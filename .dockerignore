@@ -1,0 +1,15 @@
+# Rust build artefacts
+target/
+
+# Frontend build artefacts and local deps
+frontend/node_modules/
+frontend/dist/
+
+# Git history
+.git/
+
+# GitHub Actions / CI config (not needed in image)
+.github/
+
+# Documentation
+*.md

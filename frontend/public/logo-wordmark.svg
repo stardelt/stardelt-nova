@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 160" role="img" aria-label="Stardelt — wordmark">
+  <title>Stardelt</title>
+  <desc>Stardelt wordmark: the mark followed by the word "stardelt".</desc>
+  <defs>
+    <linearGradient id="stardeltGradient" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#5b6cff"/>
+      <stop offset="100%" stop-color="#1e2a78"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Mark (scaled 0.65, x=10 y=15) -->
+  <g transform="translate(10,15) scale(0.65)">
+    <polygon points="100,28 178,170 22,170"
+             fill="none"
+             stroke="url(#stardeltGradient)"
+             stroke-width="11"
+             stroke-linejoin="round"
+             stroke-linecap="round"/>
+    <polygon points="100,92 110,118 138,128 110,138 100,162 90,138 62,128 90,118"
+             fill="url(#stardeltGradient)"/>
+  </g>
+
+  <!-- Wordmark -->
+  <text x="170" y="108"
+        font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Helvetica, Arial, sans-serif"
+        font-size="88"
+        font-weight="700"
+        letter-spacing="-2"
+        fill="url(#stardeltGradient)">stardelt</text>
+</svg>
