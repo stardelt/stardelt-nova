@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" role="img" aria-label="Stardelt logo">
-  <title>Stardelt</title>
-  <desc>A four-pointed star inside a delta triangle — the Stardelt mark.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" role="img" aria-label="stardelt logo">
+  <title>stardelt</title>
+  <desc>A four-pointed star inside a delta triangle — the stardelt mark.</desc>
   <defs>
     <linearGradient id="stardeltGradient" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0%" stop-color="#5b6cff"/>

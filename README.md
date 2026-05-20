@@ -1,8 +1,8 @@
-<img src="frontend/public/logo-wordmark.svg" alt="Stardelt" height="48" />
+<img src="frontend/public/logo-wordmark.svg" alt="stardelt" height="48" />
 
 # Nova
 
-Nova is the unified control-plane UI + API gateway for Stardelt. A Rust (axum)
+Nova is the unified control-plane UI + API gateway for stardelt. A Rust (axum)
 backend serves the React SPA and proxies the Lakekeeper Iceberg REST catalog and
 the Trino query engine.
 
@@ -107,5 +107,5 @@ The backend is configured entirely through environment variables:
 ## Links
 
 - [docs.stardelt.io](https://docs.stardelt.io) — full documentation
-- [Architecture overview](https://docs.stardelt.io/architecture) — how Nova fits into the Stardelt platform
+- [Architecture overview](https://docs.stardelt.io/architecture) — how Nova fits into the stardelt platform
 - [stardelt/stardelt](https://github.com/stardelt/stardelt) — mono-repo with Helm charts and platform infrastructure

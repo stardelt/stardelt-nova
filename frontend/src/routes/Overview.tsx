@@ -3,7 +3,7 @@ export default function Overview() {
     <div className="max-w-3xl space-y-6">
       <h1 className="text-3xl font-bold tracking-tight">Welcome</h1>
       <p className="text-text-dim">
-        Stardelt Nova MVP. Use the left nav to browse the catalog, run SQL against Trino,
+        stardelt Nova MVP. Use the left nav to browse the catalog, run SQL against Trino,
         and inspect the cluster.
       </p>
       <div className="grid grid-cols-2 gap-4">

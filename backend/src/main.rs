@@ -1,4 +1,4 @@
-//! Stardelt Nova — HTTP backend for the unified UI.
+//! stardelt Nova — HTTP backend for the unified UI.
 //!
 //! Endpoints (MVP first draft):
 //!   GET  /api/me                            — static dev user

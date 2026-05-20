@@ -23,7 +23,7 @@ export default function Shell() {
       <aside className="border-r border-border bg-bg-elev/60 backdrop-blur p-5 flex flex-col gap-6">
         <div className="flex items-center gap-3">
           <div className="w-8 h-8 rounded-[14px] bg-gradient-to-b from-accent to-accent-deep" />
-          <div className="font-bold tracking-tight text-text">Stardelt Nova</div>
+          <div className="font-bold tracking-tight text-text">stardelt Nova</div>
         </div>
         <nav className="flex flex-col gap-1">
           <NavLink to="/"           className={navClass} end>Overview</NavLink>
