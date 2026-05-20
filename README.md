@@ -106,6 +106,6 @@ The backend is configured entirely through environment variables:
 
 ## Links
 
-- [docs.stardelt.io](https://docs.stardelt.io) — full documentation
-- [Architecture overview](https://docs.stardelt.io/architecture) — how Nova fits into the stardelt platform
+- [stardelt.io](https://stardelt.io) — full documentation
+- [Architecture overview](https://stardelt.io/architecture) — how Nova fits into the stardelt platform
 - [stardelt/stardelt](https://github.com/stardelt/stardelt) — mono-repo with Helm charts and platform infrastructure
