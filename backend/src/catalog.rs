@@ -104,10 +104,7 @@ pub async fn list_namespaces(State(s): State<Arc<AppState>>) -> Response {
     proxy(&s, format!("/catalog/v1/{id}/namespaces")).await
 }
 
-pub async fn list_tables(
-    State(s): State<Arc<AppState>>,
-    Path(ns): Path<String>,
-) -> Response {
+pub async fn list_tables(State(s): State<Arc<AppState>>, Path(ns): Path<String>) -> Response {
     let id = match warehouse_id_or_500(&s).await {
         Ok(v) => v,
         Err(r) => return r,

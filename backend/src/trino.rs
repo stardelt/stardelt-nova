@@ -8,7 +8,12 @@
 
 use std::{sync::Arc, time::Duration};
 
-use axum::{Json, extract::State, http::StatusCode, response::{IntoResponse, Response}};
+use axum::{
+    Json,
+    extract::State,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::time::sleep;
@@ -53,10 +58,7 @@ struct TrinoResponse {
     stats: Option<Value>,
 }
 
-pub async fn run_query(
-    State(s): State<Arc<AppState>>,
-    Json(req): Json<QueryRequest>,
-) -> Response {
+pub async fn run_query(State(s): State<Arc<AppState>>, Json(req): Json<QueryRequest>) -> Response {
     let initial = match s
         .http
         .post(format!("{}/v1/statement", s.trino_url))
@@ -105,13 +107,16 @@ pub async fn run_query(
                 .into_response();
         }
 
-        if columns.is_empty() {
-            if let Some(cols) = current.columns.take() {
-                columns = cols
-                    .into_iter()
-                    .map(|c| Column { name: c.name, r#type: c.ty })
-                    .collect();
-            }
+        if columns.is_empty()
+            && let Some(cols) = current.columns.take()
+        {
+            columns = cols
+                .into_iter()
+                .map(|c| Column {
+                    name: c.name,
+                    r#type: c.ty,
+                })
+                .collect();
         }
 
         if let Some(d) = current.data.take() {
