@@ -20,6 +20,7 @@
 //!   NOVA_BIND_ADDR       (default: 0.0.0.0:8080)
 //!   NOVA_STATIC_DIR      (default: /app/static)
 
+mod auth;
 mod catalog;
 mod trino;
 
@@ -29,17 +30,18 @@ use axum::{
     Json, Router,
     extract::State,
     http::StatusCode,
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     routing::{get, post},
 };
-use serde::Serialize;
 use tokio::sync::OnceCell;
+use tower_cookies::{CookieManagerLayer, Cookies};
 use tower_http::{services::ServeDir, trace::TraceLayer};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 pub struct AppState {
     pub dev_user: String,
+    pub sso_enabled: bool,
     pub trino_url: String,
     pub lakekeeper_url: String,
     pub warehouse_name: String,
@@ -47,17 +49,24 @@ pub struct AppState {
     pub http: reqwest::Client,
 }
 
-#[derive(Serialize)]
-struct Me {
-    user: String,
-    auth_mode: &'static str,
-}
-
-async fn me(State(s): State<Arc<AppState>>) -> impl IntoResponse {
-    Json(Me {
-        user: s.dev_user.clone(),
-        auth_mode: "static-dev",
-    })
+/// GET /api/me — the authenticated session user, or (when SSO is on but no
+/// session) a 401 carrying the login URL so the SPA can redirect. In dev mode
+/// (no SSO) returns the static dev user.
+async fn me(cookies: Cookies, State(s): State<Arc<AppState>>) -> Response {
+    match auth::current_user(&cookies) {
+        Some(u) => Json(u).into_response(),
+        None if s.sso_enabled => (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "login": "/auth/login" })),
+        )
+            .into_response(),
+        None => Json(serde_json::json!({
+            "sub": s.dev_user,
+            "name": s.dev_user,
+            "auth_mode": "static-dev",
+        }))
+        .into_response(),
+    }
 }
 
 async fn health() -> impl IntoResponse {
@@ -101,8 +110,22 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
 
+    // Build the OIDC client when SSO env is present. Discovery failure logs and
+    // falls back to dev mode rather than crashing the backend.
+    let oidc = match auth::OidcConfig::from_env() {
+        Some(cfg) => match auth::OidcClient::discover(cfg).await {
+            Ok(c) => Some(Arc::new(c)),
+            Err(e) => {
+                tracing::error!(error = %e, "OIDC discovery failed; auth disabled");
+                None
+            }
+        },
+        None => None,
+    };
+
     let state = Arc::new(AppState {
         dev_user: std::env::var("NOVA_DEV_USER").unwrap_or_else(|_| "stardelt-dev".into()),
+        sso_enabled: oidc.is_some(),
         trino_url: std::env::var("NOVA_TRINO_URL")
             .unwrap_or_else(|_| "http://trino.stardelt.svc.cluster.local:8080".into()),
         lakekeeper_url: std::env::var("NOVA_LAKEKEEPER_URL")
@@ -124,13 +147,24 @@ async fn main() -> anyhow::Result<()> {
         .route("/catalog/tables/:ns/:tbl", get(catalog::table_metadata))
         .route("/query", post(trino::run_query));
 
-    let app = Router::new()
+    let mut app = Router::new()
         .nest("/api", api)
         .fallback_service(ServeDir::new(&static_dir).fallback(
             tower_http::services::ServeFile::new(format!("{static_dir}/index.html")),
         ))
         .layer(TraceLayer::new_for_http())
+        .layer(CookieManagerLayer::new())
         .with_state(state.clone());
+
+    // Auth routes only exist when SSO is configured; they carry their own state.
+    if let Some(oidc) = oidc {
+        let auth_routes = Router::new()
+            .route("/auth/login", get(auth::login))
+            .route("/auth/callback", get(auth::callback))
+            .route("/auth/logout", get(auth::logout))
+            .with_state(oidc);
+        app = app.merge(auth_routes);
+    }
 
     let bind = std::env::var("NOVA_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
     info!(
