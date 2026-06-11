@@ -134,15 +134,28 @@ async fn main() -> anyhow::Result<()> {
 
     let static_dir = std::env::var("NOVA_STATIC_DIR").unwrap_or_else(|_| "/app/static".into());
 
-    let api = Router::new()
-        .route("/me", get(me))
+    // Public API: health (k8s probes) + me (the SPA's auth check, which itself
+    // returns 401+login when unauthenticated). These must stay reachable so the
+    // login flow can bootstrap.
+    let public_api = Router::new()
         .route("/health", get(health))
+        .route("/me", get(me));
+
+    // Protected API: every data endpoint. Gated by require_auth — 401 when SSO is
+    // on and there is no session. In dev mode (SSO off) the gate is a pass-through.
+    let protected_api = Router::new()
         .route("/trino/cluster", get(trino_cluster))
         .route("/catalog/warehouse", get(catalog::warehouse_info))
         .route("/catalog/namespaces", get(catalog::list_namespaces))
         .route("/catalog/namespaces/:ns/tables", get(catalog::list_tables))
         .route("/catalog/tables/:ns/:tbl", get(catalog::table_metadata))
-        .route("/query", post(trino::run_query));
+        .route("/query", post(trino::run_query))
+        .layer(axum::middleware::from_fn_with_state(
+            oidc_state.sso_configured,
+            auth::require_auth,
+        ));
+
+    let api = public_api.merge(protected_api);
 
     let mut app = Router::new()
         .nest("/api", api)

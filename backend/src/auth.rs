@@ -245,6 +245,26 @@ pub fn current_user(cookies: &Cookies) -> Option<SessionUser> {
     serde_json::from_str(&decoded).ok()
 }
 
+/// Axum middleware that rejects unauthenticated requests with 401 when SSO is
+/// enabled. In dev mode (SSO off) it is a pass-through. Apply to the protected
+/// API router; mounting it there (not on `/auth/*` or static assets) lets login
+/// and the SPA shell load while every data endpoint requires a session.
+pub async fn require_auth(
+    axum::extract::State(gate): axum::extract::State<bool>,
+    cookies: Cookies,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if gate && current_user(&cookies).is_none() {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            axum::Json(serde_json::json!({ "login": "/auth/login" })),
+        )
+            .into_response();
+    }
+    next.run(request).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
