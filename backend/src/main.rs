@@ -110,22 +110,19 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
 
-    // Build the OIDC client when SSO env is present. Discovery failure logs and
-    // falls back to dev mode rather than crashing the backend.
-    let oidc = match auth::OidcConfig::from_env() {
-        Some(cfg) => match auth::OidcClient::discover(cfg).await {
-            Ok(c) => Some(Arc::new(c)),
-            Err(e) => {
-                tracing::error!(error = %e, "OIDC discovery failed; auth disabled");
-                None
-            }
-        },
-        None => None,
-    };
+    // OIDC: when NOVA_OIDC_ISSUER is set, mark SSO configured immediately and
+    // discover Keycloak in the background with retry. Nova serves right away;
+    // auth activates once discovery succeeds (Keycloak + its ingress cert may not
+    // be reachable yet on a cold platform bring-up).
+    let oidc_cfg = auth::OidcConfig::from_env();
+    let oidc_state = auth::OidcState::new(oidc_cfg.is_some());
+    if let Some(cfg) = oidc_cfg.clone() {
+        oidc_state.spawn_discovery(cfg);
+    }
 
     let state = Arc::new(AppState {
         dev_user: std::env::var("NOVA_DEV_USER").unwrap_or_else(|_| "stardelt-dev".into()),
-        sso_enabled: oidc.is_some(),
+        sso_enabled: oidc_cfg.is_some(),
         trino_url: std::env::var("NOVA_TRINO_URL")
             .unwrap_or_else(|_| "http://trino.stardelt.svc.cluster.local:8080".into()),
         lakekeeper_url: std::env::var("NOVA_LAKEKEEPER_URL")
@@ -156,13 +153,15 @@ async fn main() -> anyhow::Result<()> {
         .layer(CookieManagerLayer::new())
         .with_state(state.clone());
 
-    // Auth routes only exist when SSO is configured; they carry their own state.
-    if let Some(oidc) = oidc {
+    // Auth routes exist whenever SSO is configured (NOVA_OIDC_ISSUER set). They
+    // carry the shared OidcState; login/callback return 503 until background
+    // discovery has populated the client.
+    if oidc_state.sso_configured {
         let auth_routes = Router::new()
             .route("/auth/login", get(auth::login))
             .route("/auth/callback", get(auth::callback))
             .route("/auth/logout", get(auth::logout))
-            .with_state(oidc);
+            .with_state(oidc_state);
         app = app.merge(auth_routes);
     }
 

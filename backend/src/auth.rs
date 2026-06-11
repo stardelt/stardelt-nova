@@ -7,8 +7,6 @@
 //! When the OIDC env (`NOVA_OIDC_ISSUER`) is absent, auth is disabled and Nova
 //! falls back to the dev-user stub — preserving the no-SSO dev loop.
 
-use std::sync::Arc;
-
 use axum::extract::{Query, State};
 use axum::response::{IntoResponse, Redirect, Response};
 use openidconnect::core::{CoreClient, CoreProviderMetadata, CoreResponseType};
@@ -79,6 +77,59 @@ impl OidcClient {
     }
 }
 
+/// Shared, lazily-populated OIDC client slot. Empty until background discovery
+/// succeeds. `sso_configured` is true the moment NOVA_OIDC_ISSUER is set (even
+/// before discovery completes), so `/me` can return 401+login instead of the
+/// dev stub while auth is still warming up.
+#[derive(Clone)]
+pub struct OidcState {
+    pub sso_configured: bool,
+    slot: std::sync::Arc<tokio::sync::RwLock<Option<std::sync::Arc<OidcClient>>>>,
+}
+
+impl OidcState {
+    pub fn new(sso_configured: bool) -> Self {
+        Self {
+            sso_configured,
+            slot: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+        }
+    }
+
+    pub async fn get(&self) -> Option<std::sync::Arc<OidcClient>> {
+        self.slot.read().await.clone()
+    }
+
+    async fn set(&self, client: std::sync::Arc<OidcClient>) {
+        *self.slot.write().await = Some(client);
+    }
+
+    /// Spawn a background task that retries OIDC discovery until it succeeds.
+    /// Keycloak (and its ingress cert) may not be reachable when Nova starts on a
+    /// cold platform bring-up; this lets Nova serve immediately and activate auth
+    /// as soon as discovery works, with no restart needed.
+    pub fn spawn_discovery(&self, config: OidcConfig) {
+        let state = self.clone();
+        tokio::spawn(async move {
+            let mut attempt: u32 = 0;
+            loop {
+                attempt += 1;
+                match OidcClient::discover(config.clone()).await {
+                    Ok(c) => {
+                        state.set(std::sync::Arc::new(c)).await;
+                        tracing::info!(attempt, "OIDC discovery succeeded; auth active");
+                        return;
+                    }
+                    Err(e) => {
+                        let delay = std::cmp::min(30, 2u64.saturating_mul(attempt as u64));
+                        tracing::warn!(attempt, error = %e, retry_in_s = delay, "OIDC discovery failed; retrying");
+                        tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+                    }
+                }
+            }
+        });
+    }
+}
+
 #[derive(Deserialize)]
 pub struct CallbackQuery {
     pub code: String,
@@ -86,8 +137,18 @@ pub struct CallbackQuery {
     pub state: String,
 }
 
-/// GET /auth/login — redirect to Keycloak.
-pub async fn login(State(oidc): State<Arc<OidcClient>>) -> Response {
+/// GET /auth/login — redirect to Keycloak. 503 if discovery hasn't completed.
+pub async fn login(State(state): State<OidcState>) -> Response {
+    let oidc = match state.get().await {
+        Some(c) => c,
+        None => {
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "auth not ready yet",
+            )
+                .into_response();
+        }
+    };
     let (url, _csrf, _nonce) = oidc
         .client
         .authorize_url(
@@ -104,10 +165,20 @@ pub async fn login(State(oidc): State<Arc<OidcClient>>) -> Response {
 
 /// GET /auth/callback — exchange code, set session cookie, redirect home.
 pub async fn callback(
-    State(oidc): State<Arc<OidcClient>>,
+    State(state): State<OidcState>,
     cookies: Cookies,
     Query(q): Query<CallbackQuery>,
 ) -> Response {
+    let oidc = match state.get().await {
+        Some(c) => c,
+        None => {
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "auth not ready yet",
+            )
+                .into_response();
+        }
+    };
     let token = match oidc
         .client
         .exchange_code(AuthorizationCode::new(q.code))
