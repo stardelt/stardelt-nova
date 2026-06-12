@@ -157,26 +157,30 @@ async fn main() -> anyhow::Result<()> {
 
     let api = public_api.merge(protected_api);
 
-    let mut app = Router::new()
+    // Build the base router with API and static. Auth routes are merged BEFORE
+    // layers so they share CookieManagerLayer — axum layers only wrap routes
+    // already in the router at call time, so merging after .layer() leaves auth
+    // routes without cookie support (callback can't set the session cookie).
+    let mut base = Router::new()
         .nest("/api", api)
         .fallback_service(ServeDir::new(&static_dir).fallback(
             tower_http::services::ServeFile::new(format!("{static_dir}/index.html")),
         ))
-        .layer(TraceLayer::new_for_http())
-        .layer(CookieManagerLayer::new())
         .with_state(state.clone());
 
-    // Auth routes exist whenever SSO is configured (NOVA_OIDC_ISSUER set). They
-    // carry the shared OidcState; login/callback return 503 until background
-    // discovery has populated the client.
     if oidc_state.sso_configured {
         let auth_routes = Router::new()
             .route("/auth/login", get(auth::login))
             .route("/auth/callback", get(auth::callback))
             .route("/auth/logout", get(auth::logout))
             .with_state(oidc_state);
-        app = app.merge(auth_routes);
+        base = base.merge(auth_routes);
     }
+
+    // Apply shared layers AFTER all routes are merged.
+    let app = base
+        .layer(TraceLayer::new_for_http())
+        .layer(CookieManagerLayer::new());
 
     let bind = std::env::var("NOVA_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
     info!(
