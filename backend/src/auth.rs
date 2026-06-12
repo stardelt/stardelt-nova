@@ -2,12 +2,17 @@
 //!
 //! Nova is an OIDC client: unauthenticated users are redirected to Keycloak
 //! (`/auth/login`), which (via the GitHub broker) authenticates them and calls
-//! back to `/auth/callback`. A session cookie then carries identity.
+//! back to `/auth/callback`). A session cookie then carries identity.
+//!
+//! Cookies are handled with raw `Cookie` / `Set-Cookie` headers — no
+//! tower-cookies middleware layer needed. This avoids axum's layer-ordering
+//! gotcha (layers only apply to routes already in the router at call time).
 //!
 //! When the OIDC env (`NOVA_OIDC_ISSUER`) is absent, auth is disabled and Nova
 //! falls back to the dev-user stub — preserving the no-SSO dev loop.
 
 use axum::extract::{Query, State};
+use axum::http::{HeaderMap, HeaderValue, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use openidconnect::core::{CoreClient, CoreProviderMetadata, CoreResponseType};
 use openidconnect::reqwest::async_http_client;
@@ -16,9 +21,12 @@ use openidconnect::{
     RedirectUrl, Scope, TokenResponse,
 };
 use serde::{Deserialize, Serialize};
-use tower_cookies::{Cookie, Cookies};
 
 pub const SESSION_COOKIE: &str = "nova_session";
+
+// ---------------------------------------------------------------------------
+// Config + client
+// ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug)]
 pub struct OidcConfig {
@@ -29,7 +37,6 @@ pub struct OidcConfig {
 }
 
 impl OidcConfig {
-    /// Build from env. Returns None when OIDC env is absent (dev / no-sso mode).
     pub fn from_env() -> Option<Self> {
         let issuer = std::env::var("NOVA_OIDC_ISSUER").ok()?;
         Some(Self {
@@ -52,9 +59,6 @@ pub struct SessionUser {
     pub name: Option<String>,
 }
 
-/// Built OIDC client, stored in app state when SSO is enabled. The redirect URI
-/// and credentials are baked into `client` during discovery, so the raw config
-/// is not retained.
 #[derive(Clone)]
 pub struct OidcClient {
     pub client: CoreClient,
@@ -77,10 +81,10 @@ impl OidcClient {
     }
 }
 
-/// Shared, lazily-populated OIDC client slot. Empty until background discovery
-/// succeeds. `sso_configured` is true the moment NOVA_OIDC_ISSUER is set (even
-/// before discovery completes), so `/me` can return 401+login instead of the
-/// dev stub while auth is still warming up.
+// ---------------------------------------------------------------------------
+// Shared lazy state
+// ---------------------------------------------------------------------------
+
 #[derive(Clone)]
 pub struct OidcState {
     pub sso_configured: bool,
@@ -103,10 +107,6 @@ impl OidcState {
         *self.slot.write().await = Some(client);
     }
 
-    /// Spawn a background task that retries OIDC discovery until it succeeds.
-    /// Keycloak (and its ingress cert) may not be reachable when Nova starts on a
-    /// cold platform bring-up; this lets Nova serve immediately and activate auth
-    /// as soon as discovery works, with no restart needed.
     pub fn spawn_discovery(&self, config: OidcConfig) {
         let state = self.clone();
         tokio::spawn(async move {
@@ -121,7 +121,12 @@ impl OidcState {
                     }
                     Err(e) => {
                         let delay = std::cmp::min(30, 2u64.saturating_mul(attempt as u64));
-                        tracing::warn!(attempt, error = %e, retry_in_s = delay, "OIDC discovery failed; retrying");
+                        tracing::warn!(
+                            attempt,
+                            error = %e,
+                            retry_in_s = delay,
+                            "OIDC discovery failed; retrying"
+                        );
                         tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
                     }
                 }
@@ -130,14 +135,52 @@ impl OidcState {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Cookie helpers (raw headers — no tower-cookies layer needed)
+// ---------------------------------------------------------------------------
+
+fn session_cookie_header(value: &str) -> HeaderValue {
+    // HttpOnly + Secure + SameSite=Lax; path=/
+    HeaderValue::from_str(&format!(
+        "{SESSION_COOKIE}={value}; Path=/; HttpOnly; Secure; SameSite=Lax"
+    ))
+    .expect("cookie value is ASCII")
+}
+
+fn clear_cookie_header() -> HeaderValue {
+    HeaderValue::from_str(&format!(
+        "{SESSION_COOKIE}=; Path=/; HttpOnly; Secure; Max-Age=0"
+    ))
+    .expect("static string")
+}
+
+/// Read the session user from the `Cookie` request header, if present.
+pub fn current_user(headers: &HeaderMap) -> Option<SessionUser> {
+    let cookie_hdr = headers.get(header::COOKIE)?.to_str().ok()?;
+    // Find our specific cookie among potentially many.
+    let raw = cookie_hdr
+        .split(';')
+        .map(str::trim)
+        .find(|p| p.starts_with(&format!("{SESSION_COOKIE}=")))?
+        .trim_start_matches(&format!("{SESSION_COOKIE}="));
+    let decoded: String = openidconnect::url::form_urlencoded::parse(raw.as_bytes())
+        .map(|(k, _)| k.into_owned())
+        .collect();
+    serde_json::from_str(&decoded).ok()
+}
+
+// ---------------------------------------------------------------------------
+// Route handlers
+// ---------------------------------------------------------------------------
+
 #[derive(Deserialize)]
 pub struct CallbackQuery {
     pub code: String,
     #[allow(dead_code)]
-    pub state: String,
+    pub state: Option<String>,
 }
 
-/// GET /auth/login — redirect to Keycloak. 503 if discovery hasn't completed.
+/// GET /auth/login — redirect to Keycloak.
 pub async fn login(State(state): State<OidcState>) -> Response {
     let oidc = match state.get().await {
         Some(c) => c,
@@ -164,11 +207,7 @@ pub async fn login(State(state): State<OidcState>) -> Response {
 }
 
 /// GET /auth/callback — exchange code, set session cookie, redirect home.
-pub async fn callback(
-    State(state): State<OidcState>,
-    cookies: Cookies,
-    Query(q): Query<CallbackQuery>,
-) -> Response {
+pub async fn callback(State(state): State<OidcState>, Query(q): Query<CallbackQuery>) -> Response {
     let oidc = match state.get().await {
         Some(c) => c,
         None => {
@@ -220,42 +259,35 @@ pub async fn callback(
     let payload = serde_json::to_string(&user).unwrap_or_default();
     let encoded =
         openidconnect::url::form_urlencoded::byte_serialize(payload.as_bytes()).collect::<String>();
-    let mut cookie = Cookie::new(SESSION_COOKIE, encoded);
-    cookie.set_path("/");
-    cookie.set_http_only(true);
-    cookie.set_secure(true);
-    cookies.add(cookie);
-    Redirect::to("/").into_response()
+
+    let mut response = Redirect::to("/").into_response();
+    response
+        .headers_mut()
+        .insert(header::SET_COOKIE, session_cookie_header(&encoded));
+    response
 }
 
-/// GET /auth/logout — clear the session cookie.
-pub async fn logout(cookies: Cookies) -> Response {
-    let mut c = Cookie::new(SESSION_COOKIE, "");
-    c.set_path("/");
-    cookies.remove(c);
-    Redirect::to("/").into_response()
+/// GET /auth/logout — clear the session cookie and redirect home.
+pub async fn logout() -> Response {
+    let mut response = Redirect::to("/").into_response();
+    response
+        .headers_mut()
+        .insert(header::SET_COOKIE, clear_cookie_header());
+    response
 }
 
-/// Extract the current user from the session cookie, if any.
-pub fn current_user(cookies: &Cookies) -> Option<SessionUser> {
-    let raw = cookies.get(SESSION_COOKIE)?.value().to_string();
-    let decoded: String = openidconnect::url::form_urlencoded::parse(raw.as_bytes())
-        .map(|(k, _)| k.into_owned())
-        .collect();
-    serde_json::from_str(&decoded).ok()
-}
+// ---------------------------------------------------------------------------
+// Auth middleware
+// ---------------------------------------------------------------------------
 
 /// Axum middleware that rejects unauthenticated requests with 401 when SSO is
-/// enabled. In dev mode (SSO off) it is a pass-through. Apply to the protected
-/// API router; mounting it there (not on `/auth/*` or static assets) lets login
-/// and the SPA shell load while every data endpoint requires a session.
+/// enabled. Read the session from the raw Cookie header — no tower-cookies layer.
 pub async fn require_auth(
     axum::extract::State(gate): axum::extract::State<bool>,
-    cookies: Cookies,
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
-    if gate && current_user(&cookies).is_none() {
+    if gate && current_user(request.headers()).is_none() {
         return (
             axum::http::StatusCode::UNAUTHORIZED,
             axum::Json(serde_json::json!({ "login": "/auth/login" })),
@@ -264,6 +296,10 @@ pub async fn require_auth(
     }
     next.run(request).await
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -285,11 +321,36 @@ mod tests {
 
     #[test]
     fn from_env_is_none_without_issuer() {
-        // Not setting NOVA_OIDC_ISSUER → None (dev mode). Uses a fresh process env;
-        // this is best-effort and only asserts the issuer-absent branch shape.
         unsafe {
             std::env::remove_var("NOVA_OIDC_ISSUER");
         }
         assert!(OidcConfig::from_env().is_none());
+    }
+
+    #[test]
+    fn current_user_reads_cookie_header() {
+        use axum::http::HeaderMap;
+        let user = SessionUser {
+            sub: "u1".into(),
+            email: Some("a@b.com".into()),
+            name: Some("Alice".into()),
+        };
+        let payload = serde_json::to_string(&user).unwrap();
+        let encoded: String =
+            openidconnect::url::form_urlencoded::byte_serialize(payload.as_bytes()).collect();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("{SESSION_COOKIE}={encoded}")).unwrap(),
+        );
+        let got = current_user(&headers).unwrap();
+        assert_eq!(got.sub, "u1");
+        assert_eq!(got.name.as_deref(), Some("Alice"));
+    }
+
+    #[test]
+    fn current_user_returns_none_without_cookie() {
+        let headers = HeaderMap::new();
+        assert!(current_user(&headers).is_none());
     }
 }

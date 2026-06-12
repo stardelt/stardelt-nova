@@ -20,4 +20,3 @@ tracing-subscriber.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 openidconnect.workspace = true
-tower-cookies.workspace = true

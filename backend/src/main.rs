@@ -1,24 +1,24 @@
 //! stardelt Nova — HTTP backend for the unified UI.
 //!
-//! Endpoints (MVP first draft):
-//!   GET  /api/me                            — static dev user
+//! Endpoints:
+//!   GET  /api/me                            — authenticated user (401 if no session when SSO on)
 //!   GET  /api/health                        — backend liveness
-//!   GET  /api/trino/cluster                 — proxy Trino /v1/cluster
+//!   GET  /api/trino/cluster                 — proxy Trino /v1/info
 //!   GET  /api/catalog/warehouse             — resolved Lakekeeper warehouse id+name
 //!   GET  /api/catalog/namespaces            — list namespaces
 //!   GET  /api/catalog/namespaces/:ns/tables — list tables in a namespace
-//!   GET  /api/catalog/tables/:ns/:tbl       — table metadata (schema, partition spec, ...)
-//!   POST /api/query                         — submit SQL to Trino, return all rows JSON
+//!   GET  /api/catalog/tables/:ns/:tbl       — table metadata
+//!   POST /api/query                         — submit SQL to Trino
+//!   GET  /auth/login                        — redirect to Keycloak (when SSO configured)
+//!   GET  /auth/callback                     — exchange code, set session cookie
+//!   GET  /auth/logout                       — clear session cookie
 //!
 //! Static UI assets are served at / (NOVA_STATIC_DIR, default /app/static).
 //!
 //! Configuration via env:
-//!   NOVA_TRINO_URL       (default: http://trino.stardelt.svc.cluster.local:8080)
-//!   NOVA_LAKEKEEPER_URL  (default: http://lakekeeper.stardelt.svc.cluster.local:8181)
-//!   NOVA_WAREHOUSE_NAME  (default: "warehouse")
-//!   NOVA_DEV_USER        (default: "stardelt-dev")
-//!   NOVA_BIND_ADDR       (default: 0.0.0.0:8080)
-//!   NOVA_STATIC_DIR      (default: /app/static)
+//!   NOVA_TRINO_URL, NOVA_LAKEKEEPER_URL, NOVA_WAREHOUSE_NAME, NOVA_DEV_USER,
+//!   NOVA_BIND_ADDR, NOVA_STATIC_DIR, NOVA_OIDC_ISSUER, NOVA_OIDC_CLIENT_ID,
+//!   NOVA_OIDC_CLIENT_SECRET, NOVA_PUBLIC_URL
 
 mod auth;
 mod catalog;
@@ -29,12 +29,11 @@ use std::sync::Arc;
 use axum::{
     Json, Router,
     extract::State,
-    http::StatusCode,
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
 use tokio::sync::OnceCell;
-use tower_cookies::{CookieManagerLayer, Cookies};
 use tower_http::{services::ServeDir, trace::TraceLayer};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -49,11 +48,10 @@ pub struct AppState {
     pub http: reqwest::Client,
 }
 
-/// GET /api/me — the authenticated session user, or (when SSO is on but no
-/// session) a 401 carrying the login URL so the SPA can redirect. In dev mode
-/// (no SSO) returns the static dev user.
-async fn me(cookies: Cookies, State(s): State<Arc<AppState>>) -> Response {
-    match auth::current_user(&cookies) {
+/// GET /api/me — returns the session user. When SSO is on and there is no
+/// session, returns 401 + `{login}` so the SPA can redirect to Keycloak.
+async fn me(headers: axum::http::HeaderMap, State(s): State<Arc<AppState>>) -> Response {
+    match auth::current_user(&headers) {
         Some(u) => Json(u).into_response(),
         None if s.sso_enabled => (
             StatusCode::UNAUTHORIZED,
@@ -74,7 +72,6 @@ async fn health() -> impl IntoResponse {
 }
 
 async fn trino_cluster(State(s): State<Arc<AppState>>) -> impl IntoResponse {
-    // Trino 480 dropped /v1/cluster + /v1/node; coordinator status lives at /v1/info.
     proxy_get(&s, format!("{}/v1/info", s.trino_url)).await
 }
 
@@ -91,7 +88,7 @@ async fn proxy_get(s: &AppState, url: String) -> axum::response::Response {
             let body = r.bytes().await.unwrap_or_default();
             (
                 StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
-                [("content-type", "application/json")],
+                [(header::CONTENT_TYPE, "application/json")],
                 body,
             )
                 .into_response()
@@ -110,10 +107,6 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
 
-    // OIDC: when NOVA_OIDC_ISSUER is set, mark SSO configured immediately and
-    // discover Keycloak in the background with retry. Nova serves right away;
-    // auth activates once discovery succeeds (Keycloak + its ingress cert may not
-    // be reachable yet on a cold platform bring-up).
     let oidc_cfg = auth::OidcConfig::from_env();
     let oidc_state = auth::OidcState::new(oidc_cfg.is_some());
     if let Some(cfg) = oidc_cfg.clone() {
@@ -134,15 +127,12 @@ async fn main() -> anyhow::Result<()> {
 
     let static_dir = std::env::var("NOVA_STATIC_DIR").unwrap_or_else(|_| "/app/static".into());
 
-    // Public API: health (k8s probes) + me (the SPA's auth check, which itself
-    // returns 401+login when unauthenticated). These must stay reachable so the
-    // login flow can bootstrap.
+    // Public: health (k8s probes) + me (SPA auth check / returns 401+login).
     let public_api = Router::new()
         .route("/health", get(health))
         .route("/me", get(me));
 
-    // Protected API: every data endpoint. Gated by require_auth — 401 when SSO is
-    // on and there is no session. In dev mode (SSO off) the gate is a pass-through.
+    // Protected: data endpoints — 401 when SSO on and no session.
     let protected_api = Router::new()
         .route("/trino/cluster", get(trino_cluster))
         .route("/catalog/warehouse", get(catalog::warehouse_info))
@@ -157,11 +147,9 @@ async fn main() -> anyhow::Result<()> {
 
     let api = public_api.merge(protected_api);
 
-    // Build the base router with API and static. Auth routes are merged BEFORE
-    // layers so they share CookieManagerLayer — axum layers only wrap routes
-    // already in the router at call time, so merging after .layer() leaves auth
-    // routes without cookie support (callback can't set the session cookie).
-    let mut base = Router::new()
+    // Auth routes (login / callback / logout) — only registered when SSO configured.
+    // Cookies are raw Set-Cookie response headers; no CookieManagerLayer needed.
+    let mut app = Router::new()
         .nest("/api", api)
         .fallback_service(ServeDir::new(&static_dir).fallback(
             tower_http::services::ServeFile::new(format!("{static_dir}/index.html")),
@@ -169,18 +157,16 @@ async fn main() -> anyhow::Result<()> {
         .with_state(state.clone());
 
     if oidc_state.sso_configured {
-        let auth_routes = Router::new()
-            .route("/auth/login", get(auth::login))
-            .route("/auth/callback", get(auth::callback))
-            .route("/auth/logout", get(auth::logout))
-            .with_state(oidc_state);
-        base = base.merge(auth_routes);
+        app = app.merge(
+            Router::new()
+                .route("/auth/login", get(auth::login))
+                .route("/auth/callback", get(auth::callback))
+                .route("/auth/logout", get(auth::logout))
+                .with_state(oidc_state),
+        );
     }
 
-    // Apply shared layers AFTER all routes are merged.
-    let app = base
-        .layer(TraceLayer::new_for_http())
-        .layer(CookieManagerLayer::new());
+    let app = app.layer(TraceLayer::new_for_http());
 
     let bind = std::env::var("NOVA_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
     info!(
