@@ -123,6 +123,7 @@ export const api = {
   query:        (sql: string)                 => jpost<QueryResult>('/api/query', { sql }),
   jobs:         ()                            => jget<Job[]>('/api/jobs'),
   apps:         ()                            => jget<PlatformApp[]>('/api/apps'),
+  createNamespace: (namespace: string)        => jpost<{ namespace: string }>('/api/catalog/namespaces', { namespace }),
   upload:       (req: UploadRequest)          => jpost<UploadResult>('/api/ingest/upload', req),
   transfer:     (req: TransferRequest)        => jpost<TransferResult>('/api/transfer', req),
 }
