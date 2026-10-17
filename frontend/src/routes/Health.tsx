@@ -1,19 +1,77 @@
 import { useQuery } from '@tanstack/react-query'
+import { Link } from 'react-router-dom'
+import { api } from '../api'
+import { Icon } from '../components/Icon'
 
 export default function Health() {
-  const q = useQuery({
-    queryKey: ['trino', 'cluster'],
-    queryFn: () => fetch('/api/trino/cluster').then(r => r.json()),
-    refetchInterval: 5_000,
-  })
+  const apps = useQuery({ queryKey: ['apps'], queryFn: api.apps, refetchInterval: 10_000 })
+  const cluster = useQuery({ queryKey: ['trino', 'cluster'], queryFn: api.trinoCluster, retry: false, refetchInterval: 15_000 })
+
+  const list = apps.data ?? []
+  const up = list.filter(a => a.status === 'up').length
+  const info = cluster.data as Record<string, unknown> | undefined
+  const version = (info?.nodeVersion as Record<string, unknown> | undefined)?.version
+  const state = typeof info?.state === 'string' ? info.state : cluster.isError ? 'unreachable' : '…'
 
   return (
-    <div>
-      <h1 className="text-3xl font-bold tracking-tight">Cluster Health</h1>
-      <p className="mt-2 text-text-dim">Auto-refreshing Trino cluster summary.</p>
-      <pre className="mt-6 rounded-[14px] border border-border bg-bg-elev/60 p-4 text-sm font-mono overflow-auto">
-{q.isLoading ? 'loading…' : JSON.stringify(q.data, null, 2)}
-      </pre>
+    <div className="max-w-6xl space-y-6">
+      <header className="flex items-end justify-between gap-4 flex-wrap">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">Platform health</h1>
+          <p className="text-text-dim text-sm mt-1">Live probes for every service, from the backend.</p>
+        </div>
+        <div className="text-sm text-text-dim">
+          <span className={up === list.length && list.length > 0 ? 'text-success font-semibold' : 'font-semibold'}>{up}</span>
+          {' / '}{list.length} services up
+        </div>
+      </header>
+
+      <section className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <Stat label="Engine state" value={String(state)} hint="Trino" ok={state === 'ACTIVE'} />
+        <Stat label="Engine version" value={version ? String(version) : '—'} hint="Trino" />
+        <Stat label="Services" value={`${up}/${list.length}`} hint="probing every 10s" ok={up === list.length && list.length > 0} />
+        <Stat label="Warehouse" value={useQuery({ queryKey: ['warehouse'], queryFn: api.warehouse }).data?.name ?? '…'} hint="Iceberg REST" />
+      </section>
+
+      <section>
+        <div className="label mb-2">Services</div>
+        <div className="card divide-y divide-border/70">
+          {apps.isLoading && <div className="p-5 text-text-mute text-sm">loading…</div>}
+          {list.map(a => (
+            <div key={a.id} className="flex items-center gap-3 px-5 py-3">
+              <span className={['w-2 h-2 rounded-full', a.status === 'up' ? 'bg-success' : 'bg-text-mute'].join(' ')} />
+              <span className="font-medium">{a.name}</span>
+              <span className="text-xs text-text-mute hidden sm:inline">{a.description}</span>
+              <span className="ml-auto text-xs text-text-dim">{a.status}</span>
+              {a.external_url
+                ? <a href={a.external_url} target="_blank" rel="noreferrer" className="btn-ghost py-1 px-2.5 text-xs">
+                    Open <Icon name="arrow" className="w-3.5 h-3.5" />
+                  </a>
+                : <span className="w-[68px]" />}
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className="card p-5">
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-sm font-semibold">Trino cluster</h2>
+          <Link to="/apps" className="text-xs text-text-dim hover:text-text">All apps →</Link>
+        </div>
+        <pre className="text-xs font-mono text-text-dim overflow-auto max-h-64">
+{JSON.stringify(cluster.data ?? { error: String(cluster.error ?? 'loading') }, null, 2)}
+        </pre>
+      </section>
+    </div>
+  )
+}
+
+function Stat({ label, value, hint, ok }: { label: string; value: string; hint: string; ok?: boolean }) {
+  return (
+    <div className="card p-4">
+      <div className="text-[11px] uppercase tracking-widest text-text-mute">{label}</div>
+      <div className={`text-2xl font-semibold mt-2 ${ok ? 'text-success' : ''}`}>{value}</div>
+      <div className="text-xs text-text-mute mt-0.5">{hint}</div>
     </div>
   )
 }

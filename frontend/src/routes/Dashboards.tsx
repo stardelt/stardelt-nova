@@ -1,23 +1,26 @@
 import { useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
+import { api } from '../api'
 
-// Superset embed URL. The browser reaches Superset via its own port-forward
-// (default localhost:8089 per `make pf`), not via Nova's backend. This is
-// configurable so a future production setup can swap in a same-origin
-// reverse-proxy path.
-const DEFAULT_SUPERSET_URL =
-  (import.meta.env.VITE_SUPERSET_URL as string | undefined) ?? 'http://localhost:8089'
+// Superset runs as its own app. Prefer the deployed app URL (from /api/apps,
+// which derives it from NOVA_BASE_DOMAIN); fall back to a port-forward.
+const FALLBACK = (import.meta.env.VITE_SUPERSET_URL as string | undefined) ?? 'http://localhost:8089'
 
 const ENTRY_PATHS: Array<{ label: string; path: string }> = [
-  { label: 'Welcome',     path: '/superset/welcome/' },
-  { label: 'SQL Lab',     path: '/sqllab/'           },
-  { label: 'Dashboards',  path: '/dashboard/list/'   },
-  { label: 'Charts',      path: '/chart/list/'       },
-  { label: 'Datasets',    path: '/tablemodelview/list/' },
-  { label: 'Databases',   path: '/databaseview/list/'   },
+  { label: 'Welcome',    path: '/superset/welcome/' },
+  { label: 'SQL Lab',    path: '/sqllab/'           },
+  { label: 'Dashboards', path: '/dashboard/list/'   },
+  { label: 'Charts',     path: '/chart/list/'       },
+  { label: 'Datasets',   path: '/tablemodelview/list/' },
+  { label: 'Databases',  path: '/databaseview/list/'   },
 ]
 
 export default function Dashboards() {
-  const [base, setBase] = useState(DEFAULT_SUPERSET_URL)
+  const apps = useQuery({ queryKey: ['apps'], queryFn: api.apps, refetchInterval: 15_000 })
+  const superset = apps.data?.find(a => a.id === 'superset')
+  const deployed = superset?.status === 'up'
+  const base = superset?.external_url || FALLBACK
+
   const [path, setPath] = useState('/superset/welcome/')
   const src = `${base}${path}`
 
@@ -27,18 +30,19 @@ export default function Dashboards() {
         <div>
           <h1 className="text-3xl font-bold tracking-tight">Dashboards</h1>
           <p className="text-text-dim text-sm mt-1">
-            Apache Superset embedded. Login: <span className="font-mono">admin / admin</span>.
-            Requires <span className="font-mono">make pf</span> running.
+            Apache Superset, embedded.
+            {deployed
+              ? <> Login: <span className="font-mono">admin / admin</span>.</>
+              : <> Not deployed yet — run <span className="font-mono">make install</span> (full profile) to add it.</>}
           </p>
         </div>
-        <a
-          href={src}
-          target="_blank"
-          rel="noreferrer"
-          className="px-4 py-2 rounded-[10px] border border-border bg-bg-elev/60 hover:border-accent/50 text-sm"
-        >
-          Open in new tab ↗
-        </a>
+        <div className="flex items-center gap-2">
+          <span className={['badge', deployed ? 'border-success/40 bg-success/10 text-success' : 'border-border bg-bg-soft text-text-mute'].join(' ')}>
+            <span className={['w-1.5 h-1.5 rounded-full', deployed ? 'bg-success' : 'bg-text-mute'].join(' ')} />
+            {deployed ? 'running' : (superset?.status ?? 'unknown')}
+          </span>
+          <a href={src} target="_blank" rel="noreferrer" className="btn-ghost py-1.5">Open in new tab ↗</a>
+        </div>
       </header>
 
       <div className="flex items-center gap-2 flex-wrap">
@@ -56,20 +60,26 @@ export default function Dashboards() {
             {e.label}
           </button>
         ))}
-        <input
-          type="text"
-          value={base}
-          onChange={e => setBase(e.target.value)}
-          className="ml-auto bg-bg-elev/60 border border-border rounded-[10px] px-3 py-1 text-xs font-mono w-72"
-          placeholder="Superset base URL"
-        />
+        <span className="ml-auto text-xs text-text-mute font-mono">{base}</span>
       </div>
 
-      <iframe
-        title="Superset"
-        src={src}
-        className="flex-1 w-full rounded-[14px] border border-border bg-white"
-      />
+      {deployed ? (
+        <iframe
+          title="Superset"
+          src={src}
+          className="flex-1 w-full rounded-[14px] border border-border bg-white"
+        />
+      ) : (
+        <div className="card flex-1 grid place-items-center text-center p-10">
+          <div>
+            <div className="text-text-dim">Superset is not part of the core profile.</div>
+            <div className="text-text-mute text-sm mt-1">
+              It needs a bigger node; enable it with the <span className="font-mono">full</span> profile.
+            </div>
+            <a href={base} className="btn-ghost mt-4">Try {base} anyway</a>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
