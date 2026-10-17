@@ -1,31 +1,30 @@
 //! stardelt Nova — HTTP backend for the unified UI.
 //!
-//! Endpoints (MVP first draft):
-//!   GET  /api/me                            — static dev user
+//! Endpoints:
+//!   GET  /api/me                            — current user + demo flag
 //!   GET  /api/health                        — backend liveness
-//!   GET  /api/trino/cluster                 — proxy Trino /v1/cluster
-//!   GET  /api/catalog/warehouse             — resolved Lakekeeper warehouse id+name
+//!   GET  /api/trino/cluster                 — Trino /v1/info (or demo stub)
+//!   GET  /api/catalog/warehouse             — resolved warehouse id+name
 //!   GET  /api/catalog/namespaces            — list namespaces
-//!   GET  /api/catalog/namespaces/:ns/tables — list tables in a namespace
-//!   GET  /api/catalog/tables/:ns/:tbl       — table metadata (schema, partition spec, ...)
-//!   POST /api/query                         — submit SQL to Trino, return all rows JSON
+//!   POST /api/catalog/namespaces            — create a schema
+//!   GET  /api/catalog/namespaces/:ns/tables — list tables
+//!   GET  /api/catalog/tables/:ns/:tbl       — table metadata
+//!   POST /api/query                         — run SQL
+//!   GET  /api/jobs                          — recent activity
+//!   POST /api/ingest/upload                 — load CSV/JSON into a table
+//!   POST /api/transfer                      — copy table → table
 //!
-//! Static UI assets are served at / (NOVA_STATIC_DIR, default /app/static).
-//!
-//! Configuration via env:
-//!   NOVA_TRINO_URL       (default: http://trino.stardelt.svc.cluster.local:8080)
-//!   NOVA_LAKEKEEPER_URL  (default: http://lakekeeper.stardelt.svc.cluster.local:8181)
-//!   NOVA_WAREHOUSE_NAME  (default: "warehouse")
-//!   NOVA_DEV_USER        (default: "stardelt-dev")
-//!   NOVA_BIND_ADDR       (default: 0.0.0.0:8080)
-//!   NOVA_STATIC_DIR      (default: /app/static)
+//! `NOVA_DEMO=1` serves an in-memory lakehouse so the UI runs with no cluster.
 
 mod catalog;
+mod data;
+mod demo;
+mod jobs;
 mod trino;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, RwLock};
 
-use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::{get, post}};
+use axum::{Json, Router, extract::State, http::StatusCode, response::{IntoResponse, Response}, routing::{get, post}};
 use serde::Serialize;
 use tokio::sync::OnceCell;
 use tower_http::{services::ServeDir, trace::TraceLayer};
@@ -39,18 +38,25 @@ pub struct AppState {
     pub warehouse_name: String,
     pub warehouse_id: OnceCell<String>,
     pub http: reqwest::Client,
+    pub demo: bool,
+    pub jobs: Mutex<Vec<jobs::Job>>,
+    pub demo_state: RwLock<demo::DemoState>,
 }
 
 #[derive(Serialize)]
 struct Me {
     user: String,
     auth_mode: &'static str,
+    demo: bool,
+    warehouse: String,
 }
 
 async fn me(State(s): State<Arc<AppState>>) -> impl IntoResponse {
     Json(Me {
         user: s.dev_user.clone(),
         auth_mode: "static-dev",
+        demo: s.demo,
+        warehouse: s.warehouse_name.clone(),
     })
 }
 
@@ -58,12 +64,20 @@ async fn health() -> impl IntoResponse {
     (StatusCode::OK, "ok")
 }
 
-async fn trino_cluster(State(s): State<Arc<AppState>>) -> impl IntoResponse {
+async fn trino_cluster(State(s): State<Arc<AppState>>) -> Response {
+    if s.demo {
+        return Json(serde_json::json!({
+            "nodeVersion": { "version": "demo" },
+            "state": "ACTIVE",
+            "demo": true
+        }))
+        .into_response();
+    }
     // Trino 480 dropped /v1/cluster + /v1/node; coordinator status lives at /v1/info.
     proxy_get(&s, format!("{}/v1/info", s.trino_url)).await
 }
 
-async fn proxy_get(s: &AppState, url: String) -> axum::response::Response {
+async fn proxy_get(s: &AppState, url: String) -> Response {
     match s
         .http
         .get(&url)
@@ -89,11 +103,21 @@ async fn proxy_get(s: &AppState, url: String) -> axum::response::Response {
     }
 }
 
+fn env_flag(name: &str) -> bool {
+    matches!(
+        std::env::var(name).as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes")
+    )
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
+
+    let demo_mode = env_flag("NOVA_DEMO");
+    let demo_state = if demo_mode { demo::DemoState::seed() } else { demo::DemoState::default() };
 
     let state = Arc::new(AppState {
         dev_user: std::env::var("NOVA_DEV_USER").unwrap_or_else(|_| "stardelt-dev".into()),
@@ -104,6 +128,9 @@ async fn main() -> anyhow::Result<()> {
         warehouse_name: std::env::var("NOVA_WAREHOUSE_NAME").unwrap_or_else(|_| "warehouse".into()),
         warehouse_id: OnceCell::new(),
         http: reqwest::Client::builder().build()?,
+        demo: demo_mode,
+        jobs: Mutex::new(Vec::new()),
+        demo_state: RwLock::new(demo_state),
     });
 
     let static_dir = std::env::var("NOVA_STATIC_DIR").unwrap_or_else(|_| "/app/static".into());
@@ -113,10 +140,16 @@ async fn main() -> anyhow::Result<()> {
         .route("/health", get(health))
         .route("/trino/cluster", get(trino_cluster))
         .route("/catalog/warehouse", get(catalog::warehouse_info))
-        .route("/catalog/namespaces", get(catalog::list_namespaces))
+        .route(
+            "/catalog/namespaces",
+            get(catalog::list_namespaces).post(catalog::create_namespace),
+        )
         .route("/catalog/namespaces/:ns/tables", get(catalog::list_tables))
         .route("/catalog/tables/:ns/:tbl", get(catalog::table_metadata))
-        .route("/query", post(trino::run_query));
+        .route("/query", post(trino::run_query))
+        .route("/jobs", get(jobs::list))
+        .route("/ingest/upload", post(data::upload))
+        .route("/transfer", post(data::transfer));
 
     let app = Router::new()
         .nest("/api", api)
@@ -133,6 +166,7 @@ async fn main() -> anyhow::Result<()> {
         lakekeeper = %state.lakekeeper_url,
         warehouse = %state.warehouse_name,
         static_dir = %static_dir,
+        demo = state.demo,
         "nova backend starting"
     );
     let listener = tokio::net::TcpListener::bind(&bind).await?;
