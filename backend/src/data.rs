@@ -56,10 +56,7 @@ pub struct TransferResult {
     pub job_id: String,
 }
 
-pub async fn upload(
-    State(s): State<Arc<AppState>>,
-    Json(req): Json<UploadRequest>,
-) -> Response {
+pub async fn upload(State(s): State<Arc<AppState>>, Json(req): Json<UploadRequest>) -> Response {
     let fmt = req.format.to_lowercase();
     let title = format!("{}.{}", req.namespace, req.table);
 
@@ -67,26 +64,58 @@ pub async fn upload(
         let mut demo = s.demo_state.write().expect("demo state poisoned");
         return match demo.upload(&req.namespace, &req.table, &fmt, &req.content) {
             Ok(n) => {
-                let job = jobs::record(&s.jobs, "load", title, "succeeded", Some(format!("{n} rows via {fmt}")), Some(n));
-                Json(UploadResult { namespace: req.namespace, table: req.table, rows_loaded: n, job_id: job.id })
-                    .into_response()
+                let job = jobs::record(
+                    &s.jobs,
+                    "load",
+                    title,
+                    "succeeded",
+                    Some(format!("{n} rows via {fmt}")),
+                    Some(n),
+                );
+                Json(UploadResult {
+                    namespace: req.namespace,
+                    table: req.table,
+                    rows_loaded: n,
+                    job_id: job.id,
+                })
+                .into_response()
             }
             Err(e) => {
                 jobs::record(&s.jobs, "load", title, "failed", Some(e.clone()), None);
-                (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))).into_response()
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": e })),
+                )
+                    .into_response()
             }
         };
     }
 
     match real_upload(&s, &req, &fmt).await {
         Ok(n) => {
-            let job = jobs::record(&s.jobs, "load", title, "succeeded", Some(format!("{n} rows via {fmt}")), Some(n));
-            Json(UploadResult { namespace: req.namespace, table: req.table, rows_loaded: n, job_id: job.id })
-                .into_response()
+            let job = jobs::record(
+                &s.jobs,
+                "load",
+                title,
+                "succeeded",
+                Some(format!("{n} rows via {fmt}")),
+                Some(n),
+            );
+            Json(UploadResult {
+                namespace: req.namespace,
+                table: req.table,
+                rows_loaded: n,
+                job_id: job.id,
+            })
+            .into_response()
         }
         Err(e) => {
             jobs::record(&s.jobs, "load", title, "failed", Some(e.clone()), None);
-            (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))).into_response()
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response()
         }
     }
 }
@@ -101,26 +130,58 @@ pub async fn transfer(
         let mut demo = s.demo_state.write().expect("demo state poisoned");
         return match demo.transfer(&req.source, &req.target, &req.mode) {
             Ok(n) => {
-                let job = jobs::record(&s.jobs, "transfer", title, "succeeded", Some(format!("{} {n} rows", req.mode)), Some(n));
-                Json(TransferResult { source: req.source, target: req.target, rows: n, job_id: job.id })
-                    .into_response()
+                let job = jobs::record(
+                    &s.jobs,
+                    "transfer",
+                    title,
+                    "succeeded",
+                    Some(format!("{} {n} rows", req.mode)),
+                    Some(n),
+                );
+                Json(TransferResult {
+                    source: req.source,
+                    target: req.target,
+                    rows: n,
+                    job_id: job.id,
+                })
+                .into_response()
             }
             Err(e) => {
                 jobs::record(&s.jobs, "transfer", title, "failed", Some(e.clone()), None);
-                (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))).into_response()
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": e })),
+                )
+                    .into_response()
             }
         };
     }
 
     match real_transfer(&s, &req).await {
         Ok(n) => {
-            let job = jobs::record(&s.jobs, "transfer", title, "succeeded", Some(format!("{} {n} rows", req.mode)), Some(n));
-            Json(TransferResult { source: req.source, target: req.target, rows: n, job_id: job.id })
-                .into_response()
+            let job = jobs::record(
+                &s.jobs,
+                "transfer",
+                title,
+                "succeeded",
+                Some(format!("{} {n} rows", req.mode)),
+                Some(n),
+            );
+            Json(TransferResult {
+                source: req.source,
+                target: req.target,
+                rows: n,
+                job_id: job.id,
+            })
+            .into_response()
         }
         Err(e) => {
             jobs::record(&s.jobs, "transfer", title, "failed", Some(e.clone()), None);
-            (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))).into_response()
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response()
         }
     }
 }
@@ -176,10 +237,18 @@ async fn real_transfer(state: &AppState, req: &TransferRequest) -> Result<usize,
     let target = format!("warehouse.{}.{}", quote_ident(&tns), quote_ident(&ttbl));
 
     if req.mode.eq_ignore_ascii_case("append") {
-        trino::execute(state, format!("INSERT INTO {target} SELECT * FROM {source}")).await?;
+        trino::execute(
+            state,
+            format!("INSERT INTO {target} SELECT * FROM {source}"),
+        )
+        .await?;
     } else {
         trino::execute(state, format!("DROP TABLE IF EXISTS {target}")).await?;
-        trino::execute(state, format!("CREATE TABLE {target} AS SELECT * FROM {source}")).await?;
+        trino::execute(
+            state,
+            format!("CREATE TABLE {target} AS SELECT * FROM {source}"),
+        )
+        .await?;
     }
 
     let count = trino::execute(state, format!("SELECT count(*) FROM {target}")).await?;
@@ -225,7 +294,11 @@ fn infer_type(rows: &[Vec<Value>], col: usize) -> String {
         "bigint".into()
     } else if seen && numbers {
         "double".into()
-    } else if bools && rows.iter().any(|r| matches!(r.get(col), Some(Value::Bool(_)))) {
+    } else if bools
+        && rows
+            .iter()
+            .any(|r| matches!(r.get(col), Some(Value::Bool(_))))
+    {
         "boolean".into()
     } else {
         "varchar".into()

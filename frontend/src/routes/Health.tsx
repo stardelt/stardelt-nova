@@ -2,10 +2,12 @@ import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { api } from '../api'
 import { Icon } from '../components/Icon'
+import { shortImage } from '../format'
 
 export default function Health() {
   const apps = useQuery({ queryKey: ['apps'], queryFn: api.apps, refetchInterval: 10_000 })
   const cluster = useQuery({ queryKey: ['trino', 'cluster'], queryFn: api.trinoCluster, retry: false, refetchInterval: 15_000 })
+  const workloads = useQuery({ queryKey: ['workloads'], queryFn: api.workloads, refetchInterval: 15_000 })
 
   const list = apps.data ?? []
   const up = list.filter(a => a.status === 'up').length
@@ -51,6 +53,39 @@ export default function Health() {
             </div>
           ))}
         </div>
+      </section>
+
+      <section>
+        <div className="label mb-2">Running images</div>
+        <div className="card divide-y divide-border/70">
+          {workloads.isLoading && <div className="p-5 text-text-mute text-sm">loading…</div>}
+          {(workloads.data ?? []).map(w => (
+            <div key={`${w.kind}/${w.name}`} className="flex items-center gap-3 px-5 py-2.5">
+              <span className="w-16 shrink-0 text-[11px] uppercase tracking-wider text-text-mute">
+                {w.kind === 'StatefulSet' ? 'sts' : 'deploy'}
+              </span>
+              <span className="w-40 shrink-0 truncate text-sm font-medium">{w.name}</span>
+              <span className="truncate text-[11px] font-mono text-text-dim" title={w.image}>
+                {shortImage(w.image)}
+              </span>
+              <span className={[
+                'ml-auto shrink-0 text-xs',
+                w.desired > 0 && w.ready === w.desired ? 'text-success' : 'text-text-mute',
+              ].join(' ')}>
+                {w.ready}/{w.desired}
+              </span>
+            </div>
+          ))}
+          {workloads.data?.length === 0 && (
+            <div className="p-5 text-sm text-text-mute">
+              No cluster access — Nova lists images only when it can read its own namespace.
+            </div>
+          )}
+        </div>
+        <p className="text-xs text-text-mute mt-2">
+          Read live from the cluster, so a digest pin shows as the digest, not as the tag someone
+          meant to deploy.
+        </p>
       </section>
 
       <section className="card p-5">

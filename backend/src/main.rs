@@ -11,6 +11,8 @@
 //!   GET  /api/catalog/tables/:ns/:tbl       — table metadata
 //!   POST /api/query                         — run SQL
 //!   GET  /api/jobs                          — recent activity
+//!   GET  /api/apps                          — installed apps, reachable URLs, live images
+//!   GET  /api/workloads                     — workloads in Nova's namespace + their images
 //!   POST /api/ingest/upload                 — load CSV/JSON into a table
 //!   POST /api/transfer                      — copy table → table
 //!
@@ -18,6 +20,7 @@
 
 mod apps;
 mod catalog;
+mod cluster;
 mod data;
 mod demo;
 mod jobs;
@@ -25,7 +28,13 @@ mod trino;
 
 use std::sync::{Arc, Mutex, RwLock};
 
-use axum::{Json, Router, extract::State, http::StatusCode, response::{IntoResponse, Response}, routing::{get, post}};
+use axum::{
+    Json, Router,
+    extract::State,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    routing::{get, post},
+};
 use serde::Serialize;
 use tokio::sync::OnceCell;
 use tower_http::{services::ServeDir, trace::TraceLayer};
@@ -42,6 +51,10 @@ pub struct AppState {
     pub demo: bool,
     pub jobs: Mutex<Vec<jobs::Job>>,
     pub demo_state: RwLock<demo::DemoState>,
+    /// Cluster client for the read-only workload view. `None` in demo mode, or when
+    /// Nova runs outside a cluster / lacks RBAC — the UI then simply omits images.
+    pub kube: Option<kube::Client>,
+    pub workloads: cluster::WorkloadCache,
 }
 
 #[derive(Serialize)]
@@ -118,7 +131,26 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let demo_mode = env_flag("NOVA_DEMO");
-    let demo_state = if demo_mode { demo::DemoState::seed() } else { demo::DemoState::default() };
+    let demo_state = if demo_mode {
+        demo::DemoState::seed()
+    } else {
+        demo::DemoState::default()
+    };
+
+    // Read-only cluster access for the workload view. Absence is not an error: Nova
+    // runs in demo mode and on laptops, and a cluster without the RBAC below simply
+    // shows apps without images.
+    let kube = if demo_mode {
+        None
+    } else {
+        match kube::Client::try_default().await {
+            Ok(client) => Some(client),
+            Err(e) => {
+                info!(error = %e, "no cluster client — workload images will be omitted");
+                None
+            }
+        }
+    };
 
     let state = Arc::new(AppState {
         dev_user: std::env::var("NOVA_DEV_USER").unwrap_or_else(|_| "stardelt-dev".into()),
@@ -132,6 +164,8 @@ async fn main() -> anyhow::Result<()> {
         demo: demo_mode,
         jobs: Mutex::new(Vec::new()),
         demo_state: RwLock::new(demo_state),
+        kube,
+        workloads: cluster::WorkloadCache::default(),
     });
 
     let static_dir = std::env::var("NOVA_STATIC_DIR").unwrap_or_else(|_| "/app/static".into());
@@ -150,6 +184,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/query", post(trino::run_query))
         .route("/jobs", get(jobs::list))
         .route("/apps", get(apps::list))
+        .route("/workloads", get(cluster::list_handler))
         .route("/ingest/upload", post(data::upload))
         .route("/transfer", post(data::transfer));
 

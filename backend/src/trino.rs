@@ -8,7 +8,12 @@
 
 use std::{sync::Arc, time::Duration};
 
-use axum::{Json, extract::State, http::StatusCode, response::{IntoResponse, Response}};
+use axum::{
+    Json,
+    extract::State,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::time::sleep;
@@ -82,13 +87,16 @@ pub async fn execute(state: &AppState, sql: String) -> Result<QueryResult, Strin
             return Err(serde_json::to_string(&err).unwrap_or_else(|_| "Trino query failed".into()));
         }
 
-        if columns.is_empty() {
-            if let Some(cols) = current.columns.take() {
-                columns = cols
-                    .into_iter()
-                    .map(|c| Column { name: c.name, r#type: c.ty })
-                    .collect();
-            }
+        if columns.is_empty()
+            && let Some(cols) = current.columns.take()
+        {
+            columns = cols
+                .into_iter()
+                .map(|c| Column {
+                    name: c.name,
+                    r#type: c.ty,
+                })
+                .collect();
         }
 
         if let Some(d) = current.data.take() {
@@ -133,34 +141,53 @@ pub async fn execute(state: &AppState, sql: String) -> Result<QueryResult, Strin
     })
 }
 
-pub async fn run_query(
-    State(s): State<Arc<AppState>>,
-    Json(req): Json<QueryRequest>,
-) -> Response {
+pub async fn run_query(State(s): State<Arc<AppState>>, Json(req): Json<QueryRequest>) -> Response {
     let title = truncate(&req.sql, 90);
 
     if s.demo {
         let demo = s.demo_state.read().expect("demo state poisoned");
         return match demo.run_query(&req.sql) {
             Ok(r) => {
-                jobs::record(&s.jobs, "query", title, "succeeded", r.query_id.clone(), Some(r.row_count));
+                jobs::record(
+                    &s.jobs,
+                    "query",
+                    title,
+                    "succeeded",
+                    r.query_id.clone(),
+                    Some(r.row_count),
+                );
                 Json(r).into_response()
             }
             Err(e) => {
                 jobs::record(&s.jobs, "query", title, "failed", Some(e.clone()), None);
-                (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))).into_response()
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": e })),
+                )
+                    .into_response()
             }
         };
     }
 
     match execute(&s, req.sql).await {
         Ok(r) => {
-            jobs::record(&s.jobs, "query", title, "succeeded", r.query_id.clone(), Some(r.row_count));
+            jobs::record(
+                &s.jobs,
+                "query",
+                title,
+                "succeeded",
+                r.query_id.clone(),
+                Some(r.row_count),
+            );
             Json(r).into_response()
         }
         Err(e) => {
             jobs::record(&s.jobs, "query", title, "failed", Some(e.clone()), None);
-            (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))).into_response()
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": e })),
+            )
+                .into_response()
         }
     }
 }

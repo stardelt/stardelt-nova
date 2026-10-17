@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { api, type PlatformApp } from '../api'
 import { Icon } from '../components/Icon'
+import { shortImage } from '../format'
 
 export default function Apps() {
   const apps = useQuery({ queryKey: ['apps'], queryFn: api.apps, refetchInterval: 15_000 })
@@ -62,6 +63,17 @@ function AppCard({ app }: { app: PlatformApp }) {
           <div className="text-xs text-text-dim leading-snug">{app.description}</div>
         </div>
       </div>
+
+      {app.images.length > 0 && (
+        <div className="space-y-1">
+          {app.images.map(image => (
+            <div key={image} className="text-[11px] font-mono text-text-mute truncate" title={image}>
+              {shortImage(image)}
+            </div>
+          ))}
+        </div>
+      )}
+
       <div className="flex items-center gap-2 mt-auto">
         <span className={[
           'badge',

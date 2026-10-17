@@ -1,7 +1,7 @@
 //! Demo lakehouse. `NOVA_DEMO=1` serves an in-memory Iceberg-shaped catalog and a
 //! tiny SQL responder, so the UI can be developed and demoed with no cluster.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::trino::{Column, QueryResult};
 
@@ -19,12 +19,21 @@ pub struct DemoState {
 }
 
 fn col(name: &str, ty: &str) -> Column {
-    Column { name: name.into(), r#type: ty.into() }
+    Column {
+        name: name.into(),
+        r#type: ty.into(),
+    }
 }
 
-fn s(v: &str) -> Value { json!(v) }
-fn i(v: i64) -> Value { json!(v) }
-fn f(v: f64) -> Value { json!(v) }
+fn s(v: &str) -> Value {
+    json!(v)
+}
+fn i(v: i64) -> Value {
+    json!(v)
+}
+fn f(v: f64) -> Value {
+    json!(v)
+}
 
 impl DemoState {
     pub fn seed() -> Self {
@@ -41,18 +50,150 @@ impl DemoState {
             col("pickup_borough", "varchar"),
         ];
         let taxi_rows = vec![
-            vec![i(1), s("2026-10-01 08:12"), s("2026-10-01 08:31"), i(2), f(3.4), f(14.5), f(3.2), f(20.1), s("card"), s("Manhattan")],
-            vec![i(1), s("2026-10-01 09:02"), s("2026-10-01 09:14"), i(1), f(1.2), f(7.0), f(1.5), f(9.8), s("card"), s("Manhattan")],
-            vec![i(2), s("2026-10-01 09:30"), s("2026-10-01 10:05"), i(3), f(8.7), f(31.0), f(6.2), f(41.4), s("card"), s("Brooklyn")],
-            vec![i(2), s("2026-10-01 10:11"), s("2026-10-01 10:26"), i(1), f(2.1), f(9.5), f(2.0), f(13.1), s("cash"), s("Queens")],
-            vec![i(1), s("2026-10-01 11:40"), s("2026-10-01 11:58"), i(2), f(4.0), f(16.0), f(4.1), f(23.0), s("card"), s("Manhattan")],
-            vec![i(2), s("2026-10-01 12:05"), s("2026-10-01 12:22"), i(4), f(5.6), f(21.0), f(5.0), f(29.5), s("card"), s("Bronx")],
-            vec![i(1), s("2026-10-01 13:15"), s("2026-10-01 13:29"), i(1), f(1.8), f(8.0), f(1.8), f(11.2), s("card"), s("Manhattan")],
-            vec![i(2), s("2026-10-01 14:02"), s("2026-10-01 14:44"), i(2), f(11.3), f(38.0), f(7.6), f(50.2), s("card"), s("Brooklyn")],
-            vec![i(1), s("2026-10-01 15:20"), s("2026-10-01 15:37"), i(3), f(3.1), f(13.0), f(2.9), f(18.0), s("cash"), s("Manhattan")],
-            vec![i(2), s("2026-10-01 16:05"), s("2026-10-01 16:19"), i(1), f(2.4), f(10.0), f(2.2), f(14.1), s("card"), s("Queens")],
-            vec![i(1), s("2026-10-01 17:30"), s("2026-10-01 17:52"), i(2), f(5.0), f(19.5), f(4.4), f(26.8), s("card"), s("Manhattan")],
-            vec![i(2), s("2026-10-01 18:10"), s("2026-10-01 18:27"), i(1), f(2.7), f(11.0), f(2.4), f(15.3), s("card"), s("Staten Island")],
+            vec![
+                i(1),
+                s("2026-10-01 08:12"),
+                s("2026-10-01 08:31"),
+                i(2),
+                f(3.4),
+                f(14.5),
+                f(3.2),
+                f(20.1),
+                s("card"),
+                s("Manhattan"),
+            ],
+            vec![
+                i(1),
+                s("2026-10-01 09:02"),
+                s("2026-10-01 09:14"),
+                i(1),
+                f(1.2),
+                f(7.0),
+                f(1.5),
+                f(9.8),
+                s("card"),
+                s("Manhattan"),
+            ],
+            vec![
+                i(2),
+                s("2026-10-01 09:30"),
+                s("2026-10-01 10:05"),
+                i(3),
+                f(8.7),
+                f(31.0),
+                f(6.2),
+                f(41.4),
+                s("card"),
+                s("Brooklyn"),
+            ],
+            vec![
+                i(2),
+                s("2026-10-01 10:11"),
+                s("2026-10-01 10:26"),
+                i(1),
+                f(2.1),
+                f(9.5),
+                f(2.0),
+                f(13.1),
+                s("cash"),
+                s("Queens"),
+            ],
+            vec![
+                i(1),
+                s("2026-10-01 11:40"),
+                s("2026-10-01 11:58"),
+                i(2),
+                f(4.0),
+                f(16.0),
+                f(4.1),
+                f(23.0),
+                s("card"),
+                s("Manhattan"),
+            ],
+            vec![
+                i(2),
+                s("2026-10-01 12:05"),
+                s("2026-10-01 12:22"),
+                i(4),
+                f(5.6),
+                f(21.0),
+                f(5.0),
+                f(29.5),
+                s("card"),
+                s("Bronx"),
+            ],
+            vec![
+                i(1),
+                s("2026-10-01 13:15"),
+                s("2026-10-01 13:29"),
+                i(1),
+                f(1.8),
+                f(8.0),
+                f(1.8),
+                f(11.2),
+                s("card"),
+                s("Manhattan"),
+            ],
+            vec![
+                i(2),
+                s("2026-10-01 14:02"),
+                s("2026-10-01 14:44"),
+                i(2),
+                f(11.3),
+                f(38.0),
+                f(7.6),
+                f(50.2),
+                s("card"),
+                s("Brooklyn"),
+            ],
+            vec![
+                i(1),
+                s("2026-10-01 15:20"),
+                s("2026-10-01 15:37"),
+                i(3),
+                f(3.1),
+                f(13.0),
+                f(2.9),
+                f(18.0),
+                s("cash"),
+                s("Manhattan"),
+            ],
+            vec![
+                i(2),
+                s("2026-10-01 16:05"),
+                s("2026-10-01 16:19"),
+                i(1),
+                f(2.4),
+                f(10.0),
+                f(2.2),
+                f(14.1),
+                s("card"),
+                s("Queens"),
+            ],
+            vec![
+                i(1),
+                s("2026-10-01 17:30"),
+                s("2026-10-01 17:52"),
+                i(2),
+                f(5.0),
+                f(19.5),
+                f(4.4),
+                f(26.8),
+                s("card"),
+                s("Manhattan"),
+            ],
+            vec![
+                i(2),
+                s("2026-10-01 18:10"),
+                s("2026-10-01 18:27"),
+                i(1),
+                f(2.7),
+                f(11.0),
+                f(2.4),
+                f(15.3),
+                s("card"),
+                s("Staten Island"),
+            ],
         ];
 
         let by_borough_cols = vec![
@@ -83,9 +224,24 @@ impl DemoState {
 
         Self {
             tables: vec![
-                DemoTable { namespace: "nyc_taxi".into(), name: "yellow_trips".into(), columns: taxi_cols, rows: taxi_rows },
-                DemoTable { namespace: "analytics".into(), name: "trips_by_borough".into(), columns: by_borough_cols, rows: by_borough_rows },
-                DemoTable { namespace: "analytics".into(), name: "daily_revenue".into(), columns: daily_cols, rows: daily_rows },
+                DemoTable {
+                    namespace: "nyc_taxi".into(),
+                    name: "yellow_trips".into(),
+                    columns: taxi_cols,
+                    rows: taxi_rows,
+                },
+                DemoTable {
+                    namespace: "analytics".into(),
+                    name: "trips_by_borough".into(),
+                    columns: by_borough_cols,
+                    rows: by_borough_rows,
+                },
+                DemoTable {
+                    namespace: "analytics".into(),
+                    name: "daily_revenue".into(),
+                    columns: daily_cols,
+                    rows: daily_rows,
+                },
             ],
         }
     }
@@ -137,11 +293,15 @@ impl DemoState {
     }
 
     pub fn table(&self, namespace: &str, table: &str) -> Option<&DemoTable> {
-        self.tables.iter().find(|t| t.namespace == namespace && t.name == table)
+        self.tables
+            .iter()
+            .find(|t| t.namespace == namespace && t.name == table)
     }
 
     fn table_mut(&mut self, namespace: &str, table: &str) -> Option<&mut DemoTable> {
-        self.tables.iter_mut().find(|t| t.namespace == namespace && t.name == table)
+        self.tables
+            .iter_mut()
+            .find(|t| t.namespace == namespace && t.name == table)
     }
 
     pub fn run_query(&self, sql: &str) -> Result<QueryResult, String> {
@@ -152,7 +312,10 @@ impl DemoState {
         let query_id = Some(crate::jobs::new_id("demo"));
         if q.starts_with("select 1") {
             return Ok(QueryResult {
-                columns: vec![Column { name: "col1".into(), r#type: "integer".into() }],
+                columns: vec![Column {
+                    name: "col1".into(),
+                    r#type: "integer".into(),
+                }],
                 rows: vec![vec![json!(1)]],
                 row_count: 1,
                 query_id,
@@ -160,13 +323,19 @@ impl DemoState {
             });
         }
         let (ns, tbl) = extract_ref(&q).ok_or_else(|| {
-            "demo mode supports `SELECT * FROM <schema>.<table> [LIMIT n]` and `SELECT 1`".to_string()
+            "demo mode supports `SELECT * FROM <schema>.<table> [LIMIT n]` and `SELECT 1`"
+                .to_string()
         })?;
-        let t = self.table(&ns, &tbl).ok_or_else(|| format!("table {ns}.{tbl} not found"))?;
+        let t = self
+            .table(&ns, &tbl)
+            .ok_or_else(|| format!("table {ns}.{tbl} not found"))?;
 
         if q.contains("count(*)") {
             return Ok(QueryResult {
-                columns: vec![Column { name: "count".into(), r#type: "bigint".into() }],
+                columns: vec![Column {
+                    name: "count".into(),
+                    r#type: "bigint".into(),
+                }],
                 rows: vec![vec![json!(t.rows.len())]],
                 row_count: 1,
                 query_id,
@@ -185,7 +354,13 @@ impl DemoState {
         })
     }
 
-    pub fn upload(&mut self, namespace: &str, table: &str, format: &str, content: &str) -> Result<usize, String> {
+    pub fn upload(
+        &mut self,
+        namespace: &str,
+        table: &str,
+        format: &str,
+        content: &str,
+    ) -> Result<usize, String> {
         let (columns, rows) = if format.eq_ignore_ascii_case("json") {
             parse_json_table(content)?
         } else {
@@ -194,7 +369,13 @@ impl DemoState {
         if columns.is_empty() {
             return Err("no columns found".into());
         }
-        let cols: Vec<Column> = columns.iter().map(|c| Column { name: c.clone(), r#type: "varchar".into() }).collect();
+        let cols: Vec<Column> = columns
+            .iter()
+            .map(|c| Column {
+                name: c.clone(),
+                r#type: "varchar".into(),
+            })
+            .collect();
         let n = rows.len();
         match self.table_mut(namespace, table) {
             Some(t) => {
@@ -214,7 +395,10 @@ impl DemoState {
     pub fn transfer(&mut self, source: &str, target: &str, mode: &str) -> Result<usize, String> {
         let (sns, stbl) = parse_ref(source)?;
         let (tns, ttbl) = parse_ref(target)?;
-        let src = self.table(&sns, &stbl).cloned().ok_or_else(|| format!("source {sns}.{stbl} not found"))?;
+        let src = self
+            .table(&sns, &stbl)
+            .cloned()
+            .ok_or_else(|| format!("source {sns}.{stbl} not found"))?;
         let n = src.rows.len();
         match self.table_mut(&tns, &ttbl) {
             Some(t) => {
@@ -239,10 +423,16 @@ impl DemoState {
 fn extract_ref(q: &str) -> Option<(String, String)> {
     let idx = q.find(" from ")?;
     let rest = &q[idx + 6..];
-    let token = rest.split_whitespace().next()?.trim_matches(|c: char| c == ',' || c == ';');
+    let token = rest
+        .split_whitespace()
+        .next()?
+        .trim_matches(|c: char| c == ',' || c == ';');
     let parts: Vec<&str> = token.split('.').filter(|p| !p.is_empty()).collect();
     if parts.len() >= 2 {
-        Some((parts[parts.len() - 2].to_string(), parts[parts.len() - 1].to_string()))
+        Some((
+            parts[parts.len() - 2].to_string(),
+            parts[parts.len() - 1].to_string(),
+        ))
     } else {
         None
     }
@@ -264,13 +454,19 @@ pub fn parse_ref(raw: &str) -> Result<(String, String), String> {
     if parts.len() < 2 {
         return Err(format!("expected schema.table, got '{raw}'"));
     }
-    Ok((parts[parts.len() - 2].to_string(), parts[parts.len() - 1].to_string()))
+    Ok((
+        parts[parts.len() - 2].to_string(),
+        parts[parts.len() - 1].to_string(),
+    ))
 }
 
 pub fn parse_csv(content: &str) -> Result<(Vec<String>, Vec<Vec<Value>>), String> {
     let mut lines = content.lines().filter(|l| !l.trim().is_empty());
     let header = lines.next().ok_or("empty CSV")?;
-    let columns: Vec<String> = split_csv(header).into_iter().map(|s| s.trim().to_string()).collect();
+    let columns: Vec<String> = split_csv(header)
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .collect();
     if columns.is_empty() {
         return Err("missing CSV header".into());
     }
@@ -350,7 +546,9 @@ mod tests {
     #[test]
     fn query_returns_seeded_rows() {
         let demo = DemoState::seed();
-        let r = demo.run_query("SELECT * FROM warehouse.nyc_taxi.yellow_trips LIMIT 5").unwrap();
+        let r = demo
+            .run_query("SELECT * FROM warehouse.nyc_taxi.yellow_trips LIMIT 5")
+            .unwrap();
         assert_eq!(r.row_count, 5);
         assert_eq!(r.columns.len(), 10);
     }
@@ -358,24 +556,38 @@ mod tests {
     #[test]
     fn count_star_works() {
         let demo = DemoState::seed();
-        let r = demo.run_query("SELECT count(*) FROM nyc_taxi.yellow_trips").unwrap();
+        let r = demo
+            .run_query("SELECT count(*) FROM nyc_taxi.yellow_trips")
+            .unwrap();
         assert_eq!(r.rows[0][0], json!(12));
     }
 
     #[test]
     fn upload_and_transfer() {
         let mut demo = DemoState::seed();
-        let n = demo.upload("nyc_taxi", "zones", "csv", "zone_id,zone\n1,Manhattan\n2,Brooklyn").unwrap();
+        let n = demo
+            .upload(
+                "nyc_taxi",
+                "zones",
+                "csv",
+                "zone_id,zone\n1,Manhattan\n2,Brooklyn",
+            )
+            .unwrap();
         assert_eq!(n, 2);
         assert!(demo.table("nyc_taxi", "zones").is_some());
-        let moved = demo.transfer("nyc_taxi.zones", "analytics.zones_copy", "overwrite").unwrap();
+        let moved = demo
+            .transfer("nyc_taxi.zones", "analytics.zones_copy", "overwrite")
+            .unwrap();
         assert_eq!(moved, 2);
         assert!(demo.table("analytics", "zones_copy").is_some());
     }
 
     #[test]
     fn ref_parsing_strips_catalog() {
-        assert_eq!(parse_ref("warehouse.a.b").unwrap(), ("a".into(), "b".into()));
+        assert_eq!(
+            parse_ref("warehouse.a.b").unwrap(),
+            ("a".into(), "b".into())
+        );
         assert_eq!(parse_ref("a.b").unwrap(), ("a".into(), "b".into()));
         assert!(parse_ref("b").is_err());
     }
