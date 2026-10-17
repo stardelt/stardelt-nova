@@ -8,6 +8,7 @@ export default function Overview() {
   const tables = useQuery({ queryKey: ['catalog', 'all'], queryFn: allTables })
   const jobs = useQuery({ queryKey: ['jobs'], queryFn: api.jobs, refetchInterval: 10_000 })
   const cluster = useQuery({ queryKey: ['trino', 'cluster'], queryFn: api.trinoCluster, retry: false })
+  const apps = useQuery({ queryKey: ['apps'], queryFn: api.apps, refetchInterval: 15_000 })
 
   const refs = tables.data ?? []
   const schemas = new Set(refs.map(r => r.ns)).size
@@ -61,22 +62,19 @@ export default function Overview() {
         </div>
 
         <div className="card p-5">
-          <h2 className="text-sm font-semibold mb-3">Stack</h2>
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-sm font-semibold">Platform apps</h2>
+            <Link to="/apps" className="text-xs text-text-dim hover:text-text">All apps →</Link>
+          </div>
           <div className="space-y-2 text-sm">
-            {[
-              ['Trino', 'query engine'],
-              ['Lakekeeper', 'Iceberg REST catalog'],
-              ['SeaweedFS', 'S3-compatible storage'],
-              ['Airflow', 'orchestration'],
-              ['Superset', 'BI & dashboards'],
-              ['Nova', 'control plane'],
-            ].map(([name, role]) => (
-              <div key={name} className="flex items-center justify-between gap-3">
+            {apps.isLoading && <div className="text-text-mute text-sm">loading…</div>}
+            {(apps.data ?? []).map(a => (
+              <div key={a.id} className="flex items-center justify-between gap-3">
                 <span className="flex items-center gap-2">
-                  <span className="w-1.5 h-1.5 rounded-full bg-success" />
-                  {name}
+                  <span className={['w-1.5 h-1.5 rounded-full', a.status === 'up' ? 'bg-success' : 'bg-text-mute'].join(' ')} />
+                  {a.name}
                 </span>
-                <span className="text-xs text-text-mute">{role}</span>
+                <span className="text-xs text-text-mute">{a.status === 'up' ? 'running' : a.status}</span>
               </div>
             ))}
           </div>
@@ -86,7 +84,7 @@ export default function Overview() {
       <section className="grid md:grid-cols-3 gap-4">
         <Action to="/catalog" icon="database" title="Browse the catalog" body="Explore schemas, tables and column types." />
         <Action to="/data" icon="upload" title="Load & transfer" body="Ingest CSV or JSON, or copy a table." />
-        <Action to="/query" icon="terminal" title="Run SQL" body="Query Iceberg tables through Trino." />
+        <Action to="/apps" icon="grid" title="Platform apps" body="Every service, live status and deep links." />
       </section>
     </div>
   )
@@ -111,7 +109,7 @@ function Stat({ label, value, hint, icon, tone }: {
   )
 }
 
-function Action({ to, icon, title, body }: { to: string; icon: 'database' | 'upload' | 'terminal'; title: string; body: string }) {
+function Action({ to, icon, title, body }: { to: string; icon: 'database' | 'upload' | 'terminal' | 'grid'; title: string; body: string }) {
   return (
     <Link to={to} className="card p-5 hover:border-accent/40 transition group">
       <div className="flex items-center gap-2 text-sm font-semibold">

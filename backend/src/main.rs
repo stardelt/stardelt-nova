@@ -16,6 +16,7 @@
 //!
 //! `NOVA_DEMO=1` serves an in-memory lakehouse so the UI runs with no cluster.
 
+mod apps;
 mod catalog;
 mod data;
 mod demo;
@@ -148,6 +149,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/catalog/tables/:ns/:tbl", get(catalog::table_metadata))
         .route("/query", post(trino::run_query))
         .route("/jobs", get(jobs::list))
+        .route("/apps", get(apps::list))
         .route("/ingest/upload", post(data::upload))
         .route("/transfer", post(data::transfer));
 

@@ -3,6 +3,7 @@ import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../api'
 import { Icon, type IconName } from './Icon'
+import { getTheme, applyTheme, type Theme } from '../theme'
 
 type NavItem = { to: string; label: string; icon: IconName; end?: boolean }
 
@@ -32,7 +33,10 @@ const groups: Array<{ label: string; items: NavItem[] }> = [
   },
   {
     label: 'Platform',
-    items: [{ to: '/health', label: 'Health', icon: 'pulse' }],
+    items: [
+      { to: '/apps', label: 'Apps', icon: 'grid' },
+      { to: '/health', label: 'Health', icon: 'pulse' },
+    ],
   },
 ]
 
@@ -42,6 +46,7 @@ const titles: Record<string, string> = {
   '/query': 'SQL editor',
   '/data': 'Load & transfer',
   '/jobs': 'Jobs',
+  '/apps': 'Platform apps',
   '/lineage': 'Lineage',
   '/dashboards': 'Dashboards',
   '/health': 'Health',
@@ -61,7 +66,14 @@ export default function Shell() {
   const location = useLocation()
   const navigate = useNavigate()
   const [q, setQ] = useState('')
+  const [theme, setThemeState] = useState<Theme>(getTheme())
   const title = titles[location.pathname] ?? 'Nova'
+
+  function toggleTheme() {
+    const next: Theme = theme === 'dark' ? 'light' : 'dark'
+    setThemeState(next)
+    applyTheme(next)
+  }
 
   return (
     <div className="h-full grid grid-cols-[250px_1fr]">
@@ -138,6 +150,14 @@ export default function Shell() {
             <Icon name="plus" className="w-4 h-4" />
             Load data
           </NavLink>
+          <button
+            onClick={toggleTheme}
+            title={theme === 'dark' ? 'Switch to light' : 'Switch to dark'}
+            className="btn-ghost px-2.5 py-2"
+            aria-label="Toggle theme"
+          >
+            {theme === 'dark' ? <Icon name="spark" className="w-4 h-4" /> : <Icon name="pulse" className="w-4 h-4" />}
+          </button>
         </header>
 
         <main className="flex-1 min-h-0 overflow-auto p-6">

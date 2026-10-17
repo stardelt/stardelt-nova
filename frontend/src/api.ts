@@ -85,6 +85,15 @@ export type TransferResult = {
 
 export type TableRef = { ns: string; name: string }
 
+export type PlatformApp = {
+  id: string
+  name: string
+  description: string
+  category: string
+  external_url: string
+  status: 'up' | 'unreachable' | 'unknown'
+}
+
 async function jget<T>(path: string): Promise<T> {
   const r = await fetch(path)
   if (!r.ok) throw new Error(`${path} → ${r.status}`)
@@ -113,6 +122,7 @@ export const api = {
   tableMeta:    (ns: string, tbl: string)     => jget<TableMetadata>(`/api/catalog/tables/${ns}/${tbl}`),
   query:        (sql: string)                 => jpost<QueryResult>('/api/query', { sql }),
   jobs:         ()                            => jget<Job[]>('/api/jobs'),
+  apps:         ()                            => jget<PlatformApp[]>('/api/apps'),
   upload:       (req: UploadRequest)          => jpost<UploadResult>('/api/ingest/upload', req),
   transfer:     (req: TransferRequest)        => jpost<TransferResult>('/api/transfer', req),
 }

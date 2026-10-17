@@ -27,6 +27,7 @@ export const api = {
     tableMeta: (ns, tbl) => jget(`/api/catalog/tables/${ns}/${tbl}`),
     query: (sql) => jpost('/api/query', { sql }),
     jobs: () => jget('/api/jobs'),
+    apps: () => jget('/api/apps'),
     upload: (req) => jpost('/api/ingest/upload', req),
     transfer: (req) => jpost('/api/transfer', req),
 };
