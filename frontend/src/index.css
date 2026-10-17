@@ -2,25 +2,61 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Palette as RGB channels. Dark is the default (stardelt brand); light is opt-in
+   via <html data-theme="light">, toggled from the top bar. */
 @layer base {
+  :root,
+  [data-theme='dark'] {
+    --c-bg: 11 14 31;
+    --c-bg-elev: 17 21 43;
+    --c-bg-soft: 22 27 53;
+    --c-border: 35 42 77;
+    --c-text: 231 235 255;
+    --c-text-dim: 164 171 208;
+    --c-text-mute: 112 121 163;
+    --c-accent: 91 108 255;
+    --c-accent-deep: 30 42 120;
+    --c-success: 94 230 168;
+    --glow-1: rgba(91, 108, 255, 0.18);
+    --glow-2: rgba(30, 42, 120, 0.35);
+    color-scheme: dark;
+  }
+
+  [data-theme='light'] {
+    --c-bg: 246 247 251;
+    --c-bg-elev: 255 255 255;
+    --c-bg-soft: 238 240 247;
+    --c-border: 214 219 232;
+    --c-text: 19 22 41;
+    --c-text-dim: 74 81 105;
+    --c-text-mute: 123 131 160;
+    --c-accent: 74 91 240;
+    --c-accent-deep: 43 58 168;
+    --c-success: 26 148 92;
+    --glow-1: rgba(74, 91, 240, 0.10);
+    --glow-2: rgba(74, 91, 240, 0.10);
+    color-scheme: light;
+  }
+
   html, body, #root {
     height: 100%;
   }
   body {
     background:
-      radial-gradient(1200px 600px at 80% -10%, rgba(91,108,255,0.18), transparent 60%),
-      radial-gradient(900px 500px at -10% 10%, rgba(30,42,120,0.35), transparent 60%),
-      theme('colors.bg');
+      radial-gradient(1200px 600px at 80% -10%, var(--glow-1), transparent 60%),
+      radial-gradient(900px 500px at -10% 10%, var(--glow-2), transparent 60%),
+      rgb(var(--c-bg));
+    color: rgb(var(--c-text));
   }
   ::selection {
-    background: rgba(91,108,255,0.35);
+    background: rgb(var(--c-accent) / 0.35);
   }
   *::-webkit-scrollbar {
     width: 10px;
     height: 10px;
   }
   *::-webkit-scrollbar-thumb {
-    background: #232a4d;
+    background: rgb(var(--c-border));
     border-radius: 10px;
   }
   *::-webkit-scrollbar-track {
@@ -42,7 +78,7 @@
     @apply btn border border-border bg-bg-elev/60 text-text-dim hover:text-text hover:border-accent/40;
   }
   .btn-danger {
-    @apply btn border border-red-500/40 bg-red-500/10 text-red-300 hover:bg-red-500/15;
+    @apply btn border border-red-500/40 bg-red-500/10 text-red-500 hover:bg-red-500/15;
   }
   .input {
     @apply w-full bg-bg-soft/60 border border-border rounded-[10px] px-3 py-2 text-sm text-text outline-none focus:border-accent/60 placeholder:text-text-mute;
