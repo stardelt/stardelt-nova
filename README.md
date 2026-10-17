@@ -22,6 +22,8 @@ Browser
          ├─ POST /api/catalog/namespaces  create schema
          ├─ POST /api/query            → Trino query engine
          ├─ GET  /api/jobs             recent activity
+         ├─ GET  /api/apps             installed apps, live status + images
+         ├─ GET  /api/workloads        workloads in Nova's namespace + images
          ├─ POST /api/ingest/upload    load CSV/JSON into a table
          ├─ POST /api/transfer         copy table → table
          │
