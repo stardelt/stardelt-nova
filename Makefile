@@ -38,7 +38,7 @@ fmt:
 
 check:
 	cargo check --all-targets
-	cd frontend && npx tsc -b --noEmit
+	cd frontend && npx tsc --noEmit
 
 build:
 	cargo build --release
