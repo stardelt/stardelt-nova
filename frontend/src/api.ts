@@ -92,6 +92,17 @@ export type PlatformApp = {
   category: string
   external_url: string
   status: 'up' | 'unreachable' | 'unknown'
+  /** Images the app's workloads actually run, read from the cluster (may be empty). */
+  images: string[]
+}
+
+/** A workload in Nova's namespace, as the cluster reports it. */
+export type Workload = {
+  name: string
+  kind: 'Deployment' | 'StatefulSet' | string
+  image: string
+  ready: number
+  desired: number
 }
 
 async function jget<T>(path: string): Promise<T> {
@@ -123,6 +134,7 @@ export const api = {
   query:        (sql: string)                 => jpost<QueryResult>('/api/query', { sql }),
   jobs:         ()                            => jget<Job[]>('/api/jobs'),
   apps:         ()                            => jget<PlatformApp[]>('/api/apps'),
+  workloads:    ()                            => jget<Workload[]>('/api/workloads'),
   createNamespace: (namespace: string)        => jpost<{ namespace: string }>('/api/catalog/namespaces', { namespace }),
   upload:       (req: UploadRequest)          => jpost<UploadResult>('/api/ingest/upload', req),
   transfer:     (req: TransferRequest)        => jpost<TransferResult>('/api/transfer', req),

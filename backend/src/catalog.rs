@@ -80,13 +80,18 @@ async fn proxy(state: &AppState, path: String) -> Response {
     }
 }
 
-async fn warehouse_id_or_500(state: &AppState) -> Result<String, Response> {
+/// Resolve the warehouse id, or the 500 to send back. The error is boxed: an
+/// unboxed `Response` in the `Err` variant trips `clippy::result_large_err`, and the
+/// happy path is what this function is for.
+async fn warehouse_id_or_500(state: &AppState) -> Result<String, Box<Response>> {
     resolve_warehouse_id(state).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e})),
+        Box::new(
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response(),
         )
-            .into_response()
     })
 }
 
@@ -111,7 +116,7 @@ pub async fn list_namespaces(State(s): State<Arc<AppState>>) -> Response {
     }
     let id = match warehouse_id_or_500(&s).await {
         Ok(v) => v,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     proxy(&s, format!("/catalog/v1/{id}/namespaces")).await
 }
@@ -122,7 +127,11 @@ pub async fn create_namespace(
 ) -> Response {
     let ns = req.namespace.trim();
     if ns.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "namespace is required"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "namespace is required"})),
+        )
+            .into_response();
     }
     if s.demo {
         return (
@@ -133,24 +142,28 @@ pub async fn create_namespace(
         )
             .into_response();
     }
-    let sql = format!("CREATE SCHEMA IF NOT EXISTS warehouse.{}", data::quote_ident(ns));
+    let sql = format!(
+        "CREATE SCHEMA IF NOT EXISTS warehouse.{}",
+        data::quote_ident(ns)
+    );
     match crate::trino::execute(&s, sql).await {
         Ok(_) => Json(serde_json::json!({ "namespace": ns })).into_response(),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e}))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
     }
 }
 
-pub async fn list_tables(
-    State(s): State<Arc<AppState>>,
-    Path(ns): Path<String>,
-) -> Response {
+pub async fn list_tables(State(s): State<Arc<AppState>>, Path(ns): Path<String>) -> Response {
     if s.demo {
         let demo = s.demo_state.read().expect("demo state poisoned");
         return Json(demo.tables_json(&ns)).into_response();
     }
     let id = match warehouse_id_or_500(&s).await {
         Ok(v) => v,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     proxy(&s, format!("/catalog/v1/{id}/namespaces/{ns}/tables")).await
 }
@@ -172,7 +185,7 @@ pub async fn table_metadata(
     }
     let id = match warehouse_id_or_500(&s).await {
         Ok(v) => v,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     proxy(&s, format!("/catalog/v1/{id}/namespaces/{ns}/tables/{tbl}")).await
 }
