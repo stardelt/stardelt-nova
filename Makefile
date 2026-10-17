@@ -1,10 +1,11 @@
-.PHONY: help dev fmt check build image clean
+.PHONY: help dev demo fmt check build image clean
 
 # Default target: list available targets
 help:
 	@echo "stardelt-nova — available targets:"
 	@echo ""
 	@echo "  make dev     Run backend (port 8080) and frontend dev server (port 5173)"
+	@echo "  make demo    Run with in-memory demo data (no cluster needed)"
 	@echo "  make fmt     cargo fmt + frontend lint"
 	@echo "  make check   cargo check + TypeScript type-check"
 	@echo "  make build   cargo build --release + vite build"
@@ -19,6 +20,15 @@ dev:
 	@echo "(Ctrl-C stops both)"
 	@trap 'kill 0' INT; \
 	  (cd backend && cargo run) & \
+	  (cd frontend && npm run dev) & \
+	  wait
+
+# In-memory demo lakehouse: browse, query, load and transfer with no cluster.
+demo:
+	@echo "Nova demo mode — backend :8080 (NOVA_DEMO=1), frontend :5173"
+	@echo "(Ctrl-C stops both)"
+	@trap 'kill 0' INT; \
+	  (cd backend && NOVA_DEMO=1 cargo run) & \
 	  (cd frontend && npm run dev) & \
 	  wait
 

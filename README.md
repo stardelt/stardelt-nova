@@ -15,14 +15,31 @@ Browser
   │
   └─── :5173 (dev) / :8080 (prod)
          │
-         ├─ GET /api/health           liveness
-         ├─ GET /api/me               dev-user identity
-         ├─ GET /api/trino/cluster    → Trino /v1/info
-         ├─ GET /api/catalog/*        → Lakekeeper REST catalog
-         └─ POST /api/query           → Trino query engine
+         ├─ GET  /api/health           liveness
+         ├─ GET  /api/me               current user + demo flag
+         ├─ GET  /api/trino/cluster    → Trino /v1/info
+         ├─ GET  /api/catalog/*        → Lakekeeper REST catalog
+         ├─ POST /api/catalog/namespaces  create schema
+         ├─ POST /api/query            → Trino query engine
+         ├─ GET  /api/jobs             recent activity
+         ├─ POST /api/ingest/upload    load CSV/JSON into a table
+         ├─ POST /api/transfer         copy table → table
          │
          └─ /*                        React SPA (static files)
 ```
+
+## Demo mode (no cluster)
+
+`NOVA_DEMO=1` serves an in-memory lakehouse — a seeded Iceberg-shaped catalog
+(`nyc_taxi`, `analytics`), a small SQL responder, and working load/transfer — so the
+whole UI can be explored without Kubernetes:
+
+```bash
+make demo        # backend :8080 + frontend :5173
+```
+
+In this mode every operation mutates memory and is recorded as a job. Set
+`NOVA_DEMO` unset to talk to real Trino and Lakekeeper.
 
 ```
 stardelt-nova/
