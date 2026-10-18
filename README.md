@@ -23,7 +23,7 @@ Browser
          ├─ POST /api/query            → Trino query engine
          ├─ GET  /api/jobs             recent activity
          ├─ GET  /api/apps             installed apps: live status + images
-         ├─ GET  /api/apps/:id         one app: workloads, facts, deep links
+         ├─ GET  /api/apps/:id         one app: workloads, facts, links, embed check
          ├─ GET  /api/workloads        workloads in Nova's namespace + images
          ├─ POST /api/ingest/upload    load CSV/JSON into a table
          ├─ POST /api/transfer         copy table → table
@@ -78,6 +78,21 @@ liveness, and facts read from the service's own API —
 
 Every fact names its source and is omitted when the service does not answer: the
 page shows what Nova observed, never a guess.
+
+### Embedded apps
+
+Nova frames Superset (`/dashboards`) and JupyterHub (`/notebooks`) in an iframe,
+and both ship with headers that refuse framing — JupyterHub sends
+`content-security-policy: frame-ancestors 'none'`, Superset `x-frame-options`.
+The browser enforces that client-side, so the naive result is a blank frame with
+the reason hidden in the console.
+
+`/api/apps/:id` therefore reports what the app itself says (`embed.state`:
+`allowed` / `blocked` / `unknown`, with the header that blocks it), read from the
+app's own response. Those pages show an “embeds ok” badge when framing is
+permitted, and the offending header plus what to change when it is not — while
+still offering the deep link out. `unknown` (demo mode, or a service Nova cannot
+reach) makes no claim either way.
 
 ---
 
@@ -139,6 +154,8 @@ The backend is configured entirely through environment variables:
 | `NOVA_TRINO_URL` | `http://trino.stardelt.svc.cluster.local:8080` | Trino coordinator base URL |
 | `NOVA_LAKEKEEPER_URL` | `http://lakekeeper.stardelt.svc.cluster.local:8181` | Lakekeeper REST catalog base URL |
 | `NOVA_WAREHOUSE_NAME` | `warehouse` | Lakekeeper warehouse name to resolve on startup |
+| `NOVA_SUPERSET_URL` | `http://superset:8088` | Superset base URL (probe + embed check) |
+| `NOVA_JUPYTERHUB_URL` | `http://proxy-public:80` | JupyterHub public proxy base URL (probe + embed check) |
 | `NOVA_DEV_USER` | `stardelt-dev` | Static user identity returned by `/api/me` (dev mode only) |
 | `RUST_LOG` | `info` | Tracing filter for the backend (`debug`, `info`, `warn`, …) |
 

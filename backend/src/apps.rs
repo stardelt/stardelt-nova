@@ -23,6 +23,7 @@ use serde_json::{Value, json};
 
 use crate::AppState;
 use crate::cluster::{self, Workload};
+use crate::embed::{self, Embed};
 
 #[derive(Serialize, Clone)]
 pub struct PlatformApp {
@@ -99,6 +100,10 @@ pub struct AppDetail {
     /// Deep links into the app's UI; empty when it has none or Nova has no base
     /// domain to build them from.
     pub links: Vec<Link>,
+    /// Whether a browser will let Nova frame the app's UI. Absent for apps Nova
+    /// does not embed anywhere.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embed: Option<Embed>,
 }
 
 #[derive(Serialize)]
@@ -107,23 +112,41 @@ pub struct Replicas {
     pub desired: i32,
 }
 
-/// Where Nova probes an app. Trino and Lakekeeper are probed where Nova actually
-/// talks to them (`NOVA_TRINO_URL` / `NOVA_LAKEKEEPER_URL`), so the status can
-/// never disagree with the connection Nova uses; the rest have a fixed in-cluster
+/// The service addresses Nova talks to, from `NOVA_*_URL` (with in-cluster
+/// defaults). Probes, fact reads and the embed check all use these, so nothing
+/// in the UI can disagree with the connection Nova actually makes.
+pub struct Targets<'a> {
+    pub trino: &'a str,
+    pub lakekeeper: &'a str,
+    pub superset: &'a str,
+    pub jupyterhub: &'a str,
+}
+
+/// Where Nova probes an app. Trino, Lakekeeper, Superset and JupyterHub are
+/// probed where Nova actually talks to them; the rest have a fixed in-cluster
 /// address in their spec.
 enum Endpoint {
     Fixed(&'static str),
     Trino,
     Lakekeeper,
+    Superset,
+    JupyterHub,
 }
 
 impl Endpoint {
-    fn url(&self, trino_url: &str, lakekeeper_url: &str) -> String {
+    fn base<'a>(&self, targets: &'a Targets<'_>) -> &'a str {
         match self {
-            Endpoint::Fixed(url) => (*url).to_string(),
-            Endpoint::Trino => format!("{}/v1/info", trino_url.trim_end_matches('/')),
-            Endpoint::Lakekeeper => format!("{}/health", lakekeeper_url.trim_end_matches('/')),
+            Endpoint::Fixed(url) => url,
+            Endpoint::Trino => targets.trino,
+            Endpoint::Lakekeeper => targets.lakekeeper,
+            Endpoint::Superset => targets.superset,
+            Endpoint::JupyterHub => targets.jupyterhub,
         }
+    }
+
+    /// The URL Nova requests: the app's base address plus the path Nova needs.
+    fn url(&self, targets: &Targets<'_>, path: &str) -> String {
+        format!("{}{path}", self.base(targets).trim_end_matches('/'))
     }
 }
 
@@ -134,12 +157,23 @@ struct Spec {
     category: &'static str,
     /// Subdomain under the base domain, e.g. `superset`.
     sub: &'static str,
-    /// URL probed for liveness.
+    /// Where the app runs, plus the path probed for liveness.
     probe: Endpoint,
+    probe_path: &'static str,
     /// Workload name prefixes that make up the app — how the app's images are found.
     workload_prefixes: &'static [&'static str],
     /// UI paths appended to the external URL, as deep links.
     paths: &'static [(&'static str, &'static str)],
+    /// Set when Nova frames this app's UI somewhere in its own UI.
+    embed: Option<EmbedSpec>,
+}
+
+/// The page Nova frames, for the apps Nova embeds in its own UI (Dashboards,
+/// Notebooks). Nova reads that page's headers to report whether the embed can
+/// work — the app decides, not Nova.
+struct EmbedSpec {
+    /// Path of the framed page, appended to the app's base URL.
+    path: &'static str,
 }
 
 const SPECS: &[Spec] = &[
@@ -149,9 +183,11 @@ const SPECS: &[Spec] = &[
         description: "Control plane: catalog, SQL, load & transfer",
         category: "Experience",
         sub: "",
-        probe: Endpoint::Fixed("http://nova:8080/api/health"),
+        probe: Endpoint::Fixed("http://nova:8080"),
+        probe_path: "/api/health",
         workload_prefixes: &["nova"],
         paths: &[("Overview", "/")],
+        embed: None,
     },
     Spec {
         id: "trino",
@@ -160,8 +196,10 @@ const SPECS: &[Spec] = &[
         category: "Query",
         sub: "trino",
         probe: Endpoint::Trino,
+        probe_path: "/v1/info",
         workload_prefixes: &["trino-"],
         paths: &[("Trino UI", "/ui"), ("Query list", "/ui/admin/query")],
+        embed: None,
     },
     Spec {
         id: "lakekeeper",
@@ -170,10 +208,12 @@ const SPECS: &[Spec] = &[
         category: "Catalog",
         sub: "lakekeeper",
         probe: Endpoint::Lakekeeper,
+        probe_path: "/health",
         workload_prefixes: &["lakekeeper"],
         // No browsable UI in v0.12 — the warehouse is read through Nova's
         // Catalog page, which speaks the same REST API.
         paths: &[],
+        embed: None,
     },
     Spec {
         id: "superset",
@@ -181,7 +221,8 @@ const SPECS: &[Spec] = &[
         description: "BI & dashboards",
         category: "Analytics",
         sub: "superset",
-        probe: Endpoint::Fixed("http://superset:8088/health"),
+        probe: Endpoint::Superset,
+        probe_path: "/health",
         workload_prefixes: &["superset"],
         paths: &[
             ("Welcome", "/superset/welcome/"),
@@ -190,6 +231,10 @@ const SPECS: &[Spec] = &[
             ("Datasets", "/tablemodelview/list/"),
             ("Databases", "/databaseview/list/"),
         ],
+        // Nova frames Superset on its Dashboards page.
+        embed: Some(EmbedSpec {
+            path: "/superset/welcome/",
+        }),
     },
     Spec {
         id: "airflow",
@@ -197,13 +242,15 @@ const SPECS: &[Spec] = &[
         description: "Workflow orchestration",
         category: "Pipelines",
         sub: "airflow",
-        probe: Endpoint::Fixed("http://airflow-api-server:8080/health"),
+        probe: Endpoint::Fixed("http://airflow-api-server:8080"),
+        probe_path: "/health",
         workload_prefixes: &["airflow-"],
         paths: &[
             ("Home", "/home"),
             ("DAGs", "/dags"),
             ("Variables", "/variables"),
         ],
+        embed: None,
     },
     Spec {
         id: "jupyterhub",
@@ -211,7 +258,8 @@ const SPECS: &[Spec] = &[
         description: "Notebook workspaces",
         category: "Engineering",
         sub: "jupyter",
-        probe: Endpoint::Fixed("http://proxy-public:80"),
+        probe: Endpoint::JupyterHub,
+        probe_path: "",
         // The scheduler and the placeholder StatefulSet are part of JupyterHub's
         // shape: the placeholder at 0/0 is how a healthy idle hub looks.
         workload_prefixes: &["hub", "proxy", "user-"],
@@ -221,6 +269,8 @@ const SPECS: &[Spec] = &[
             ("Spawn server", "/hub/spawn"),
             ("API tokens", "/hub/token"),
         ],
+        // Nova frames JupyterHub on its Notebooks page.
+        embed: Some(EmbedSpec { path: "/hub/home" }),
     },
 ];
 
@@ -239,6 +289,15 @@ fn external_url(base: &str, sub: &str) -> String {
     }
 }
 
+fn targets(state: &AppState) -> Targets<'_> {
+    Targets {
+        trino: &state.trino_url,
+        lakekeeper: &state.lakekeeper_url,
+        superset: &state.superset_url,
+        jupyterhub: &state.jupyterhub_url,
+    }
+}
+
 /// Build the list-page view of an app: status + images, both observed, not configured.
 async fn describe(s: &AppState, spec: &Spec, base: &str, snapshot: &[Workload]) -> PlatformApp {
     PlatformApp {
@@ -247,7 +306,7 @@ async fn describe(s: &AppState, spec: &Spec, base: &str, snapshot: &[Workload]) 
         description: spec.description.to_string(),
         category: spec.category.to_string(),
         external_url: external_url(base, spec.sub),
-        status: probe(s, &spec.probe.url(&s.trino_url, &s.lakekeeper_url)).await,
+        status: probe(s, &spec.probe.url(&targets(s), spec.probe_path)).await,
         images: cluster::images_for(snapshot, spec.workload_prefixes),
     }
 }
@@ -283,11 +342,15 @@ pub async fn detail(State(s): State<Arc<AppState>>, Path(id): Path<String>) -> R
 
     Json(AppDetail {
         app: describe(&s, spec, &base, &snapshot).await,
-        probe: spec.probe.url(&s.trino_url, &s.lakekeeper_url),
+        probe: spec.probe.url(&targets(&s), spec.probe_path),
         replicas: Replicas { ready, desired },
         workloads,
         facts: facts(&s, spec).await,
         links: deep_links(spec, &base),
+        embed: match &spec.embed {
+            Some(_) => Some(embed_report(&s, spec, &base).await),
+            None => None,
+        },
     })
     .into_response()
 }
@@ -338,7 +401,7 @@ async fn facts(state: &AppState, spec: &Spec) -> Vec<Fact> {
             {
                 facts.extend(lakekeeper_info_facts(&info));
             }
-            let health_url = Endpoint::Lakekeeper.url(&state.trino_url, &state.lakekeeper_url);
+            let health_url = Endpoint::Lakekeeper.url(&targets(state), "/health");
             if let Some(health) = fetch_json(state, &health_url).await {
                 facts.extend(lakekeeper_health_facts(&health));
             }
@@ -350,7 +413,7 @@ async fn facts(state: &AppState, spec: &Spec) -> Vec<Fact> {
             if state.demo {
                 return Vec::new();
             }
-            let url = spec.probe.url(&state.trino_url, &state.lakekeeper_url);
+            let url = spec.probe.url(&targets(state), spec.probe_path);
             match fetch_json(state, &url).await {
                 Some(health) if spec.id == "superset" => superset_facts(&health),
                 Some(health) => airflow_facts(&health),
@@ -561,6 +624,46 @@ fn http_client(state: &AppState) -> reqwest::Client {
         .unwrap_or_else(|_| state.http.clone())
 }
 
+/// Read the framed page's headers so the UI can explain a blank frame instead of
+/// showing one. The page Nova frames is the external URL, but only the in-cluster
+/// address is reachable from here — the headers are the app's own either way.
+async fn embed_report(state: &AppState, spec: &Spec, base: &str) -> Embed {
+    let Some(frame) = &spec.embed else {
+        return Embed::unknown(String::new(), None);
+    };
+    let root = external_url(base, spec.sub);
+    let url = if root.is_empty() {
+        String::new()
+    } else {
+        format!("{root}{}", frame.path)
+    };
+    let checked = spec.probe.url(&targets(state), frame.path);
+
+    if state.demo || url.is_empty() {
+        return Embed::unknown(url, Some(checked));
+    }
+
+    match http_client(state).get(&checked).send().await {
+        Ok(response) => match embed::frame_policy(response.headers(), base) {
+            embed::FramePolicy::Allowed => Embed {
+                url,
+                state: "allowed".into(),
+                blocked_by: None,
+                detail: None,
+                checked: Some(checked),
+            },
+            embed::FramePolicy::Blocked { header, value } => Embed {
+                url,
+                state: "blocked".into(),
+                blocked_by: Some(header.to_string()),
+                detail: Some(value),
+                checked: Some(checked),
+            },
+        },
+        Err(_) => Embed::unknown(url, Some(checked)),
+    }
+}
+
 async fn probe(state: &AppState, url: &str) -> String {
     if state.demo {
         return "up".into();
@@ -581,36 +684,76 @@ async fn probe(state: &AppState, url: &str) -> String {
 mod tests {
     use super::*;
 
+    fn test_targets<'a>() -> Targets<'a> {
+        Targets {
+            trino: "http://trino.stardelt.svc:8080",
+            lakekeeper: "http://catalog.stardelt.svc:8181",
+            superset: "http://superset.stardelt.svc:8088",
+            jupyterhub: "http://proxy-public.stardelt.svc:80",
+        }
+    }
+
     #[test]
     fn probe_targets_follow_the_configured_urls() {
+        let targets = test_targets();
+
         let trino = spec("trino").unwrap();
         assert_eq!(
-            trino
-                .probe
-                .url("http://trino.stardelt.svc:8080", "http://lk:8181"),
-            "http://trino.stardelt.svc:8080/v1/info"
-        );
-        assert_eq!(
-            trino
-                .probe
-                .url("http://trino.stardelt.svc:8080/", "http://lk:8181"),
+            trino.probe.url(&targets, trino.probe_path),
             "http://trino.stardelt.svc:8080/v1/info"
         );
 
         let lakekeeper = spec("lakekeeper").unwrap();
         assert_eq!(
-            lakekeeper
-                .probe
-                .url("http://trino:8080", "http://catalog:8181"),
-            "http://catalog:8181/health"
+            lakekeeper.probe.url(&targets, lakekeeper.probe_path),
+            "http://catalog.stardelt.svc:8181/health"
         );
 
+        let superset = spec("superset").unwrap();
+        assert_eq!(
+            superset.probe.url(&targets, superset.probe_path),
+            "http://superset.stardelt.svc:8088/health"
+        );
+
+        // JupyterHub's public proxy answers on its root path.
+        let jupyterhub = spec("jupyterhub").unwrap();
+        assert_eq!(
+            jupyterhub.probe.url(&targets, jupyterhub.probe_path),
+            "http://proxy-public.stardelt.svc:80"
+        );
+
+        // Airflow has no NOVA_*_URL of its own: the spec's fixed address stands.
         let airflow = spec("airflow").unwrap();
         assert_eq!(
-            airflow
-                .probe
-                .url("http://trino:8080", "http://catalog:8181"),
+            airflow.probe.url(&targets, airflow.probe_path),
             "http://airflow-api-server:8080/health"
+        );
+    }
+
+    #[test]
+    fn a_trailing_slash_in_configuration_does_not_double_up() {
+        let targets = Targets {
+            trino: "http://trino:8080/",
+            ..test_targets()
+        };
+        let trino = spec("trino").unwrap();
+        assert_eq!(
+            trino.probe.url(&targets, trino.probe_path),
+            "http://trino:8080/v1/info"
+        );
+    }
+
+    #[test]
+    fn only_embedded_apps_carry_an_embed_spec() {
+        let embedded: Vec<&str> = SPECS
+            .iter()
+            .filter(|s| s.embed.is_some())
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(embedded, vec!["superset", "jupyterhub"]);
+        assert_eq!(
+            spec("jupyterhub").unwrap().embed.as_ref().unwrap().path,
+            "/hub/home"
         );
     }
 
