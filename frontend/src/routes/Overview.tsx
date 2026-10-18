@@ -2,13 +2,18 @@ import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { api, allTables, formatTime } from '../api'
 import { Icon } from '../components/Icon'
+import { isAdmin } from '../roles'
 
 export default function Overview() {
   const me = useQuery({ queryKey: ['me'], queryFn: api.me })
   const tables = useQuery({ queryKey: ['catalog', 'all'], queryFn: allTables })
   const jobs = useQuery({ queryKey: ['jobs'], queryFn: api.jobs, refetchInterval: 10_000 })
-  const cluster = useQuery({ queryKey: ['trino', 'cluster'], queryFn: api.trinoCluster, retry: false })
-  const apps = useQuery({ queryKey: ['apps'], queryFn: api.apps, refetchInterval: 15_000 })
+  // The engine and app cards are operator views: their endpoints answer 403 to everyone else,
+  // so they are not fetched at all for a non-admin (an `enabled: false` query stays pending —
+  // it must never be rendered as "loading…" or as an error).
+  const admin = me.data ? isAdmin(me.data) : false
+  const cluster = useQuery({ queryKey: ['trino', 'cluster'], queryFn: api.trinoCluster, retry: false, enabled: admin })
+  const apps = useQuery({ queryKey: ['apps'], queryFn: api.apps, refetchInterval: 15_000, enabled: admin })
 
   const refs = tables.data ?? []
   const schemas = new Set(refs.map(r => r.ns)).size
@@ -34,13 +39,15 @@ export default function Overview() {
 
       <section className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <Stat label="Tables" value={tables.data ? String(refs.length) : tables.isError ? '—' : '…'} hint={tables.data || !tables.isError ? `${schemas} schemas` : 'catalog unavailable'} icon="table" />
-        <Stat label="Engine" value={String(engineState)} hint="Trino" icon="spark" tone={engineState === 'ACTIVE' ? 'ok' : undefined} />
+        {admin && (
+          <Stat label="Engine" value={String(engineState)} hint="Trino" icon="spark" tone={engineState === 'ACTIVE' ? 'ok' : undefined} />
+        )}
         <Stat label="Jobs" value={jobs.data ? String(jobs.data.length) : jobs.isError ? '—' : '…'} hint="recent activity" icon="clock" />
         <Stat label="Format" value="Iceberg" hint="open tables on S3" icon="database" />
       </section>
 
       <section className="grid lg:grid-cols-3 gap-4">
-        <div className="card p-5 lg:col-span-2">
+        <div className={`card p-5 ${admin ? 'lg:col-span-2' : 'lg:col-span-3'}`}>
           <div className="flex items-center justify-between mb-3">
             <h2 className="text-sm font-semibold">Recent activity</h2>
             <Link to="/jobs" className="text-xs text-text-dim hover:text-text">View all →</Link>
@@ -62,6 +69,7 @@ export default function Overview() {
           </div>
         </div>
 
+        {admin && (
         <div className="card p-5">
           <div className="flex items-center justify-between mb-3">
             <h2 className="text-sm font-semibold">Platform apps</h2>
@@ -81,12 +89,15 @@ export default function Overview() {
             ))}
           </div>
         </div>
+        )}
       </section>
 
       <section className="grid md:grid-cols-3 gap-4">
         <Action to="/catalog" icon="database" title="Browse the catalog" body="Explore schemas, tables and column types." />
         <Action to="/data" icon="upload" title="Load & transfer" body="Ingest CSV or JSON, or copy a table." />
-        <Action to="/apps" icon="grid" title="Platform apps" body="Every service, live status and deep links." />
+        {admin && (
+          <Action to="/apps" icon="grid" title="Platform apps" body="Every service, live status and deep links." />
+        )}
       </section>
     </div>
   )

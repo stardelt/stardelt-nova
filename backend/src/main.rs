@@ -211,6 +211,9 @@ fn api_router() -> Router<Arc<AppState>> {
         .route("/catalog/tables/{ns}/{tbl}", get(catalog::table_metadata))
         .route("/query", post(trino::run_query))
         .route("/jobs", get(jobs::list))
+        // Every signed-in user: what the embedded pages need (see apps::embeds). The
+        // operator routes live in admin_router() instead.
+        .route("/embeds", get(apps::embeds))
         .route("/ingest/upload", post(data::upload))
         .route("/transfer", post(data::transfer))
 }
