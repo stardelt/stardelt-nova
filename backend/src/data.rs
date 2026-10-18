@@ -74,7 +74,7 @@ pub async fn upload(
                     "load",
                     title,
                     "succeeded",
-                    Some(format!("{n} rows via {fmt}")),
+                    Some(format!("{} via {fmt}", rows(n))),
                     Some(n),
                 );
                 Json(UploadResult {
@@ -103,7 +103,7 @@ pub async fn upload(
                 "load",
                 title,
                 "succeeded",
-                Some(format!("{n} rows via {fmt}")),
+                Some(format!("{} via {fmt}", rows(n))),
                 Some(n),
             );
             Json(UploadResult {
@@ -142,7 +142,7 @@ pub async fn transfer(
                     "transfer",
                     title,
                     "succeeded",
-                    Some(format!("{} {n} rows", req.mode)),
+                    Some(format!("{} {}", req.mode, rows(n))),
                     Some(n),
                 );
                 Json(TransferResult {
@@ -171,7 +171,7 @@ pub async fn transfer(
                 "transfer",
                 title,
                 "succeeded",
-                Some(format!("{} {n} rows", req.mode)),
+                Some(format!("{} {}", req.mode, rows(n))),
                 Some(n),
             );
             Json(TransferResult {
@@ -358,9 +358,25 @@ pub fn quote_ident(raw: &str) -> String {
     format!("\"{}\"", raw.replace('"', "\"\""))
 }
 
+/// `1 row`, `3 rows`.
+fn rows(n: usize) -> String {
+    if n == 1 {
+        "1 row".into()
+    } else {
+        format!("{n} rows")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::check_transfer;
+
+    #[test]
+    fn rows_are_pluralised() {
+        assert_eq!(super::rows(0), "0 rows");
+        assert_eq!(super::rows(1), "1 row");
+        assert_eq!(super::rows(2), "2 rows");
+    }
 
     #[test]
     fn overwriting_a_table_with_itself_is_refused() {

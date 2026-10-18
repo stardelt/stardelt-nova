@@ -68,12 +68,13 @@ export default function Query() {
   return (
     <div className="grid grid-cols-[1fr_280px] gap-5 h-full min-h-0">
       <div className="flex flex-col gap-4 min-h-0">
-        <div className="card p-3">
+        <div className="card p-3 focus-within:border-accent/60">
           <textarea
             ref={taRef}
             value={sql}
             onChange={e => setSql(e.target.value)}
             onKeyDown={onKey}
+            aria-label="SQL query"
             className="w-full h-36 bg-transparent font-mono text-sm outline-hidden resize-y placeholder:text-text-mute"
             spellCheck={false}
             placeholder="SELECT ..."

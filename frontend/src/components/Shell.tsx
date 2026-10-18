@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../api'
@@ -92,6 +92,10 @@ export default function Shell() {
   const title = titleFor(location.pathname)
   const admin = isAdmin(me.data)
   const role = roleLabel(me.data)
+
+  useEffect(() => {
+    document.title = title === 'Nova' ? 'stardelt Nova' : `${title} · stardelt Nova`
+  }, [title])
 
   function toggleTheme() {
     const next: Theme = theme === 'dark' ? 'light' : 'dark'
