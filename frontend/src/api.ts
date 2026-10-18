@@ -143,10 +143,29 @@ export type AppDetail = {
   embed?: AppEmbed
 }
 
+/** A non-2xx answer from the backend; `status` lets callers tell 404 from 5xx. */
+export class ApiError extends Error {
+  status: number
+  constructor(message: string, status: number) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+  }
+}
+
+/** Parse a 2xx body as JSON; a non-JSON body (e.g. an HTML fallback page) gets a readable error. */
+async function readJson<T>(path: string, r: Response): Promise<T> {
+  try {
+    return (await r.json()) as T
+  } catch {
+    throw new Error(`${path} → ${r.status}: response was not JSON`)
+  }
+}
+
 async function jget<T>(path: string): Promise<T> {
   const r = await fetch(path)
-  if (!r.ok) throw new Error(`${path} → ${r.status}`)
-  return r.json() as Promise<T>
+  if (!r.ok) throw new ApiError(`${path} → ${r.status}`, r.status)
+  return readJson<T>(path, r)
 }
 
 async function jpost<T>(path: string, body: unknown): Promise<T> {
@@ -156,23 +175,25 @@ async function jpost<T>(path: string, body: unknown): Promise<T> {
     body: JSON.stringify(body),
   })
   if (!r.ok) {
-    const text = await r.text()
-    throw new Error(`${path} → ${r.status}: ${text}`)
+    const text = await r.text().catch(() => '')
+    throw new ApiError(`${path} → ${r.status}: ${text}`, r.status)
   }
-  return r.json() as Promise<T>
+  return readJson<T>(path, r)
 }
+
+const seg = encodeURIComponent
 
 export const api = {
   me:           ()                            => jget<Me>('/api/me'),
   trinoCluster: ()                            => jget<unknown>('/api/trino/cluster'),
   warehouse:    ()                            => jget<Warehouse>('/api/catalog/warehouse'),
   namespaces:   ()                            => jget<NamespaceList>('/api/catalog/namespaces'),
-  tables:       (ns: string)                  => jget<TableList>(`/api/catalog/namespaces/${ns}/tables`),
-  tableMeta:    (ns: string, tbl: string)     => jget<TableMetadata>(`/api/catalog/tables/${ns}/${tbl}`),
+  tables:       (ns: string)                  => jget<TableList>(`/api/catalog/namespaces/${seg(ns)}/tables`),
+  tableMeta:    (ns: string, tbl: string)     => jget<TableMetadata>(`/api/catalog/tables/${seg(ns)}/${seg(tbl)}`),
   query:        (sql: string)                 => jpost<QueryResult>('/api/query', { sql }),
   jobs:         ()                            => jget<Job[]>('/api/jobs'),
   apps:         ()                            => jget<PlatformApp[]>('/api/apps'),
-  app:          (id: string)                  => jget<AppDetail>(`/api/apps/${id}`),
+  app:          (id: string)                  => jget<AppDetail>(`/api/apps/${seg(id)}`),
   workloads:    ()                            => jget<Workload[]>('/api/workloads'),
   createNamespace: (namespace: string)        => jpost<{ namespace: string }>('/api/catalog/namespaces', { namespace }),
   upload:       (req: UploadRequest)          => jpost<UploadResult>('/api/ingest/upload', req),
@@ -213,15 +234,20 @@ export function formatTime(ms: number): string {
 
 export function downloadCsv(filename: string, columns: string[], rows: unknown[][]) {
   const escape = (v: unknown) => {
-    const s = v === null || v === undefined ? '' : String(v)
-    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+    // Arrays / ROWs / maps from the engine would otherwise export as "[object Object]".
+    const s = v === null || v === undefined ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v)
+    return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
   }
-  const body = [columns.join(','), ...rows.map(r => r.map(escape).join(','))].join('\n')
+  const body = [columns.map(escape).join(','), ...rows.map(r => r.map(escape).join(','))].join('\n')
   const blob = new Blob([body], { type: 'text/csv;charset=utf-8' })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
   a.download = filename
+  // Attached while clicking (older Firefox ignores detached anchors); the URL is
+  // revoked on a later tick so the browser has started the download first.
+  document.body.appendChild(a)
   a.click()
-  URL.revokeObjectURL(url)
+  a.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
 }

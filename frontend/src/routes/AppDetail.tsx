@@ -1,8 +1,8 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link, useParams } from 'react-router-dom'
-import { api, type AppFact } from '../api'
+import { api, ApiError, type AppFact } from '../api'
 import { Icon } from '../components/Icon'
-import { shortImage } from '../format'
+import { safeHttpUrl, shortImage } from '../format'
 
 /**
  * Nova's own view of an app's data — the part of "using" the service that Nova
@@ -28,18 +28,32 @@ export default function AppDetail() {
     retry: false,
   })
 
-  if (detail.isError) {
+  // A failed 15s refresh keeps the last good `detail.data`; only replace the page when there is none.
+  if (detail.isError && !detail.data) {
+    const unknown = detail.error instanceof ApiError && detail.error.status === 404
     return (
       <div className="max-w-6xl space-y-4">
         <Link to="/apps" className="text-sm text-text-dim hover:text-text inline-flex items-center gap-1">
           ← All apps
         </Link>
         <div className="card p-6">
-          <div className="font-semibold">Unknown app “{id}”.</div>
-          <p className="text-text-dim text-sm mt-1">
-            Nova only knows the services it can wire into the platform. The list is on the{' '}
-            <Link to="/apps" className="text-accent hover:underline">apps page</Link>.
-          </p>
+          {unknown ? (
+            <>
+              <div className="font-semibold">Unknown app “{id}”.</div>
+              <p className="text-text-dim text-sm mt-1">
+                Nova only knows the services it can wire into the platform. The list is on the{' '}
+                <Link to="/apps" className="text-accent hover:underline">apps page</Link>.
+              </p>
+            </>
+          ) : (
+            <>
+              <div className="font-semibold">Could not load “{id}”.</div>
+              <p className="text-text-dim text-sm mt-1">
+                The Nova backend did not answer with the app's details.{' '}
+                <button onClick={() => detail.refetch()} className="text-accent hover:underline">Try again</button>
+              </p>
+            </>
+          )}
           <div className="text-xs text-text-mute mt-3 font-mono">{String(detail.error)}</div>
         </div>
       </div>
@@ -51,6 +65,7 @@ export default function AppDetail() {
   const { app, probe, replicas, workloads, facts, links } = detail.data
   const up = app.status === 'up'
   const novaRoutes = NOVA_ROUTES[app.id] ?? []
+  const externalUrl = safeHttpUrl(app.external_url)
 
   return (
     <div className="max-w-6xl space-y-6">
@@ -79,8 +94,8 @@ export default function AppDetail() {
               {replicas.ready}/{replicas.desired} replicas
             </span>
           )}
-          {app.external_url ? (
-            <a href={app.external_url} target="_blank" rel="noreferrer" className="btn-ghost py-1.5">
+          {externalUrl ? (
+            <a href={externalUrl} target="_blank" rel="noreferrer" className="btn-ghost py-1.5">
               Open <Icon name="arrow" className="w-3.5 h-3.5" />
             </a>
           ) : (
@@ -140,11 +155,14 @@ export default function AppDetail() {
         <div className="card p-5 lg:col-span-2">
           <h2 className="text-sm font-semibold mb-3">{app.name} links</h2>
           <div className="flex flex-wrap gap-2">
-            {links.map(l => (
-              <a key={l.url} href={l.url} target="_blank" rel="noreferrer" className="btn-ghost py-1.5 text-xs">
-                {l.label} <Icon name="arrow" className="w-3.5 h-3.5" />
-              </a>
-            ))}
+            {links.map(l => {
+              const href = safeHttpUrl(l.url)
+              return href ? (
+                <a key={l.url} href={href} target="_blank" rel="noreferrer" className="btn-ghost py-1.5 text-xs">
+                  {l.label} <Icon name="arrow" className="w-3.5 h-3.5" />
+                </a>
+              ) : null
+            })}
             {links.length === 0 && app.external_url === '' && (
               <span className="text-sm text-text-mute">
                 No external URL: the platform install sets <span className="font-mono">NOVA_BASE_DOMAIN</span>,

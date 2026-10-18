@@ -33,7 +33,10 @@ export default function Jobs() {
             {jobs.isLoading && (
               <tr><td className="px-4 py-5 text-text-mute" colSpan={5}>loading…</td></tr>
             )}
-            {!jobs.isLoading && (jobs.data ?? []).length === 0 && (
+            {jobs.isError && !jobs.data && (
+              <tr><td className="px-4 py-5 text-red-400" colSpan={5}>{String(jobs.error)}</td></tr>
+            )}
+            {jobs.data && jobs.data.length === 0 && (
               <tr><td className="px-4 py-5 text-text-mute" colSpan={5}>No jobs yet.</td></tr>
             )}
             {(jobs.data ?? []).map(j => (

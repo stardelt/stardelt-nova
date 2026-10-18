@@ -51,6 +51,7 @@ function Tab({ active, onClick, icon, label }: {
   return (
     <button
       onClick={onClick}
+      aria-pressed={active}
       className={[
         'btn border',
         active
@@ -102,6 +103,7 @@ function LoadForm() {
             <button
               key={f}
               onClick={() => { setFormat(f); setContent(f === 'csv' ? SAMPLE_CSV : SAMPLE_JSON) }}
+              aria-pressed={format === f}
               className={[
                 'px-2.5 py-1 rounded-[8px] text-xs border',
                 format === f
@@ -120,12 +122,19 @@ function LoadForm() {
               accept=".csv,.json,text/csv,application/json"
               className="hidden"
               onChange={e => {
-                const file = e.target.files?.[0]
+                const input = e.currentTarget
+                const file = input.files?.[0]
+                // Reset so choosing the same file again (after editing it) fires onChange again.
+                input.value = ''
                 if (file) {
-                  file.text().then(text => {
-                    setContent(text)
-                    setFormat(file.name.endsWith('.json') ? 'json' : 'csv')
-                  })
+                  file.text().then(
+                    text => {
+                      setError(null)
+                      setContent(text)
+                      setFormat(file.name.toLowerCase().endsWith('.json') ? 'json' : 'csv')
+                    },
+                    (err: unknown) => setError(`Could not read ${file.name}: ${err instanceof Error ? err.message : String(err)}`),
+                  )
                 }
               }}
             />
@@ -145,7 +154,7 @@ function LoadForm() {
           <button
             className="btn-primary"
             disabled={upload.isPending || !namespace.trim() || !table.trim() || !content.trim()}
-            onClick={() => upload.mutate({ namespace, table, format, content })}
+            onClick={() => upload.mutate({ namespace: namespace.trim(), table: table.trim(), format, content })}
           >
             <Icon name="upload" className="w-4 h-4" />
             {upload.isPending ? 'Loading…' : 'Load into table'}
@@ -162,7 +171,10 @@ function LoadForm() {
               Loaded {result.rows_loaded} rows into {result.namespace}.{result.table}
             </div>
             <div className="text-text-dim mt-1 flex gap-3">
-              <Link to={`/catalog?ns=${result.namespace}&tbl=${result.table}`} className="hover:text-text">
+              <Link
+                to={`/catalog?ns=${encodeURIComponent(result.namespace)}&tbl=${encodeURIComponent(result.table)}`}
+                className="hover:text-text"
+              >
                 Open in catalog →
               </Link>
               <Link to="/jobs" className="hover:text-text">View job →</Link>
@@ -221,6 +233,7 @@ function TransferForm() {
               <option key={`${r.ns}.${r.name}`} value={`${r.ns}.${r.name}`}>{r.ns}.{r.name}</option>
             ))}
           </select>
+          {tables.isError && <div className="text-red-400 text-xs mt-1.5">Could not list tables: {String(tables.error)}</div>}
         </Field>
 
         <div className="grid sm:grid-cols-2 gap-4">
@@ -238,6 +251,7 @@ function TransferForm() {
               <button
                 key={m}
                 onClick={() => setMode(m)}
+                aria-pressed={mode === m}
                 className={[
                   'px-3 py-1.5 rounded-[8px] text-xs border',
                   mode === m
@@ -254,7 +268,7 @@ function TransferForm() {
         <button
           className="btn-primary"
           disabled={transfer.isPending || !source || !targetNs.trim() || !targetTable.trim()}
-          onClick={() => transfer.mutate({ source, target: `${targetNs}.${targetTable}`, mode })}
+          onClick={() => transfer.mutate({ source, target: `${targetNs.trim()}.${targetTable.trim()}`, mode })}
         >
           <Icon name="arrow" className="w-4 h-4" />
           {transfer.isPending ? 'Transferring…' : 'Transfer table'}

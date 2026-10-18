@@ -2,12 +2,13 @@ import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { api } from '../api'
 import { Icon } from '../components/Icon'
-import { shortImage } from '../format'
+import { safeHttpUrl, shortImage } from '../format'
 
 export default function Health() {
   const apps = useQuery({ queryKey: ['apps'], queryFn: api.apps, refetchInterval: 10_000 })
   const cluster = useQuery({ queryKey: ['trino', 'cluster'], queryFn: api.trinoCluster, retry: false, refetchInterval: 15_000 })
   const workloads = useQuery({ queryKey: ['workloads'], queryFn: api.workloads, refetchInterval: 15_000 })
+  const warehouse = useQuery({ queryKey: ['warehouse'], queryFn: api.warehouse })
 
   const list = apps.data ?? []
   const up = list.filter(a => a.status === 'up').length
@@ -32,21 +33,22 @@ export default function Health() {
         <Stat label="Engine state" value={String(state)} hint="Trino" ok={state === 'ACTIVE'} />
         <Stat label="Engine version" value={version ? String(version) : '—'} hint="Trino" />
         <Stat label="Services" value={`${up}/${list.length}`} hint="probing every 10s" ok={up === list.length && list.length > 0} />
-        <Stat label="Warehouse" value={useQuery({ queryKey: ['warehouse'], queryFn: api.warehouse }).data?.name ?? '…'} hint="Iceberg REST" />
+        <Stat label="Warehouse" value={warehouse.data?.name ?? (warehouse.isError ? '—' : '…')} hint="Iceberg REST" />
       </section>
 
       <section>
         <div className="label mb-2">Services</div>
         <div className="card divide-y divide-border/70">
           {apps.isLoading && <div className="p-5 text-text-mute text-sm">loading…</div>}
+          {apps.isError && !apps.data && <div className="p-5 text-red-400 text-sm">{String(apps.error)}</div>}
           {list.map(a => (
             <div key={a.id} className="flex items-center gap-3 px-5 py-3">
               <span className={['w-2 h-2 rounded-full', a.status === 'up' ? 'bg-success' : 'bg-text-mute'].join(' ')} />
               <Link to={`/apps/${a.id}`} className="font-medium hover:text-accent transition">{a.name}</Link>
               <span className="text-xs text-text-mute hidden sm:inline">{a.description}</span>
               <span className="ml-auto text-xs text-text-dim">{a.status}</span>
-              {a.external_url
-                ? <a href={a.external_url} target="_blank" rel="noreferrer" className="btn-ghost py-1 px-2.5 text-xs">
+              {safeHttpUrl(a.external_url)
+                ? <a href={safeHttpUrl(a.external_url)} target="_blank" rel="noreferrer" className="btn-ghost py-1 px-2.5 text-xs">
                     Open <Icon name="arrow" className="w-3.5 h-3.5" />
                   </a>
                 : <span className="w-[68px]" />}
@@ -59,6 +61,7 @@ export default function Health() {
         <div className="label mb-2">Running images</div>
         <div className="card divide-y divide-border/70">
           {workloads.isLoading && <div className="p-5 text-text-mute text-sm">loading…</div>}
+          {workloads.isError && !workloads.data && <div className="p-5 text-red-400 text-sm">{String(workloads.error)}</div>}
           {(workloads.data ?? []).map(w => (
             <div key={`${w.kind}/${w.name}`} className="flex items-center gap-3 px-5 py-2.5">
               <span className="w-16 shrink-0 text-[11px] uppercase tracking-wider text-text-mute">

@@ -8,10 +8,21 @@ const HISTORY_LIMIT = 50
 const SAMPLE = 'SELECT * FROM warehouse.nyc_taxi.yellow_trips LIMIT 100'
 
 function loadHistory(): string[] {
-  try { return JSON.parse(localStorage.getItem(HISTORY_KEY) ?? '[]') } catch { return [] }
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(HISTORY_KEY) ?? '[]')
+    // Stored data is untrusted: anything but an array of strings would crash `.filter` / `.slice` below.
+    return Array.isArray(parsed) ? parsed.filter((h): h is string => typeof h === 'string') : []
+  } catch {
+    return []
+  }
 }
 function saveHistory(h: string[]) {
-  localStorage.setItem(HISTORY_KEY, JSON.stringify(h.slice(0, HISTORY_LIMIT)))
+  // Persisting history is a convenience; blocked or full storage must not fail the query.
+  try {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(h.slice(0, HISTORY_LIMIT)))
+  } catch {
+    /* ignore */
+  }
 }
 
 export default function Query() {
@@ -30,6 +41,7 @@ export default function Query() {
   }, [params])
 
   async function run() {
+    if (running) return // Ctrl+Enter bypasses the disabled button
     setRunning(true); setError(null); setResult(null); setElapsed(null)
     const t0 = performance.now()
     try {
@@ -99,7 +111,7 @@ export default function Query() {
             <div className="overflow-auto flex-1">
               <table className="w-full text-sm font-mono">
                 <thead className="text-text-mute sticky top-0 bg-bg-elev">
-                  <tr>{result.columns.map(c => <th key={c.name} className="th px-4 py-2">{c.name}</th>)}</tr>
+                  <tr>{result.columns.map((c, i) => <th key={i} className="th px-4 py-2">{c.name}</th>)}</tr>
                 </thead>
                 <tbody>
                   {result.rows.map((row, i) => (
