@@ -77,6 +77,11 @@
   ::selection {
     background: rgb(var(--c-accent) / 0.35);
   }
+  /* Tailwind 4's preflight made buttons `cursor: default`; keep the pointer. */
+  button:not(:disabled),
+  [role='button']:not(:disabled) {
+    cursor: pointer;
+  }
   *::-webkit-scrollbar {
     width: 10px;
     height: 10px;

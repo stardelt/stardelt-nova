@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
 import { api, formatCell, formatTime, type QueryResult, type TableMetadata } from '../api'
-import { sqlTableRef } from '../format'
+import { sqlTableRef, rowsLabel } from '../format'
 
 type Sel = { ns: string; tbl: string }
 
@@ -33,6 +33,7 @@ export default function Catalog() {
             value={filter}
             onChange={e => setFilter(e.target.value)}
             placeholder="Filter tables…"
+            aria-label="Filter tables"
             className="input py-1.5"
           />
         </div>
@@ -209,7 +210,7 @@ function Preview({ q }: { q: { data?: QueryResult; isLoading: boolean; error: un
   return (
     <div className="card overflow-hidden">
       <div className="px-4 py-2 text-xs text-text-mute border-b border-border flex justify-between">
-        <span>{q.data.row_count} rows · preview</span>
+        <span>{rowsLabel(q.data.row_count)} · preview</span>
         <span className="font-mono">{q.data.query_id}</span>
       </div>
       <div className="overflow-auto max-h-[60vh]">

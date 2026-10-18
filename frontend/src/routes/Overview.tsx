@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { api, allTables, formatTime } from '../api'
 import { Icon } from '../components/Icon'
 import { isAdmin } from '../roles'
+import { rowsLabel } from '../format'
 
 export default function Overview() {
   const me = useQuery({ queryKey: ['me'], queryFn: api.me })
@@ -62,7 +63,7 @@ export default function Overview() {
               <div key={j.id} className="flex items-center gap-3 py-2 border-b border-border/60 last:border-0">
                 <span className={kindBadge(j.kind)}>{j.kind}</span>
                 <span className="text-sm truncate flex-1">{j.title}</span>
-                <span className="text-xs text-text-mute">{j.rows != null ? `${j.rows} rows` : ''}</span>
+                <span className="text-xs text-text-mute">{j.rows != null ? rowsLabel(j.rows) : ''}</span>
                 <span className="text-xs text-text-mute w-36 text-right">{formatTime(j.started_at)}</span>
               </div>
             ))}

@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { api, allTables, type UploadResult, type TransferResult } from '../api'
 import { Icon } from '../components/Icon'
+import { rowsLabel } from '../format'
 
 const SAMPLE_CSV = `vendor_id,pickup_at,dropoff_at,passenger_count,trip_distance,fare_amount,tip_amount,total_amount,payment_type,pickup_borough
 1,2026-10-02 08:00,2026-10-02 08:20,2,3.1,13.0,3.0,18.2,card,Manhattan
@@ -168,7 +169,7 @@ function LoadForm() {
         {result && (
           <div className="rounded-[10px] border border-emerald-400/30 bg-emerald-400/10 p-4 text-sm">
             <div className="font-medium text-emerald-300">
-              Loaded {result.rows_loaded} rows into {result.namespace}.{result.table}
+              Loaded {rowsLabel(result.rows_loaded)} into {result.namespace}.{result.table}
             </div>
             <div className="text-text-dim mt-1 flex gap-3">
               <Link
@@ -278,7 +279,7 @@ function TransferForm() {
         {result && (
           <div className="rounded-[10px] border border-emerald-400/30 bg-emerald-400/10 p-4 text-sm">
             <div className="font-medium text-emerald-300">
-              Transferred {result.rows} rows → {result.target}
+              Transferred {rowsLabel(result.rows)} → {result.target}
             </div>
             <Link to="/jobs" className="text-text-dim mt-1 inline-block hover:text-text">View job →</Link>
           </div>

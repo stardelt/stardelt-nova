@@ -10,7 +10,7 @@ export default function Lineage() {
       </header>
 
       <div className="card p-6 overflow-auto">
-        <svg viewBox="0 0 900 380" className="w-full min-w-[720px]" role="img" aria-label="Lineage graph">
+        <svg viewBox="0 0 1000 380" className="w-full min-w-[720px]" role="img" aria-label="Lineage graph">
           <defs>
             <marker id="arr" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
               <path d="M0,0 L8,4 L0,8 Z" fill="#5b6cff" />
@@ -31,8 +31,8 @@ export default function Lineage() {
           <Node x={390} y={235} title="analytics.daily_revenue" sub="aggregate · 3 rows" />
           <Node x={750} y={150} title="Superset dashboard" sub="consumer" />
 
-          <text x={300} y={78} fill="#7079a3" fontSize="11">GROUP BY borough</text>
-          <text x={300} y={258} fill="#7079a3" fontSize="11">GROUP BY day</text>
+          <text x={268} y={78} fill="#7079a3" fontSize="11">GROUP BY borough</text>
+          <text x={228} y={258} fill="#7079a3" fontSize="11">GROUP BY day</text>
           <text x={655} y={120} fill="#7079a3" fontSize="11">read</text>
         </svg>
       </div>

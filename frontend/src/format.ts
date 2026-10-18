@@ -34,6 +34,11 @@ export function safeHttpUrl(raw: string | null | undefined): string | undefined 
   }
 }
 
+/** `1 row`, `3 rows`. */
+export function rowsLabel(n: number): string {
+  return `${n} row${n === 1 ? '' : 's'}`
+}
+
 const PLAIN_IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/
 
 /** One SQL identifier part: left as-is when it is plain, otherwise double-quoted. */
