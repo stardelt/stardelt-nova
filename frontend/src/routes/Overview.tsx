@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom'
 import { api, allTables, formatTime } from '../api'
 import { Icon } from '../components/Icon'
 import { isAdmin } from '../roles'
-import { rowsLabel } from '../format'
+import { rowsLabel, statusLabel } from '../format'
 
 export default function Overview() {
   const me = useQuery({ queryKey: ['me'], queryFn: api.me })
@@ -85,7 +85,7 @@ export default function Overview() {
                   <span className={['w-1.5 h-1.5 rounded-full', a.status === 'up' ? 'bg-success' : 'bg-text-mute'].join(' ')} />
                   {a.name}
                 </span>
-                <span className="text-xs text-text-mute">{a.status === 'up' ? 'running' : a.status}</span>
+                <span className="text-xs text-text-mute">{statusLabel(a.status)}</span>
               </div>
             ))}
           </div>

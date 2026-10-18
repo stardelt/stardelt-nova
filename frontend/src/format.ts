@@ -39,6 +39,11 @@ export function rowsLabel(n: number): string {
   return `${n} row${n === 1 ? '' : 's'}`
 }
 
+/** A status as a person reads it: `up` is "running", `not-installed` loses its hyphen. */
+export function statusLabel(status: string): string {
+  return status === 'up' ? 'running' : status === 'not-installed' ? 'not installed' : status
+}
+
 /**
  * Whether the app's `external_url` is a page a browser can open, as opposed to only
  * its address. API-only services (Lakekeeper) answer on that host with an ingress 404,

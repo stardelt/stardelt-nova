@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../api'
 import { EmbedBadge, EmbedNotice, SignInNotice } from '../components/EmbedNotice'
-import { safeHttpUrl } from '../format'
+import { safeHttpUrl, statusLabel } from '../format'
 
 // JupyterHub runs as its own app. Prefer the deployed app URL (from /api/apps,
 // which derives it from NOVA_BASE_DOMAIN); fall back to a port-forward
@@ -54,7 +54,7 @@ export default function Notebooks() {
           <EmbedBadge embed={jupyter?.embed} />
           <span className={['badge', up ? 'border-success/40 bg-success/10 text-success' : 'border-border bg-bg-soft text-text-mute'].join(' ')}>
             <span className={['w-1.5 h-1.5 rounded-full', up ? 'bg-success' : 'bg-text-mute'].join(' ')} />
-            {up ? 'running' : (jupyter?.status ?? 'unknown')}
+            {statusLabel(jupyter?.status ?? 'unknown')}
           </span>
           {src && (
             <a

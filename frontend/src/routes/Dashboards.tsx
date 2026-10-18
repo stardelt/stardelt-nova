@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../api'
 import { EmbedBadge, EmbedNotice } from '../components/EmbedNotice'
-import { safeHttpUrl } from '../format'
+import { safeHttpUrl, statusLabel } from '../format'
 
 // Superset runs as its own app. Prefer the deployed app URL (from /api/apps,
 // which derives it from NOVA_BASE_DOMAIN); fall back to a port-forward.
@@ -57,7 +57,7 @@ export default function Dashboards() {
           <EmbedBadge embed={superset?.embed} />
           <span className={['badge', deployed ? 'border-success/40 bg-success/10 text-success' : 'border-border bg-bg-soft text-text-mute'].join(' ')}>
             <span className={['w-1.5 h-1.5 rounded-full', deployed ? 'bg-success' : 'bg-text-mute'].join(' ')} />
-            {deployed ? 'running' : (superset?.status ?? 'unknown')}
+            {statusLabel(superset?.status ?? 'unknown')}
           </span>
           {src && <a href={src} target="_blank" rel="noreferrer" className="btn-ghost py-1.5">Open in new tab ↗</a>}
         </div>
