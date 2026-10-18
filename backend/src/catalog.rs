@@ -165,6 +165,9 @@ pub async fn list_tables(State(s): State<Arc<AppState>>, Path(ns): Path<String>)
         Ok(v) => v,
         Err(r) => return *r,
     };
+    let Some(ns) = path_segment(&ns) else {
+        return bad_segment(&ns);
+    };
     proxy(&s, format!("/catalog/v1/{id}/namespaces/{ns}/tables")).await
 }
 
@@ -187,5 +190,67 @@ pub async fn table_metadata(
         Ok(v) => v,
         Err(r) => return *r,
     };
+    let (Some(ns), Some(tbl)) = (path_segment(&ns), path_segment(&tbl)) else {
+        return bad_segment(&format!("{ns}.{tbl}"));
+    };
     proxy(&s, format!("/catalog/v1/{id}/namespaces/{ns}/tables/{tbl}")).await
+}
+
+/// Percent-encode one URL path segment for the Lakekeeper proxy. Axum has already
+/// decoded the request path, so a namespace like `a%2F..%2Fb` arrives as `a/../b`;
+/// interpolated raw, the URL parser would collapse the dot segments and send the GET
+/// to another Lakekeeper endpoint. Encoding keeps it one segment; a bare `.` or `..`
+/// (which parsers collapse even when encoded as unreserved characters) or an empty
+/// segment is refused.
+fn path_segment(raw: &str) -> Option<String> {
+    if raw.is_empty() || raw == "." || raw == ".." {
+        return None;
+    }
+    let mut out = String::with_capacity(raw.len());
+    for b in raw.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    Some(out)
+}
+
+fn bad_segment(what: &str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({"error": format!("invalid name '{what}'")})),
+    )
+        .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::path_segment;
+
+    #[test]
+    fn plain_names_pass_through() {
+        assert_eq!(
+            path_segment("nyc_taxi-2024").as_deref(),
+            Some("nyc_taxi-2024")
+        );
+    }
+
+    #[test]
+    fn separators_and_specials_are_encoded() {
+        assert_eq!(path_segment("a/../b").as_deref(), Some("a%2F..%2Fb"));
+        assert_eq!(path_segment("x?y#z").as_deref(), Some("x%3Fy%23z"));
+        // Iceberg REST joins nested namespace levels with the unit separator.
+        assert_eq!(path_segment("a\u{1f}b").as_deref(), Some("a%1Fb"));
+        assert_eq!(path_segment("ä").as_deref(), Some("%C3%A4"));
+    }
+
+    #[test]
+    fn dot_segments_and_empty_are_refused() {
+        assert_eq!(path_segment(""), None);
+        assert_eq!(path_segment("."), None);
+        assert_eq!(path_segment(".."), None);
+    }
 }

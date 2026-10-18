@@ -235,6 +235,7 @@ async fn real_transfer(state: &AppState, req: &TransferRequest) -> Result<usize,
     let (tns, ttbl) = demo::parse_ref(&req.target)?;
     let source = format!("warehouse.{}.{}", quote_ident(&sns), quote_ident(&stbl));
     let target = format!("warehouse.{}.{}", quote_ident(&tns), quote_ident(&ttbl));
+    check_transfer(&req.mode, (&sns, &stbl), (&tns, &ttbl))?;
 
     if req.mode.eq_ignore_ascii_case("append") {
         trino::execute(
@@ -259,6 +260,21 @@ async fn real_transfer(state: &AppState, req: &TransferRequest) -> Result<usize,
         .and_then(Value::as_u64)
         .unwrap_or(0) as usize;
     Ok(n)
+}
+
+/// An overwrite drops the target before copying into it, so it must never be the
+/// source: the copy would read from a table that no longer exists, and the data
+/// would be gone. Trino folds unquoted identifiers to lower case, hence the
+/// case-insensitive comparison.
+fn check_transfer(mode: &str, source: (&str, &str), target: (&str, &str)) -> Result<(), String> {
+    let same = source.0.eq_ignore_ascii_case(target.0) && source.1.eq_ignore_ascii_case(target.1);
+    if same && !mode.eq_ignore_ascii_case("append") {
+        return Err(format!(
+            "source and target are the same table ({}.{}); overwrite would delete it",
+            source.0, source.1
+        ));
+    }
+    Ok(())
 }
 
 fn infer_type(rows: &[Vec<Value>], col: usize) -> String {
@@ -317,4 +333,22 @@ fn sql_literal(v: &Value) -> String {
 
 pub fn quote_ident(raw: &str) -> String {
     format!("\"{}\"", raw.replace('"', "\"\""))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_transfer;
+
+    #[test]
+    fn overwriting_a_table_with_itself_is_refused() {
+        assert!(check_transfer("overwrite", ("raw", "trips"), ("raw", "trips")).is_err());
+        assert!(check_transfer("overwrite", ("raw", "Trips"), ("RAW", "trips")).is_err());
+        assert!(check_transfer("replace", ("raw", "trips"), ("raw", "trips")).is_err());
+    }
+
+    #[test]
+    fn distinct_tables_and_appends_are_allowed() {
+        assert!(check_transfer("overwrite", ("raw", "trips"), ("curated", "trips")).is_ok());
+        assert!(check_transfer("append", ("raw", "trips"), ("raw", "trips")).is_ok());
+    }
 }
