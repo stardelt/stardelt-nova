@@ -309,13 +309,20 @@ async fn main() -> anyhow::Result<()> {
             // them (sign-in must be reachable unauthenticated). Within the admin table,
             // `require_auth` is applied last and therefore runs first — `require_admin`
             // reads the identity it put in the request extensions.
+            // Order, outer to inner: `require_auth` (who are you) → `require_admin`
+            // (may you) → `audit` (what did you do). The audit layer is innermost on
+            // purpose: it needs the principal, and a refused request never reaches it —
+            // refusals are recorded by the two middlewares themselves, with the actor
+            // when they know it.
             let authed = protected
+                .route_layer(axum::middleware::from_fn(audit::record_mutations))
                 .route_layer(axum::middleware::from_fn_with_state(
                     a.clone(),
                     auth::require_auth,
                 ))
                 .merge(
                     admin_router()
+                        .route_layer(axum::middleware::from_fn(audit::record_mutations))
                         .route_layer(axum::middleware::from_fn(auth::require_admin))
                         .route_layer(axum::middleware::from_fn_with_state(
                             a.clone(),
@@ -331,11 +338,12 @@ async fn main() -> anyhow::Result<()> {
             .route("/health", get(health))
             .merge(protected)
             .merge(admin_router())
+            .layer(axum::middleware::from_fn(audit::record_mutations))
             .nest("/auth", auth::dev_router()),
     };
 
     let app = Router::new()
-        .nest("/api", api.layer(axum::middleware::from_fn(audit::record_mutations)))
+        .nest("/api", api)
         .fallback_service(ServeDir::new(&static_dir).fallback(
             tower_http::services::ServeFile::new(format!("{static_dir}/index.html")),
         ))
