@@ -31,8 +31,14 @@ pub struct PlatformApp {
     pub name: String,
     pub description: String,
     pub category: String,
-    /// Reachable-from-the-browser URL (empty when no base domain is configured).
+    /// Reachable-from-the-browser URL. Empty when no base domain is configured,
+    /// and empty for an app with no browsable surface (nothing serves its host —
+    /// see `public_url`).
     pub external_url: String,
+    /// Whether a browser has somewhere to go for this app. False for an app with
+    /// no browsable surface of its own (an API-only catalog, say), which is
+    /// independent of whether the app is installed or reachable.
+    pub browsable: bool,
     /// up | unreachable | unknown
     pub status: String,
     /// Images the app's workloads actually run, read from the cluster. Empty when
@@ -289,6 +295,29 @@ fn external_url(base: &str, sub: &str) -> String {
     }
 }
 
+/// The URL worth handing to a browser, or "" when there is nowhere to go.
+///
+/// An app with no browsable paths still has a subdomain that wildcard DNS resolves,
+/// but nothing serves it: the ingress controller answers with its own fake
+/// certificate. Worse, the apex sends HSTS with `includeSubDomains`, so a browser
+/// will not even let the reader click past that certificate warning. Advertising
+/// the host is therefore worse than advertising nothing — report no URL and let
+/// the app be reached through the surfaces that do exist (Nova's Catalog page, or
+/// the engines that speak its protocol).
+fn public_url(base: &str, spec: &Spec) -> String {
+    if browsable(spec) {
+        external_url(base, spec.sub)
+    } else {
+        String::new()
+    }
+}
+
+/// An app is browsable when it has paths a browser can open. That is the same fact
+/// that decides whether an Ingress exists for its host.
+fn browsable(spec: &Spec) -> bool {
+    !spec.paths.is_empty()
+}
+
 fn targets(state: &AppState) -> Targets<'_> {
     Targets {
         trino: &state.trino_url,
@@ -305,7 +334,8 @@ async fn describe(s: &AppState, spec: &Spec, base: &str, snapshot: &[Workload]) 
         name: spec.name.to_string(),
         description: spec.description.to_string(),
         category: spec.category.to_string(),
-        external_url: external_url(base, spec.sub),
+        external_url: public_url(base, spec),
+        browsable: browsable(spec),
         status: probe(s, &spec.probe.url(&targets(s), spec.probe_path)).await,
         images: cluster::images_for(snapshot, spec.workload_prefixes),
     }
@@ -345,7 +375,7 @@ pub async fn embeds(State(s): State<Arc<AppState>>) -> Json<Vec<EmbedApp>> {
         out.push(EmbedApp {
             id: spec.id.to_string(),
             name: spec.name.to_string(),
-            external_url: external_url(&base, spec.sub),
+            external_url: public_url(&base, spec),
             status: probe(&s, &spec.probe.url(&targets(&s), spec.probe_path)).await,
             embed: embed_report(&s, spec, &base).await,
         });
@@ -805,6 +835,30 @@ mod tests {
             "https://alpha.dev.stardelt.io"
         );
         assert_eq!(external_url("", "trino"), "");
+    }
+
+    #[test]
+    fn an_app_with_no_browsable_surface_advertises_no_host() {
+        // Lakekeeper is the one app with `paths: &[]` and no Ingress. Its
+        // subdomain still resolves, which is exactly the trap: DNS says yes,
+        // the ingress controller's fake certificate says no, and HSTS
+        // `includeSubDomains` removes the click-through.
+        let lakekeeper = SPECS.iter().find(|s| s.id == "lakekeeper").unwrap();
+        assert_eq!(public_url("alpha.dev.stardelt.io", lakekeeper), "");
+        assert!(
+            !browsable(lakekeeper),
+            "Lakekeeper has no UI, so it is not browsable"
+        );
+
+        // Everything with somewhere to go keeps its URL.
+        for spec in SPECS.iter().filter(|s| !s.paths.is_empty()) {
+            assert_eq!(
+                public_url("alpha.dev.stardelt.io", spec),
+                external_url("alpha.dev.stardelt.io", spec.sub),
+                "{} lost its URL",
+                spec.id
+            );
+        }
     }
 
     #[test]
