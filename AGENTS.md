@@ -19,7 +19,7 @@ needs no cluster: `make demo` serves in-memory data.
 ## Layout
 
 - `backend/` — Rust crate: axum server, Lakekeeper/Trino proxies, kube client for the
-  platform app launcher (`apps.rs`), demo mode (`demo.rs`).
+  platform app launcher (`apps.rs`), demo mode (`demo.rs`), OIDC sign-in (`auth.rs`).
 - `frontend/` — Vite + React + TypeScript + Tailwind SPA.
 - `image/Dockerfile` — multi-stage node → rust → debian-slim image.
 - `.github/workflows/ci.yml` — CI: `cargo fmt --check`, `cargo clippy -D warnings`,
@@ -51,6 +51,13 @@ make image       # docker build -t ghcr.io/stardelt/nova:dev
   CRDs; nothing in Nova is state that is not a resource.
 
 ## Gotchas
+
+- Auth: `NOVA_AUTH_MODE=dev` (default) must keep working unchanged — `/api/me` returns
+  the exact pre-OIDC shape. `oidc` mode lives in `backend/src/auth.rs` (env vars in
+  README "Sign-in"); protected routes go in the `protected` router in `main.rs`, and
+  only `/api/health` and `/api/auth/*` stay public. Sessions are in-memory (single
+  replica). Never log, return or put in a URL any token; `Secret` redacts `Debug`.
+  `backend/src/testdata/` holds a test-only RSA key — never use it elsewhere.
 
 - The frontend is type-checked with `tsc --noEmit`; `frontend/tsconfig.json` sets
   `noEmit: true` and has no `outDir`. Do not turn emit back on — `tsc` would write `.js`

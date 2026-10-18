@@ -15,8 +15,11 @@ Browser
   │
   └─── :5173 (dev) / :8080 (prod)
          │
-         ├─ GET  /api/health           liveness
+         ├─ GET  /api/health           liveness (never behind sign-in)
          ├─ GET  /api/me               current user + demo flag
+         ├─ GET  /api/auth/login       start OIDC sign-in (oidc mode)
+         ├─ GET  /api/auth/callback    OIDC redirect target (oidc mode)
+         ├─ POST /api/auth/logout      sign out here and at the IdP
          ├─ GET  /api/trino/cluster    → Trino /v1/info
          ├─ GET  /api/catalog/*        → Lakekeeper REST catalog
          ├─ POST /api/catalog/namespaces  create schema
@@ -157,7 +160,61 @@ The backend is configured entirely through environment variables:
 | `NOVA_SUPERSET_URL` | `http://superset:8088` | Superset base URL (probe + embed check) |
 | `NOVA_JUPYTERHUB_URL` | `http://proxy-public:80` | JupyterHub public proxy base URL (probe + embed check) |
 | `NOVA_DEV_USER` | `stardelt-dev` | Static user identity returned by `/api/me` (dev mode only) |
+| `NOVA_AUTH_MODE` | `dev` | `dev` (no login) or `oidc` — see [Sign-in](#sign-in-oidc) |
 | `RUST_LOG` | `info` | Tracing filter for the backend (`debug`, `info`, `warn`, …) |
+
+---
+
+## Sign-in (OIDC)
+
+Nova is an OIDC *client*; the identity provider is either your own (Microsoft Entra
+ID, Okta, any standards-compliant OIDC provider) or the platform's Keycloak. The
+contract is [Identity](https://stardelt.io/architecture/identity).
+
+`NOVA_AUTH_MODE=dev` (the default) keeps the no-login behaviour that CI, the kind gate
+and `make demo` use. `NOVA_AUTH_MODE=oidc` puts every `/api/*` route except
+`/api/health` and `/api/auth/*` behind sign-in: a browser gets a 401 and the UI sends
+it to `/api/auth/login?return_to=<path>` (authorization code + PKCE + `state` +
+`nonce`); scripts send `Authorization: Bearer <access token>`. Any configuration
+error in `oidc` mode makes Nova refuse to start; an unreachable IdP is a failed
+sign-in, never a fallback to `dev`.
+
+| Variable | Default | Description |
+|---|---|---|
+| `NOVA_OIDC_ISSUER` | — (required) | Issuer URL; discovery at `/.well-known/openid-configuration` must report the same issuer. Entra: `https://login.microsoftonline.com/<tenant-id>/v2.0`; Keycloak: `https://id.<baseDomain>/realms/stardelt`. `https` only (plain `http` only for localhost). |
+| `NOVA_OIDC_CLIENT_ID` | — (required) | Registered (confidential) client id |
+| `NOVA_OIDC_CLIENT_SECRET` | — (required) | Client secret |
+| `NOVA_PUBLIC_URL` | — (required) | Nova's external origin, e.g. `https://nova.example.com`. Redirect URI is `<NOVA_PUBLIC_URL>/api/auth/callback`; post-logout redirect is `<NOVA_PUBLIC_URL>/` — register both at the IdP. Cookies are `Secure` when this is `https`. |
+| `NOVA_SESSION_SECRET` | — (required) | ≥ 32 bytes; signs the session cookie (`openssl rand -base64 48`) |
+| `NOVA_OIDC_SCOPES` | `openid profile email` | Must include `openid` |
+| `NOVA_OIDC_GROUP_CLAIM` | `groups` | Claim carrying group names (or Entra group object ids) |
+| `NOVA_OIDC_ADMIN_GROUP` | `stardelt-admins` | Group that makes a Nova admin; Keycloak's full path `/stardelt-admins` also matches |
+| `NOVA_OIDC_ADMIN_ROLE` | = admin group | Value in the `roles` claim (Entra app roles) that makes a Nova admin |
+| `NOVA_OIDC_AUDIENCES` | client id | Comma-separated `aud` values accepted on bearer access tokens |
+
+**Claims.** `sub` is the identifier; display uses `preferred_username` → `email` →
+`upn` → `name`. Admin precedence: the `roles` claim is checked against
+`NOVA_OIDC_ADMIN_ROLE` first, then the group claim against `NOVA_OIDC_ADMIN_GROUP`;
+either grants admin. When Entra reports a *group overage* (`_claim_names.groups` or
+`hasgroups`), Nova logs a warning and treats the user as having no groups (it does
+not call Graph) — use app roles or a group filter on the app registration. `/api/me`
+returns claims, never tokens, and `identity_forwarding: false`: Nova still queries
+Trino and Lakekeeper with its service connection.
+
+**Entra ID notes.** Single-tenant issuer only (the `common`/`organizations` endpoints'
+`{tenantid}` issuer template is not supported). For bearer access, set
+`accessTokenAcceptedVersion: 2` in the app manifest so access tokens carry the v2.0
+issuer, and list the token's `aud` in `NOVA_OIDC_AUDIENCES` (e.g. `api://<client-id>`).
+Tokens Entra issues for Microsoft Graph cannot be validated by anyone but Graph.
+
+**Keycloak notes.** Add a *Group Membership* mapper (`groups`) to the `nova` client;
+for bearer access add an *Audience* mapper so access tokens carry `aud: nova`.
+Keycloak shows a logout confirmation page because Nova does not put the ID token in
+the end-session URL (`client_id` + `post_logout_redirect_uri` are sent instead).
+
+**Limitations.** Sessions are held in memory: run one Nova replica in `oidc` mode; a
+restart signs everyone out. Sessions last 8 hours regardless of token lifetime and
+are not refreshed or revoked when the IdP revokes the user.
 
 ---
 
