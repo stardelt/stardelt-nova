@@ -122,15 +122,15 @@ impl WorkloadCache {
                 state: "unreachable".into(),
             };
         };
-        if let Some((at, cached)) = self.inner.read().await.as_ref() {
-            if at.elapsed() < TTL {
-                return Snapshot {
-                    workloads: cached.clone(),
-                    error: None,
-                    age_seconds: Some(at.elapsed().as_secs()),
-                    state: "ok".into(),
-                };
-            }
+        if let Some((at, cached)) = self.inner.read().await.as_ref()
+            && at.elapsed() < TTL
+        {
+            return Snapshot {
+                workloads: cached.clone(),
+                error: None,
+                age_seconds: Some(at.elapsed().as_secs()),
+                state: "ok".into(),
+            };
         }
         let previous = self.inner.read().await.clone();
         let result = list(client, &namespace()).await.map_err(|e| e.to_string());

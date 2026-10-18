@@ -121,6 +121,23 @@ export type Workload = {
   desired: number
 }
 
+/**
+ * `GET /api/workloads` — the namespace as Nova last managed to read it.
+ *
+ * An empty list alone is ambiguous ("nothing is running" or "nobody answered"), so the
+ * backend says which: `ok` (read just now), `stale` (the read failed and `workloads` is
+ * the last known good state, `age_seconds` old) or `unreachable` (never read it).
+ * `state` is computed by the backend so the UI cannot disagree with the API about it.
+ */
+export type WorkloadSnapshot = {
+  workloads: Workload[]
+  /** Why the last read failed; null when it did not. */
+  error: string | null
+  /** Seconds since the last successful read; null when there never was one. */
+  age_seconds: number | null
+  state: 'ok' | 'stale' | 'unreachable'
+}
+
 /** One observed fact about an app, with where Nova read it. */
 export type AppFact = {
   label: string
@@ -220,7 +237,7 @@ export const api = {
   jobs:         ()                            => jget<Job[]>('/api/jobs'),
   apps:         ()                            => jget<PlatformApp[]>('/api/apps'),
   app:          (id: string)                  => jget<AppDetail>(`/api/apps/${seg(id)}`),
-  workloads:    ()                            => jget<Workload[]>('/api/workloads'),
+  workloads:    ()                            => jget<WorkloadSnapshot>('/api/workloads'),
   createNamespace: (namespace: string)        => jpost<{ namespace: string }>('/api/catalog/namespaces', { namespace }),
   upload:       (req: UploadRequest)          => jpost<UploadResult>('/api/ingest/upload', req),
   transfer:     (req: TransferRequest)        => jpost<TransferResult>('/api/transfer', req),
