@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 # ------- Stage 1: UI build -------
-FROM node:22-alpine AS ui-build
+FROM node:26-alpine AS ui-build
 WORKDIR /src
 COPY frontend/package.json frontend/package-lock.json* frontend/.npmrc* ./
 RUN npm install
