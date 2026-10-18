@@ -6,6 +6,7 @@ import Query from './routes/Query'
 import Data from './routes/Data'
 import Jobs from './routes/Jobs'
 import Apps from './routes/Apps'
+import AppDetail from './routes/AppDetail'
 import Lineage from './routes/Lineage'
 import Health from './routes/Health'
 import Dashboards from './routes/Dashboards'
@@ -20,6 +21,7 @@ export default function App() {
         <Route path="/data"       element={<Data       />} />
         <Route path="/jobs"       element={<Jobs       />} />
         <Route path="/apps"       element={<Apps       />} />
+        <Route path="/apps/:id"   element={<AppDetail  />} />
         <Route path="/lineage"    element={<Lineage    />} />
         <Route path="/dashboards" element={<Dashboards />} />
         <Route path="/health"     element={<Health     />} />

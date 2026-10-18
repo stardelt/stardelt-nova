@@ -42,7 +42,7 @@ export default function Health() {
           {list.map(a => (
             <div key={a.id} className="flex items-center gap-3 px-5 py-3">
               <span className={['w-2 h-2 rounded-full', a.status === 'up' ? 'bg-success' : 'bg-text-mute'].join(' ')} />
-              <span className="font-medium">{a.name}</span>
+              <Link to={`/apps/${a.id}`} className="font-medium hover:text-accent transition">{a.name}</Link>
               <span className="text-xs text-text-mute hidden sm:inline">{a.description}</span>
               <span className="ml-auto text-xs text-text-dim">{a.status}</span>
               {a.external_url

@@ -105,6 +105,29 @@ export type Workload = {
   desired: number
 }
 
+/** One observed fact about an app, with where Nova read it. */
+export type AppFact = {
+  label: string
+  value: string
+  /** e.g. `Trino /v1/info`; absent for facts Nova knows from its own config. */
+  source?: string
+  /** `ok` | `bad` when the value is a health judgement. */
+  tone?: 'ok' | 'bad'
+}
+
+export type AppLink = { label: string; url: string }
+
+/** `GET /api/apps/:id` — the detail view of one platform app. */
+export type AppDetail = {
+  app: PlatformApp
+  /** In-cluster URL the backend probes for liveness. */
+  probe: string
+  replicas: { ready: number; desired: number }
+  workloads: Workload[]
+  facts: AppFact[]
+  links: AppLink[]
+}
+
 async function jget<T>(path: string): Promise<T> {
   const r = await fetch(path)
   if (!r.ok) throw new Error(`${path} → ${r.status}`)
@@ -134,6 +157,7 @@ export const api = {
   query:        (sql: string)                 => jpost<QueryResult>('/api/query', { sql }),
   jobs:         ()                            => jget<Job[]>('/api/jobs'),
   apps:         ()                            => jget<PlatformApp[]>('/api/apps'),
+  app:          (id: string)                  => jget<AppDetail>(`/api/apps/${id}`),
   workloads:    ()                            => jget<Workload[]>('/api/workloads'),
   createNamespace: (namespace: string)        => jpost<{ namespace: string }>('/api/catalog/namespaces', { namespace }),
   upload:       (req: UploadRequest)          => jpost<UploadResult>('/api/ingest/upload', req),

@@ -12,6 +12,7 @@
 //!   POST /api/query                         — run SQL
 //!   GET  /api/jobs                          — recent activity
 //!   GET  /api/apps                          — installed apps, reachable URLs, live images
+//!   GET  /api/apps/:id                      — one app: workloads, facts, deep links
 //!   GET  /api/workloads                     — workloads in Nova's namespace + their images
 //!   POST /api/ingest/upload                 — load CSV/JSON into a table
 //!   POST /api/transfer                      — copy table → table
@@ -184,6 +185,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/query", post(trino::run_query))
         .route("/jobs", get(jobs::list))
         .route("/apps", get(apps::list))
+        .route("/apps/:id", get(apps::detail))
         .route("/workloads", get(cluster::list_handler))
         .route("/ingest/upload", post(data::upload))
         .route("/transfer", post(data::transfer));

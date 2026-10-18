@@ -52,6 +52,13 @@ const titles: Record<string, string> = {
   '/health': 'Health',
 }
 
+/** The app detail route carries its own id, so the header can be specific. */
+function titleFor(pathname: string): string {
+  const app = pathname.match(/^\/apps\/([^/]+)$/)
+  if (app) return `${app[1]} — app detail`
+  return titles[pathname] ?? 'Nova'
+}
+
 function navClass({ isActive }: { isActive: boolean }) {
   return [
     'flex items-center gap-2.5 px-3 py-2 rounded-[10px] text-sm transition-colors',
@@ -67,7 +74,7 @@ export default function Shell() {
   const navigate = useNavigate()
   const [q, setQ] = useState('')
   const [theme, setThemeState] = useState<Theme>(getTheme())
-  const title = titles[location.pathname] ?? 'Nova'
+  const title = titleFor(location.pathname)
 
   function toggleTheme() {
     const next: Theme = theme === 'dark' ? 'light' : 'dark'

@@ -128,13 +128,23 @@ fn container_image(template: Option<&PodTemplateSpec>) -> String {
         .unwrap_or_default()
 }
 
+/// The workloads that make up an app: those whose names start with any of
+/// `prefixes`, in the snapshot's order (sorted by name).
+pub fn workloads_for(workloads: &[Workload], prefixes: &[&str]) -> Vec<Workload> {
+    workloads
+        .iter()
+        .filter(|w| prefixes.iter().any(|p| w.name.starts_with(p)))
+        .cloned()
+        .collect()
+}
+
 /// Distinct images of the workloads whose names start with any of `prefixes`.
 /// Container suffixes (`-coordinator`, `-worker`, `-scheduler`) collapse into one
 /// entry per distinct image, which is what a human reads.
 pub fn images_for(workloads: &[Workload], prefixes: &[&str]) -> Vec<String> {
     let mut images: Vec<String> = Vec::new();
-    for w in workloads {
-        if !prefixes.iter().any(|p| w.name.starts_with(p)) || w.image.is_empty() {
+    for w in workloads_for(workloads, prefixes) {
+        if w.image.is_empty() {
             continue;
         }
         if !images.contains(&w.image) {
@@ -142,6 +152,15 @@ pub fn images_for(workloads: &[Workload], prefixes: &[&str]) -> Vec<String> {
         }
     }
     images
+}
+
+/// Replicas across `workloads` as `(ready, desired)`. Scale-to-zero workloads
+/// (a JupyterHub `user-placeholder`, say) report `0/0`, which is a fact, not a
+/// failure — the caller decides how to read it.
+pub fn replicas(workloads: &[Workload]) -> (i32, i32) {
+    workloads.iter().fold((0, 0), |(ready, desired), w| {
+        (ready + w.ready, desired + w.desired)
+    })
 }
 
 /// Plausible in-memory workloads so `make demo` shows the same UI without a cluster.
@@ -155,6 +174,12 @@ fn demo_workloads() -> Vec<Workload> {
             1,
         ),
         ("nova", "Deployment", "ghcr.io/stardelt/nova:dev", 1),
+        (
+            "proxy",
+            "Deployment",
+            "quay.io/jupyterhub/configurable-http-proxy:5.2.0",
+            1,
+        ),
         ("seaweedfs-s3", "Deployment", "chrislusf/seaweedfs:4.25", 1),
         (
             "stardelt-operator",
@@ -164,8 +189,20 @@ fn demo_workloads() -> Vec<Workload> {
         ),
         ("trino-coordinator", "Deployment", "trinodb/trino:480", 1),
         ("trino-worker", "Deployment", "trinodb/trino:480", 1),
+        (
+            "user-placeholder",
+            "StatefulSet",
+            "registry.k8s.io/pause:3.10.1",
+            0,
+        ),
+        (
+            "user-scheduler",
+            "Deployment",
+            "registry.k8s.io/kube-scheduler:v1.30.14",
+            2,
+        ),
     ];
-    specs
+    let mut out: Vec<Workload> = specs
         .iter()
         .map(|(name, kind, image, replicas)| Workload {
             name: (*name).into(),
@@ -174,7 +211,10 @@ fn demo_workloads() -> Vec<Workload> {
             ready: *replicas,
             desired: *replicas,
         })
-        .collect()
+        .collect();
+    // The live snapshot is sorted by name; the demo one should be too.
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
 }
 
 /// `GET /api/workloads` — every workload Nova can see, with the image it runs.
@@ -219,6 +259,33 @@ mod tests {
         let pinned = "ghcr.io/stardelt/nova@sha256:7a70a64e2b69d9d9c4738c33ca6fdb322e3072fe6791a70d04d20ad68aae41f5";
         let workloads = vec![workload("nova", pinned)];
         assert_eq!(images_for(&workloads, &["nova"]), vec![pinned]);
+    }
+
+    #[test]
+    fn an_apps_workloads_are_the_ones_sharing_its_name() {
+        let workloads = vec![
+            workload("hub", "quay.io/jupyterhub/k8s-hub:4.4.3"),
+            workload("proxy", "quay.io/jupyterhub/configurable-http-proxy:5.2.0"),
+            workload("trino-coordinator", "trinodb/trino:480"),
+        ];
+        let hub = workloads_for(&workloads, &["hub", "proxy"]);
+        let names: Vec<&str> = hub.iter().map(|w| w.name.as_str()).collect();
+        assert_eq!(names, vec!["hub", "proxy"]);
+        assert!(workloads_for(&workloads, &["superset"]).is_empty());
+    }
+
+    #[test]
+    fn replicas_add_up_across_an_apps_workloads() {
+        let mut frontend = workload("proxy", "quay.io/jupyterhub/configurable-http-proxy:5.2.0");
+        frontend.ready = 3;
+        frontend.desired = 4;
+        let mut placeholder = workload("user-placeholder", "");
+        placeholder.kind = "StatefulSet".into();
+        placeholder.ready = 0;
+        placeholder.desired = 0;
+
+        assert_eq!(replicas(&[frontend, placeholder]), (3, 4));
+        assert_eq!(replicas(&[]), (0, 0));
     }
 
     #[test]
