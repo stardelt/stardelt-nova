@@ -40,6 +40,9 @@ jobs:
       - name: check
         run: cargo check --all-targets
 
+      - name: test
+        run: cargo test
+
   frontend:
     name: Frontend (Node 20)
     runs-on: ubuntu-latest
