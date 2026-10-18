@@ -907,14 +907,21 @@ mod tests {
             vec![
                 Fact::sourced("DAG processor", "healthy", "Airflow /api/v2/monitor/health")
                     .with_tone("ok"),
-                Fact::sourced("Metadata database", "healthy", "Airflow /health").with_tone("ok"),
-                Fact::sourced("Scheduler", "healthy", "Airflow /health").with_tone("ok"),
+                Fact::sourced(
+                    "Metadata database",
+                    "healthy",
+                    "Airflow /api/v2/monitor/health"
+                )
+                .with_tone("ok"),
+                Fact::sourced("Scheduler", "healthy", "Airflow /api/v2/monitor/health")
+                    .with_tone("ok"),
                 Fact::sourced(
                     "Scheduler heartbeat",
                     "2026-10-18T08:00:00+00:00",
-                    "Airflow /health"
+                    "Airflow /api/v2/monitor/health"
                 ),
-                Fact::sourced("Triggerer", "unhealthy", "Airflow /health").with_tone("bad"),
+                Fact::sourced("Triggerer", "unhealthy", "Airflow /api/v2/monitor/health")
+                    .with_tone("bad"),
             ]
         );
     }
