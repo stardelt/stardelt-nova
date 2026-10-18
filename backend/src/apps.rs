@@ -243,7 +243,7 @@ const SPECS: &[Spec] = &[
         category: "Pipelines",
         sub: "airflow",
         probe: Endpoint::Fixed("http://airflow-api-server:8080"),
-        probe_path: "/health",
+        probe_path: "/api/v2/monitor/health",
         workload_prefixes: &["airflow-"],
         paths: &[
             ("Home", "/home"),
@@ -407,7 +407,7 @@ async fn facts(state: &AppState, spec: &Spec) -> Vec<Fact> {
             }
             facts
         }
-        // Superset and Airflow answer `/health` with a component report; the
+        // Superset and Airflow answer their health endpoint with a component report; the
         // probe URL is that endpoint, so one fetch serves both purposes.
         "superset" | "airflow" => {
             if state.demo {
@@ -528,10 +528,10 @@ fn superset_facts(health: &Value) -> Vec<Fact> {
     facts
 }
 
-/// Airflow's `/health` reports one status per component — the fastest way to
+/// Airflow 3's `/api/v2/monitor/health` reports one status per component — the fastest way to
 /// tell "the API server answers" from "the scheduler is actually running".
 fn airflow_facts(health: &Value) -> Vec<Fact> {
-    let source = "Airflow /health";
+    let source = "Airflow /api/v2/monitor/health";
     let mut facts = Vec::new();
     if let Some(status) = health.get("status").and_then(Value::as_str) {
         facts.push(Fact::sourced("Overall", status, source).with_tone(health_tone(status)));
@@ -726,7 +726,7 @@ mod tests {
         let airflow = spec("airflow").unwrap();
         assert_eq!(
             airflow.probe.url(&targets, airflow.probe_path),
-            "http://airflow-api-server:8080/health"
+            "http://airflow-api-server:8080/api/v2/monitor/health"
         );
     }
 
@@ -905,15 +905,23 @@ mod tests {
         assert_eq!(
             facts,
             vec![
-                Fact::sourced("DAG processor", "healthy", "Airflow /health").with_tone("ok"),
-                Fact::sourced("Metadata database", "healthy", "Airflow /health").with_tone("ok"),
-                Fact::sourced("Scheduler", "healthy", "Airflow /health").with_tone("ok"),
+                Fact::sourced("DAG processor", "healthy", "Airflow /api/v2/monitor/health")
+                    .with_tone("ok"),
+                Fact::sourced(
+                    "Metadata database",
+                    "healthy",
+                    "Airflow /api/v2/monitor/health"
+                )
+                .with_tone("ok"),
+                Fact::sourced("Scheduler", "healthy", "Airflow /api/v2/monitor/health")
+                    .with_tone("ok"),
                 Fact::sourced(
                     "Scheduler heartbeat",
                     "2026-10-18T08:00:00+00:00",
-                    "Airflow /health"
+                    "Airflow /api/v2/monitor/health"
                 ),
-                Fact::sourced("Triggerer", "unhealthy", "Airflow /health").with_tone("bad"),
+                Fact::sourced("Triggerer", "unhealthy", "Airflow /api/v2/monitor/health")
+                    .with_tone("bad"),
             ]
         );
     }
