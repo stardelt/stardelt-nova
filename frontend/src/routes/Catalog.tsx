@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
 import { api, formatCell, formatTime, type QueryResult, type TableMetadata } from '../api'
+import { sqlTableRef } from '../format'
 
 type Sel = { ns: string; tbl: string }
 
@@ -91,12 +92,14 @@ function NamespaceItem({ ns, filter, onSelect, selected }: {
       {open && (
         <ul className="ml-3 mt-0.5 space-y-0.5">
           {tables.isLoading && <li className="text-text-mute text-xs px-2 py-1">loading…</li>}
+          {tables.isError && !tables.data && <li className="text-red-400 text-xs px-2 py-1 break-words">{String(tables.error)}</li>}
           {visible.map(id => {
             const sel = selected?.ns === ns && selected?.tbl === id.name
             return (
               <li key={id.name}>
                 <button
                   onClick={() => onSelect({ ns, tbl: id.name })}
+                  aria-current={sel ? 'true' : undefined}
                   className={[
                     'w-full text-left px-2 py-1.5 rounded-[8px] text-sm flex items-center gap-2',
                     sel ? 'bg-accent/15 text-text border border-accent/30' : 'text-text-dim hover:text-text hover:bg-bg-soft/40 border border-transparent',
@@ -119,7 +122,7 @@ function TableDetail({ ns, tbl }: Sel) {
   const meta = useQuery({ queryKey: ['catalog', 'table', ns, tbl], queryFn: () => api.tableMeta(ns, tbl) })
   const preview = useQuery({
     queryKey: ['preview', ns, tbl],
-    queryFn: () => api.query(`SELECT * FROM warehouse.${ns}.${tbl} LIMIT 50`),
+    queryFn: () => api.query(`SELECT * FROM ${sqlTableRef(ns, tbl)} LIMIT 50`),
     enabled: tab === 'preview',
   })
 
@@ -139,7 +142,7 @@ function TableDetail({ ns, tbl }: Sel) {
           )}
         </div>
         <div className="flex gap-2">
-          <Link to={`/query?sql=${encodeURIComponent(`SELECT * FROM warehouse.${ns}.${tbl} LIMIT 100`)}`} className="btn-primary">
+          <Link to={`/query?sql=${encodeURIComponent(`SELECT * FROM ${sqlTableRef(ns, tbl)} LIMIT 100`)}`} className="btn-primary">
             Query table
           </Link>
           <Link to="/data" className="btn-ghost">Load data</Link>
@@ -151,6 +154,7 @@ function TableDetail({ ns, tbl }: Sel) {
           <button
             key={t}
             onClick={() => setTab(t)}
+            aria-pressed={tab === t}
             className={[
               'px-3 py-1.5 rounded-[8px] text-sm border capitalize',
               tab === t
@@ -211,7 +215,7 @@ function Preview({ q }: { q: { data?: QueryResult; isLoading: boolean; error: un
       <div className="overflow-auto max-h-[60vh]">
         <table className="w-full text-sm font-mono">
           <thead className="bg-bg-soft/60 sticky top-0">
-            <tr>{q.data.columns.map(c => <th key={c.name} className="th px-4 py-2">{c.name}</th>)}</tr>
+            <tr>{q.data.columns.map((c, i) => <th key={i} className="th px-4 py-2">{c.name}</th>)}</tr>
           </thead>
           <tbody>
             {q.data.rows.map((row, i) => (

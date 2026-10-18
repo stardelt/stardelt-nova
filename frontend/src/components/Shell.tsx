@@ -4,6 +4,7 @@ import { useQuery } from '@tanstack/react-query'
 import { api } from '../api'
 import { Icon, type IconName } from './Icon'
 import { getTheme, applyTheme, type Theme } from '../theme'
+import ErrorBoundary from './ErrorBoundary'
 
 type NavItem = { to: string; label: string; icon: IconName; end?: boolean }
 
@@ -77,7 +78,7 @@ export default function Shell() {
   const location = useLocation()
   const navigate = useNavigate()
   const [q, setQ] = useState('')
-  const [theme, setThemeState] = useState<Theme>(getTheme())
+  const [theme, setThemeState] = useState<Theme>(getTheme)
   const title = titleFor(location.pathname)
 
   function toggleTheme() {
@@ -132,7 +133,7 @@ export default function Shell() {
               {(me.data?.user ?? '?').slice(0, 1).toUpperCase()}
             </div>
             <div className="min-w-0">
-              <div className="text-sm truncate">{me.data?.user ?? 'loading…'}</div>
+              <div className="text-sm truncate">{me.data?.user ?? (me.isError ? 'unknown user' : 'loading…')}</div>
               <div className="text-[11px] text-text-mute">{me.data?.auth_mode ?? ''}</div>
             </div>
           </div>
@@ -154,6 +155,7 @@ export default function Shell() {
               value={q}
               onChange={e => setQ(e.target.value)}
               placeholder="Search catalog…"
+              aria-label="Search catalog"
               className="input pl-9 w-64 py-1.5"
             />
           </form>
@@ -172,7 +174,9 @@ export default function Shell() {
         </header>
 
         <main className="flex-1 min-h-0 overflow-auto p-6">
-          <Outlet />
+          <ErrorBoundary key={location.pathname}>
+            <Outlet />
+          </ErrorBoundary>
         </main>
       </div>
     </div>

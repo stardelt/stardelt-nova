@@ -33,9 +33,9 @@ export default function Overview() {
       </header>
 
       <section className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <Stat label="Tables" value={tables.isLoading ? '…' : String(refs.length)} hint={`${schemas} schemas`} icon="table" />
+        <Stat label="Tables" value={tables.data ? String(refs.length) : tables.isError ? '—' : '…'} hint={tables.data || !tables.isError ? `${schemas} schemas` : 'catalog unavailable'} icon="table" />
         <Stat label="Engine" value={String(engineState)} hint="Trino" icon="spark" tone={engineState === 'ACTIVE' ? 'ok' : undefined} />
-        <Stat label="Jobs" value={jobs.isLoading ? '…' : String(jobs.data?.length ?? 0)} hint="recent activity" icon="clock" />
+        <Stat label="Jobs" value={jobs.data ? String(jobs.data.length) : jobs.isError ? '—' : '…'} hint="recent activity" icon="clock" />
         <Stat label="Format" value="Iceberg" hint="open tables on S3" icon="database" />
       </section>
 
@@ -46,7 +46,8 @@ export default function Overview() {
             <Link to="/jobs" className="text-xs text-text-dim hover:text-text">View all →</Link>
           </div>
           {jobs.isLoading && <div className="text-text-mute text-sm">loading…</div>}
-          {!jobs.isLoading && recent.length === 0 && (
+          {jobs.isError && !jobs.data && <div className="text-red-400 text-sm">{String(jobs.error)}</div>}
+          {jobs.data && recent.length === 0 && (
             <div className="text-text-mute text-sm">No activity yet. Run a query or load a file.</div>
           )}
           <div className="space-y-1">
@@ -68,6 +69,7 @@ export default function Overview() {
           </div>
           <div className="space-y-2 text-sm">
             {apps.isLoading && <div className="text-text-mute text-sm">loading…</div>}
+            {apps.isError && !apps.data && <div className="text-red-400 text-sm">{String(apps.error)}</div>}
             {(apps.data ?? []).map(a => (
               <div key={a.id} className="flex items-center justify-between gap-3">
                 <span className="flex items-center gap-2">

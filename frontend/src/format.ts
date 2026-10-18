@@ -15,3 +15,38 @@ export function shortImage(ref: string): string {
   const digest = ref.slice(at + 1).replace(/^sha256:/, '').slice(0, 8)
   return `${name}@sha256:${digest}`
 }
+
+/**
+ * Returns `raw` only if it parses as an absolute http(s) URL, else `undefined`.
+ *
+ * App links come from the API (derived from `NOVA_BASE_DOMAIN`). They end up in
+ * `href` and iframe `src`, where a `javascript:` or `data:` value would run in
+ * Nova's origin, so anything that is not plain http(s) is dropped.
+ */
+export function safeHttpUrl(raw: string | null | undefined): string | undefined {
+  if (!raw) return undefined
+  const value = raw.trim()
+  try {
+    const { protocol } = new URL(value)
+    return protocol === 'https:' || protocol === 'http:' ? value : undefined
+  } catch {
+    return undefined
+  }
+}
+
+const PLAIN_IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/
+
+/** One SQL identifier part: left as-is when it is plain, otherwise double-quoted. */
+function sqlIdent(part: string): string {
+  return PLAIN_IDENT.test(part) ? part : `"${part.replace(/"/g, '""')}"`
+}
+
+/**
+ * `warehouse.<ns>.<tbl>` for generated SQL. The namespace and table come from
+ * the catalog (or from URL params), so a part that is not a plain identifier is
+ * quoted instead of being pasted into the statement verbatim. Plain names are
+ * unchanged, so the common case reads exactly as before.
+ */
+export function sqlTableRef(ns: string, tbl: string): string {
+  return ['warehouse', ...ns.split('.').filter(Boolean), tbl].map(sqlIdent).join('.')
+}
