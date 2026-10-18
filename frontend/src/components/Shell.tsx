@@ -70,7 +70,8 @@ const titles: Record<string, string> = {
 function titleFor(pathname: string): string {
   const app = pathname.match(/^\/apps\/([^/]+)$/)
   if (app) return `${app[1]} — app detail`
-  return titles[pathname] ?? 'Nova'
+  // Anything else that is not a known route is the catch-all, and says so.
+  return titles[pathname] ?? 'Not found'
 }
 
 function navClass({ isActive }: { isActive: boolean }) {
