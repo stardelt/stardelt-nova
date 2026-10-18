@@ -22,7 +22,7 @@ COPY backend/src backend/src
 RUN cargo build --release -p stardelt-nova-backend
 
 # ------- Stage 3: minimal runtime -------
-FROM debian:bookworm-slim AS runtime
+FROM debian:trixie-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=backend-build /src/target/release/stardelt-nova-backend /usr/local/bin/nova

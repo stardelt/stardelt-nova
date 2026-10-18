@@ -130,6 +130,34 @@ fn env_flag(name: &str) -> bool {
     )
 }
 
+/// The API route table.
+///
+/// Deliberately separate from `main`: axum validates path syntax when the router is
+/// built and panics on anything it rejects, so a table that only exists inside `main`
+/// cannot be checked by any test. That is exactly how the axum 0.8 `:param` → `{param}`
+/// change reached a published image and crash-looped the Deployment while CI stayed
+/// green — `api_router_builds` below now fails in CI instead.
+fn api_router() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/me", get(me))
+        .route("/health", get(health))
+        .route("/trino/cluster", get(trino_cluster))
+        .route("/catalog/warehouse", get(catalog::warehouse_info))
+        .route(
+            "/catalog/namespaces",
+            get(catalog::list_namespaces).post(catalog::create_namespace),
+        )
+        .route("/catalog/namespaces/{ns}/tables", get(catalog::list_tables))
+        .route("/catalog/tables/{ns}/{tbl}", get(catalog::table_metadata))
+        .route("/query", post(trino::run_query))
+        .route("/jobs", get(jobs::list))
+        .route("/apps", get(apps::list))
+        .route("/apps/{id}", get(apps::detail))
+        .route("/workloads", get(cluster::list_handler))
+        .route("/ingest/upload", post(data::upload))
+        .route("/transfer", post(data::transfer))
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -180,24 +208,7 @@ async fn main() -> anyhow::Result<()> {
 
     let static_dir = std::env::var("NOVA_STATIC_DIR").unwrap_or_else(|_| "/app/static".into());
 
-    let api = Router::new()
-        .route("/me", get(me))
-        .route("/health", get(health))
-        .route("/trino/cluster", get(trino_cluster))
-        .route("/catalog/warehouse", get(catalog::warehouse_info))
-        .route(
-            "/catalog/namespaces",
-            get(catalog::list_namespaces).post(catalog::create_namespace),
-        )
-        .route("/catalog/namespaces/:ns/tables", get(catalog::list_tables))
-        .route("/catalog/tables/:ns/:tbl", get(catalog::table_metadata))
-        .route("/query", post(trino::run_query))
-        .route("/jobs", get(jobs::list))
-        .route("/apps", get(apps::list))
-        .route("/apps/:id", get(apps::detail))
-        .route("/workloads", get(cluster::list_handler))
-        .route("/ingest/upload", post(data::upload))
-        .route("/transfer", post(data::transfer));
+    let api = api_router();
 
     let app = Router::new()
         .nest("/api", api)
@@ -220,4 +231,14 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod router_tests {
+    use super::*;
+
+    #[test]
+    fn api_router_builds() {
+        let _ = api_router();
+    }
 }
