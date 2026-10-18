@@ -317,7 +317,7 @@ pub async fn list(State(s): State<Arc<AppState>>) -> Json<Vec<PlatformApp>> {
     let mut apps = Vec::with_capacity(SPECS.len());
 
     for spec in SPECS {
-        apps.push(describe(&s, spec, &base, &snapshot).await);
+        apps.push(describe(&s, spec, &base, &snapshot.workloads).await);
     }
 
     Json(apps)
@@ -337,11 +337,11 @@ pub async fn detail(State(s): State<Arc<AppState>>, Path(id): Path<String>) -> R
 
     let base = std::env::var("NOVA_BASE_DOMAIN").unwrap_or_default();
     let snapshot = s.workloads.snapshot(s.kube.as_ref(), s.demo).await;
-    let workloads = cluster::workloads_for(&snapshot, spec.workload_prefixes);
+    let workloads = cluster::workloads_for(&snapshot.workloads, spec.workload_prefixes);
     let (ready, desired) = cluster::replicas(&workloads);
 
     Json(AppDetail {
-        app: describe(&s, spec, &base, &snapshot).await,
+        app: describe(&s, spec, &base, &snapshot.workloads).await,
         probe: spec.probe.url(&targets(&s), spec.probe_path),
         replicas: Replicas { ready, desired },
         workloads,

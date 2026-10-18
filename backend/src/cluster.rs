@@ -40,11 +40,61 @@ pub fn namespace() -> String {
         .unwrap_or_else(|_| "stardelt".into())
 }
 
+/// What Nova knows about the namespace, and how it knows it.
+///
+/// The list alone is not enough: an empty list means "nothing is there" *or* "the cluster
+/// did not answer", and those are very different things to show a person. `error` plus
+/// `age_seconds` (time since the last successful read) let the UI say which.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct Snapshot {
+    pub workloads: Vec<Workload>,
+    /// Set when the most recent read failed; the workloads above are then the last known
+    /// good state, not the current one.
+    pub error: Option<String>,
+    /// Seconds since the last successful read. `None` when there never was one.
+    pub age_seconds: Option<u64>,
+    /// `ok` | `stale` | `unreachable` — computed here rather than by the client, so the
+    /// UI and the API cannot disagree about what an empty list means.
+    pub state: String,
+}
+
 /// Snapshot cache. The UI polls `/api/apps` every few seconds; the API server
 /// should not pay for that, and a 15 s stale image list is invisible to a human.
 #[derive(Default)]
 pub struct WorkloadCache {
     inner: RwLock<Option<(Instant, Vec<Workload>)>>,
+}
+
+impl Snapshot {
+    /// Build a snapshot from a read result and the previous good one. Pure, so the states
+    /// above are testable without a cluster.
+    fn from_read(
+        result: Result<Vec<Workload>, String>,
+        previous: Option<(Instant, Vec<Workload>)>,
+    ) -> Self {
+        match result {
+            Ok(workloads) => Self {
+                workloads,
+                error: None,
+                age_seconds: Some(0),
+                state: "ok".into(),
+            },
+            Err(error) => match previous {
+                Some((at, cached)) => Self {
+                    workloads: cached,
+                    error: Some(error),
+                    age_seconds: Some(at.elapsed().as_secs()),
+                    state: "stale".into(),
+                },
+                None => Self {
+                    workloads: Vec::new(),
+                    error: Some(error),
+                    age_seconds: None,
+                    state: "unreachable".into(),
+                },
+            },
+        }
+    }
 }
 
 const TTL: Duration = Duration::from_secs(15);
@@ -53,33 +103,43 @@ impl WorkloadCache {
     /// A cached snapshot of the namespace. Returns the last known good list when the
     /// cluster is temporarily unreachable, or an empty list when there is no client
     /// (demo mode, local run).
-    pub async fn snapshot(&self, client: Option<&Client>, demo: bool) -> Vec<Workload> {
+    pub async fn snapshot(&self, client: Option<&Client>, demo: bool) -> Snapshot {
         if demo {
-            return demo_workloads();
+            return Snapshot {
+                workloads: demo_workloads(),
+                error: None,
+                age_seconds: Some(0),
+                state: "ok".into(),
+            };
         }
         let Some(client) = client else {
-            return Vec::new();
+            // No client at all (outside a cluster): say so rather than pretending the
+            // namespace is empty.
+            return Snapshot {
+                workloads: Vec::new(),
+                error: Some("no cluster client".into()),
+                age_seconds: None,
+                state: "unreachable".into(),
+            };
         };
-        if let Some((at, cached)) = self.inner.read().await.as_ref()
-            && at.elapsed() < TTL
-        {
-            return cached.clone();
-        }
-        match list(client, &namespace()).await {
-            Ok(workloads) => {
-                *self.inner.write().await = Some((Instant::now(), workloads.clone()));
-                workloads
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "listing workloads failed");
-                self.inner
-                    .read()
-                    .await
-                    .as_ref()
-                    .map(|(_, cached)| cached.clone())
-                    .unwrap_or_default()
+        if let Some((at, cached)) = self.inner.read().await.as_ref() {
+            if at.elapsed() < TTL {
+                return Snapshot {
+                    workloads: cached.clone(),
+                    error: None,
+                    age_seconds: Some(at.elapsed().as_secs()),
+                    state: "ok".into(),
+                };
             }
         }
+        let previous = self.inner.read().await.clone();
+        let result = list(client, &namespace()).await.map_err(|e| e.to_string());
+        if let Ok(workloads) = &result {
+            *self.inner.write().await = Some((Instant::now(), workloads.clone()));
+        } else if let Err(e) = &result {
+            tracing::warn!(error = %e, "listing workloads failed");
+        }
+        Snapshot::from_read(result, previous)
     }
 }
 
@@ -218,7 +278,7 @@ fn demo_workloads() -> Vec<Workload> {
 }
 
 /// `GET /api/workloads` — every workload Nova can see, with the image it runs.
-pub async fn list_handler(State(s): State<Arc<AppState>>) -> Json<Vec<Workload>> {
+pub async fn list_handler(State(s): State<Arc<AppState>>) -> Json<Snapshot> {
     Json(s.workloads.snapshot(s.kube.as_ref(), s.demo).await)
 }
 
@@ -234,6 +294,38 @@ mod tests {
             ready: 1,
             desired: 1,
         }
+    }
+
+    #[test]
+    fn a_failed_read_with_a_previous_snapshot_is_stale_not_empty() {
+        let previous = Some((
+            Instant::now(),
+            vec![workload("nova", "ghcr.io/stardelt/nova:dev")],
+        ));
+        let snap = Snapshot::from_read(Err("the cluster did not answer".into()), previous);
+        assert_eq!(snap.state, "stale");
+        assert_eq!(
+            snap.workloads.len(),
+            1,
+            "the last known state is still shown"
+        );
+        assert_eq!(snap.age_seconds, Some(0));
+    }
+
+    #[test]
+    fn a_failed_read_with_nothing_to_show_is_unreachable() {
+        let snap = Snapshot::from_read(Err("connection refused".into()), None);
+        assert_eq!(snap.state, "unreachable");
+        assert!(snap.workloads.is_empty());
+        assert_eq!(snap.age_seconds, None);
+        assert!(snap.error.is_some());
+    }
+
+    #[test]
+    fn a_successful_read_is_ok_and_carries_no_error() {
+        let snap = Snapshot::from_read(Ok(vec![workload("nova", "img")]), None);
+        assert_eq!(snap.state, "ok");
+        assert!(snap.error.is_none());
     }
 
     #[test]

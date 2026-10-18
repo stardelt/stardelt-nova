@@ -250,8 +250,23 @@ async fn main() -> anyhow::Result<()> {
     let kube = if demo_mode {
         None
     } else {
-        match kube::Client::try_default().await {
-            Ok(client) => Some(client),
+        match kube::Config::infer().await {
+            Ok(mut config) => {
+                // A half-reachable API server (accepts TCP, never answers) would otherwise
+                // stall every workload read for the client's 30 s default — enough to make
+                // the UI feel hung on a screen a person is watching. Short timeouts turn
+                // that into a fast, honest "the cluster did not answer".
+                config.connect_timeout = Some(std::time::Duration::from_secs(3));
+                config.read_timeout = Some(std::time::Duration::from_secs(5));
+                config.write_timeout = Some(std::time::Duration::from_secs(5));
+                match kube::Client::try_from(config) {
+                    Ok(client) => Some(client),
+                    Err(e) => {
+                        info!(error = %e, "no cluster client — workload images will be omitted");
+                        None
+                    }
+                }
+            }
             Err(e) => {
                 info!(error = %e, "no cluster client — workload images will be omitted");
                 None
