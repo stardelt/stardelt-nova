@@ -2,7 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { api, type PlatformApp } from '../api'
 import { Icon } from '../components/Icon'
-import { safeHttpUrl, shortImage } from '../format'
+import { isBrowsable, safeHttpUrl, shortImage } from '../format'
 
 export default function Apps() {
   const apps = useQuery({ queryKey: ['apps'], queryFn: api.apps, refetchInterval: 15_000 })
@@ -53,7 +53,7 @@ export default function Apps() {
 
 function AppCard({ app }: { app: PlatformApp }) {
   const up = app.status === 'up'
-  const externalUrl = safeHttpUrl(app.external_url)
+  const externalUrl = isBrowsable(app) ? safeHttpUrl(app.external_url) : undefined
   return (
     <div className="card p-5 flex flex-col gap-3 hover:border-accent/40 transition">
       <div className="flex items-start gap-3">
@@ -89,10 +89,11 @@ function AppCard({ app }: { app: PlatformApp }) {
         <Link to={`/apps/${app.id}`} className="btn-ghost ml-auto py-1.5 px-3 text-xs">
           Details <Icon name="arrow" className="w-3.5 h-3.5" />
         </Link>
-        {/* Only link what is actually serving. The ingress exists for every app in the
-            playground, so an uninstalled Superset answers with an ingress 503 — offering
-            that link is how a user ends up staring at one. See issue #70 for the
-            not-installed-vs-unreachable wording. */}
+        {/* Only link what is actually serving. The ingress exists for every app with a
+            UI in the playground, so an uninstalled Superset answers with an ingress 503
+            — offering that link is how a user ends up staring at one — and an app with
+            no UI at all (Lakekeeper) has no ingress, hence no link. See issue #70 for
+            the not-installed-vs-unreachable wording, #69 for `browsable`. */}
         {externalUrl && up && (
           <a
             href={externalUrl}

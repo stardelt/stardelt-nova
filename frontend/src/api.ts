@@ -107,6 +107,12 @@ export type PlatformApp = {
   description: string
   category: string
   external_url: string
+  /**
+   * False for API-only services such as Lakekeeper: `external_url` is then only the
+   * service's address, not a page a browser can open. Optional because the backend
+   * field (issue #69, `apps.rs`) is landing separately; see `isBrowsable()`.
+   */
+  browsable?: boolean
   status: 'up' | 'unreachable' | 'unknown'
   /** Images the app's workloads actually run, read from the cluster (may be empty). */
   images: string[]

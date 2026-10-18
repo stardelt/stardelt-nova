@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom'
 import { api } from '../api'
 import { ClusterNotice } from '../components/ClusterNotice'
 import { Icon } from '../components/Icon'
-import { safeHttpUrl, shortImage } from '../format'
+import { isBrowsable, safeHttpUrl, shortImage } from '../format'
 
 export default function Health() {
   const apps = useQuery({ queryKey: ['apps'], queryFn: api.apps, refetchInterval: 10_000 })
@@ -52,7 +52,7 @@ export default function Health() {
               <Link to={`/apps/${a.id}`} className="font-medium hover:text-accent transition">{a.name}</Link>
               <span className="text-xs text-text-mute hidden sm:inline">{a.description}</span>
               <span className="ml-auto text-xs text-text-dim">{a.status}</span>
-              {safeHttpUrl(a.external_url)
+              {isBrowsable(a) && safeHttpUrl(a.external_url)
                 ? <a href={safeHttpUrl(a.external_url)} target="_blank" rel="noreferrer" className="btn-ghost py-1 px-2.5 text-xs">
                     Open <Icon name="arrow" className="w-3.5 h-3.5" />
                   </a>
