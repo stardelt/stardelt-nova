@@ -117,6 +117,19 @@ export type AppFact = {
 
 export type AppLink = { label: string; url: string }
 
+/**
+ * Whether a browser will let Nova frame the app's UI, as the app's own headers
+ * report it. `unknown` means Nova could not read them — not the same as allowed.
+ */
+export type AppEmbed = {
+  url: string
+  state: 'allowed' | 'blocked' | 'unknown'
+  blocked_by?: string
+  detail?: string
+  /** In-cluster page Nova read the headers from. */
+  checked?: string
+}
+
 /** `GET /api/apps/:id` — the detail view of one platform app. */
 export type AppDetail = {
   app: PlatformApp
@@ -126,6 +139,8 @@ export type AppDetail = {
   workloads: Workload[]
   facts: AppFact[]
   links: AppLink[]
+  /** Present only for apps Nova frames in its own UI. */
+  embed?: AppEmbed
 }
 
 async function jget<T>(path: string): Promise<T> {

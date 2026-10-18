@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../api'
+import { EmbedBadge, EmbedNotice } from '../components/EmbedNotice'
 
 // Superset runs as its own app. Prefer the deployed app URL (from /api/apps,
 // which derives it from NOVA_BASE_DOMAIN); fall back to a port-forward.
@@ -21,6 +22,14 @@ export default function Dashboards() {
   const deployed = superset?.status === 'up'
   const base = superset?.external_url || FALLBACK
 
+  // The detail endpoint carries what Superset itself says about being framed.
+  const detail = useQuery({
+    queryKey: ['app', 'superset'],
+    queryFn: () => api.app('superset'),
+    refetchInterval: 30_000,
+    retry: false,
+  })
+
   const [path, setPath] = useState('/superset/welcome/')
   const src = `${base}${path}`
 
@@ -37,6 +46,7 @@ export default function Dashboards() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <EmbedBadge embed={detail.data?.embed} />
           <span className={['badge', deployed ? 'border-success/40 bg-success/10 text-success' : 'border-border bg-bg-soft text-text-mute'].join(' ')}>
             <span className={['w-1.5 h-1.5 rounded-full', deployed ? 'bg-success' : 'bg-text-mute'].join(' ')} />
             {deployed ? 'running' : (superset?.status ?? 'unknown')}
@@ -44,6 +54,8 @@ export default function Dashboards() {
           <a href={src} target="_blank" rel="noreferrer" className="btn-ghost py-1.5">Open in new tab ↗</a>
         </div>
       </header>
+
+      <EmbedNotice app="Superset" embed={detail.data?.embed} />
 
       <div className="flex items-center gap-2 flex-wrap">
         {ENTRY_PATHS.map(e => (

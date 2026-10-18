@@ -15,6 +15,7 @@ export type IconName =
   | 'download'
   | 'table'
   | 'spark'
+  | 'notebook'
 
 const paths: Record<IconName, ReactNode> = {
   grid: (
@@ -99,6 +100,13 @@ const paths: Record<IconName, ReactNode> = {
       <path d="M12 3v4M12 17v4M3 12h4M17 12h4" />
       <path d="m6 6 2.5 2.5M15.5 15.5 18 18M18 6l-2.5 2.5M8.5 15.5 6 18" />
       <circle cx="12" cy="12" r="3" />
+    </>
+  ),
+  notebook: (
+    <>
+      <rect x="4" y="3.5" width="16" height="17" rx="2" />
+      <path d="M9 3.5v17" />
+      <path d="M13 8.5h4M13 12.5h4" />
     </>
   ),
 }

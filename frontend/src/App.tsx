@@ -10,6 +10,7 @@ import AppDetail from './routes/AppDetail'
 import Lineage from './routes/Lineage'
 import Health from './routes/Health'
 import Dashboards from './routes/Dashboards'
+import Notebooks from './routes/Notebooks'
 
 export default function App() {
   return (
@@ -24,6 +25,7 @@ export default function App() {
         <Route path="/apps/:id"   element={<AppDetail  />} />
         <Route path="/lineage"    element={<Lineage    />} />
         <Route path="/dashboards" element={<Dashboards />} />
+        <Route path="/notebooks"  element={<Notebooks  />} />
         <Route path="/health"     element={<Health     />} />
       </Route>
     </Routes>

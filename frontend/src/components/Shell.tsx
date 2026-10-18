@@ -29,7 +29,10 @@ const groups: Array<{ label: string; items: NavItem[] }> = [
   },
   {
     label: 'Analytics',
-    items: [{ to: '/dashboards', label: 'Dashboards', icon: 'chart' }],
+    items: [
+      { to: '/dashboards', label: 'Dashboards', icon: 'chart' },
+      { to: '/notebooks', label: 'Notebooks', icon: 'notebook' },
+    ],
   },
   {
     label: 'Platform',
@@ -49,6 +52,7 @@ const titles: Record<string, string> = {
   '/apps': 'Platform apps',
   '/lineage': 'Lineage',
   '/dashboards': 'Dashboards',
+  '/notebooks': 'Notebooks',
   '/health': 'Health',
 }
 

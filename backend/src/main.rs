@@ -24,6 +24,7 @@ mod catalog;
 mod cluster;
 mod data;
 mod demo;
+mod embed;
 mod jobs;
 mod trino;
 
@@ -46,6 +47,10 @@ pub struct AppState {
     pub dev_user: String,
     pub trino_url: String,
     pub lakekeeper_url: String,
+    /// Superset and JupyterHub are embedded in Nova's own UI; Nova reads their
+    /// headers (and probes them) where they actually run.
+    pub superset_url: String,
+    pub jupyterhub_url: String,
     pub warehouse_name: String,
     pub warehouse_id: OnceCell<String>,
     pub http: reqwest::Client,
@@ -159,6 +164,10 @@ async fn main() -> anyhow::Result<()> {
             .unwrap_or_else(|_| "http://trino.stardelt.svc.cluster.local:8080".into()),
         lakekeeper_url: std::env::var("NOVA_LAKEKEEPER_URL")
             .unwrap_or_else(|_| "http://lakekeeper.stardelt.svc.cluster.local:8181".into()),
+        superset_url: std::env::var("NOVA_SUPERSET_URL")
+            .unwrap_or_else(|_| "http://superset:8088".into()),
+        jupyterhub_url: std::env::var("NOVA_JUPYTERHUB_URL")
+            .unwrap_or_else(|_| "http://proxy-public:80".into()),
         warehouse_name: std::env::var("NOVA_WAREHOUSE_NAME").unwrap_or_else(|_| "warehouse".into()),
         warehouse_id: OnceCell::new(),
         http: reqwest::Client::builder().build()?,
