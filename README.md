@@ -246,6 +246,31 @@ Trino and Lakekeeper with its service connection.
 issuer, and list the token's `aud` in `NOVA_OIDC_AUDIENCES` (e.g. `api://<client-id>`).
 Tokens Entra issues for Microsoft Graph cannot be validated by anyone but Graph.
 
+**Token refresh.** One sign-in outlives many access tokens. There is no timer and no
+background task: when a request finds the session's access token inside its refresh
+window, that request exchanges the refresh token at the IdP's token endpoint (the same
+client id, secret and auth method as the code exchange), stores the new tokens and
+re-derives the identity from the refreshed claims before serving anything. So
+
+- a token that expires mid-session does not turn Trino queries into 401s — the request
+  carrying it is served with a fresh one;
+- group changes take effect within one token lifetime, not at the end of the session: a
+  user removed from `NOVA_OIDC_ADMIN_GROUP` loses `/api/me`'s `is_admin`, the admin UI
+  and the admin API as soon as their next token is fetched, with no restart and no
+  re-login;
+- the refresh window is `min(60 s, half the token's life)`, so a realm with 60-second
+  tokens refreshes half-way through them instead of on every request. `expires_in`
+  schedules the next refresh; when the IdP reports neither `expires_in` nor a decodable
+  `exp`, Nova assumes 300 s and says so in the log.
+
+Refreshes are serialized per session (Keycloak rotates refresh tokens, so spending one
+twice would invalidate the session). Any refresh failure — revoked session, spent refresh
+token, an unreachable IdP, or tokens whose claims cannot be verified — drops the session
+and answers a plain `401 {"detail":"not signed in","error":"unauthenticated",
+"login":"/api/auth/login"}`, so the browser signs in again instead of looping; a refresh
+never extends the 8 h `SESSION_TTL`. Nova keeps the refresh token server-side only, never
+in a cookie, a URL, a log line or a response body.
+
 **Keycloak notes.** Add a *Group Membership* mapper (`groups`) to the `nova` client;
 for bearer access add an *Audience* mapper so access tokens carry `aud: nova`.
 With a Keycloak-style issuer (`…/realms/<realm>`) `/api/me` also carries
@@ -257,8 +282,11 @@ Keycloak shows a logout confirmation page because Nova does not put the ID token
 the end-session URL (`client_id` + `post_logout_redirect_uri` are sent instead).
 
 **Limitations.** Sessions are held in memory: run one Nova replica in `oidc` mode; a
-restart signs everyone out. Sessions last 8 hours regardless of token lifetime and
-are not refreshed or revoked when the IdP revokes the user.
+restart signs everyone out. Nova does not request `offline_access`, so the refresh token
+lives as long as the IdP's SSO session while it is in use (Keycloak's defaults: 30 min
+idle, 10 h max) — a session left idle past that signs in again rather than refreshing.
+Revoking a *single* session at the IdP is noticed at the next refresh (within one token
+lifetime); the session is otherwise not revoked.
 
 ---
 
