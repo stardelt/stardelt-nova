@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::time::sleep;
 
-use crate::{AppState, jobs};
+use crate::{AppState, api_json::ApiJson, jobs};
 
 #[derive(Deserialize)]
 pub struct QueryRequest {
@@ -79,7 +79,10 @@ pub async fn execute(
     if let Some(header) = crate::auth::upstream_authorization(state.forward_identity, caller) {
         request = request.header(reqwest::header::AUTHORIZATION, header);
     }
-    let initial = request.body(sql).send().await.map_err(|e| e.to_string())?;
+    let initial = request.body(sql).send().await.map_err(|e| {
+        tracing::warn!(error = %e, "trino request failed");
+        "the query engine is not reachable".to_string()
+    })?;
 
     let mut current: TrinoResponse = initial
         .json()
@@ -94,7 +97,7 @@ pub async fn execute(
 
     loop {
         if let Some(err) = current.error.take() {
-            return Err(serde_json::to_string(&err).unwrap_or_else(|_| "Trino query failed".into()));
+            return Err(client_error(&err));
         }
 
         if columns.is_empty()
@@ -136,7 +139,10 @@ pub async fn execute(
             .header("X-Trino-User", &state.dev_user)
             .send()
             .await
-            .map_err(|e| e.to_string())?
+            .map_err(|e| {
+                tracing::warn!(error = %e, "trino paginated request failed");
+                "the query engine is not reachable".to_string()
+            })?
             .json()
             .await
             .map_err(|e| format!("malformed Trino paginated response: {e}"))?;
@@ -151,11 +157,49 @@ pub async fn execute(
     })
 }
 
+/// One line for the UI and the activity feed: Trino's `errorName` and its `message`.
+///
+/// Trino's error document also carries `failureInfo` — the full Java stack, the
+/// coordinator and worker URLs, the build — internals no signed-in user needs and which
+/// the Query page used to print verbatim. The document is logged once at debug level;
+/// the response says what went wrong.
+fn client_error(err: &Value) -> String {
+    tracing::debug!(error = %err, "trino error");
+    let name = err
+        .get("errorName")
+        .and_then(Value::as_str)
+        .unwrap_or("Trino query failed");
+    match err.get("message").and_then(Value::as_str) {
+        // Trino's message already starts with `line L:C:`, so no location is added.
+        Some(message) if !message.trim().is_empty() => {
+            scrub_internal(&format!("{name}: {message}"))
+        }
+        _ => name.to_string(),
+    }
+}
+
+/// Replace every URL-shaped token with `<internal>`: Trino's messages can name the
+/// worker a task ran on (`http://10.244.0.59:8080/v1/task/...`). No regex crate for
+/// this; splitting on whitespace is enough and keeps the dependency set as it is.
+fn scrub_internal(message: &str) -> String {
+    message
+        .split_whitespace()
+        .map(|token| {
+            if token.starts_with("http://") || token.starts_with("https://") {
+                "<internal>"
+            } else {
+                token
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 pub async fn run_query(
     State(s): State<Arc<AppState>>,
     caller: Option<axum::Extension<crate::auth::Principal>>,
     // The body extractor has to be last: axum consumes the request for it.
-    Json(req): Json<QueryRequest>,
+    ApiJson(req): ApiJson<QueryRequest>,
 ) -> Response {
     let title = truncate(&req.sql, 90);
 
@@ -213,5 +257,80 @@ fn truncate(s: &str, n: usize) -> String {
         format!("{}…", one_line.chars().take(n).collect::<String>())
     } else {
         one_line
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Shaped like a real Trino `TABLE_NOT_FOUND` answer, `failureInfo.stack` included.
+    fn table_not_found() -> Value {
+        serde_json::json!({
+            "errorCode": 46,
+            "errorLocation": { "lineNumber": 1, "columnNumber": 15 },
+            "errorName": "TABLE_NOT_FOUND",
+            "errorType": "USER_ERROR",
+            "message": "line 1:15: Table 'warehouse.demo.nonexistent_tbl' does not exist",
+            "failureInfo": {
+                "type": "io.trino.sql.analyzer.SemanticExceptions$SemanticException",
+                "message": "line 1:15: Table 'warehouse.demo.nonexistent_tbl' does not exist",
+                "stack": [
+                    "io.trino.sql.analyzer.SemanticExceptions.semanticException(SemanticExceptions.java:58)",
+                    "io.trino.sql.analyzer.Analyzer.analyze(Analyzer.java:123)",
+                    "io.trino.execution.QueryStateMachine$State.execute(QueryStateMachine.java:456)"
+                ],
+                "suppressed": [],
+                "errorLocation": { "lineNumber": 1, "columnNumber": 15 }
+            }
+        })
+    }
+
+    #[test]
+    fn client_error_keeps_message_and_drops_stack() {
+        let out = client_error(&table_not_found());
+        assert_eq!(
+            out,
+            "TABLE_NOT_FOUND: line 1:15: Table 'warehouse.demo.nonexistent_tbl' does not exist"
+        );
+        assert!(!out.contains("io.trino."), "stack leaked: {out}");
+        assert!(!out.contains("failureInfo"), "raw document leaked: {out}");
+    }
+
+    #[test]
+    fn client_error_falls_back_when_trino_is_terse() {
+        assert_eq!(
+            client_error(&serde_json::json!({ "errorName": "SYNTAX_ERROR" })),
+            "SYNTAX_ERROR"
+        );
+        assert_eq!(
+            client_error(&serde_json::json!({})),
+            "Trino query failed",
+            "an error document Nova cannot read still yields one line"
+        );
+    }
+
+    #[test]
+    fn scrub_internal_hides_urls() {
+        assert_eq!(
+            scrub_internal("Error fetching http://10.244.0.59:8080/v1/task/x: boom"),
+            "Error fetching <internal> boom"
+        );
+        assert_eq!(
+            scrub_internal("see https://trino.example/v1/info now"),
+            "see <internal> now"
+        );
+        assert_eq!(scrub_internal("plain message"), "plain message");
+    }
+
+    #[test]
+    fn client_error_scrubs_urls_inside_the_message() {
+        let err = serde_json::json!({
+            "errorName": "WORKER_FAILURE",
+            "message": "Error fetching http://10.244.0.59:8080/v1/task/x: 503",
+        });
+        let out = client_error(&err);
+        assert_eq!(out, "WORKER_FAILURE: Error fetching <internal> 503");
+        assert!(!out.contains("10.244.0.59"), "pod IP leaked: {out}");
     }
 }

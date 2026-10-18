@@ -24,6 +24,7 @@
 //! `NOVA_AUTH_MODE=oidc` puts every `/api/*` route except `/api/health` and
 //! `/api/auth/*` behind OIDC sign-in (see `auth.rs`); `dev` (default) has no login.
 
+mod api_json;
 mod apps;
 mod audit;
 mod auth;
@@ -40,7 +41,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use axum::{
     Extension, Json, Router,
     extract::State,
-    http::StatusCode,
+    http::{HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -173,12 +174,82 @@ async fn proxy_get(s: &AppState, url: String) -> Response {
             )
                 .into_response()
         }
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({"error": e.to_string()})),
-        )
-            .into_response(),
+        Err(e) => {
+            // The reqwest error names the internal URL it tried. Log that, answer a
+            // sentence: every signed-in user sees this body.
+            tracing::warn!(error = %e, "upstream request failed");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"error": "the upstream service is not reachable"})),
+            )
+                .into_response()
+        }
     }
+}
+
+/// Any unmatched path under `/api` answers JSON, never the SPA's `index.html`.
+///
+/// Attached to the nested API router, i.e. outside the auth layer: a script that
+/// mistypes a route gets `404 not found` rather than a `401` suggesting a session
+/// problem, and the body says nothing about which routes do exist.
+async fn api_not_found() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({"error": "not found"})),
+    )
+        .into_response()
+}
+
+/// Browser hardening for everything Nova serves. Nova is an authenticated console with
+/// mutating actions (SQL, loads, transfers) and `/api/*` carries per-user data, so it
+/// must not be framed by another origin, sniffed into another type, or kept by anything
+/// in between a person and the cluster.
+///
+/// `or_insert` leaves a header a handler set itself untouched: the sign-in redirects
+/// already send their own `cache-control: no-store`. No `script-src`/`default-src` here
+/// on purpose — Nova frames Superset and JupyterHub, and a full CSP needs the platform's
+/// base domain and a ticket of its own.
+async fn security_headers(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let is_api = req.uri().path().starts_with("/api/");
+    let mut res = next.run(req).await;
+    let h = res.headers_mut();
+    h.entry("x-content-type-options")
+        .or_insert(HeaderValue::from_static("nosniff"));
+    h.entry("x-frame-options")
+        .or_insert(HeaderValue::from_static("SAMEORIGIN"));
+    h.entry("content-security-policy")
+        .or_insert(HeaderValue::from_static("frame-ancestors 'self'"));
+    h.entry("referrer-policy")
+        .or_insert(HeaderValue::from_static("same-origin"));
+    if is_api {
+        h.entry("cache-control")
+            .or_insert(HeaderValue::from_static("no-store"));
+    }
+    res
+}
+
+/// The whole app: the JSON API under `/api`, the SPA everywhere else, and the response
+/// headers both share. `main` supplies the real state and static directory; the tests in
+/// `router_tests` build the same shape, so a routing or header regression fails in CI
+/// instead of at the ingress.
+fn app(state: Arc<AppState>, api: Router<Arc<AppState>>, static_dir: &str) -> Router {
+    Router::new()
+        // The fallback sits on the nested router; see `api_not_found`.
+        .nest("/api", api.fallback(api_not_found))
+        .fallback_service(
+            ServeDir::new(static_dir).fallback(tower_http::services::ServeFile::new(format!(
+                "{static_dir}/index.html"
+            ))),
+        )
+        .layer(axum::middleware::from_fn(security_headers))
+        // Spans carry the path only: query strings (e.g. the OIDC callback's `code`)
+        // stay out of logs.
+        .layer(TraceLayer::new_for_http().make_span_with(
+            |req: &axum::http::Request<axum::body::Body>| {
+                tracing::debug_span!("request", method = %req.method(), path = %req.uri().path())
+            },
+        ))
+        .with_state(state)
 }
 
 fn env_flag(name: &str) -> bool {
@@ -366,19 +437,7 @@ async fn main() -> anyhow::Result<()> {
             .nest("/auth", auth::dev_router()),
     };
 
-    let app = Router::new()
-        .nest("/api", api)
-        .fallback_service(ServeDir::new(&static_dir).fallback(
-            tower_http::services::ServeFile::new(format!("{static_dir}/index.html")),
-        ))
-        // Spans carry the path only: query strings (e.g. the OIDC callback's `code`)
-        // stay out of logs.
-        .layer(TraceLayer::new_for_http().make_span_with(
-            |req: &axum::http::Request<axum::body::Body>| {
-                tracing::debug_span!("request", method = %req.method(), path = %req.uri().path())
-            },
-        ))
-        .with_state(state.clone());
+    let app = app(state.clone(), api, &static_dir);
 
     let bind = std::env::var("NOVA_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
     info!(
@@ -400,9 +459,158 @@ async fn main() -> anyhow::Result<()> {
 mod router_tests {
     use super::*;
 
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    /// An `AppState` for the routing and header tests: no cluster, no upstream. Nothing
+    /// here is reached by the paths under test.
+    fn test_state() -> Arc<AppState> {
+        Arc::new(AppState {
+            dev_user: "test".into(),
+            trino_url: "http://127.0.0.1:1".into(),
+            lakekeeper_url: "http://127.0.0.1:1".into(),
+            superset_url: "http://127.0.0.1:1".into(),
+            jupyterhub_url: "http://127.0.0.1:1".into(),
+            warehouse_name: "warehouse".into(),
+            warehouse_id: OnceCell::new(),
+            http: reqwest::Client::new(),
+            demo: true,
+            forward_identity: false,
+            jobs: Mutex::new(Vec::new()),
+            demo_state: RwLock::new(demo::DemoState::default()),
+            kube: None,
+            workloads: cluster::WorkloadCache::default(),
+        })
+    }
+
+    /// A static directory holding only `index.html`, so the SPA fallback behaves the way
+    /// the image's `/app/static` does. Removed when the test ends.
+    struct StaticDir(std::path::PathBuf);
+
+    impl StaticDir {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("nova-test-{tag}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("temp static dir");
+            std::fs::write(dir.join("index.html"), "<!doctype html><title>nova</title>")
+                .expect("index.html");
+            Self(dir)
+        }
+
+        fn path(&self) -> &str {
+            self.0.to_str().expect("utf-8 temp path")
+        }
+    }
+
+    impl Drop for StaticDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn test_app(tag: &str) -> (Router, StaticDir) {
+        let dir = StaticDir::new(tag);
+        let app = app(test_state(), api_router(), dir.path());
+        (app, dir)
+    }
+
+    async fn get(app: Router, uri: &str) -> Response {
+        app.oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    fn header<'a>(response: &'a Response, name: &str) -> Option<&'a str> {
+        response
+            .headers()
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+    }
+
     #[test]
     fn api_router_builds() {
         let _ = api_router();
         let _ = admin_router();
+    }
+
+    /// A typo in an API path must not reach the SPA's `index.html`: a caller cannot tell
+    /// a 200 HTML page from a result document. One rule: unknown `/api/*` is 404 JSON.
+    #[tokio::test]
+    async fn unknown_api_path_is_json_404() {
+        for uri in [
+            "/api/nope",
+            "/api",
+            "/api/catalog/",
+            "/api/auth/nonexistent",
+        ] {
+            let (app, _dir) = test_app("api-404");
+            let response = get(app, uri).await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
+            assert_eq!(
+                header(&response, "content-type"),
+                Some("application/json"),
+                "{uri} must answer JSON"
+            );
+            let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(value["error"], "not found", "{uri}");
+        }
+    }
+
+    /// Client-side routes are not API routes: a deep link still gets the SPA.
+    #[tokio::test]
+    async fn spa_routes_still_serve_index_html() {
+        for uri in ["/", "/catalog"] {
+            let (app, _dir) = test_app("spa");
+            let response = get(app, uri).await;
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            assert!(
+                header(&response, "content-type").is_some_and(|v| v.starts_with("text/html")),
+                "{uri} must serve the SPA"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn security_headers_are_set_on_api_responses() {
+        let (app, _dir) = test_app("headers-api");
+        let response = get(app, "/api/me").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(header(&response, "x-content-type-options"), Some("nosniff"));
+        assert_eq!(header(&response, "x-frame-options"), Some("SAMEORIGIN"));
+        assert_eq!(
+            header(&response, "content-security-policy"),
+            Some("frame-ancestors 'self'")
+        );
+        assert_eq!(header(&response, "referrer-policy"), Some("same-origin"));
+        // `/api/me` carries the signed-in person's sub, email and groups.
+        assert_eq!(header(&response, "cache-control"), Some("no-store"));
+    }
+
+    #[tokio::test]
+    async fn security_headers_are_set_on_the_spa_without_no_store() {
+        let (app, _dir) = test_app("headers-spa");
+        let response = get(app, "/").await;
+        assert_eq!(header(&response, "x-content-type-options"), Some("nosniff"));
+        assert_eq!(header(&response, "x-frame-options"), Some("SAMEORIGIN"));
+        assert_eq!(
+            header(&response, "content-security-policy"),
+            Some("frame-ancestors 'self'")
+        );
+        assert_eq!(header(&response, "referrer-policy"), Some("same-origin"));
+        // Static assets are cacheable; only the API is `no-store`.
+        assert_eq!(header(&response, "cache-control"), None);
+    }
+
+    /// The headers also ride on the error path the fallback exists for.
+    #[tokio::test]
+    async fn unknown_api_path_carries_security_headers() {
+        let (app, _dir) = test_app("headers-404");
+        let response = get(app, "/api/nope").await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(header(&response, "cache-control"), Some("no-store"));
+        assert_eq!(header(&response, "x-content-type-options"), Some("nosniff"));
     }
 }

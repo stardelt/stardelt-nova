@@ -13,7 +13,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{AppState, demo, jobs, trino};
+use crate::{AppState, api_json::ApiJson, demo, jobs, trino};
 
 #[derive(Deserialize)]
 pub struct UploadRequest {
@@ -60,7 +60,7 @@ pub async fn upload(
     State(s): State<Arc<AppState>>,
     caller: Option<axum::Extension<crate::auth::Principal>>,
     // The body extractor has to be last: axum consumes the request for it.
-    Json(req): Json<UploadRequest>,
+    ApiJson(req): ApiJson<UploadRequest>,
 ) -> Response {
     let fmt = req.format.to_lowercase();
     let title = format!("{}.{}", req.namespace, req.table);
@@ -129,7 +129,7 @@ pub async fn transfer(
     State(s): State<Arc<AppState>>,
     caller: Option<axum::Extension<crate::auth::Principal>>,
     // The body extractor has to be last: axum consumes the request for it.
-    Json(req): Json<TransferRequest>,
+    ApiJson(req): ApiJson<TransferRequest>,
 ) -> Response {
     let title = format!("{} → {}", req.source, req.target);
 
