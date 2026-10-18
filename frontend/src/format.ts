@@ -39,6 +39,18 @@ export function rowsLabel(n: number): string {
   return `${n} row${n === 1 ? '' : 's'}`
 }
 
+/**
+ * Whether the app's `external_url` is a page a browser can open, as opposed to only
+ * its address. API-only services (Lakekeeper) answer on that host with an ingress 404,
+ * and Lakekeeper has no Ingress at all — an "Open" button there is a dead end.
+ *
+ * The backend reports this as `browsable`; a backend that predates the field sends
+ * nothing, and then every app keeps its link rather than losing all of them.
+ */
+export function isBrowsable(app: { browsable?: boolean }): boolean {
+  return app.browsable !== false
+}
+
 const PLAIN_IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/
 
 /** One SQL identifier part: left as-is when it is plain, otherwise double-quoted. */

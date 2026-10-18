@@ -65,7 +65,11 @@ export default function AppDetail() {
   const { app, probe, replicas, workloads, facts, links } = detail.data
   const up = app.status === 'up'
   const novaRoutes = NOVA_ROUTES[app.id] ?? []
-  const externalUrl = safeHttpUrl(app.external_url)
+  // `browsable` is landing in the API separately (issue #69). Until it does, this page
+  // already knows the answer: with a base domain, the detail response carries links
+  // only for an app that has paths a browser can open.
+  const browsable = app.browsable ?? (links.length > 0 || app.external_url === '')
+  const externalUrl = browsable ? safeHttpUrl(app.external_url) : undefined
 
   return (
     <div className="max-w-6xl space-y-6">
@@ -163,13 +167,13 @@ export default function AppDetail() {
                 </a>
               ) : null
             })}
-            {links.length === 0 && app.external_url === '' && (
+            {links.length === 0 && browsable && app.external_url === '' && (
               <span className="text-sm text-text-mute">
                 No external URL: the platform install sets <span className="font-mono">NOVA_BASE_DOMAIN</span>,
                 and Nova derives every app link from it.
               </span>
             )}
-            {links.length === 0 && app.external_url !== '' && (
+            {links.length === 0 && !browsable && (
               <span className="text-sm text-text-mute">
                 {app.name} has no browsable UI of its own — Nova talks to its API directly.
               </span>
