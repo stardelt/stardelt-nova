@@ -992,10 +992,13 @@ pub async fn require_auth(
 /// Only mounted in `oidc` mode: in `dev` there is no IdP and the single user is the
 /// operator, which is what CI, `make demo` and the kind gate depend on.
 pub async fn require_admin(req: Request, next: Next) -> Response {
+    // `require_auth` inserts a `Principal` (identity + how it arrived), not the bare
+    // `Identity` — reading the wrong type silently refuses everyone, which is exactly
+    // what happened the first time this shipped.
     let principal = req
         .extensions()
-        .get::<Identity>()
-        .map(|p| p.is_admin)
+        .get::<Principal>()
+        .map(|p| p.identity.is_admin)
         .unwrap_or(false);
     if principal {
         return next.run(req).await;
@@ -1287,6 +1290,60 @@ pub fn dev_router<S: Clone + Send + Sync + 'static>() -> Router<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The admin middleware must read the extension type `require_auth` actually inserts.
+    /// It shipped reading `Identity` instead of `Principal`, which refused *everyone*
+    /// including administrators — a bug no other test could see, because the mismatch is
+    /// invisible until a request flows through both layers.
+    #[tokio::test]
+    async fn admin_layer_allows_admins_only() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        fn ident(admin: bool) -> Identity {
+            Identity {
+                sub: "s".into(),
+                display_name: "u".into(),
+                email: None,
+                name: None,
+                groups: vec![],
+                roles: vec![],
+                groups_overage: false,
+                is_admin: admin,
+            }
+        }
+
+        async fn status_for(identity: Option<Identity>) -> StatusCode {
+            let app = Router::new()
+                .route("/x", get(|| async { StatusCode::OK }))
+                .layer(axum::middleware::from_fn(require_admin))
+                // Applied last = outermost, so the extension exists before the check runs —
+                // the same order `main` builds.
+                .layer(axum::middleware::from_fn(
+                    move |mut req: Request<Body>, next: Next| {
+                        let identity = identity.clone();
+                        async move {
+                            if let Some(identity) = identity {
+                                req.extensions_mut().insert(Principal {
+                                    identity,
+                                    via: "session",
+                                });
+                            }
+                            next.run(req).await
+                        }
+                    },
+                ));
+            app.oneshot(Request::builder().uri("/x").body(Body::empty()).unwrap())
+                .await
+                .unwrap()
+                .status()
+        }
+
+        assert_eq!(status_for(Some(ident(true))).await, StatusCode::OK);
+        assert_eq!(status_for(Some(ident(false))).await, StatusCode::FORBIDDEN);
+        assert_eq!(status_for(None).await, StatusCode::FORBIDDEN);
+    }
     use axum::body::Body;
     use axum::http::Request as HttpRequest;
     use jsonwebtoken::{EncodingKey, Header, encode};
