@@ -9,10 +9,13 @@ import { safeHttpUrl } from '../format'
 // (`kubectl -n stardelt port-forward svc/proxy-public 8000:80`).
 const FALLBACK = (import.meta.env.VITE_JUPYTERHUB_URL as string | undefined) ?? 'http://localhost:8000'
 
+// Hub-level paths only. JupyterLab does not live at `/lab` on the hub host: each
+// person's server has its own URL (`/user/<name>/lab`), which is why a fixed
+// "JupyterLab" entry cannot work — and why `/hub/home` is the right entry point,
+// since the hub redirects it to that person's running server.
 const ENTRY_PATHS: Array<{ label: string; path: string }> = [
-  { label: 'Hub home',  path: '/hub/home'  },
-  { label: 'JupyterLab', path: '/lab'      },
-  { label: 'Spawn server', path: '/hub/spawn' },
+  { label: 'Hub home',  path: '/hub/home'    },
+  { label: 'My server', path: '/hub/spawn'   },
   { label: 'API tokens', path: '/hub/token'  },
 ]
 
