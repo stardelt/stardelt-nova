@@ -10,6 +10,12 @@
 //! Reads are not audited: they are the overwhelming majority of traffic, and a log that
 //! records everything is a log nobody reads.
 //!
+//! This layer sits *inside* the auth middlewares, because it needs the principal — which
+//! means a refused request never reaches it. That is not a hole: `require_auth` and
+//! `require_admin` record their own refusals on the same `audit` target, with the actor
+//! when they know it. Between them: the audit target carries what was done and what was
+//! refused; the application log carries everything else.
+//!
 //! The line goes to the `audit` tracing target at INFO, so it can be routed separately
 //! from the application log (`RUST_LOG=audit=info,info`).
 
