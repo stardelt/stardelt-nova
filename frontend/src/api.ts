@@ -22,6 +22,12 @@ export type Me = {
   via?: 'session' | 'bearer'
   /** False until Nova forwards the user's token to Trino/Lakekeeper (phase 2). */
   identity_forwarding?: boolean
+  /**
+   * The Keycloak admin console for the realm, built by the backend from the
+   * configured issuer. `null`/absent in dev mode and for non-Keycloak issuers, so the
+   * UI shows no Users link where there is no console to open.
+   */
+  admin_console_url?: string | null
 }
 
 export type Warehouse = { name: string; id: string }

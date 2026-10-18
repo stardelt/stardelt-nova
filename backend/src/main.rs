@@ -50,6 +50,7 @@ use tokio::sync::OnceCell;
 use tower_http::{services::ServeDir, trace::TraceLayer};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
+use url::Url;
 
 pub struct AppState {
     pub dev_user: String,
@@ -74,6 +75,11 @@ pub struct AppState {
     /// Nova runs outside a cluster / lacks RBAC — the UI then simply omits images.
     pub kube: Option<kube::Client>,
     pub workloads: cluster::WorkloadCache,
+    /// The Keycloak admin console for the configured realm, derived from
+    /// `NOVA_OIDC_ISSUER` at startup. `None` in dev mode, for a non-Keycloak
+    /// issuer, and for the master realm: Nova never links where it cannot manage
+    /// users. The frontend only shows the link; the console enforces the roles.
+    pub admin_console_url: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -82,6 +88,8 @@ struct Me {
     auth_mode: &'static str,
     demo: bool,
     warehouse: String,
+    /// `None` in `dev` mode: there is no IdP, so no console.
+    admin_console_url: Option<String>,
 }
 
 /// `/api/me` in `oidc` mode: claims, never tokens. Nova still talks to Trino and
@@ -101,6 +109,8 @@ struct OidcMe<'a> {
     is_admin: bool,
     via: &'static str,
     identity_forwarding: bool,
+    /// Realm admin console derived from the issuer; `None` for non-Keycloak issuers.
+    admin_console_url: Option<&'a str>,
 }
 
 async fn me(
@@ -115,6 +125,7 @@ async fn me(
             auth_mode: "static-dev",
             demo: s.demo,
             warehouse: s.warehouse_name.clone(),
+            admin_console_url: None,
         })
         .into_response(),
         Some(Extension(p)) => {
@@ -133,6 +144,7 @@ async fn me(
                 is_admin: id.is_admin,
                 via: p.via,
                 identity_forwarding: s.forward_identity,
+                admin_console_url: s.admin_console_url.as_deref(),
             })
             .into_response()
         }
@@ -259,6 +271,37 @@ fn env_flag(name: &str) -> bool {
     )
 }
 
+/// The realm's Keycloak admin console, derived from the configured issuer.
+///
+/// A Keycloak issuer ends in `/realms/<realm>` (optionally behind a base path,
+/// e.g. `/auth/realms/<realm>`), so the console is `…/admin/<realm>/console/`.
+/// Anything else — `dev` mode (no issuer), an external provider such as Entra ID,
+/// the master realm, or an issuer with trailing segments — has no console Nova
+/// could address, so the answer is `None` and the UI shows no Users link.
+fn admin_console_url(issuer: &str) -> Option<String> {
+    let mut url = Url::parse(issuer).ok()?;
+    let segments: Vec<&str> = url.path_segments()?.filter(|s| !s.is_empty()).collect();
+    let realms_at = segments.iter().rposition(|s| *s == "realms")?;
+    // Exactly `/realms/<realm>` at the end; a deeper path is not a realm issuer.
+    if realms_at + 2 != segments.len() {
+        return None;
+    }
+    let realm = segments[realms_at + 1];
+    if realm == "master" {
+        return None;
+    }
+    let base = segments[..realms_at].join("/");
+    let path = if base.is_empty() {
+        format!("/admin/{realm}/console/")
+    } else {
+        format!("/{base}/admin/{realm}/console/")
+    };
+    url.set_path(&path);
+    url.set_query(None);
+    url.set_fragment(None);
+    Some(url.to_string())
+}
+
 /// The API route table.
 ///
 /// Deliberately separate from `main`: axum validates path syntax when the router is
@@ -312,6 +355,12 @@ async fn main() -> anyhow::Result<()> {
     // Fail closed: a half-configured oidc mode refuses to start.
     let auth_mode = auth::AuthMode::from_env()
         .map_err(|e| anyhow::anyhow!("refusing to start: auth configuration: {e}"))?;
+    // Derived once, from the same issuer tokens are validated against. The frontend
+    // never hard-codes a Keycloak host.
+    let admin_console = match &auth_mode {
+        auth::AuthMode::Oidc(cfg) => admin_console_url(&cfg.issuer),
+        auth::AuthMode::Dev => None,
+    };
 
     let demo_mode = env_flag("NOVA_DEMO");
     let demo_state = if demo_mode {
@@ -369,6 +418,7 @@ async fn main() -> anyhow::Result<()> {
         demo_state: RwLock::new(demo_state),
         kube,
         workloads: cluster::WorkloadCache::default(),
+        admin_console_url: admin_console,
     });
 
     let auth = match auth_mode {
@@ -483,7 +533,40 @@ mod router_tests {
             demo_state: RwLock::new(demo::DemoState::default()),
             kube: None,
             workloads: cluster::WorkloadCache::default(),
+            admin_console_url: admin_console_url("https://id.example.com/realms/stardelt"),
         })
+    }
+
+    #[test]
+    fn admin_console_url_from_keycloak_issuer() {
+        assert_eq!(
+            admin_console_url("https://id.example.com/realms/stardelt").as_deref(),
+            Some("https://id.example.com/admin/stardelt/console/")
+        );
+        // A trailing slash on the issuer is normal in Keycloak discovery documents.
+        assert_eq!(
+            admin_console_url("https://id.example.com/realms/stardelt/").as_deref(),
+            Some("https://id.example.com/admin/stardelt/console/")
+        );
+        // Keycloak behind a base path keeps it.
+        assert_eq!(
+            admin_console_url("https://example.com/auth/realms/stardelt").as_deref(),
+            Some("https://example.com/auth/admin/stardelt/console/")
+        );
+        // A realm console, not realm ownership, and not another provider.
+        assert_eq!(
+            admin_console_url("https://id.example.com/realms/master"),
+            None
+        );
+        assert_eq!(
+            admin_console_url("https://login.microsoftonline.com/tenant/v2.0"),
+            None
+        );
+        assert_eq!(
+            admin_console_url("https://id.example.com/realms/stardelt/extra"),
+            None
+        );
+        assert_eq!(admin_console_url("not a url"), None);
     }
 
     /// A static directory holding only `index.html`, so the SPA fallback behaves the way

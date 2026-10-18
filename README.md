@@ -248,6 +248,11 @@ Tokens Entra issues for Microsoft Graph cannot be validated by anyone but Graph.
 
 **Keycloak notes.** Add a *Group Membership* mapper (`groups`) to the `nova` client;
 for bearer access add an *Audience* mapper so access tokens carry `aud: nova`.
+With a Keycloak-style issuer (`…/realms/<realm>`) `/api/me` also carries
+`admin_console_url`, the realm's own admin console (`…/admin/<realm>/console/`); the
+sidebar links to it as **Users** for administrators. It is `null` in `dev` mode, for
+non-Keycloak issuers (Entra ID) and for the master realm — Nova never links to a console
+it cannot address, and the console still enforces who may manage users.
 Keycloak shows a logout confirmation page because Nova does not put the ID token in
 the end-session URL (`client_id` + `post_logout_redirect_uri` are sent instead).
 

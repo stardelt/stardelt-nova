@@ -217,6 +217,22 @@ export default function Shell() {
                     {item.label}
                   </NavLink>
                 ))}
+                {/* User management is the IdP's job, not a Nova screen: Keycloak owns
+                    the realm and its console does it properly. The backend computes the
+                    URL from the configured issuer; absent (dev mode, non-Keycloak issuer)
+                    means no link, and non-admins never see this group. */}
+                {group.admin && admin && me.data?.admin_console_url && (
+                  <a
+                    href={me.data.admin_console_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    title="Manage users in the platform identity provider"
+                    className={navClass({ isActive: false })}
+                  >
+                    <Icon name="users" className="w-4 h-4" />
+                    Users
+                  </a>
+                )}
               </div>
             </div>
             ))}
