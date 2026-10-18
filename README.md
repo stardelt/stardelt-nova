@@ -159,11 +159,33 @@ The backend is configured entirely through environment variables:
 | `NOVA_WAREHOUSE_NAME` | `warehouse` | Lakekeeper warehouse name to resolve on startup |
 | `NOVA_SUPERSET_URL` | `http://superset:8088` | Superset base URL (probe + embed check) |
 | `NOVA_JUPYTERHUB_URL` | `http://proxy-public:80` | JupyterHub public proxy base URL (probe + embed check) |
+| `POD_NAMESPACE` | `stardelt` | Namespace whose workloads Nova reports (downward API in the manifests); `NOVA_NAMESPACE` overrides it for a local run |
+| `NOVA_BASE_DOMAIN` | — (empty) | Base domain for the app deep-links (`trino.<domain>`, …). Empty = the UI links nothing; the install sets it from a ConfigMap |
 | `NOVA_DEV_USER` | `stardelt-dev` | Static user identity returned by `/api/me` (dev mode only) |
 | `NOVA_AUTH_MODE` | `dev` | `dev` (no login) or `oidc` — see [Sign-in](#sign-in-oidc) |
 | `RUST_LOG` | `info` | Tracing filter for the backend (`debug`, `info`, `warn`, …) |
 
 ---
+
+## Audit trail
+
+Every **mutating** request to the API gets one structured line on the `audit` tracing target —
+actor, subject, how they authenticated, method, path, status:
+
+```
+INFO audit: mutating request actor="admin" sub="52f3331c…" via=session method=POST path=/query status=200
+```
+
+Reads are not recorded (they dwarf everything else and would bury the signal), and neither query
+strings nor request bodies are: the record is the *action*, not its content. Statement-level auditing
+belongs in Trino's query events, which see the SQL and are already configured for it. Failed attempts
+are audited — a denied mutation is exactly what an audit trail is for.
+
+Route it separately from the application log:
+
+```
+RUST_LOG=audit=info,info
+```
 
 ## Sign-in (OIDC)
 

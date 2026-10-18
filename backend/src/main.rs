@@ -25,6 +25,7 @@
 //! `/api/auth/*` behind OIDC sign-in (see `auth.rs`); `dev` (default) has no login.
 
 mod apps;
+mod audit;
 mod auth;
 mod catalog;
 mod cluster;
@@ -334,7 +335,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let app = Router::new()
-        .nest("/api", api)
+        .nest("/api", api.layer(axum::middleware::from_fn(audit::record_mutations)))
         .fallback_service(ServeDir::new(&static_dir).fallback(
             tower_http::services::ServeFile::new(format!("{static_dir}/index.html")),
         ))
