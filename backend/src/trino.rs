@@ -60,16 +60,26 @@ struct TrinoResponse {
 
 /// Run SQL and return the aggregated result. Used by the query handler and by
 /// load/transfer, which issue DDL/DML through the same path.
-pub async fn execute(state: &AppState, sql: String) -> Result<QueryResult, String> {
-    let initial = state
+pub async fn execute(
+    state: &AppState,
+    sql: String,
+    caller: Option<&crate::auth::Principal>,
+) -> Result<QueryResult, String> {
+    // `X-Trino-User` is what Trino records in its query events, so it should name the person
+    // who asked — the token identifies them for authentication, this identifies them to the
+    // audit trail. Falls back to the dev user when nobody is signed in.
+    let user = caller
+        .map(|c| c.identity.display_name.as_str())
+        .unwrap_or(&state.dev_user);
+    let mut request = state
         .http
         .post(format!("{}/v1/statement", state.trino_url))
-        .header("X-Trino-User", &state.dev_user)
-        .header("Content-Type", "text/plain")
-        .body(sql)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+        .header("X-Trino-User", user)
+        .header("Content-Type", "text/plain");
+    if let Some(header) = crate::auth::upstream_authorization(state.forward_identity, caller) {
+        request = request.header(reqwest::header::AUTHORIZATION, header);
+    }
+    let initial = request.body(sql).send().await.map_err(|e| e.to_string())?;
 
     let mut current: TrinoResponse = initial
         .json()
@@ -141,7 +151,12 @@ pub async fn execute(state: &AppState, sql: String) -> Result<QueryResult, Strin
     })
 }
 
-pub async fn run_query(State(s): State<Arc<AppState>>, Json(req): Json<QueryRequest>) -> Response {
+pub async fn run_query(
+    State(s): State<Arc<AppState>>,
+    caller: Option<axum::Extension<crate::auth::Principal>>,
+    // The body extractor has to be last: axum consumes the request for it.
+    Json(req): Json<QueryRequest>,
+) -> Response {
     let title = truncate(&req.sql, 90);
 
     if s.demo {
@@ -169,7 +184,7 @@ pub async fn run_query(State(s): State<Arc<AppState>>, Json(req): Json<QueryRequ
         };
     }
 
-    match execute(&s, req.sql).await {
+    match execute(&s, req.sql, caller.as_ref().map(|c| &c.0)).await {
         Ok(r) => {
             jobs::record(
                 &s.jobs,
