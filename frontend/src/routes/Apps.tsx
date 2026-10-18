@@ -2,7 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { api, type PlatformApp } from '../api'
 import { Icon } from '../components/Icon'
-import { shortImage } from '../format'
+import { safeHttpUrl, shortImage } from '../format'
 
 export default function Apps() {
   const apps = useQuery({ queryKey: ['apps'], queryFn: api.apps, refetchInterval: 15_000 })
@@ -53,6 +53,7 @@ export default function Apps() {
 
 function AppCard({ app }: { app: PlatformApp }) {
   const up = app.status === 'up'
+  const externalUrl = safeHttpUrl(app.external_url)
   return (
     <div className="card p-5 flex flex-col gap-3 hover:border-accent/40 transition">
       <div className="flex items-start gap-3">
@@ -88,13 +89,13 @@ function AppCard({ app }: { app: PlatformApp }) {
         <Link to={`/apps/${app.id}`} className="btn-ghost ml-auto py-1.5 px-3 text-xs">
           Details <Icon name="arrow" className="w-3.5 h-3.5" />
         </Link>
-        {app.external_url && (
+        {externalUrl && (
           <a
-            href={app.external_url}
+            href={externalUrl}
             target="_blank"
             rel="noreferrer"
             className="btn-ghost py-1.5 px-3 text-xs"
-            title={`Open ${app.external_url}`}
+            title={`Open ${externalUrl}`}
           >
             Open
           </a>
