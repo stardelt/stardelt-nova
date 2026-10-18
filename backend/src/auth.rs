@@ -995,15 +995,27 @@ pub async fn require_admin(req: Request, next: Next) -> Response {
     // `require_auth` inserts a `Principal` (identity + how it arrived), not the bare
     // `Identity` — reading the wrong type silently refuses everyone, which is exactly
     // what happened the first time this shipped.
-    let principal = req
-        .extensions()
-        .get::<Principal>()
+    let principal = req.extensions().get::<Principal>().cloned();
+    if principal
+        .as_ref()
         .map(|p| p.identity.is_admin)
-        .unwrap_or(false);
-    if principal {
+        .unwrap_or(false)
+    {
         return next.run(req).await;
     }
-    warn!(path = %req.uri().path(), "rejected non-admin request to an admin route");
+    // The audit layer sits inside this one, so a refusal is recorded here — with the
+    // actor when we know it, which is the case that matters.
+    match &principal {
+        Some(p) => warn!(
+            target: "audit",
+            actor = %p.identity.display_name,
+            sub = %p.identity.sub,
+            via = p.via,
+            path = %req.uri().path(),
+            "refused: not an administrator"
+        ),
+        None => warn!(target: "audit", path = %req.uri().path(), "refused: no principal"),
+    }
     AuthError::Forbidden.into_response()
 }
 

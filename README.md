@@ -178,8 +178,11 @@ INFO audit: mutating request actor="admin" sub="52f3331c…" via=session method=
 
 Reads are not recorded (they dwarf everything else and would bury the signal), and neither query
 strings nor request bodies are: the record is the *action*, not its content. Statement-level auditing
-belongs in Trino's query events, which see the SQL and are already configured for it. Failed attempts
-are audited — a denied mutation is exactly what an audit trail is for.
+belongs in Trino's query events, which see the SQL and are already configured for it.
+
+Refusals land on the same `audit` target from the middleware that refused — a 403 names the caller and
+the path — because the audit layer itself sits inside authentication (it needs the principal, and a
+refused request never reaches it).
 
 Route it separately from the application log:
 
