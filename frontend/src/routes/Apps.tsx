@@ -32,7 +32,7 @@ export default function Apps() {
       </header>
 
       {apps.isLoading && <div className="text-text-mute">loading…</div>}
-      {apps.isError && <div className="text-red-500 text-sm">{String(apps.error)}</div>}
+      {apps.isError && <div className="text-bad text-sm">{String(apps.error)}</div>}
 
       {[...groups.entries()].map(([category, list]) => (
         <section key={category}>

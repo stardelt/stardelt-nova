@@ -34,7 +34,7 @@ export default function Jobs() {
               <tr><td className="px-4 py-5 text-text-mute" colSpan={5}>loading…</td></tr>
             )}
             {jobs.isError && !jobs.data && (
-              <tr><td className="px-4 py-5 text-red-400" colSpan={5}>{String(jobs.error)}</td></tr>
+              <tr><td className="px-4 py-5 text-bad" colSpan={5}>{String(jobs.error)}</td></tr>
             )}
             {jobs.data && jobs.data.length === 0 && (
               <tr><td className="px-4 py-5 text-text-mute" colSpan={5}>No jobs yet.</td></tr>
@@ -65,9 +65,9 @@ export default function Jobs() {
 
 function Kind({ kind }: { kind: string }) {
   const map: Record<string, string> = {
-    query: 'badge border-sky-400/40 bg-sky-400/10 text-sky-300',
-    load: 'badge border-emerald-400/40 bg-emerald-400/10 text-emerald-300',
-    transfer: 'badge border-violet-400/40 bg-violet-400/10 text-violet-300',
+    query: 'badge border-sky-400/40 bg-sky-400/10 text-info',
+    load: 'badge border-emerald-400/40 bg-emerald-400/10 text-ok',
+    transfer: 'badge border-violet-400/40 bg-violet-400/10 text-xfer',
   }
   return <span className={map[kind] ?? 'badge border-border bg-bg-soft text-text-dim'}>{kind}</span>
 }
@@ -76,8 +76,8 @@ function Status({ status }: { status: string }) {
   const ok = status === 'succeeded'
   return (
     <span className={ok
-      ? 'badge border-emerald-400/40 bg-emerald-400/10 text-emerald-300'
-      : 'badge border-red-400/40 bg-red-400/10 text-red-300'}>
+      ? 'badge border-emerald-400/40 bg-emerald-400/10 text-ok'
+      : 'badge border-red-400/40 bg-red-400/10 text-bad'}>
       {status}
     </span>
   )

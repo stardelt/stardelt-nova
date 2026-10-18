@@ -14,7 +14,7 @@ export function EmbedNotice({ app, embed }: { app: string; embed?: AppEmbed }) {
   return (
     <div className="card border-amber-400/40 bg-amber-400/5 px-4 py-3 text-sm">
       <div className="flex items-start gap-3">
-        <span className="badge shrink-0 border-amber-400/40 bg-amber-400/10 text-amber-300">
+        <span className="badge shrink-0 border-amber-400/40 bg-amber-400/10 text-warn">
           framing blocked
         </span>
         <div className="min-w-0">
@@ -52,7 +52,7 @@ export function EmbedBadge({ embed }: { embed?: AppEmbed }) {
         'badge',
         ok
           ? 'border-success/40 bg-success/10 text-success'
-          : 'border-amber-400/40 bg-amber-400/10 text-amber-300',
+          : 'border-amber-400/40 bg-amber-400/10 text-warn',
       ].join(' ')}
       title={embed.checked ? `headers read from ${embed.checked}` : undefined}
     >

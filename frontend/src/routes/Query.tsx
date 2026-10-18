@@ -90,7 +90,7 @@ export default function Query() {
         </div>
 
         {error && (
-          <div className="rounded-[14px] border border-red-500/40 bg-red-500/10 p-4 text-sm text-red-300 font-mono whitespace-pre-wrap">
+          <div className="rounded-[14px] border border-red-500/40 bg-red-500/10 p-4 text-sm text-bad font-mono whitespace-pre-wrap">
             {error}
           </div>
         )}

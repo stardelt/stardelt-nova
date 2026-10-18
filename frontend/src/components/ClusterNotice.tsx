@@ -15,7 +15,7 @@ export function ClusterNotice({ snapshot }: { snapshot?: WorkloadSnapshot }) {
   return (
     <div className="card border-amber-400/40 bg-amber-400/5 px-4 py-3 text-sm">
       <div className="flex items-start gap-3">
-        <span className="badge shrink-0 border-amber-400/40 bg-amber-400/10 text-amber-300">
+        <span className="badge shrink-0 border-amber-400/40 bg-amber-400/10 text-warn">
           {stale ? 'last known state' : 'cluster unreachable'}
         </span>
         <div className="min-w-0">
