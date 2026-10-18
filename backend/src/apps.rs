@@ -323,6 +323,36 @@ pub async fn list(State(s): State<Arc<AppState>>) -> Json<Vec<PlatformApp>> {
     Json(apps)
 }
 
+/// What the embedded pages (Dashboards, Notebooks) need, readable by every signed-in user:
+/// the apps Nova frames, their address, liveness and framing state. No workloads, images or
+/// replica counts; those stay behind the admin-only `/api/apps`.
+///
+/// Deliberately not an admin route and deliberately not a filtered `/api/apps`: an ordinary
+/// user needs to open the notebook and the dashboard, and nothing else on that payload.
+#[derive(Serialize)]
+pub struct EmbedApp {
+    pub id: String,
+    pub name: String,
+    pub external_url: String,
+    pub status: String,
+    pub embed: Embed,
+}
+
+pub async fn embeds(State(s): State<Arc<AppState>>) -> Json<Vec<EmbedApp>> {
+    let base = std::env::var("NOVA_BASE_DOMAIN").unwrap_or_default();
+    let mut out = Vec::new();
+    for spec in SPECS.iter().filter(|spec| spec.embed.is_some()) {
+        out.push(EmbedApp {
+            id: spec.id.to_string(),
+            name: spec.name.to_string(),
+            external_url: external_url(&base, spec.sub),
+            status: probe(&s, &spec.probe.url(&targets(&s), spec.probe_path)).await,
+            embed: embed_report(&s, spec, &base).await,
+        });
+    }
+    Json(out)
+}
+
 pub async fn detail(State(s): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
     let Some(spec) = spec(&id) else {
         return (

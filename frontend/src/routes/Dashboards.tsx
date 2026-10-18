@@ -18,19 +18,14 @@ const ENTRY_PATHS: Array<{ label: string; path: string }> = [
 ]
 
 export default function Dashboards() {
-  const apps = useQuery({ queryKey: ['apps'], queryFn: api.apps, refetchInterval: 15_000 })
+  // `/api/embeds` is readable by every signed-in user; `/api/apps` and its detail are
+  // operator views (they carry workloads and images), so this page cannot depend on them.
+  const apps = useQuery({ queryKey: ['embeds'], queryFn: api.embeds, refetchInterval: 15_000 })
   const superset = apps.data?.find(a => a.id === 'superset')
   const deployed = superset?.status === 'up'
   // Only http(s) URLs may reach `href` / iframe `src`; anything else falls back, then to nothing.
   const base = safeHttpUrl(superset?.external_url) ?? safeHttpUrl(FALLBACK)
 
-  // The detail endpoint carries what Superset itself says about being framed.
-  const detail = useQuery({
-    queryKey: ['app', 'superset'],
-    queryFn: () => api.app('superset'),
-    refetchInterval: 30_000,
-    retry: false,
-  })
 
   const [path, setPath] = useState('/superset/welcome/')
   const src = base ? `${base.replace(/\/+$/, '')}${path}` : undefined
@@ -52,7 +47,7 @@ export default function Dashboards() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <EmbedBadge embed={detail.data?.embed} />
+          <EmbedBadge embed={superset?.embed} />
           <span className={['badge', deployed ? 'border-success/40 bg-success/10 text-success' : 'border-border bg-bg-soft text-text-mute'].join(' ')}>
             <span className={['w-1.5 h-1.5 rounded-full', deployed ? 'bg-success' : 'bg-text-mute'].join(' ')} />
             {deployed ? 'running' : (superset?.status ?? 'unknown')}
@@ -61,7 +56,7 @@ export default function Dashboards() {
         </div>
       </header>
 
-      <EmbedNotice app="Superset" embed={detail.data?.embed} />
+      <EmbedNotice app="Superset" embed={superset?.embed} />
 
       <div className="flex items-center gap-2 flex-wrap">
         {ENTRY_PATHS.map(e => (

@@ -163,6 +163,15 @@ export type AppEmbed = {
   checked?: string
 }
 
+/** `GET /api/embeds` — just what a signed-in user needs to use the embedded apps. */
+export type EmbedApp = {
+  id: string
+  name: string
+  external_url: string
+  status: PlatformApp['status']
+  embed: AppEmbed
+}
+
 /** `GET /api/apps/:id` — the detail view of one platform app. */
 export type AppDetail = {
   app: PlatformApp
@@ -236,6 +245,7 @@ export const api = {
   query:        (sql: string)                 => jpost<QueryResult>('/api/query', { sql }),
   jobs:         ()                            => jget<Job[]>('/api/jobs'),
   apps:         ()                            => jget<PlatformApp[]>('/api/apps'),
+  embeds:       ()                            => jget<EmbedApp[]>('/api/embeds'),
   app:          (id: string)                  => jget<AppDetail>(`/api/apps/${seg(id)}`),
   workloads:    ()                            => jget<WorkloadSnapshot>('/api/workloads'),
   createNamespace: (namespace: string)        => jpost<{ namespace: string }>('/api/catalog/namespaces', { namespace }),

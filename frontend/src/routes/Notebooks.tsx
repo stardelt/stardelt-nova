@@ -17,19 +17,12 @@ const ENTRY_PATHS: Array<{ label: string; path: string }> = [
 ]
 
 export default function Notebooks() {
-  const apps = useQuery({ queryKey: ['apps'], queryFn: api.apps, refetchInterval: 15_000 })
+  const apps = useQuery({ queryKey: ['embeds'], queryFn: api.embeds, refetchInterval: 15_000 })
   const jupyter = apps.data?.find(a => a.id === 'jupyterhub')
   const up = jupyter?.status === 'up'
   // Only http(s) URLs may reach `href` / iframe `src`; anything else falls back, then to nothing.
   const base = safeHttpUrl(jupyter?.external_url) ?? safeHttpUrl(FALLBACK)
 
-  // The detail endpoint carries what JupyterHub itself says about being framed.
-  const detail = useQuery({
-    queryKey: ['app', 'jupyterhub'],
-    queryFn: () => api.app('jupyterhub'),
-    refetchInterval: 30_000,
-    retry: false,
-  })
 
   const [path, setPath] = useState('/hub/home')
   const src = base ? `${base.replace(/\/+$/, '')}${path}` : undefined
@@ -51,7 +44,7 @@ export default function Notebooks() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <EmbedBadge embed={detail.data?.embed} />
+          <EmbedBadge embed={jupyter?.embed} />
           <span className={['badge', up ? 'border-success/40 bg-success/10 text-success' : 'border-border bg-bg-soft text-text-mute'].join(' ')}>
             <span className={['w-1.5 h-1.5 rounded-full', up ? 'bg-success' : 'bg-text-mute'].join(' ')} />
             {up ? 'running' : (jupyter?.status ?? 'unknown')}
@@ -79,7 +72,7 @@ export default function Notebooks() {
         <span className="ml-auto text-xs text-text-mute font-mono">{base ?? 'no valid JupyterHub URL'}</span>
       </div>
 
-      <EmbedNotice app="JupyterHub" embed={detail.data?.embed} />
+      <EmbedNotice app="JupyterHub" embed={jupyter?.embed} />
 
       {up && src ? (
         // Same trade-off as the Superset frame: scripts + its own origin's cookies, forms, popups,
