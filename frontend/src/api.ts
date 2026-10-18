@@ -173,6 +173,12 @@ export type AppEmbed = {
   detail?: string
   /** In-cluster page Nova read the headers from. */
   checked?: string
+  /**
+   * Sign-in host the app sends visitors without a session to (Keycloak), when
+   * that is a different host from the app itself. That page refuses framing, so
+   * the frame stays empty until the visitor signs in in a top-level tab.
+   */
+  sign_in_host?: string
 }
 
 /** `GET /api/apps/links` — the header's app switcher, safe for every signed-in user. */

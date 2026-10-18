@@ -731,6 +731,14 @@ fn http_client(state: &AppState) -> reqwest::Client {
 /// Read the framed page's headers so the UI can explain a blank frame instead of
 /// showing one. The page Nova frames is the external URL, but only the in-cluster
 /// address is reachable from here — the headers are the app's own either way.
+///
+/// Redirects are followed only while they stay on the app's hosts. A signed-out
+/// visitor's journey normally ends at the app's own login redirect (which carries
+/// the same CSP as its pages); following it one hop further lands on Keycloak,
+/// whose login page must refuse framing — judging *its* headers would report
+/// "blocked" for an app that is frameable (stardelt-nova#91). The host that hop
+/// goes to is reported as `sign_in_host` so the UI can offer the top-level sign-in
+/// instead of a blank frame.
 async fn embed_report(state: &AppState, spec: &Spec, base: &str) -> Embed {
     let Some(frame) = &spec.embed else {
         return Embed::unknown(String::new(), None);
@@ -747,25 +755,82 @@ async fn embed_report(state: &AppState, spec: &Spec, base: &str) -> Embed {
         return Embed::unknown(url, Some(checked));
     }
 
-    match http_client(state).get(&checked).send().await {
-        Ok(response) => match embed::frame_policy(response.headers(), base) {
-            embed::FramePolicy::Allowed => Embed {
-                url,
-                state: "allowed".into(),
-                blocked_by: None,
-                detail: None,
-                checked: Some(checked),
-            },
-            embed::FramePolicy::Blocked { header, value } => Embed {
-                url,
-                state: "blocked".into(),
-                blocked_by: Some(header.to_string()),
-                detail: Some(value),
-                checked: Some(checked),
-            },
-        },
+    let own_hosts = app_hosts(&checked, &url);
+    match framing_client(state, own_hosts.clone())
+        .get(&checked)
+        .send()
+        .await
+    {
+        Ok(response) => {
+            let sign_in_host = response
+                .status()
+                .is_redirection()
+                .then(|| {
+                    response
+                        .headers()
+                        .get("location")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|location| embed::sign_in_host(location, &checked, &own_hosts))
+                })
+                .flatten();
+            match embed::frame_policy(response.headers(), base) {
+                embed::FramePolicy::Allowed => Embed {
+                    url,
+                    state: "allowed".into(),
+                    blocked_by: None,
+                    detail: None,
+                    checked: Some(checked),
+                    sign_in_host,
+                },
+                embed::FramePolicy::Blocked { header, value } => Embed {
+                    url,
+                    state: "blocked".into(),
+                    blocked_by: Some(header.to_string()),
+                    detail: Some(value),
+                    checked: Some(checked),
+                    sign_in_host,
+                },
+            }
+        }
         Err(_) => Embed::unknown(url, Some(checked)),
     }
+}
+
+/// The hosts the app answers from: the in-cluster address Nova reads headers
+/// from, plus the public URL a browser uses. A redirect between them is still
+/// the app; a redirect anywhere else is not.
+fn app_hosts(checked: &str, public_url: &str) -> Vec<String> {
+    let mut hosts: Vec<String> = Vec::new();
+    for url in [checked, public_url] {
+        if let Some(host) = url::Url::parse(url)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_string))
+            && !hosts.contains(&host)
+        {
+            hosts.push(host);
+        }
+    }
+    hosts
+}
+
+/// The client the framing check uses: same short deadline as every other probe,
+/// but redirects stop at the app's own hosts (a few hops to allow the app's own
+/// login loop, then a stop — the journey off the app is what `sign_in_host`
+/// reports, not something to fetch).
+fn framing_client(state: &AppState, own_hosts: Vec<String>) -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(Duration::from_millis(1500))
+        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+            if attempt.previous().len() >= 5 {
+                return attempt.stop();
+            }
+            match attempt.url().host_str() {
+                Some(host) if own_hosts.iter().any(|own| own == host) => attempt.follow(),
+                _ => attempt.stop(),
+            }
+        }))
+        .build()
+        .unwrap_or_else(|_| state.http.clone())
 }
 
 async fn probe(state: &AppState, url: &str) -> String {
@@ -1075,5 +1140,26 @@ mod tests {
         assert_eq!(component_label("dag_processor"), "DAG processor");
         assert_eq!(component_label("celery_worker"), "Celery worker");
         assert_eq!(component_label("scheduler"), "Scheduler");
+    }
+
+    #[test]
+    fn embed_checks_stop_at_the_app_s_own_hosts() {
+        // The in-cluster address Nova probes and the public URL a browser uses:
+        // both count as the app, nothing else does.
+        assert_eq!(
+            app_hosts(
+                "http://hub:8081/hub/home",
+                "https://jupyter.alpha.dev.stardelt.io/hub/home"
+            ),
+            vec![
+                "hub".to_string(),
+                "jupyter.alpha.dev.stardelt.io".to_string()
+            ]
+        );
+        // An unparseable checked URL contributes nothing, not a stray host.
+        assert_eq!(
+            app_hosts("", "https://jupyter.alpha.dev.stardelt.io/hub/home"),
+            vec!["jupyter.alpha.dev.stardelt.io".to_string()]
+        );
     }
 }

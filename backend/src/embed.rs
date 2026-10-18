@@ -26,6 +26,14 @@ pub struct Embed {
     /// The in-cluster page Nova read the headers from.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub checked: Option<String>,
+    /// Host a visitor without a session is sent to for sign-in, when the app's
+    /// own page redirects off its hosts before it renders. That page (Keycloak
+    /// on this platform) refuses framing, so the frame stays empty until the
+    /// visitor signs in in a top-level tab; the UI turns this into a call to
+    /// action. `None` when the app answers for itself — a login form on its own
+    /// host is part of the app and frames fine.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sign_in_host: Option<String>,
 }
 
 impl Embed {
@@ -38,6 +46,7 @@ impl Embed {
             blocked_by: None,
             detail: None,
             checked,
+            sign_in_host: None,
         }
     }
 }
@@ -46,6 +55,24 @@ impl Embed {
 pub enum FramePolicy {
     Allowed,
     Blocked { header: &'static str, value: String },
+}
+
+/// The host a redirect hands the browser to, when that leaves the app's own
+/// hosts — the sign-in detour. The page there (Keycloak's login form on this
+/// platform) refuses framing by design, so a signed-out visitor's frame stays
+/// empty; the UI uses this to offer "open in a new tab and sign in" instead.
+///
+/// `request_url` is the URL the response came from (a relative `Location` is
+/// resolved against it) and `own_hosts` are the hosts the app answers from: its
+/// in-cluster address and its public URL. A redirect between those is still the
+/// app; anything else is the detour.
+pub fn sign_in_host(location: &str, request_url: &str, own_hosts: &[String]) -> Option<String> {
+    let target = url::Url::parse(request_url).ok()?.join(location).ok()?;
+    let host = target.host_str()?;
+    if own_hosts.iter().any(|own| own == host) {
+        return None;
+    }
+    Some(host.to_string())
 }
 
 /// Judge a page's framing policy from its response headers. `base_domain` is the
@@ -254,5 +281,54 @@ mod tests {
         assert_eq!(host_of("alpha.dev.stardelt.io/"), BASE);
         // Quotes are stripped by `permits`, which is where `'self'` is judged.
         assert_eq!(host_of("'self'"), "'self'");
+    }
+
+    fn hosts() -> Vec<String> {
+        vec![
+            "hub".to_string(),
+            "jupyter.alpha.dev.stardelt.io".to_string(),
+        ]
+    }
+
+    #[test]
+    fn a_redirect_between_the_app_s_own_hosts_is_not_a_sign_in() {
+        // The hub's relative redirect to its own login page.
+        assert_eq!(
+            sign_in_host(
+                "/hub/login?next=%2Fhub%2Fhome",
+                "http://hub:8081/hub/home",
+                &hosts()
+            ),
+            None
+        );
+        // The same app's public host, if it ever redirects to it.
+        assert_eq!(
+            sign_in_host(
+                "https://jupyter.alpha.dev.stardelt.io/hub/home",
+                "http://hub:8081/hub/home",
+                &hosts()
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_redirect_to_the_idp_is_a_sign_in_detour() {
+        assert_eq!(
+            sign_in_host(
+                "https://id.alpha.dev.stardelt.io/realms/stardelt/protocol/openid-connect/auth?client_id=jupyterhub",
+                "http://hub:8081/hub/login",
+                &hosts()
+            ),
+            Some("id.alpha.dev.stardelt.io".to_string())
+        );
+    }
+
+    #[test]
+    fn an_unparseable_location_has_no_host() {
+        assert_eq!(
+            sign_in_host("http://[", "http://hub:8081/hub/home", &hosts()),
+            None
+        );
     }
 }

@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../api'
-import { EmbedBadge, EmbedNotice } from '../components/EmbedNotice'
+import { EmbedBadge, EmbedNotice, SignInNotice } from '../components/EmbedNotice'
 import { safeHttpUrl } from '../format'
 
 // JupyterHub runs as its own app. Prefer the deployed app URL (from /api/apps,
@@ -40,7 +40,7 @@ export default function Notebooks() {
           <p className="text-text-dim text-sm mt-1">
             JupyterHub, embedded — one notebook server per user, on the same catalog.
             {up
-              ? <> Login: any username, password <span className="font-mono">stardelt</span> (dev DummyAuthenticator).</>
+              ? <> Signed in through Keycloak, same account as Nova; the hub sends you on to your own JupyterLab.</>
               : apps.isLoading
                 ? <> Checking whether it is deployed…</>
                 : apps.isError
@@ -54,7 +54,16 @@ export default function Notebooks() {
             <span className={['w-1.5 h-1.5 rounded-full', up ? 'bg-success' : 'bg-text-mute'].join(' ')} />
             {up ? 'running' : (jupyter?.status ?? 'unknown')}
           </span>
-          {src && <a href={src} target="_blank" rel="noreferrer" className="btn-ghost py-1.5">Open in new tab ↗</a>}
+          {src && (
+            <a
+              href={src}
+              target="_blank"
+              rel="noreferrer"
+              className={jupyter?.embed?.sign_in_host ? 'btn-primary py-1.5' : 'btn-ghost py-1.5'}
+            >
+              Open in new tab ↗
+            </a>
+          )}
         </div>
       </header>
 
@@ -78,6 +87,7 @@ export default function Notebooks() {
       </div>
 
       <EmbedNotice app="JupyterHub" embed={jupyter?.embed} />
+      <SignInNotice app="JupyterHub" embed={jupyter?.embed} url={src} />
 
       {up && src ? (
         // Same trade-off as the Superset frame: scripts + its own origin's cookies, forms, popups,

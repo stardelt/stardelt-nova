@@ -60,3 +60,31 @@ export function EmbedBadge({ embed }: { embed?: AppEmbed }) {
     </span>
   )
 }
+
+/**
+ * The app is frameable, but a visitor without a session is sent to a sign-in
+ * service on another host first — and that page (Keycloak) must never be
+ * framed. The browser shows nothing until the visitor has a session, so give
+ * the obvious action — open the app top-level, sign in, come back — instead of
+ * leaving a blank rectangle that looks like a broken notebook.
+ */
+export function SignInNotice({ app, embed, url }: { app: string; embed?: AppEmbed; url?: string }) {
+  if (!embed?.sign_in_host || !url) return null
+  return (
+    <div className="card border-accent/40 bg-accent/5 px-4 py-3 text-sm">
+      <div className="flex items-start gap-3">
+        <span className="badge shrink-0 border-accent/40 bg-accent/15 text-accent">sign in first</span>
+        <div className="min-w-0">
+          <div>
+            {app} sends everyone without a session to{' '}
+            <span className="font-mono">{embed.sign_in_host}</span> to sign in — deliberately not
+            frameable, so the frame below stays empty until you have signed in once.
+          </div>
+          <a href={url} target="_blank" rel="noreferrer" className="btn-primary mt-3">
+            Open {app} in a new tab and sign in ↗
+          </a>
+        </div>
+      </div>
+    </div>
+  )
+}
