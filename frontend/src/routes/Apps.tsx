@@ -89,7 +89,11 @@ function AppCard({ app }: { app: PlatformApp }) {
         <Link to={`/apps/${app.id}`} className="btn-ghost ml-auto py-1.5 px-3 text-xs">
           Details <Icon name="arrow" className="w-3.5 h-3.5" />
         </Link>
-        {externalUrl && (
+        {/* Only link what is actually serving. The ingress exists for every app in the
+            playground, so an uninstalled Superset answers with an ingress 503 — offering
+            that link is how a user ends up staring at one. See issue #70 for the
+            not-installed-vs-unreachable wording. */}
+        {externalUrl && up && (
           <a
             href={externalUrl}
             target="_blank"
@@ -99,6 +103,11 @@ function AppCard({ app }: { app: PlatformApp }) {
           >
             Open
           </a>
+        )}
+        {externalUrl && !up && (
+          <span className="py-1.5 px-3 text-xs text-text-mute" title={`${externalUrl} is not answering yet`}>
+            no link
+          </span>
         )}
       </div>
     </div>

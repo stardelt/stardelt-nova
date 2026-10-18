@@ -42,7 +42,7 @@ const groups: NavGroup[] = [
     // Operating the platform is not a data-engineering task: an analyst has no use for
     // the service inventory, the workload list or the settings page, and the noise
     // makes the parts they do use harder to find.
-    label: 'Platform',
+    label: 'Admin',
     admin: true,
     items: [
       { to: '/apps', label: 'Apps', icon: 'grid' },
@@ -106,12 +106,11 @@ export default function Shell() {
   return (
     <div className="h-full grid grid-cols-[250px_1fr]">
       <aside className="border-r border-border bg-bg-elev/50 backdrop-blur flex flex-col min-h-0">
-        <div className="p-5 flex items-center gap-3">
-          <div className="w-8 h-8 rounded-[11px] bg-linear-to-b from-accent to-accent-deep shadow-lg shadow-accent/20" />
-          <div className="leading-tight">
-            <div className="font-bold tracking-tight">stardelt</div>
-            <div className="text-[11px] text-text-mute -mt-0.5">Nova</div>
-          </div>
+        <div className="p-5 flex items-center gap-2.5">
+          {/* The brand asset, not a stand-in: `logo-wordmark.svg` is the same file the
+              favicon and the docs use, so the product and its documentation cannot drift. */}
+          <img src="/logo-wordmark.svg" alt="stardelt" className="h-7 w-auto" />
+          <div className="text-[11px] text-text-mute leading-tight">Nova</div>
         </div>
 
         <div className="px-3 pb-3">

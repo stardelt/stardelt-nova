@@ -25,7 +25,9 @@ export default function Notebooks() {
 
 
   const [path, setPath] = useState('/hub/home')
-  const src = base ? `${base.replace(/\/+$/, '')}${path}` : undefined
+  // Only address the app when it is actually up: the fallback is a developer's
+  // port-forward, and the deployed host answers 503 when nothing is behind the ingress.
+  const src = up && base ? `${base.replace(/\/+$/, '')}${path}` : undefined
 
   return (
     <div className="h-full flex flex-col gap-4">
@@ -98,7 +100,7 @@ export default function Notebooks() {
             <div className="mt-4 rounded-[10px] border border-border bg-bg-soft/60 px-3 py-2 font-mono text-xs">
               make install-notebooks
             </div>
-            {base && <a href={base} className="btn-ghost mt-4">Try {base} anyway</a>}
+            {up && base && <a href={base} className="btn-ghost mt-4">Open {base}</a>}
           </div>
         </div>
       )}

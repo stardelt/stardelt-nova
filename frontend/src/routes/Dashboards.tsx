@@ -28,7 +28,9 @@ export default function Dashboards() {
 
 
   const [path, setPath] = useState('/superset/welcome/')
-  const src = base ? `${base.replace(/\/+$/, '')}${path}` : undefined
+  // Only address the app when it is actually up: the fallback is a developer's
+  // port-forward, and the deployed host answers 503 when nothing is behind the ingress.
+  const src = deployed && base ? `${base.replace(/\/+$/, '')}${path}` : undefined
 
   return (
     <div className="h-full flex flex-col gap-4">
@@ -97,7 +99,7 @@ export default function Dashboards() {
             <div className="text-text-mute text-sm mt-1">
               It needs a bigger node; enable it with the <span className="font-mono">full</span> profile.
             </div>
-            {base && <a href={base} className="btn-ghost mt-4">Try {base} anyway</a>}
+            {deployed && base && <a href={base} className="btn-ghost mt-4">Open {base}</a>}
           </div>
         </div>
       )}
