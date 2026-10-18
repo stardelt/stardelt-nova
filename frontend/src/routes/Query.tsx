@@ -1,11 +1,19 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
-import { api, downloadCsv, formatCell, type QueryResult } from '../api'
+import { api, allTables, downloadCsv, formatCell, type QueryResult, type TableRef } from '../api'
 import { Icon } from '../components/Icon'
+import { sqlTableRef } from '../format'
 
 const HISTORY_KEY = 'stardelt-nova:history'
 const HISTORY_LIMIT = 50
-const SAMPLE = 'SELECT * FROM warehouse.nyc_taxi.yellow_trips LIMIT 100'
+
+/** A sample that exists: the NYC demo table if present, else the first table, else a constant query. */
+function pickSample(tables: TableRef[] | undefined): string {
+  if (!tables || tables.length === 0) return 'SELECT 1'
+  const t = tables.find(x => x.ns === 'nyc_taxi' && x.name === 'yellow_trips') ?? tables[0]
+  return `SELECT * FROM ${sqlTableRef(t.ns, t.name)} LIMIT 100`
+}
 
 function loadHistory(): string[] {
   try {
@@ -27,7 +35,11 @@ function saveHistory(h: string[]) {
 
 export default function Query() {
   const [params] = useSearchParams()
-  const [sql, setSql] = useState<string>(params.get('sql') ?? SAMPLE)
+  const tables = useQuery({ queryKey: ['catalog', 'all'], queryFn: allTables })
+  const sample = pickSample(tables.data)
+  // `null` = the user has not typed or picked anything: show the sample.
+  const [typed, setTyped] = useState<string | null>(params.get('sql'))
+  const sql = typed ?? sample
   const [running, setRunning] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<QueryResult | null>(null)
@@ -37,7 +49,7 @@ export default function Query() {
 
   useEffect(() => {
     const fromUrl = params.get('sql')
-    if (fromUrl) setSql(fromUrl)
+    if (fromUrl) setTyped(fromUrl)
   }, [params])
 
   async function run() {
@@ -72,7 +84,7 @@ export default function Query() {
           <textarea
             ref={taRef}
             value={sql}
-            onChange={e => setSql(e.target.value)}
+            onChange={e => setTyped(e.target.value)}
             onKeyDown={onKey}
             aria-label="SQL query"
             className="w-full h-36 bg-transparent font-mono text-sm outline-hidden resize-y placeholder:text-text-mute"
@@ -81,7 +93,7 @@ export default function Query() {
           />
           <div className="flex items-center gap-2 mt-2">
             <div className="text-xs text-text-mute">⌘/Ctrl+Enter to run</div>
-            <button onClick={() => setSql(SAMPLE)} className="btn-ghost ml-auto py-1.5">Sample</button>
+            <button onClick={() => setTyped(null)} className="btn-ghost ml-auto py-1.5">Sample</button>
             <button onClick={run} disabled={running} className="btn-primary py-1.5">
               <Icon name="terminal" className="w-4 h-4" />
               {running ? 'Running…' : 'Run'}
@@ -140,7 +152,7 @@ export default function Query() {
           {history.map((h, i) => (
             <li key={i}>
               <button
-                onClick={() => { setSql(h); taRef.current?.focus() }}
+                onClick={() => { setTyped(h); taRef.current?.focus() }}
                 className="w-full text-left text-xs font-mono text-text-dim hover:text-text break-all"
                 title={h}
               >
