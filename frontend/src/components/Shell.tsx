@@ -102,7 +102,7 @@ export default function Shell() {
     <div className="h-full grid grid-cols-[250px_1fr]">
       <aside className="border-r border-border bg-bg-elev/50 backdrop-blur flex flex-col min-h-0">
         <div className="p-5 flex items-center gap-3">
-          <div className="w-8 h-8 rounded-[11px] bg-gradient-to-b from-accent to-accent-deep shadow-lg shadow-accent/20" />
+          <div className="w-8 h-8 rounded-[11px] bg-linear-to-b from-accent to-accent-deep shadow-lg shadow-accent/20" />
           <div className="leading-tight">
             <div className="font-bold tracking-tight">stardelt</div>
             <div className="text-[11px] text-text-mute -mt-0.5">Nova</div>
