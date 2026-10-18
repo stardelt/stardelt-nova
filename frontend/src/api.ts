@@ -119,7 +119,13 @@ export type PlatformApp = {
    * field (issue #69, `apps.rs`) is landing separately; see `isBrowsable()`.
    */
   browsable?: boolean
-  status: 'up' | 'unreachable' | 'unknown'
+  /**
+   * `up` | `unreachable` | `unknown` | `not-installed`. The last one means the cluster
+   * was read and holds no workload for this app: an optional component that was never
+   * installed is a fact, not an outage, so it is shown as "not installed" and left out
+   * of the "x / y up" counts.
+   */
+  status: 'up' | 'unreachable' | 'unknown' | 'not-installed'
   /** Images the app's workloads actually run, read from the cluster (may be empty). */
   images: string[]
 }

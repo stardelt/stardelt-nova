@@ -2,7 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { api, type PlatformApp } from '../api'
 import { Icon } from '../components/Icon'
-import { isBrowsable, safeHttpUrl, shortImage } from '../format'
+import { isBrowsable, safeHttpUrl, shortImage, statusLabel } from '../format'
 
 export default function Apps() {
   const apps = useQuery({ queryKey: ['apps'], queryFn: api.apps, refetchInterval: 15_000 })
@@ -14,8 +14,12 @@ export default function Apps() {
     groups.set(app.category, list)
   }
 
-  const up = (apps.data ?? []).filter(a => a.status === 'up').length
-  const total = apps.data?.length ?? 0
+  // "x / y up" counts what is installed. An app the cluster holds no workload for was
+  // never installed — counting it as down reads as a degraded platform when nothing is
+  // wrong (#70). It stays in the list below, with its status.
+  const installed = (apps.data ?? []).filter(a => a.status !== 'not-installed')
+  const up = installed.filter(a => a.status === 'up').length
+  const total = installed.length
 
   return (
     <div className="max-w-6xl space-y-6">
@@ -84,7 +88,7 @@ function AppCard({ app }: { app: PlatformApp }) {
           up ? 'border-success/40 bg-success/10 text-success' : 'border-border bg-bg-soft text-text-mute',
         ].join(' ')}>
           <span className={['w-1.5 h-1.5 rounded-full', up ? 'bg-success' : 'bg-text-mute'].join(' ')} />
-          {up ? 'running' : app.status}
+          {statusLabel(app.status)}
         </span>
         <Link to={`/apps/${app.id}`} className="btn-ghost ml-auto py-1.5 px-3 text-xs">
           Details <Icon name="arrow" className="w-3.5 h-3.5" />

@@ -20,8 +20,14 @@ export default function Settings() {
   const snapshot = workloads.data
   const rows = snapshot?.workloads ?? []
   const images = [...new Set(rows.map(w => w.image).filter(Boolean))]
-  const running = rows.filter(w => w.desired > 0 && w.ready === w.desired).length
-  const up = (apps.data ?? []).filter(a => a.status === 'up').length
+  // A workload scaled to zero (`user-placeholder` is 0/0) is a fact, not a pod that failed
+  // to start: it is not part of "running", so it is not part of the count either (#70).
+  const active = rows.filter(w => w.desired > 0)
+  const running = active.filter(w => w.ready === w.desired).length
+  // Same rule for apps: one the cluster holds no workload for was never installed, so it is
+  // not an app that failed to answer (#70).
+  const installed = (apps.data ?? []).filter(a => a.status !== 'not-installed')
+  const up = installed.filter(a => a.status === 'up').length
 
   // A count is a fact only while the cluster answers. `stale` is still worth showing —
   // it is the last known state, and the notice above says so — but an unanswered read is
@@ -29,7 +35,7 @@ export default function Settings() {
   const workloadCount = workloads.isLoading
     ? '…'
     : snapshot && snapshot.state !== 'unreachable'
-      ? `${running}/${rows.length}`
+      ? `${running}/${active.length}`
       : '—'
 
   return (
@@ -72,7 +78,7 @@ export default function Settings() {
               value={workloadCount}
               hint={snapshot?.state === 'stale' ? 'last known state' : undefined}
             />
-            <Row label="Apps reachable" value={apps.isLoading ? '…' : `${up}/${apps.data?.length ?? 0}`} />
+            <Row label="Apps reachable" value={apps.isLoading ? '…' : `${up}/${installed.length}`} />
             <Row label="Distinct images" value={String(images.length)} />
           </dl>
           <div className="flex gap-2 mt-4">
