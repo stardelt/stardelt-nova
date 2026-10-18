@@ -22,7 +22,8 @@ Browser
          ├─ POST /api/catalog/namespaces  create schema
          ├─ POST /api/query            → Trino query engine
          ├─ GET  /api/jobs             recent activity
-         ├─ GET  /api/apps             installed apps, live status + images
+         ├─ GET  /api/apps             installed apps: live status + images
+         ├─ GET  /api/apps/:id         one app: workloads, facts, deep links
          ├─ GET  /api/workloads        workloads in Nova's namespace + images
          ├─ POST /api/ingest/upload    load CSV/JSON into a table
          ├─ POST /api/transfer         copy table → table
@@ -57,6 +58,26 @@ stardelt-nova/
 ├── Cargo.toml        workspace root (members: ["backend"])
 └── Makefile          dev / build / image targets
 ```
+
+---
+
+## Platform apps
+
+`/apps` lists every service Nova knows about with its live status and the images
+its workloads actually run. `/apps/:id` opens one service: the workloads and
+their replicas, deep links into the app's own UI, the URL Nova probes for
+liveness, and facts read from the service's own API —
+
+| App | Facts Nova reads |
+|---|---|
+| Trino | engine version, state, coordinator, uptime (`/v1/info`) |
+| Lakekeeper | warehouse name + id, catalog version, bootstrap state, authorization backend, license, dependency health (`/management/v1/*`, `/health`) |
+| Superset | health, version (`/health`) |
+| Airflow | per-component health: metadata database, scheduler, triggerer, DAG processor (`/health`) |
+| JupyterHub | hub/proxy/scheduler workloads and their replicas — the hub API needs a token, so Nova reads no fact from it |
+
+Every fact names its source and is omitted when the service does not answer: the
+page shows what Nova observed, never a guess.
 
 ---
 

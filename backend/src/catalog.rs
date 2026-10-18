@@ -32,7 +32,7 @@ pub struct CreateNamespaceRequest {
     pub namespace: String,
 }
 
-async fn resolve_warehouse_id(state: &AppState) -> Result<String, String> {
+pub(crate) async fn resolve_warehouse_id(state: &AppState) -> Result<String, String> {
     state
         .warehouse_id
         .get_or_try_init(|| async {

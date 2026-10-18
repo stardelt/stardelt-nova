@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
+import { Link } from 'react-router-dom'
 import { api, type PlatformApp } from '../api'
 import { Icon } from '../components/Icon'
 import { shortImage } from '../format'
@@ -59,7 +60,9 @@ function AppCard({ app }: { app: PlatformApp }) {
           <Icon name="grid" className="w-4 h-4" />
         </div>
         <div className="min-w-0 flex-1">
-          <div className="font-semibold truncate">{app.name}</div>
+          <Link to={`/apps/${app.id}`} className="font-semibold truncate block hover:text-accent transition">
+            {app.name}
+          </Link>
           <div className="text-xs text-text-dim leading-snug">{app.description}</div>
         </div>
       </div>
@@ -82,12 +85,19 @@ function AppCard({ app }: { app: PlatformApp }) {
           <span className={['w-1.5 h-1.5 rounded-full', up ? 'bg-success' : 'bg-text-mute'].join(' ')} />
           {up ? 'running' : app.status}
         </span>
-        {app.external_url ? (
-          <a href={app.external_url} target="_blank" rel="noreferrer" className="btn-ghost ml-auto py-1.5 px-3 text-xs">
-            Open <Icon name="arrow" className="w-3.5 h-3.5" />
+        <Link to={`/apps/${app.id}`} className="btn-ghost ml-auto py-1.5 px-3 text-xs">
+          Details <Icon name="arrow" className="w-3.5 h-3.5" />
+        </Link>
+        {app.external_url && (
+          <a
+            href={app.external_url}
+            target="_blank"
+            rel="noreferrer"
+            className="btn-ghost py-1.5 px-3 text-xs"
+            title={`Open ${app.external_url}`}
+          >
+            Open
           </a>
-        ) : (
-          <span className="ml-auto text-[11px] text-text-mute">no link</span>
         )}
       </div>
     </div>
