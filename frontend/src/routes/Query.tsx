@@ -74,7 +74,7 @@ export default function Query() {
             value={sql}
             onChange={e => setSql(e.target.value)}
             onKeyDown={onKey}
-            className="w-full h-36 bg-transparent font-mono text-sm outline-none resize-y placeholder:text-text-mute"
+            className="w-full h-36 bg-transparent font-mono text-sm outline-hidden resize-y placeholder:text-text-mute"
             spellCheck={false}
             placeholder="SELECT ..."
           />

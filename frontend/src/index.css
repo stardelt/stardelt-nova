@@ -1,9 +1,35 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import 'tailwindcss';
 
-/* Palette as RGB channels. Dark is the default (stardelt brand); light is opt-in
-   via <html data-theme="light">, toggled from the top bar. */
+/* Tailwind 4 is configured in CSS, not in a JS file: `tailwind.config.ts` is gone and
+   `@theme` below is the whole theme. Source files are detected automatically (project
+   root, respects .gitignore), which is why the old `content` globs — index.html and
+   src — need no replacement. */
+
+/* Brand tokens. Dark is the default (stardelt brand); light is opt-in via
+   <html data-theme="light">, toggled from the top bar.
+
+   `inline` is what keeps the toggle working: it makes every utility emit the variable
+   itself — `background-color: rgb(var(--c-bg))` — instead of baking the value into the
+   utility at build time, so flipping `--c-bg` under `[data-theme='light']` repaints the
+   whole UI. The channels stay space-separated triplets for the same reason they were in
+   Tailwind 3, but the alpha modifiers (`bg-bg-elev/60`) no longer rely on the
+   `<alpha-value>` placeholder: Tailwind 4 computes them with color-mix(). */
+@theme inline {
+  --color-bg: rgb(var(--c-bg));
+  --color-bg-elev: rgb(var(--c-bg-elev));
+  --color-bg-soft: rgb(var(--c-bg-soft));
+  --color-border: rgb(var(--c-border));
+  --color-text: rgb(var(--c-text));
+  --color-text-dim: rgb(var(--c-text-dim));
+  --color-text-mute: rgb(var(--c-text-mute));
+  --color-accent: rgb(var(--c-accent));
+  --color-accent-deep: rgb(var(--c-accent-deep));
+  --color-success: rgb(var(--c-success));
+
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
 @layer base {
   :root,
   [data-theme='dark'] {
@@ -68,20 +94,19 @@
   .card {
     @apply rounded-[14px] border border-border bg-bg-elev/60;
   }
-  .btn {
-    @apply inline-flex items-center justify-center gap-2 px-3.5 py-2 rounded-[10px] text-sm font-medium transition;
-  }
+  /* The three button variants repeat the base instead of `@apply btn`: Tailwind 4's
+     `@apply` is for utilities, and a class defined in `@layer components` is not one. */
   .btn-primary {
-    @apply btn bg-accent text-white hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed;
+    @apply inline-flex items-center justify-center gap-2 px-3.5 py-2 rounded-[10px] text-sm font-medium transition bg-accent text-white hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed;
   }
   .btn-ghost {
-    @apply btn border border-border bg-bg-elev/60 text-text-dim hover:text-text hover:border-accent/40;
+    @apply inline-flex items-center justify-center gap-2 px-3.5 py-2 rounded-[10px] text-sm font-medium transition border border-border bg-bg-elev/60 text-text-dim hover:text-text hover:border-accent/40;
   }
   .btn-danger {
-    @apply btn border border-red-500/40 bg-red-500/10 text-red-500 hover:bg-red-500/15;
+    @apply inline-flex items-center justify-center gap-2 px-3.5 py-2 rounded-[10px] text-sm font-medium transition border border-red-500/40 bg-red-500/10 text-red-500 hover:bg-red-500/15;
   }
   .input {
-    @apply w-full bg-bg-soft/60 border border-border rounded-[10px] px-3 py-2 text-sm text-text outline-none focus:border-accent/60 placeholder:text-text-mute;
+    @apply w-full bg-bg-soft/60 border border-border rounded-[10px] px-3 py-2 text-sm text-text outline-hidden focus:border-accent/60 placeholder:text-text-mute;
   }
   .label {
     @apply text-[11px] uppercase tracking-widest text-text-mute;

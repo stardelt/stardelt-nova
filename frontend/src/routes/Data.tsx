@@ -146,7 +146,7 @@ function LoadForm() {
             value={content}
             onChange={e => setContent(e.target.value)}
             spellCheck={false}
-            className="w-full h-56 bg-bg-soft/40 border border-border rounded-[10px] p-3 font-mono text-xs outline-none focus:border-accent/60 resize-y"
+            className="w-full h-56 bg-bg-soft/40 border border-border rounded-[10px] p-3 font-mono text-xs outline-hidden focus:border-accent/60 resize-y"
           />
         </Field>
 
