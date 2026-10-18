@@ -163,6 +163,20 @@ export default function Shell() {
             <Icon name="plus" className="w-4 h-4" />
             Load data
           </NavLink>
+          {me.data?.auth_mode === 'oidc' && (
+            <div className="flex items-center gap-2 pl-2 border-l border-border">
+              <div className="text-right leading-tight min-w-0" title={me.data.email ?? me.data.sub ?? ''}>
+                <div className="text-sm truncate max-w-[12rem]">{me.data.user}</div>
+                {me.data.is_admin && <div className="text-[11px] text-text-mute">admin</div>}
+              </div>
+              {/* A plain form POST: the backend clears the session and 303s to the IdP's logout. */}
+              <form method="post" action="/api/auth/logout">
+                <button type="submit" className="btn-ghost px-2.5 py-1.5 text-sm">
+                  Sign out
+                </button>
+              </form>
+            </div>
+          )}
           <button
             onClick={toggleTheme}
             title={theme === 'dark' ? 'Switch to light' : 'Switch to dark'}

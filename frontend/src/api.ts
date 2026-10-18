@@ -1,11 +1,27 @@
 // API client for the Nova backend.
 // Same-origin in production (backend serves static UI), proxied via vite dev server locally.
+// Auth is a same-origin HttpOnly session cookie (oidc mode) — no tokens in JS.
+
+import { redirectToLogin } from './auth'
 
 export type Me = {
+  /** Display name (`preferred_username` / `email` / `upn` / `name` in oidc mode). */
   user: string
-  auth_mode: string
+  /** `static-dev` (no login) or `oidc`. */
+  auth_mode: 'static-dev' | 'oidc' | string
   demo: boolean
   warehouse: string
+  // The fields below are present in oidc mode only — claims, never tokens.
+  sub?: string
+  email?: string | null
+  name?: string | null
+  groups?: string[]
+  roles?: string[]
+  groups_overage?: boolean
+  is_admin?: boolean
+  via?: 'session' | 'bearer'
+  /** False until Nova forwards the user's token to Trino/Lakekeeper (phase 2). */
+  identity_forwarding?: boolean
 }
 
 export type Warehouse = { name: string; id: string }
@@ -162,8 +178,17 @@ async function readJson<T>(path: string, r: Response): Promise<T> {
   }
 }
 
+/** A 401 means the session is missing or expired: go sign in, then come back. */
+function checkAuth(path: string, r: Response) {
+  if (r.status === 401) {
+    redirectToLogin()
+    throw new ApiError(`${path} → 401: signing in…`, 401)
+  }
+}
+
 async function jget<T>(path: string): Promise<T> {
   const r = await fetch(path)
+  checkAuth(path, r)
   if (!r.ok) throw new ApiError(`${path} → ${r.status}`, r.status)
   return readJson<T>(path, r)
 }
@@ -174,6 +199,7 @@ async function jpost<T>(path: string, body: unknown): Promise<T> {
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
   })
+  checkAuth(path, r)
   if (!r.ok) {
     const text = await r.text().catch(() => '')
     throw new ApiError(`${path} → ${r.status}: ${text}`, r.status)

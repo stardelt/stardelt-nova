@@ -3,6 +3,9 @@
 //! Endpoints:
 //!   GET  /api/me                            — current user + demo flag
 //!   GET  /api/health                        — backend liveness
+//!   GET  /api/auth/login                    — start OIDC sign-in (oidc mode)
+//!   GET  /api/auth/callback                 — OIDC redirect target (oidc mode)
+//!   POST /api/auth/logout                   — sign out locally and at the IdP
 //!   GET  /api/trino/cluster                 — Trino /v1/info (or demo stub)
 //!   GET  /api/catalog/warehouse             — resolved warehouse id+name
 //!   GET  /api/catalog/namespaces            — list namespaces
@@ -18,8 +21,11 @@
 //!   POST /api/transfer                      — copy table → table
 //!
 //! `NOVA_DEMO=1` serves an in-memory lakehouse so the UI runs with no cluster.
+//! `NOVA_AUTH_MODE=oidc` puts every `/api/*` route except `/api/health` and
+//! `/api/auth/*` behind OIDC sign-in (see `auth.rs`); `dev` (default) has no login.
 
 mod apps;
+mod auth;
 mod catalog;
 mod cluster;
 mod data;
@@ -31,7 +37,7 @@ mod trino;
 use std::sync::{Arc, Mutex, RwLock};
 
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -71,13 +77,59 @@ struct Me {
     warehouse: String,
 }
 
-async fn me(State(s): State<Arc<AppState>>) -> impl IntoResponse {
-    Json(Me {
-        user: s.dev_user.clone(),
-        auth_mode: "static-dev",
-        demo: s.demo,
-        warehouse: s.warehouse_name.clone(),
-    })
+/// `/api/me` in `oidc` mode: claims, never tokens. Nova still talks to Trino and
+/// Lakekeeper with its service connection, and says so (`identity_forwarding`).
+#[derive(Serialize)]
+struct OidcMe<'a> {
+    user: &'a str,
+    auth_mode: &'static str,
+    demo: bool,
+    warehouse: &'a str,
+    sub: &'a str,
+    email: Option<&'a str>,
+    name: Option<&'a str>,
+    groups: &'a [String],
+    roles: &'a [String],
+    groups_overage: bool,
+    is_admin: bool,
+    via: &'static str,
+    identity_forwarding: bool,
+}
+
+async fn me(
+    State(s): State<Arc<AppState>>,
+    principal: Option<Extension<auth::Principal>>,
+) -> Response {
+    // The auth middleware only runs (and only inserts a principal) in oidc mode;
+    // dev mode answers exactly as before.
+    match principal {
+        None => Json(Me {
+            user: s.dev_user.clone(),
+            auth_mode: "static-dev",
+            demo: s.demo,
+            warehouse: s.warehouse_name.clone(),
+        })
+        .into_response(),
+        Some(Extension(p)) => {
+            let id = &p.identity;
+            Json(OidcMe {
+                user: &id.display_name,
+                auth_mode: "oidc",
+                demo: s.demo,
+                warehouse: &s.warehouse_name,
+                sub: &id.sub,
+                email: id.email.as_deref(),
+                name: id.name.as_deref(),
+                groups: &id.groups,
+                roles: &id.roles,
+                groups_overage: id.groups_overage,
+                is_admin: id.is_admin,
+                via: p.via,
+                identity_forwarding: false,
+            })
+            .into_response()
+        }
+    }
 }
 
 async fn health() -> impl IntoResponse {
@@ -137,10 +189,12 @@ fn env_flag(name: &str) -> bool {
 /// cannot be checked by any test. That is exactly how the axum 0.8 `:param` → `{param}`
 /// change reached a published image and crash-looped the Deployment while CI stayed
 /// green — `api_router_builds` below now fails in CI instead.
+///
+/// These are the routes that sit behind sign-in in oidc mode; `/health` and
+/// `/auth/*` are added (unprotected) in `main`.
 fn api_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/me", get(me))
-        .route("/health", get(health))
         .route("/trino/cluster", get(trino_cluster))
         .route("/catalog/warehouse", get(catalog::warehouse_info))
         .route(
@@ -163,6 +217,10 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
+
+    // Fail closed: a half-configured oidc mode refuses to start.
+    let auth_mode = auth::AuthMode::from_env()
+        .map_err(|e| anyhow::anyhow!("refusing to start: auth configuration: {e}"))?;
 
     let demo_mode = env_flag("NOVA_DEMO");
     let demo_state = if demo_mode {
@@ -206,16 +264,59 @@ async fn main() -> anyhow::Result<()> {
         workloads: cluster::WorkloadCache::default(),
     });
 
+    let auth = match auth_mode {
+        auth::AuthMode::Dev => None,
+        auth::AuthMode::Oidc(cfg) => {
+            if !cfg.secure_cookies() {
+                tracing::warn!(public_url = %cfg.public_url, "NOVA_PUBLIC_URL is not https — session cookies are not Secure");
+            }
+            let a = auth::AuthState::new(*cfg, reqwest::Client::builder().build()?);
+            // Check the IdP now so a wrong issuer is a startup error. An unreachable IdP
+            // is not: Nova starts, sign-in fails (closed) and discovery is retried.
+            match a.provider.discovery().await {
+                Ok(d) => info!(issuer = %d.issuer, "oidc discovery ok"),
+                Err(e @ auth::AuthError::Misconfigured(_)) => {
+                    anyhow::bail!("refusing to start: {e}")
+                }
+                Err(e) => {
+                    tracing::warn!(reason = %e, "oidc discovery failed — sign-in unavailable until the identity provider answers")
+                }
+            }
+            Some(a)
+        }
+    };
+
     let static_dir = std::env::var("NOVA_STATIC_DIR").unwrap_or_else(|_| "/app/static".into());
 
-    let api = api_router();
+    let protected = api_router();
+
+    // Everything except /health and /auth/* requires a principal in oidc mode.
+    let api = match &auth {
+        Some(a) => Router::new()
+            .route("/health", get(health))
+            .merge(protected.route_layer(axum::middleware::from_fn_with_state(
+                a.clone(),
+                auth::require_auth,
+            )))
+            .nest("/auth", auth::router(a.clone())),
+        None => Router::new()
+            .route("/health", get(health))
+            .merge(protected)
+            .nest("/auth", auth::dev_router()),
+    };
 
     let app = Router::new()
         .nest("/api", api)
         .fallback_service(ServeDir::new(&static_dir).fallback(
             tower_http::services::ServeFile::new(format!("{static_dir}/index.html")),
         ))
-        .layer(TraceLayer::new_for_http())
+        // Spans carry the path only: query strings (e.g. the OIDC callback's `code`)
+        // stay out of logs.
+        .layer(TraceLayer::new_for_http().make_span_with(
+            |req: &axum::http::Request<axum::body::Body>| {
+                tracing::debug_span!("request", method = %req.method(), path = %req.uri().path())
+            },
+        ))
         .with_state(state.clone());
 
     let bind = std::env::var("NOVA_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
@@ -226,6 +327,7 @@ async fn main() -> anyhow::Result<()> {
         warehouse = %state.warehouse_name,
         static_dir = %static_dir,
         demo = state.demo,
+        auth = if auth.is_some() { "oidc" } else { "dev" },
         "nova backend starting"
     );
     let listener = tokio::net::TcpListener::bind(&bind).await?;
