@@ -40,7 +40,7 @@ export default function Notebooks() {
           <p className="text-text-dim text-sm mt-1">
             JupyterHub, embedded — one notebook server per user, on the same catalog.
             {up
-              ? <> Login: any username, password <span className="font-mono">stardelt</span> (dev DummyAuthenticator).</>
+              ? <> Sign in with your platform account. If the frame below stays blank, open the hub once in a new tab (the identity provider does not allow being framed).</>
               : apps.isLoading
                 ? <> Checking whether it is deployed…</>
                 : apps.isError
