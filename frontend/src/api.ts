@@ -169,6 +169,14 @@ export type AppEmbed = {
   checked?: string
 }
 
+/** `GET /api/apps/links` — the header's app switcher, safe for every signed-in user. */
+export type AppShortcut = {
+  id: string
+  name: string
+  category: string
+  external_url: string
+}
+
 /** `GET /api/embeds` — just what a signed-in user needs to use the embedded apps. */
 export type EmbedApp = {
   id: string
@@ -252,6 +260,7 @@ export const api = {
   jobs:         ()                            => jget<Job[]>('/api/jobs'),
   apps:         ()                            => jget<PlatformApp[]>('/api/apps'),
   embeds:       ()                            => jget<EmbedApp[]>('/api/embeds'),
+  links:        ()                            => jget<AppShortcut[]>('/api/apps/links'),
   app:          (id: string)                  => jget<AppDetail>(`/api/apps/${seg(id)}`),
   workloads:    ()                            => jget<WorkloadSnapshot>('/api/workloads'),
   createNamespace: (namespace: string)        => jpost<{ namespace: string }>('/api/catalog/namespaces', { namespace }),

@@ -341,6 +341,50 @@ async fn describe(s: &AppState, spec: &Spec, base: &str, snapshot: &[Workload]) 
     }
 }
 
+/// One entry of the header's app switcher: enough to open the app, and nothing else.
+#[derive(Serialize)]
+pub struct AppLink {
+    pub id: String,
+    pub name: String,
+    pub category: String,
+    pub external_url: String,
+}
+
+/// The apps a signed-in user may open, in the order the app specs declare them.
+///
+/// Nova itself is not a destination (you are already in it), and an app with no
+/// browsable surface has no URL worth offering. When no base domain is configured
+/// (demo mode, a local run) every URL is empty, so the honest answer is no links
+/// at all rather than anchors that go nowhere.
+fn links_for(base: &str) -> Vec<AppLink> {
+    SPECS
+        .iter()
+        .filter(|spec| spec.id != "nova" && browsable(spec))
+        .filter_map(|spec| {
+            let external_url = public_url(base, spec);
+            if external_url.is_empty() {
+                return None;
+            }
+            Some(AppLink {
+                id: spec.id.to_string(),
+                name: spec.name.to_string(),
+                category: spec.category.to_string(),
+                external_url,
+            })
+        })
+        .collect()
+}
+
+/// `GET /api/apps/links` — the header's app switcher, for every signed-in user.
+///
+/// Deliberately no status: liveness comes from cluster probes, which is operator
+/// information (see `apps::list`), and this endpoint is called by people who are
+/// not operators.
+pub async fn links() -> Json<Vec<AppLink>> {
+    let base = std::env::var("NOVA_BASE_DOMAIN").unwrap_or_default();
+    Json(links_for(&base))
+}
+
 pub async fn list(State(s): State<Arc<AppState>>) -> Json<Vec<PlatformApp>> {
     let base = std::env::var("NOVA_BASE_DOMAIN").unwrap_or_default();
     let snapshot = s.workloads.snapshot(s.kube.as_ref(), s.demo).await;
@@ -835,6 +879,22 @@ mod tests {
             "https://alpha.dev.stardelt.io"
         );
         assert_eq!(external_url("", "trino"), "");
+    }
+
+    #[test]
+    fn app_links_offer_the_browsable_apps_except_nova() {
+        let links = links_for("alpha.dev.stardelt.io");
+        let ids: Vec<&str> = links.iter().map(|l| l.id.as_str()).collect();
+        assert_eq!(ids, ["trino", "superset", "airflow", "jupyterhub"]);
+        assert!(
+            links.iter().all(|l| l.external_url.starts_with("https://")),
+            "every link must be an absolute https URL"
+        );
+        // Lakekeeper has no UI and Nova is where the user already is.
+        assert!(links.iter().all(|l| l.id != "nova" && l.id != "lakekeeper"));
+
+        // No base domain (demo mode, local run): no links, rather than empty hrefs.
+        assert!(links_for("").is_empty());
     }
 
     #[test]

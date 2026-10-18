@@ -285,6 +285,8 @@ fn api_router() -> Router<Arc<AppState>> {
         // Every signed-in user: what the embedded pages need (see apps::embeds). The
         // operator routes live in admin_router() instead.
         .route("/embeds", get(apps::embeds))
+        // Same audience, same rule: only what a person can open, never workload data.
+        .route("/apps/links", get(apps::links))
         .route("/ingest/upload", post(data::upload))
         .route("/transfer", post(data::transfer))
 }

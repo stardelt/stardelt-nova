@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../api'
@@ -81,6 +81,84 @@ function navClass({ isActive }: { isActive: boolean }) {
       ? 'bg-accent/15 text-text border border-accent/30'
       : 'text-text-dim hover:text-text hover:bg-bg-soft border border-transparent',
   ].join(' ')
+}
+
+
+/**
+ * The header's app switcher. `/apps` is an operator page (workloads, images), so a
+ * data engineer has no other way to reach Superset, Airflow or JupyterHub without
+ * knowing the hostname. The list is status-free on purpose: liveness is operator
+ * information, and this control is for everyone.
+ */
+function AppSwitcher() {
+  const [open, setOpen] = useState(false)
+  const wrapper = useRef<HTMLDivElement>(null)
+  const button = useRef<HTMLButtonElement>(null)
+  const location = useLocation()
+  const links = useQuery({ queryKey: ['app-links'], queryFn: api.links, staleTime: 60_000 })
+
+  // Moving to another page is a new context; the menu should not survive it.
+  useEffect(() => setOpen(false), [location.pathname])
+
+  useEffect(() => {
+    if (!open) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setOpen(false)
+        button.current?.focus()
+      }
+    }
+    const onClick = (e: MouseEvent) => {
+      if (wrapper.current && !wrapper.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('keydown', onKey)
+    document.addEventListener('mousedown', onClick)
+    return () => {
+      document.removeEventListener('keydown', onKey)
+      document.removeEventListener('mousedown', onClick)
+    }
+  }, [open])
+
+  const apps = links.data ?? []
+  // Nothing to offer (no base domain, or every app is down to zero entries): no button.
+  if (apps.length === 0) return null
+
+  return (
+    <div ref={wrapper} className="relative">
+      <button
+        ref={button}
+        type="button"
+        className="btn-ghost py-1.5 text-sm"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen(v => !v)}
+      >
+        <Icon name="grid" className="w-4 h-4" />
+        Apps
+      </button>
+      {open && (
+        <div
+          role="menu"
+          aria-label="Open another app"
+          className="absolute right-0 top-full mt-1 z-50 min-w-[14rem] rounded-[12px] border border-border bg-bg-elev shadow-2xl p-1.5"
+        >
+          {apps.map(app => (
+            <a
+              key={app.id}
+              role="menuitem"
+              href={app.external_url}
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-center justify-between gap-6 px-3 py-2 rounded-[8px] text-sm hover:bg-bg-soft"
+            >
+              <span>{app.name}</span>
+              <span className="text-[11px] text-text-mute">{app.category}</span>
+            </a>
+          ))}
+        </div>
+      )}
+    </div>
+  )
 }
 
 export default function Shell() {
@@ -190,10 +268,7 @@ export default function Shell() {
               className="input pl-9 w-64 py-1.5"
             />
           </form>
-          <NavLink to="/data" className="btn-primary">
-            <Icon name="plus" className="w-4 h-4" />
-            Load data
-          </NavLink>
+          <AppSwitcher />
           {me.data?.auth_mode === 'oidc' && (
             <div className="flex items-center gap-2 pl-2 border-l border-border">
               <div className="text-right leading-tight min-w-0" title={me.data.email ?? me.data.sub ?? ''}>
