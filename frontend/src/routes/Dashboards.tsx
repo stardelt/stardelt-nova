@@ -40,7 +40,12 @@ export default function Dashboards() {
           <p className="text-text-dim text-sm mt-1">
             Apache Superset, embedded.
             {deployed
-              ? <> Login: <span className="font-mono">admin / admin</span>.</>
+              // The password is generated per cluster (scripts/app-secrets.sh in the
+              // platform repo) and kept in the superset-admin Secret; the old
+              // "admin / admin" hint stopped being true when that landed, and
+              // printing a kubectl command here would hand a data engineer
+              // Kubernetes vocabulary they do not need.
+              ? <> Sign in with the Superset admin account.</>
               : apps.isLoading
                 ? <> Checking whether it is deployed…</>
                 : apps.isError
