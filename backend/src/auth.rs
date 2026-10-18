@@ -276,6 +276,8 @@ pub enum AuthError {
     Misconfigured(String),
     #[error("internal error: {0}")]
     Internal(&'static str),
+    #[error("this view is for platform administrators")]
+    Forbidden,
 }
 
 impl IntoResponse for AuthError {
@@ -299,6 +301,15 @@ impl IntoResponse for AuthError {
                 )
                     .into_response()
             }
+            AuthError::Forbidden => (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({
+                    "error": "forbidden",
+                    "detail": msg,
+                    "hint": "membership is decided by the identity provider's admin group",
+                })),
+            )
+                .into_response(),
             AuthError::ProviderUnavailable(_) | AuthError::Misconfigured(_) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(serde_json::json!({ "error": msg })),
@@ -969,6 +980,28 @@ pub async fn require_auth(
             e.into_response()
         }
     }
+}
+
+/// Admin-only routes (`/api/apps`, `/api/workloads`, engine details).
+///
+/// The operator surface is not data-engineering work, and an analyst has no business
+/// reading the service inventory or the workload list — so this is enforced here, on the
+/// way in, and not only by hiding navigation in the SPA. The decision itself is the same
+/// one `/api/me` reports (`is_admin`), so the UI and the API cannot drift apart.
+///
+/// Only mounted in `oidc` mode: in `dev` there is no IdP and the single user is the
+/// operator, which is what CI, `make demo` and the kind gate depend on.
+pub async fn require_admin(req: Request, next: Next) -> Response {
+    let principal = req
+        .extensions()
+        .get::<Identity>()
+        .map(|p| p.is_admin)
+        .unwrap_or(false);
+    if principal {
+        return next.run(req).await;
+    }
+    warn!(path = %req.uri().path(), "rejected non-admin request to an admin route");
+    AuthError::Forbidden.into_response()
 }
 
 // ---------------------------------------------------------------------------

@@ -191,11 +191,11 @@ fn env_flag(name: &str) -> bool {
 /// green — `api_router_builds` below now fails in CI instead.
 ///
 /// These are the routes that sit behind sign-in in oidc mode; `/health` and
-/// `/auth/*` are added (unprotected) in `main`.
+/// `/auth/*` are added (unprotected) in `main`, and the operator surfaces live in
+/// `admin_router()` so they can carry an administrator check of their own.
 fn api_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/me", get(me))
-        .route("/trino/cluster", get(trino_cluster))
         .route("/catalog/warehouse", get(catalog::warehouse_info))
         .route(
             "/catalog/namespaces",
@@ -205,11 +205,20 @@ fn api_router() -> Router<Arc<AppState>> {
         .route("/catalog/tables/{ns}/{tbl}", get(catalog::table_metadata))
         .route("/query", post(trino::run_query))
         .route("/jobs", get(jobs::list))
+        .route("/ingest/upload", post(data::upload))
+        .route("/transfer", post(data::transfer))
+}
+
+/// The operator surfaces: the service inventory, the workload list and the engine
+/// details behind them. Separate from `api_router` because they are the one part of the
+/// API an ordinary user has no business reading — `main` puts the administrator check in
+/// front of them in `oidc` mode (see `auth::require_admin`).
+fn admin_router() -> Router<Arc<AppState>> {
+    Router::new()
         .route("/apps", get(apps::list))
         .route("/apps/{id}", get(apps::detail))
         .route("/workloads", get(cluster::list_handler))
-        .route("/ingest/upload", post(data::upload))
-        .route("/transfer", post(data::transfer))
+        .route("/trino/cluster", get(trino_cluster))
 }
 
 #[tokio::main]
@@ -289,19 +298,28 @@ async fn main() -> anyhow::Result<()> {
     let static_dir = std::env::var("NOVA_STATIC_DIR").unwrap_or_else(|_| "/app/static".into());
 
     let protected = api_router();
-
-    // Everything except /health and /auth/* requires a principal in oidc mode.
+    // Everything except /health and /auth/* requires a principal in oidc mode; the
+    // admin table additionally requires an administrator. In `dev` there is no IdP and
+    // one user, so both tables are served as they always were.
     let api = match &auth {
-        Some(a) => Router::new()
-            .route("/health", get(health))
-            .merge(protected.route_layer(axum::middleware::from_fn_with_state(
-                a.clone(),
-                auth::require_auth,
-            )))
-            .nest("/auth", auth::router(a.clone())),
+        Some(a) => {
+            // `route_layer` covers the routes present when it is applied, which is why
+            // the /auth/* nest happens last: sign-in must stay reachable without a session.
+            let admin = admin_router().route_layer(axum::middleware::from_fn(auth::require_admin));
+            Router::new()
+                .route("/health", get(health))
+                .merge(protected)
+                .merge(admin)
+                .route_layer(axum::middleware::from_fn_with_state(
+                    a.clone(),
+                    auth::require_auth,
+                ))
+                .nest("/auth", auth::router(a.clone()))
+        }
         None => Router::new()
             .route("/health", get(health))
             .merge(protected)
+            .merge(admin_router())
             .nest("/auth", auth::dev_router()),
     };
 
@@ -342,5 +360,6 @@ mod router_tests {
     #[test]
     fn api_router_builds() {
         let _ = api_router();
+        let _ = admin_router();
     }
 }

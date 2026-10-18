@@ -9,10 +9,10 @@ import type { Me } from './api'
  * there is no IdP and no second user, so the person running it is the operator and
  * gets the admin surface; that is also how CI, `make demo` and the kind gate behave.
  *
- * This decides what the UI *shows*, which is not the same as authorization: every
- * `/api/*` route is behind the session, and nothing in Nova writes to the cluster. When
- * the serving side grows real per-route authorization, this flag should follow it
- * rather than lead it.
+ * This decides what the UI *shows*, and it mirrors the API rather than inventing a rule:
+ * the same claim drives `auth::require_admin` on the operator routes (`/api/apps`,
+ * `/api/workloads`, `/api/trino/cluster`), which answer 403 for a signed-in non-admin.
+ * Hiding the navigation is courtesy; the refusal is the boundary.
  */
 export function isAdmin(me?: Me): boolean {
   if (!me) return false
