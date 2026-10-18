@@ -39,7 +39,7 @@ export default function Catalog() {
         </div>
         <div className="overflow-auto flex-1">
           {namespaces.isLoading && <div className="text-text-mute text-sm p-2">loading…</div>}
-          {namespaces.isError && <div className="text-red-400 text-sm p-2">{String(namespaces.error)}</div>}
+          {namespaces.isError && <div className="text-bad text-sm p-2">{String(namespaces.error)}</div>}
           <ul className="space-y-1">
             {namespaces.data?.namespaces.map(parts => {
               const ns = parts.join('.')
@@ -93,7 +93,7 @@ function NamespaceItem({ ns, filter, onSelect, selected }: {
       {open && (
         <ul className="ml-3 mt-0.5 space-y-0.5">
           {tables.isLoading && <li className="text-text-mute text-xs px-2 py-1">loading…</li>}
-          {tables.isError && !tables.data && <li className="text-red-400 text-xs px-2 py-1 break-words">{String(tables.error)}</li>}
+          {tables.isError && !tables.data && <li className="text-bad text-xs px-2 py-1 break-words">{String(tables.error)}</li>}
           {visible.map(id => {
             const sel = selected?.ns === ns && selected?.tbl === id.name
             return (
@@ -168,7 +168,7 @@ function TableDetail({ ns, tbl }: Sel) {
         ))}
       </div>
 
-      {meta.isError && <div className="text-red-400 text-sm">{String(meta.error)}</div>}
+      {meta.isError && <div className="text-bad text-sm">{String(meta.error)}</div>}
 
       {tab === 'preview' && <Preview q={preview} />}
 
@@ -205,7 +205,7 @@ function TableDetail({ ns, tbl }: Sel) {
 
 function Preview({ q }: { q: { data?: QueryResult; isLoading: boolean; error: unknown } }) {
   if (q.isLoading) return <div className="card p-6 text-text-mute text-sm">loading preview…</div>
-  if (q.error) return <div className="card p-6 text-red-400 text-sm">{String(q.error)}</div>
+  if (q.error) return <div className="card p-6 text-bad text-sm">{String(q.error)}</div>
   if (!q.data) return null
   return (
     <div className="card overflow-hidden">

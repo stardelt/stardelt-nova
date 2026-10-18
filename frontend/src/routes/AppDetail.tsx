@@ -208,7 +208,7 @@ export default function AppDetail() {
 }
 
 function FactCard({ fact }: { fact: AppFact }) {
-  const tone = fact.tone === 'ok' ? 'text-success' : fact.tone === 'bad' ? 'text-red-400' : ''
+  const tone = fact.tone === 'ok' ? 'text-success' : fact.tone === 'bad' ? 'text-bad' : ''
   return (
     <div className="card p-4">
       <div className="label">{fact.label}</div>

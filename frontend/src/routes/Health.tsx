@@ -45,7 +45,7 @@ export default function Health() {
         <div className="label mb-2">Services</div>
         <div className="card divide-y divide-border/70">
           {apps.isLoading && <div className="p-5 text-text-mute text-sm">loading…</div>}
-          {apps.isError && !apps.data && <div className="p-5 text-red-400 text-sm">{String(apps.error)}</div>}
+          {apps.isError && !apps.data && <div className="p-5 text-bad text-sm">{String(apps.error)}</div>}
           {list.map(a => (
             <div key={a.id} className="flex items-center gap-3 px-5 py-3">
               <span className={['w-2 h-2 rounded-full', a.status === 'up' ? 'bg-success' : 'bg-text-mute'].join(' ')} />
@@ -68,7 +68,7 @@ export default function Health() {
           <ClusterNotice snapshot={snapshot} />
           <div className="card divide-y divide-border/70">
             {workloads.isLoading && <div className="p-5 text-text-mute text-sm">loading…</div>}
-            {workloads.isError && !workloads.data && <div className="p-5 text-red-400 text-sm">{String(workloads.error)}</div>}
+            {workloads.isError && !workloads.data && <div className="p-5 text-bad text-sm">{String(workloads.error)}</div>}
             {rows.map(w => (
               <div key={`${w.kind}/${w.name}`} className="flex items-center gap-3 px-5 py-2.5">
                 <span className="w-16 shrink-0 text-[11px] uppercase tracking-wider text-text-mute">

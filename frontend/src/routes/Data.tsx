@@ -29,7 +29,7 @@ export default function Data() {
         <h1 className="text-2xl font-bold tracking-tight">Load & transfer</h1>
         <p className="text-text-dim text-sm mt-1">
           Bring files into Iceberg, or move data between tables. Every operation is recorded as a job.
-          {me.data?.demo && <span className="text-amber-300"> Demo mode writes to memory.</span>}
+          {me.data?.demo && <span className="text-warn"> Demo mode writes to memory.</span>}
         </p>
       </header>
 
@@ -168,7 +168,7 @@ function LoadForm() {
         {error && <ErrorBox text={error} />}
         {result && (
           <div className="rounded-[10px] border border-emerald-400/30 bg-emerald-400/10 p-4 text-sm">
-            <div className="font-medium text-emerald-300">
+            <div className="font-medium text-ok">
               Loaded {rowsLabel(result.rows_loaded)} into {result.namespace}.{result.table}
             </div>
             <div className="text-text-dim mt-1 flex gap-3">
@@ -234,7 +234,7 @@ function TransferForm() {
               <option key={`${r.ns}.${r.name}`} value={`${r.ns}.${r.name}`}>{r.ns}.{r.name}</option>
             ))}
           </select>
-          {tables.isError && <div className="text-red-400 text-xs mt-1.5">Could not list tables: {String(tables.error)}</div>}
+          {tables.isError && <div className="text-bad text-xs mt-1.5">Could not list tables: {String(tables.error)}</div>}
         </Field>
 
         <div className="grid sm:grid-cols-2 gap-4">
@@ -278,7 +278,7 @@ function TransferForm() {
         {error && <ErrorBox text={error} />}
         {result && (
           <div className="rounded-[10px] border border-emerald-400/30 bg-emerald-400/10 p-4 text-sm">
-            <div className="font-medium text-emerald-300">
+            <div className="font-medium text-ok">
               Transferred {rowsLabel(result.rows)} → {result.target}
             </div>
             <Link to="/jobs" className="text-text-dim mt-1 inline-block hover:text-text">View job →</Link>
@@ -312,7 +312,7 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 
 function ErrorBox({ text }: { text: string }) {
   return (
-    <div className="rounded-[10px] border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-300 font-mono whitespace-pre-wrap">
+    <div className="rounded-[10px] border border-red-500/40 bg-red-500/10 p-3 text-sm text-bad font-mono whitespace-pre-wrap">
       {text}
     </div>
   )

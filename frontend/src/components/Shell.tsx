@@ -121,7 +121,7 @@ export default function Shell() {
               <div className="text-sm truncate">{me.data?.warehouse ?? 'warehouse'}</div>
             </div>
             {me.data?.demo && (
-              <span className="badge ml-auto border-amber-400/40 bg-amber-400/10 text-amber-300">demo</span>
+              <span className="badge ml-auto border-amber-400/40 bg-amber-400/10 text-warn">demo</span>
             )}
           </div>
         </div>

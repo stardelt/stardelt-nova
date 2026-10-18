@@ -14,6 +14,9 @@
    whole UI. The channels stay space-separated triplets for the same reason they were in
    Tailwind 3, but the alpha modifiers (`bg-bg-elev/60`) no longer rely on the
    `<alpha-value>` placeholder: Tailwind 4 computes them with color-mix(). */
+/* Status ink is theme-aware: the pale `-300` shades read on the dark background and
+   vanish on the light one, so the shades live in the `--c-*` blocks below, not in the
+   components. The translucent border and background tints stay where they are. */
 @theme inline {
   --color-bg: rgb(var(--c-bg));
   --color-bg-elev: rgb(var(--c-bg-elev));
@@ -25,6 +28,11 @@
   --color-accent: rgb(var(--c-accent));
   --color-accent-deep: rgb(var(--c-accent-deep));
   --color-success: rgb(var(--c-success));
+  --color-ok: rgb(var(--c-ok));
+  --color-info: rgb(var(--c-info));
+  --color-xfer: rgb(var(--c-xfer));
+  --color-warn: rgb(var(--c-warn));
+  --color-bad: rgb(var(--c-bad));
 
   --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Helvetica, Arial, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
@@ -43,6 +51,11 @@
     --c-accent: 91 108 255;
     --c-accent-deep: 30 42 120;
     --c-success: 94 230 168;
+    --c-ok: 110 231 183;     /* emerald-300 */
+    --c-info: 125 211 252;   /* sky-300 */
+    --c-xfer: 196 181 253;   /* violet-300 */
+    --c-warn: 252 211 77;    /* amber-300 */
+    --c-bad: 248 113 113;    /* red-400 */
     --glow-1: rgba(91, 108, 255, 0.18);
     --glow-2: rgba(30, 42, 120, 0.35);
     color-scheme: dark;
@@ -59,6 +72,11 @@
     --c-accent: 74 91 240;
     --c-accent-deep: 43 58 168;
     --c-success: 26 148 92;
+    --c-ok: 4 120 87;        /* emerald-700, 5.5:1 on white */
+    --c-info: 3 105 161;     /* sky-700 */
+    --c-xfer: 109 40 217;    /* violet-700 */
+    --c-warn: 146 64 14;     /* amber-800: amber-700 is 4.33:1 on the amber-tinted notice cards */
+    --c-bad: 185 28 28;      /* red-700 */
     --glow-1: rgba(74, 91, 240, 0.10);
     --glow-2: rgba(74, 91, 240, 0.10);
     color-scheme: light;

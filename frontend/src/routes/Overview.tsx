@@ -29,7 +29,7 @@ export default function Overview() {
           <h1 className="text-2xl font-bold tracking-tight">Lakehouse overview</h1>
           <p className="text-text-dim text-sm mt-1">
             One catalog, one engine, one place to load and move data.
-            {me.data?.demo && <span className="text-amber-300"> Demo data is in memory.</span>}
+            {me.data?.demo && <span className="text-warn"> Demo data is in memory.</span>}
           </p>
         </div>
         <div className="flex gap-2">
@@ -54,7 +54,7 @@ export default function Overview() {
             <Link to="/jobs" className="text-xs text-text-dim hover:text-text">View all →</Link>
           </div>
           {jobs.isLoading && <div className="text-text-mute text-sm">loading…</div>}
-          {jobs.isError && !jobs.data && <div className="text-red-400 text-sm">{String(jobs.error)}</div>}
+          {jobs.isError && !jobs.data && <div className="text-bad text-sm">{String(jobs.error)}</div>}
           {jobs.data && recent.length === 0 && (
             <div className="text-text-mute text-sm">No activity yet. Run a query or load a file.</div>
           )}
@@ -78,7 +78,7 @@ export default function Overview() {
           </div>
           <div className="space-y-2 text-sm">
             {apps.isLoading && <div className="text-text-mute text-sm">loading…</div>}
-            {apps.isError && !apps.data && <div className="text-red-400 text-sm">{String(apps.error)}</div>}
+            {apps.isError && !apps.data && <div className="text-bad text-sm">{String(apps.error)}</div>}
             {(apps.data ?? []).map(a => (
               <div key={a.id} className="flex items-center justify-between gap-3">
                 <span className="flex items-center gap-2">
@@ -138,9 +138,9 @@ function Action({ to, icon, title, body }: { to: string; icon: 'database' | 'upl
 
 function kindBadge(kind: string) {
   const map: Record<string, string> = {
-    query: 'badge border-sky-400/40 bg-sky-400/10 text-sky-300',
-    load: 'badge border-emerald-400/40 bg-emerald-400/10 text-emerald-300',
-    transfer: 'badge border-violet-400/40 bg-violet-400/10 text-violet-300',
+    query: 'badge border-sky-400/40 bg-sky-400/10 text-info',
+    load: 'badge border-emerald-400/40 bg-emerald-400/10 text-ok',
+    transfer: 'badge border-violet-400/40 bg-violet-400/10 text-xfer',
   }
   return map[kind] ?? 'badge border-border bg-bg-soft text-text-dim'
 }
