@@ -2,7 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Link, useParams } from 'react-router-dom'
 import { api, ApiError, type AppFact } from '../api'
 import { Icon } from '../components/Icon'
-import { safeHttpUrl, shortImage } from '../format'
+import { safeHttpUrl, shortImage, statusLabel } from '../format'
 
 /**
  * Nova's own view of an app's data — the part of "using" the service that Nova
@@ -91,7 +91,7 @@ export default function AppDetail() {
             up ? 'border-success/40 bg-success/10 text-success' : 'border-border bg-bg-soft text-text-mute',
           ].join(' ')}>
             <span className={['w-1.5 h-1.5 rounded-full', up ? 'bg-success' : 'bg-text-mute'].join(' ')} />
-            {up ? 'running' : app.status}
+            {statusLabel(app.status)}
           </span>
           {workloads.length > 0 && (
             <span className="badge border-border bg-bg-soft text-text-dim" title="ready/desired replicas across this app's workloads">
