@@ -16,6 +16,7 @@ export type IconName =
   | 'table'
   | 'spark'
   | 'notebook'
+  | 'sliders'
 
 const paths: Record<IconName, ReactNode> = {
   grid: (
@@ -73,6 +74,14 @@ const paths: Record<IconName, ReactNode> = {
     </>
   ),
   pulse: <path d="M3 12h4l2.2-6 3.6 12 2.2-6H21" />,
+  sliders: (
+    <>
+      <path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h8M16 18h4" />
+      <circle cx="16" cy="6" r="2" />
+      <circle cx="10" cy="12" r="2" />
+      <circle cx="14" cy="18" r="2" />
+    </>
+  ),
   search: (
     <>
       <circle cx="11" cy="11" r="7" />
