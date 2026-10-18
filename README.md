@@ -98,7 +98,7 @@ page shows what Nova observed, never a guess.
 ### Embedded apps
 
 Nova frames Superset (`/dashboards`) and JupyterHub (`/notebooks`) in an iframe,
-and both ship with headers that refuse framing — JupyterHub sends
+and both ship with headers that refuse framing by default — JupyterHub sends
 `content-security-policy: frame-ancestors 'none'`, Superset `x-frame-options`.
 The browser enforces that client-side, so the naive result is a blank frame with
 the reason hidden in the console.
@@ -109,6 +109,14 @@ app's own response. Those pages show an “embeds ok” badge when framing is
 permitted, and the offending header plus what to change when it is not — while
 still offering the deep link out. `unknown` (demo mode, or a service Nova cannot
 reach) makes no claim either way.
+
+The header check follows redirects only while they stay on the app's own hosts:
+a signed-out JupyterHub visitor is sent through the hub's login page (the same
+headers as its pages) and then off to Keycloak, and judging Keycloak's login page
+would report “blocked” for an app that is frameable. That off-host hop is
+reported as `embed.sign_in_host` instead, and the Notebooks page turns it into an
+explicit “open in a new tab and sign in” action — a deliberately unframeable
+sign-in page must never look like a broken notebook.
 
 ---
 
