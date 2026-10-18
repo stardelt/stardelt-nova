@@ -175,7 +175,8 @@ The backend is configured entirely through environment variables:
 |---|---|---|
 | `NOVA_BIND_ADDR` | `0.0.0.0:8080` | TCP address the HTTP server listens on |
 | `NOVA_STATIC_DIR` | `/app/static` | Directory containing the compiled frontend assets |
-| `NOVA_TRINO_URL` | `http://trino.stardelt.svc.cluster.local:8080` | Trino coordinator base URL |
+| `NOVA_TRINO_URL` | `http://trino.stardelt.svc.cluster.local:8080` | Trino coordinator base URL. The platform's installer points this at the coordinator's in-cluster HTTPS endpoint (`https://trino.<ns>.svc.cluster.local:8443`) once an IdP is installed — see `NOVA_TRINO_CA_PEM` |
+| `NOVA_TRINO_CA_PEM` | — (empty) | PEM of a CA to **add** to the TLS roots the upstream client trusts (the platform's internal CA for the coordinator certificate, from the `trino-ca` Secret). Empty = only the public WebPKI roots; never a replacement, and verification is never disabled |
 | `NOVA_LAKEKEEPER_URL` | `http://lakekeeper.stardelt.svc.cluster.local:8181` | Lakekeeper REST catalog base URL |
 | `NOVA_WAREHOUSE_NAME` | `warehouse` | Lakekeeper warehouse name to resolve on startup |
 | `NOVA_SUPERSET_URL` | `http://superset:8088` | Superset base URL (probe + embed check) |

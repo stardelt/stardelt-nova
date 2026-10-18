@@ -271,6 +271,37 @@ fn env_flag(name: &str) -> bool {
     )
 }
 
+/// The shared upstream HTTP client, with the platform's internal CA added when
+/// the platform hands one over (`NOVA_TRINO_CA_PEM`).
+///
+/// The Trino coordinator's in-cluster TLS certificate is signed by a
+/// namespace-local CA (`manifests/trino-tls.yaml` in stardelt-platform), which
+/// the public WebPKI roots of course do not contain — and pointing Nova at the
+/// public hostname instead would hairpin every query through the ingress and
+/// fail on an air-gapped install. The value is a Secret read through
+/// `secretKeyRef` (Secret `trino-ca`, key `tls.crt`) and, like the other
+/// identity variables, optional: a dev install without an IdP has no HTTPS
+/// listener and no certificate. The CA is *added* to the public roots; nothing
+/// disables verification, and a value that is not a certificate is a startup
+/// error rather than a silently ignored variable.
+fn http_client() -> anyhow::Result<reqwest::Client> {
+    let mut builder = reqwest::Client::builder();
+    if let Ok(pem) = std::env::var("NOVA_TRINO_CA_PEM")
+        && !pem.trim().is_empty()
+    {
+        let certs = reqwest::Certificate::from_pem_bundle(pem.as_bytes())
+            .map_err(|e| anyhow::anyhow!("NOVA_TRINO_CA_PEM is not a certificate: {e}"))?;
+        for cert in certs {
+            builder = builder.add_root_certificate(cert);
+        }
+        info!(
+            certificates = pem.matches("BEGIN CERTIFICATE").count(),
+            "trusting the platform's internal CA (NOVA_TRINO_CA_PEM)"
+        );
+    }
+    Ok(builder.build()?)
+}
+
 /// The realm's Keycloak admin console, derived from the configured issuer.
 ///
 /// A Keycloak issuer ends in `/realms/<realm>` (optionally behind a base path,
@@ -411,7 +442,7 @@ async fn main() -> anyhow::Result<()> {
             .unwrap_or_else(|_| "http://proxy-public:80".into()),
         warehouse_name: std::env::var("NOVA_WAREHOUSE_NAME").unwrap_or_else(|_| "warehouse".into()),
         warehouse_id: OnceCell::new(),
-        http: reqwest::Client::builder().build()?,
+        http: http_client()?,
         demo: demo_mode,
         forward_identity: env_flag("NOVA_FORWARD_IDENTITY"),
         jobs: Mutex::new(Vec::new()),
