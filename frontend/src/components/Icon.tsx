@@ -16,6 +16,7 @@ export type IconName =
   | 'table'
   | 'spark'
   | 'notebook'
+  | 'users'
   | 'sliders'
 
 const paths: Record<IconName, ReactNode> = {
@@ -116,6 +117,14 @@ const paths: Record<IconName, ReactNode> = {
       <rect x="4" y="3.5" width="16" height="17" rx="2" />
       <path d="M9 3.5v17" />
       <path d="M13 8.5h4M13 12.5h4" />
+    </>
+  ),
+  users: (
+    <>
+      <circle cx="9" cy="8" r="3.2" />
+      <path d="M3.5 19c0-3 2.5-5 5.5-5s5.5 2 5.5 5" />
+      <path d="M16 5.4a3 3 0 0 1 0 5.8" />
+      <path d="M17.6 14.4c1.9.7 3 2.3 3 4.4" />
     </>
   ),
 }
