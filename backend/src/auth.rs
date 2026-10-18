@@ -830,7 +830,7 @@ impl PendingStore {
 
 fn random_token(bytes: usize) -> Result<String, AuthError> {
     let mut buf = vec![0u8; bytes];
-    getrandom::getrandom(&mut buf).map_err(|_| AuthError::Internal("no randomness"))?;
+    getrandom::fill(&mut buf).map_err(|_| AuthError::Internal("no randomness"))?;
     Ok(URL_SAFE_NO_PAD.encode(buf))
 }
 
