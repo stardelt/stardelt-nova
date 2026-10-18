@@ -11,11 +11,13 @@ const FALLBACK = (import.meta.env.VITE_JUPYTERHUB_URL as string | undefined) ?? 
 
 // Hub-level paths only. JupyterLab does not live at `/lab` on the hub host: each
 // person's server has its own URL (`/user/<name>/lab`), which is why a fixed
-// "JupyterLab" entry cannot work — and why `/hub/home` is the right entry point,
-// since the hub redirects it to that person's running server.
+// "JupyterLab" entry cannot work. `/hub/` is the hub *root* and the right default:
+// it redirects a signed-in person to their own server (JupyterLab — or the spawn
+// page when they have none), while `/hub/home` is the control panel and stays put.
 const ENTRY_PATHS: Array<{ label: string; path: string }> = [
-  { label: 'Hub home',  path: '/hub/home'    },
-  { label: 'My server', path: '/hub/spawn'   },
+  { label: 'My server', path: '/hub/'     },
+  { label: 'Hub home',  path: '/hub/home' },
+  { label: 'Start server', path: '/hub/spawn' },
   { label: 'API tokens', path: '/hub/token'  },
 ]
 
@@ -27,7 +29,7 @@ export default function Notebooks() {
   const base = safeHttpUrl(jupyter?.external_url) ?? safeHttpUrl(FALLBACK)
 
 
-  const [path, setPath] = useState('/hub/home')
+  const [path, setPath] = useState('/hub/')
   // Only address the app when it is actually up: the fallback is a developer's
   // port-forward, and the deployed host answers 503 when nothing is behind the ingress.
   const src = up && base ? `${base.replace(/\/+$/, '')}${path}` : undefined

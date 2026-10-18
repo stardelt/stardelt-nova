@@ -270,13 +270,21 @@ const SPECS: &[Spec] = &[
         // shape: the placeholder at 0/0 is how a healthy idle hub looks.
         workload_prefixes: &["hub", "proxy", "user-"],
         paths: &[
+            // `/hub/` is the hub's *root*: for a signed-in person it redirects
+            // to their own server (`user.url`, i.e. JupyterLab), and to the
+            // spawn page when no server runs — `/hub/home` is the control panel
+            // and never redirects (jupyterhub/handlers/pages.py, RootHandler vs
+            // HomeHandler).
+            ("My server", "/hub/"),
             ("Hub home", "/hub/home"),
-            ("JupyterLab", "/lab"),
-            ("Spawn server", "/hub/spawn"),
+            ("Start server", "/hub/spawn"),
             ("API tokens", "/hub/token"),
         ],
-        // Nova frames JupyterHub on its Notebooks page.
-        embed: Some(EmbedSpec { path: "/hub/home" }),
+        // Nova frames JupyterHub on its Notebooks page: the hub root, so a
+        // signed-in person lands in their own JupyterLab (or on the spawn page
+        // when they have no server yet). The server may in turn be framed only
+        // by Nova — that is the image's jupyter_server_config.py.
+        embed: Some(EmbedSpec { path: "/hub/" }),
     },
 ];
 
@@ -922,7 +930,7 @@ mod tests {
         assert_eq!(embedded, vec!["superset", "jupyterhub"]);
         assert_eq!(
             spec("jupyterhub").unwrap().embed.as_ref().unwrap().path,
-            "/hub/home"
+            "/hub/"
         );
     }
 
