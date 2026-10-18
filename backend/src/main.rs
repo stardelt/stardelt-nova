@@ -62,6 +62,11 @@ pub struct AppState {
     pub warehouse_id: OnceCell<String>,
     pub http: reqwest::Client,
     pub demo: bool,
+    /// Forward the caller's own token to Trino and the catalog, when the platform has
+    /// configured them to accept it (`NOVA_FORWARD_IDENTITY=1`). Off by default: sending a
+    /// bearer to a catalog that does not validate it buys nothing, and turning it on is a
+    /// platform decision rather than a UI one.
+    pub forward_identity: bool,
     pub jobs: Mutex<Vec<jobs::Job>>,
     pub demo_state: RwLock<demo::DemoState>,
     /// Cluster client for the read-only workload view. `None` in demo mode, or when
@@ -126,7 +131,7 @@ async fn me(
                 groups_overage: id.groups_overage,
                 is_admin: id.is_admin,
                 via: p.via,
-                identity_forwarding: false,
+                identity_forwarding: s.forward_identity,
             })
             .into_response()
         }
@@ -268,6 +273,7 @@ async fn main() -> anyhow::Result<()> {
         warehouse_id: OnceCell::new(),
         http: reqwest::Client::builder().build()?,
         demo: demo_mode,
+        forward_identity: env_flag("NOVA_FORWARD_IDENTITY"),
         jobs: Mutex::new(Vec::new()),
         demo_state: RwLock::new(demo_state),
         kube,

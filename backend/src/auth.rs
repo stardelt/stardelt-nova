@@ -785,10 +785,12 @@ impl SessionStore {
         Ok(id)
     }
 
-    fn get(&self, id: &str) -> Option<Identity> {
+    fn get(&self, id: &str) -> Option<(Identity, Option<Secret>)> {
         let mut m = self.inner.lock().ok()?;
         match m.get(id) {
-            Some(s) if s.expires > Instant::now() => Some(s.identity.clone()),
+            Some(s) if s.expires > Instant::now() => {
+                Some((s.identity.clone(), Some(s.tokens.access_token.clone())))
+            }
             Some(_) => {
                 m.remove(id);
                 None
@@ -873,6 +875,9 @@ pub struct Principal {
     pub identity: Identity,
     /// `session` (browser cookie) or `bearer` (Authorization header).
     pub via: &'static str,
+    /// The token this principal presented. It is passed upstream **only** when
+    /// `NOVA_FORWARD_IDENTITY` is on, and never logged or returned — `Secret` redacts.
+    pub access_token: Option<Secret>,
 }
 
 pub struct AuthState {
@@ -947,17 +952,19 @@ impl AuthState {
             return Ok(Principal {
                 identity,
                 via: "bearer",
+                access_token: Some(Secret(token.to_string())),
             });
         }
         let jar = self.jar(headers);
         let id = jar.get(SESSION_COOKIE).ok_or(AuthError::Unauthenticated)?;
-        let identity = self
+        let (identity, access_token) = self
             .sessions
             .get(id.value())
             .ok_or(AuthError::Unauthenticated)?;
         Ok(Principal {
             identity,
             via: "session",
+            access_token,
         })
     }
 }
@@ -1299,9 +1306,65 @@ pub fn dev_router<S: Clone + Send + Sync + 'static>() -> Router<S> {
 // Tests
 // ---------------------------------------------------------------------------
 
+/// The `Authorization` header Nova should send upstream for this caller, if any.
+///
+/// One place, one rule: forward only when the platform asked for it *and* somebody is
+/// signed in *and* holds a token. In `dev` mode there is no token to forward, which is
+/// the honest answer — the catalog then sees Nova's service connection, as before.
+pub fn upstream_authorization(forward: bool, caller: Option<&Principal>) -> Option<String> {
+    if !forward {
+        return None;
+    }
+    let token = caller?.access_token.as_ref()?;
+    Some(format!("Bearer {}", token.expose()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn principal_with_token(token: Option<&str>) -> Principal {
+        Principal {
+            identity: Identity {
+                sub: "s".into(),
+                display_name: "u".into(),
+                email: None,
+                name: None,
+                groups: vec![],
+                roles: vec![],
+                groups_overage: false,
+                is_admin: false,
+            },
+            via: "session",
+            access_token: token.map(Secret::new),
+        }
+    }
+
+    /// The rule in one place: forward only when asked, only for somebody signed in, and
+    /// never a token that is not there. `dev` mode has no token, which is the honest answer.
+    #[test]
+    fn upstream_authorization_is_gated() {
+        let signed_in = principal_with_token(Some("tok"));
+        assert_eq!(
+            upstream_authorization(true, Some(&signed_in)).as_deref(),
+            Some("Bearer tok")
+        );
+        // Off by default: the platform has to ask.
+        assert_eq!(upstream_authorization(false, Some(&signed_in)), None);
+        // Nobody signed in (dev mode, or an anonymous call).
+        assert_eq!(upstream_authorization(true, None), None);
+        // Signed in without a token (a dev session).
+        let no_token = principal_with_token(None);
+        assert_eq!(upstream_authorization(true, Some(&no_token)), None);
+    }
+
+    #[test]
+    fn forwarded_tokens_are_redacted_in_debug_output() {
+        let p = principal_with_token(Some("super-secret-token"));
+        let rendered = format!("{p:?}");
+        assert!(!rendered.contains("super-secret-token"), "{rendered}");
+        assert!(rendered.contains("[redacted]"), "{rendered}");
+    }
 
     /// The admin middleware must read the extension type `require_auth` actually inserts.
     /// It shipped reading `Identity` instead of `Principal`, which refused *everyone*
@@ -1340,6 +1403,7 @@ mod tests {
                                 req.extensions_mut().insert(Principal {
                                     identity,
                                     via: "session",
+                                    access_token: None,
                                 });
                             }
                             next.run(req).await

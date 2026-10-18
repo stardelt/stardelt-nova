@@ -56,7 +56,12 @@ pub struct TransferResult {
     pub job_id: String,
 }
 
-pub async fn upload(State(s): State<Arc<AppState>>, Json(req): Json<UploadRequest>) -> Response {
+pub async fn upload(
+    State(s): State<Arc<AppState>>,
+    caller: Option<axum::Extension<crate::auth::Principal>>,
+    // The body extractor has to be last: axum consumes the request for it.
+    Json(req): Json<UploadRequest>,
+) -> Response {
     let fmt = req.format.to_lowercase();
     let title = format!("{}.{}", req.namespace, req.table);
 
@@ -91,7 +96,7 @@ pub async fn upload(State(s): State<Arc<AppState>>, Json(req): Json<UploadReques
         };
     }
 
-    match real_upload(&s, &req, &fmt).await {
+    match real_upload(&s, &req, &fmt, caller.as_ref().map(|c| &c.0)).await {
         Ok(n) => {
             let job = jobs::record(
                 &s.jobs,
@@ -122,6 +127,8 @@ pub async fn upload(State(s): State<Arc<AppState>>, Json(req): Json<UploadReques
 
 pub async fn transfer(
     State(s): State<Arc<AppState>>,
+    caller: Option<axum::Extension<crate::auth::Principal>>,
+    // The body extractor has to be last: axum consumes the request for it.
     Json(req): Json<TransferRequest>,
 ) -> Response {
     let title = format!("{} → {}", req.source, req.target);
@@ -157,7 +164,7 @@ pub async fn transfer(
         };
     }
 
-    match real_transfer(&s, &req).await {
+    match real_transfer(&s, &req, caller.as_ref().map(|c| &c.0)).await {
         Ok(n) => {
             let job = jobs::record(
                 &s.jobs,
@@ -186,7 +193,12 @@ pub async fn transfer(
     }
 }
 
-async fn real_upload(state: &AppState, req: &UploadRequest, fmt: &str) -> Result<usize, String> {
+async fn real_upload(
+    state: &AppState,
+    req: &UploadRequest,
+    fmt: &str,
+    caller: Option<&crate::auth::Principal>,
+) -> Result<usize, String> {
     let (columns, rows) = if fmt == "json" {
         demo::parse_json_table(&req.content)?
     } else {
@@ -209,8 +221,8 @@ async fn real_upload(state: &AppState, req: &UploadRequest, fmt: &str) -> Result
         .collect::<Vec<_>>()
         .join(", ");
 
-    trino::execute(state, format!("DROP TABLE IF EXISTS {target}")).await?;
-    trino::execute(state, format!("CREATE TABLE {target} ({ddl_cols})")).await?;
+    trino::execute(state, format!("DROP TABLE IF EXISTS {target}"), caller).await?;
+    trino::execute(state, format!("CREATE TABLE {target} ({ddl_cols})"), caller).await?;
 
     let mut loaded = 0usize;
     for chunk in rows.chunks(100) {
@@ -224,13 +236,22 @@ async fn real_upload(state: &AppState, req: &UploadRequest, fmt: &str) -> Result
             })
             .collect::<Vec<_>>()
             .join(", ");
-        trino::execute(state, format!("INSERT INTO {target} VALUES {values}")).await?;
+        trino::execute(
+            state,
+            format!("INSERT INTO {target} VALUES {values}"),
+            caller,
+        )
+        .await?;
         loaded += chunk.len();
     }
     Ok(loaded)
 }
 
-async fn real_transfer(state: &AppState, req: &TransferRequest) -> Result<usize, String> {
+async fn real_transfer(
+    state: &AppState,
+    req: &TransferRequest,
+    caller: Option<&crate::auth::Principal>,
+) -> Result<usize, String> {
     let (sns, stbl) = demo::parse_ref(&req.source)?;
     let (tns, ttbl) = demo::parse_ref(&req.target)?;
     let source = format!("warehouse.{}.{}", quote_ident(&sns), quote_ident(&stbl));
@@ -241,18 +262,20 @@ async fn real_transfer(state: &AppState, req: &TransferRequest) -> Result<usize,
         trino::execute(
             state,
             format!("INSERT INTO {target} SELECT * FROM {source}"),
+            caller,
         )
         .await?;
     } else {
-        trino::execute(state, format!("DROP TABLE IF EXISTS {target}")).await?;
+        trino::execute(state, format!("DROP TABLE IF EXISTS {target}"), caller).await?;
         trino::execute(
             state,
             format!("CREATE TABLE {target} AS SELECT * FROM {source}"),
+            caller,
         )
         .await?;
     }
 
-    let count = trino::execute(state, format!("SELECT count(*) FROM {target}")).await?;
+    let count = trino::execute(state, format!("SELECT count(*) FROM {target}"), caller).await?;
     let n = count
         .rows
         .first()

@@ -14,7 +14,7 @@ use axum::{
 use serde::Deserialize;
 use tracing::warn;
 
-use crate::{AppState, data};
+use crate::{AppState, auth, data};
 
 #[derive(Deserialize)]
 struct WarehouseListItem {
@@ -56,9 +56,13 @@ pub(crate) async fn resolve_warehouse_id(state: &AppState) -> Result<String, Str
         .cloned()
 }
 
-async fn proxy(state: &AppState, path: String) -> Response {
+async fn proxy(state: &AppState, path: String, authorization: Option<&str>) -> Response {
     let url = format!("{}{}", state.lakekeeper_url, path);
-    match state.http.get(&url).send().await {
+    let mut request = state.http.get(&url);
+    if let Some(header) = authorization {
+        request = request.header(reqwest::header::AUTHORIZATION, header);
+    }
+    match request.send().await {
         Ok(r) => {
             let status = r.status();
             let body = r.bytes().await.unwrap_or_default();
@@ -109,7 +113,10 @@ pub async fn warehouse_info(State(s): State<Arc<AppState>>) -> Response {
     }
 }
 
-pub async fn list_namespaces(State(s): State<Arc<AppState>>) -> Response {
+pub async fn list_namespaces(
+    State(s): State<Arc<AppState>>,
+    caller: Option<axum::Extension<auth::Principal>>,
+) -> Response {
     if s.demo {
         let demo = s.demo_state.read().expect("demo state poisoned");
         return Json(demo.namespaces_json()).into_response();
@@ -118,11 +125,18 @@ pub async fn list_namespaces(State(s): State<Arc<AppState>>) -> Response {
         Ok(v) => v,
         Err(r) => return *r,
     };
-    proxy(&s, format!("/catalog/v1/{id}/namespaces")).await
+    proxy(
+        &s,
+        format!("/catalog/v1/{id}/namespaces"),
+        auth::upstream_authorization(s.forward_identity, caller.as_ref().map(|c| &c.0)).as_deref(),
+    )
+    .await
 }
 
 pub async fn create_namespace(
     State(s): State<Arc<AppState>>,
+    caller: Option<axum::Extension<auth::Principal>>,
+    // The body extractor has to be last: axum consumes the request for it.
     Json(req): Json<CreateNamespaceRequest>,
 ) -> Response {
     let ns = req.namespace.trim();
@@ -146,7 +160,7 @@ pub async fn create_namespace(
         "CREATE SCHEMA IF NOT EXISTS warehouse.{}",
         data::quote_ident(ns)
     );
-    match crate::trino::execute(&s, sql).await {
+    match crate::trino::execute(&s, sql, caller.as_ref().map(|c| &c.0)).await {
         Ok(_) => Json(serde_json::json!({ "namespace": ns })).into_response(),
         Err(e) => (
             StatusCode::BAD_REQUEST,
@@ -156,7 +170,11 @@ pub async fn create_namespace(
     }
 }
 
-pub async fn list_tables(State(s): State<Arc<AppState>>, Path(ns): Path<String>) -> Response {
+pub async fn list_tables(
+    State(s): State<Arc<AppState>>,
+    Path(ns): Path<String>,
+    caller: Option<axum::Extension<auth::Principal>>,
+) -> Response {
     if s.demo {
         let demo = s.demo_state.read().expect("demo state poisoned");
         return Json(demo.tables_json(&ns)).into_response();
@@ -168,12 +186,18 @@ pub async fn list_tables(State(s): State<Arc<AppState>>, Path(ns): Path<String>)
     let Some(ns) = path_segment(&ns) else {
         return bad_segment(&ns);
     };
-    proxy(&s, format!("/catalog/v1/{id}/namespaces/{ns}/tables")).await
+    proxy(
+        &s,
+        format!("/catalog/v1/{id}/namespaces/{ns}/tables"),
+        auth::upstream_authorization(s.forward_identity, caller.as_ref().map(|c| &c.0)).as_deref(),
+    )
+    .await
 }
 
 pub async fn table_metadata(
     State(s): State<Arc<AppState>>,
     Path((ns, tbl)): Path<(String, String)>,
+    caller: Option<axum::Extension<auth::Principal>>,
 ) -> Response {
     if s.demo {
         let demo = s.demo_state.read().expect("demo state poisoned");
@@ -193,7 +217,12 @@ pub async fn table_metadata(
     let (Some(ns), Some(tbl)) = (path_segment(&ns), path_segment(&tbl)) else {
         return bad_segment(&format!("{ns}.{tbl}"));
     };
-    proxy(&s, format!("/catalog/v1/{id}/namespaces/{ns}/tables/{tbl}")).await
+    proxy(
+        &s,
+        format!("/catalog/v1/{id}/namespaces/{ns}/tables/{tbl}"),
+        auth::upstream_authorization(s.forward_identity, caller.as_ref().map(|c| &c.0)).as_deref(),
+    )
+    .await
 }
 
 /// Percent-encode one URL path segment for the Lakekeeper proxy. Axum has already
