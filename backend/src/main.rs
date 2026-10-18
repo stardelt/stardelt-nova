@@ -303,17 +303,27 @@ async fn main() -> anyhow::Result<()> {
     // one user, so both tables are served as they always were.
     let api = match &auth {
         Some(a) => {
-            // `route_layer` covers the routes present when it is applied, which is why
-            // the /auth/* nest happens last: sign-in must stay reachable without a session.
-            let admin = admin_router().route_layer(axum::middleware::from_fn(auth::require_admin));
-            Router::new()
-                .route("/health", get(health))
-                .merge(protected)
-                .merge(admin)
+            // Each layer is applied to the routes already in the router: /health stays
+            // outside them (the kubelet probe has no session) and /auth/* is nested after
+            // them (sign-in must be reachable unauthenticated). Within the admin table,
+            // `require_auth` is applied last and therefore runs first — `require_admin`
+            // reads the identity it put in the request extensions.
+            let authed = protected
                 .route_layer(axum::middleware::from_fn_with_state(
                     a.clone(),
                     auth::require_auth,
                 ))
+                .merge(
+                    admin_router()
+                        .route_layer(axum::middleware::from_fn(auth::require_admin))
+                        .route_layer(axum::middleware::from_fn_with_state(
+                            a.clone(),
+                            auth::require_auth,
+                        )),
+                );
+            Router::new()
+                .route("/health", get(health))
+                .merge(authed)
                 .nest("/auth", auth::router(a.clone()))
         }
         None => Router::new()
