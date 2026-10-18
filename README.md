@@ -27,7 +27,7 @@ Browser
          ├─ GET  /api/jobs             recent activity
          ├─ GET  /api/apps             installed apps: live status + images
          ├─ GET  /api/apps/:id         one app: workloads, facts, links, embed check
-         ├─ GET  /api/workloads        workloads in Nova's namespace + images
+         ├─ GET  /api/workloads        workloads in Nova's namespace + read state (ok/stale/unreachable)
          ├─ POST /api/ingest/upload    load CSV/JSON into a table
          ├─ POST /api/transfer         copy table → table
          │

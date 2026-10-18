@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { api } from '../api'
+import { ClusterNotice } from '../components/ClusterNotice'
 import { isAdmin } from '../roles'
 
 /**
@@ -16,9 +17,20 @@ export default function Settings() {
   const workloads = useQuery({ queryKey: ['workloads'], queryFn: api.workloads, refetchInterval: 30_000 })
   const apps = useQuery({ queryKey: ['apps'], queryFn: api.apps, refetchInterval: 30_000 })
 
-  const images = [...new Set((workloads.data ?? []).map(w => w.image).filter(Boolean))]
-  const running = (workloads.data ?? []).filter(w => w.desired > 0 && w.ready === w.desired).length
+  const snapshot = workloads.data
+  const rows = snapshot?.workloads ?? []
+  const images = [...new Set(rows.map(w => w.image).filter(Boolean))]
+  const running = rows.filter(w => w.desired > 0 && w.ready === w.desired).length
   const up = (apps.data ?? []).filter(a => a.status === 'up').length
+
+  // A count is a fact only while the cluster answers. `stale` is still worth showing —
+  // it is the last known state, and the notice above says so — but an unanswered read is
+  // not a zero, so it shows as `—` instead of "0 workloads".
+  const workloadCount = workloads.isLoading
+    ? '…'
+    : snapshot && snapshot.state !== 'unreachable'
+      ? `${running}/${rows.length}`
+      : '—'
 
   return (
     <div className="max-w-5xl space-y-6">
@@ -28,6 +40,8 @@ export default function Settings() {
           What this Nova knows about the platform it runs on.
         </p>
       </header>
+
+      <ClusterNotice snapshot={snapshot} />
 
       <section className="grid lg:grid-cols-2 gap-4">
         <div className="card p-5">
@@ -53,7 +67,11 @@ export default function Settings() {
           <div className="label mb-3">Platform</div>
           <dl className="text-sm space-y-2">
             <Row label="Warehouse" value={me.data?.warehouse ?? '—'} />
-            <Row label="Workloads running" value={workloads.isLoading ? '…' : `${running}/${workloads.data?.length ?? 0}`} />
+            <Row
+              label="Workloads running"
+              value={workloadCount}
+              hint={snapshot?.state === 'stale' ? 'last known state' : undefined}
+            />
             <Row label="Apps reachable" value={apps.isLoading ? '…' : `${up}/${apps.data?.length ?? 0}`} />
             <Row label="Distinct images" value={String(images.length)} />
           </dl>
@@ -77,7 +95,9 @@ export default function Settings() {
         <div className="label mb-3">Running images</div>
         {images.length === 0 ? (
           <p className="text-sm text-text-mute">
-            No cluster access — Nova lists images only when it can read its own namespace.
+            {snapshot?.state === 'ok'
+              ? "The cluster answered — no workloads in Nova's namespace to read images from."
+              : 'No cluster access — Nova lists images only when it can read its own namespace.'}
           </p>
         ) : (
           <ul className="space-y-1 text-[11px] font-mono text-text-dim">
