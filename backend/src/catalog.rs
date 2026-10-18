@@ -14,7 +14,7 @@ use axum::{
 use serde::Deserialize;
 use tracing::warn;
 
-use crate::{AppState, auth, data};
+use crate::{AppState, api_json::ApiJson, auth, data};
 
 #[derive(Deserialize)]
 struct WarehouseListItem {
@@ -42,10 +42,16 @@ pub(crate) async fn resolve_warehouse_id(state: &AppState) -> Result<String, Str
                 .get(&url)
                 .send()
                 .await
-                .map_err(|e| format!("lakekeeper unreachable: {e}"))?
+                .map_err(|e| {
+                    warn!("lakekeeper unreachable: {e}");
+                    "the catalog is not reachable".to_string()
+                })?
                 .json()
                 .await
-                .map_err(|e| format!("lakekeeper warehouse list malformed: {e}"))?;
+                .map_err(|e| {
+                    warn!("lakekeeper warehouse list malformed: {e}");
+                    "the catalog returned an unexpected response".to_string()
+                })?;
             resp.warehouses
                 .into_iter()
                 .find(|w| w.name == state.warehouse_name)
@@ -74,10 +80,12 @@ async fn proxy(state: &AppState, path: String, authorization: Option<&str>) -> R
                 .into_response()
         }
         Err(e) => {
+            // The reqwest error names the Lakekeeper URL it tried; log that and answer
+            // a sentence, since every signed-in user sees this body.
             warn!("lakekeeper proxy error: {e}");
             (
                 StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({"error": e.to_string()})),
+                Json(serde_json::json!({"error": "the upstream service is not reachable"})),
             )
                 .into_response()
         }
@@ -137,7 +145,7 @@ pub async fn create_namespace(
     State(s): State<Arc<AppState>>,
     caller: Option<axum::Extension<auth::Principal>>,
     // The body extractor has to be last: axum consumes the request for it.
-    Json(req): Json<CreateNamespaceRequest>,
+    ApiJson(req): ApiJson<CreateNamespaceRequest>,
 ) -> Response {
     let ns = req.namespace.trim();
     if ns.is_empty() {

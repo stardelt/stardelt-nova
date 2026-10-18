@@ -34,6 +34,18 @@ Browser
          └─ /*                        React SPA (static files)
 ```
 
+### HTTP conventions
+
+Every non-2xx answer under `/api/` is `{"error": "..."}` with
+`content-type: application/json` — including a malformed or missing request body
+(400/415/422) and an unknown path, which is `404 {"error":"not found"}` rather than
+the SPA's `index.html`. The 401 that starts sign-in keeps its `detail`/`login` fields.
+Every response carries `X-Content-Type-Options: nosniff`, `X-Frame-Options: SAMEORIGIN`,
+`Content-Security-Policy: frame-ancestors 'self'` and `Referrer-Policy: same-origin`;
+`/api/*` responses additionally carry `Cache-Control: no-store` (static assets do not,
+their names are hashed). Upstream failures answer one sentence — Trino's raw error
+document, with its Java stack, stays in Nova's log at debug level.
+
 ## Demo mode (no cluster)
 
 `NOVA_DEMO=1` serves an in-memory lakehouse — a seeded Iceberg-shaped catalog
@@ -52,6 +64,7 @@ stardelt-nova/
 ├── backend/          Rust crate (axum, tower-http, reqwest)
 │   └── src/
 │       ├── main.rs   server setup, /api/health, /api/me, /api/trino
+│       ├── api_json.rs  `ApiJson` body extractor: JSON, never text, on rejection
 │       ├── catalog.rs Lakekeeper proxy routes
 │       └── trino.rs  SQL query proxy
 ├── frontend/         Vite + React + TypeScript + Tailwind SPA
