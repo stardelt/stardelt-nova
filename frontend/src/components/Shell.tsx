@@ -4,11 +4,14 @@ import { useQuery } from '@tanstack/react-query'
 import { api } from '../api'
 import { Icon, type IconName } from './Icon'
 import { getTheme, applyTheme, type Theme } from '../theme'
+import { isAdmin, roleLabel } from '../roles'
 import ErrorBoundary from './ErrorBoundary'
 
 type NavItem = { to: string; label: string; icon: IconName; end?: boolean }
+/** `admin: true` hides the whole group from non-admins (see `roles.ts`). */
+type NavGroup = { label: string; items: NavItem[]; admin?: boolean }
 
-const groups: Array<{ label: string; items: NavItem[] }> = [
+const groups: NavGroup[] = [
   {
     label: 'Workspace',
     items: [
@@ -36,10 +39,15 @@ const groups: Array<{ label: string; items: NavItem[] }> = [
     ],
   },
   {
+    // Operating the platform is not a data-engineering task: an analyst has no use for
+    // the service inventory, the workload list or the settings page, and the noise
+    // makes the parts they do use harder to find.
     label: 'Platform',
+    admin: true,
     items: [
       { to: '/apps', label: 'Apps', icon: 'grid' },
       { to: '/health', label: 'Health', icon: 'pulse' },
+      { to: '/settings', label: 'Settings', icon: 'sliders' },
     ],
   },
 ]
@@ -55,6 +63,7 @@ const titles: Record<string, string> = {
   '/dashboards': 'Dashboards',
   '/notebooks': 'Notebooks',
   '/health': 'Health',
+  '/settings': 'Settings',
 }
 
 /** The app detail route carries its own id, so the header can be specific. */
@@ -80,6 +89,8 @@ export default function Shell() {
   const [q, setQ] = useState('')
   const [theme, setThemeState] = useState<Theme>(getTheme)
   const title = titleFor(location.pathname)
+  const admin = isAdmin(me.data)
+  const role = roleLabel(me.data)
 
   function toggleTheme() {
     const next: Theme = theme === 'dark' ? 'light' : 'dark'
@@ -112,7 +123,9 @@ export default function Shell() {
         </div>
 
         <nav className="px-3 pb-4 overflow-auto flex-1">
-          {groups.map(group => (
+          {groups
+            .filter(group => !group.admin || admin)
+            .map(group => (
             <div key={group.label} className="mb-4">
               <div className="label px-3 mb-1.5">{group.label}</div>
               <div className="space-y-1">
@@ -124,7 +137,7 @@ export default function Shell() {
                 ))}
               </div>
             </div>
-          ))}
+            ))}
         </nav>
 
         <div className="p-3 border-t border-border">
@@ -134,7 +147,21 @@ export default function Shell() {
             </div>
             <div className="min-w-0">
               <div className="text-sm truncate">{me.data?.user ?? (me.isError ? 'unknown user' : 'loading…')}</div>
-              <div className="text-[11px] text-text-mute">{me.data?.auth_mode ?? ''}</div>
+              <div className="text-[11px] text-text-mute flex items-center gap-1.5">
+                {role && (
+                  <span
+                    className={[
+                      'badge px-1.5 py-0 text-[10px]',
+                      admin
+                        ? 'border-accent/40 bg-accent/10 text-accent'
+                        : 'border-border bg-bg-soft text-text-mute',
+                    ].join(' ')}
+                  >
+                    {role}
+                  </span>
+                )}
+                {me.data?.auth_mode ?? ''}
+              </div>
             </div>
           </div>
         </div>
