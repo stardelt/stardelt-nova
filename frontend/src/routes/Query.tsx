@@ -116,11 +116,17 @@ export default function Query() {
               <button
                 onClick={() => downloadCsv(`nova-query-${result.query_id ?? 'result'}.csv`, result.columns.map(c => c.name), result.rows)}
                 className="btn-ghost ml-auto py-1 px-2 text-xs"
+                title={result.truncated ? 'This CSV holds only the first rows: add a LIMIT or aggregate to see the rest.' : 'Download these rows as CSV'}
               >
                 <Icon name="download" className="w-3.5 h-3.5" />
                 CSV
               </button>
             </div>
+            {result.truncated && (
+              <div className="px-4 py-2 text-xs bg-amber-500/10 border-b border-amber-500/40 text-amber-600 dark:text-amber-400">
+                Showing the first {result.row_count.toLocaleString()} rows. Add a LIMIT or aggregate to see the rest.
+              </div>
+            )}
             <div className="overflow-auto flex-1">
               <table className="w-full text-sm font-mono">
                 <thead className="text-text-mute sticky top-0 bg-bg-elev">

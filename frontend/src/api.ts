@@ -68,6 +68,8 @@ export type QueryResult = {
   row_count: number
   query_id?: string
   stats?: unknown
+  /** True when the backend cut the result at its 50,000-row cap. */
+  truncated?: boolean
 }
 
 export type Job = {

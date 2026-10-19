@@ -23,6 +23,9 @@
 //! `NOVA_DEMO=1` serves an in-memory lakehouse so the UI runs with no cluster.
 //! `NOVA_AUTH_MODE=oidc` puts every `/api/*` route except `/api/health` and
 //! `/api/auth/*` behind OIDC sign-in (see `auth.rs`); `dev` (default) has no login.
+//! `NOVA_QUERY_TIMEOUT_SECS` bounds how long `POST /api/query` waits for Trino
+//! (default 300 s): a slower query is cancelled server-side and answered
+//! `400 {"error":"query exceeded the Ns limit and was cancelled"}`.
 
 mod api_json;
 mod apps;
