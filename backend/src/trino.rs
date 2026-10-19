@@ -170,8 +170,6 @@ impl Drop for CancelOnDrop {
     }
 }
 
-/// Run SQL and return the aggregated result. Used by the query handler and by
-/// load/transfer, which issue DDL/DML through the same path.
 /// The engine's `source` for statements Nova runs on its own behalf (loads, transfers); the query
 /// log shows it so a person can tell where a statement came from.
 const SOURCE_NOVA: &str = "nova";
@@ -195,6 +193,8 @@ fn statement_post(
     )
 }
 
+/// Run SQL and return the aggregated result. Used by the query handler and by
+/// load/transfer, which issue DDL/DML through the same path.
 pub async fn execute(
     state: &AppState,
     sql: String,
