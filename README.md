@@ -184,6 +184,8 @@ The backend is configured entirely through environment variables:
 | Variable | Default | Description |
 |---|---|---|
 | `NOVA_BIND_ADDR` | `0.0.0.0:8080` | TCP address the HTTP server listens on |
+| `NOVA_INTERNAL_ADDR` | — (off) | Second, internal-only listener that receives the engine's query events (e.g. `0.0.0.0:8081`). Opened only when `NOVA_EVENTS_TOKEN` is set too; with the address alone a warning is logged and no second port opens. The route exists on this listener only — never on the public port, never through the Ingress |
+| `NOVA_EVENTS_TOKEN` | — (required with the address) | Shared bearer token the engine presents on `POST /internal/trino-events` (env from the `nova-events` Secret). Wrong or missing token = `401`; full queue = `503`; accepted = `204`. Compared in constant time and never logged |
 | `NOVA_STATIC_DIR` | `/app/static` | Directory containing the compiled frontend assets |
 | `NOVA_TRINO_URL` | `http://trino.stardelt.svc.cluster.local:8080` | Trino coordinator base URL. The platform's installer points this at the coordinator's in-cluster HTTPS endpoint (`https://trino.<ns>.svc.cluster.local:8443`) once an IdP is installed — see `NOVA_TRINO_CA_PEM` |
 | `NOVA_TRINO_CA_PEM` | — (empty) | PEM of a CA to **add** to the TLS roots the upstream client trusts (the platform's internal CA for the coordinator certificate, from the `trino-ca` Secret). Empty = only the public WebPKI roots; never a replacement, and verification is never disabled |
