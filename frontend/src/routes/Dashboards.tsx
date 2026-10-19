@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../api'
+import { isAdmin } from '../roles'
 import { EmbedBadge, EmbedNotice } from '../components/EmbedNotice'
 import { safeHttpUrl, statusLabel } from '../format'
 
@@ -21,6 +22,8 @@ export default function Dashboards() {
   // `/api/embeds` is readable by every signed-in user; `/api/apps` and its detail are
   // operator views (they carry workloads and images), so this page cannot depend on them.
   const apps = useQuery({ queryKey: ['embeds'], queryFn: api.embeds, refetchInterval: 15_000 })
+  const me = useQuery({ queryKey: ['me'], queryFn: api.me })
+  const admin = isAdmin(me.data)
   const superset = apps.data?.find(a => a.id === 'superset')
   const deployed = superset?.status === 'up'
   // Only http(s) URLs may reach `href` / iframe `src`; anything else falls back, then to nothing.
@@ -50,7 +53,9 @@ export default function Dashboards() {
                 ? <> Checking whether it is deployed…</>
                 : apps.isError
                   ? <> Could not read the app list ({String(apps.error)}).</>
-                  : <> Not deployed yet — run <span className="font-mono">make install</span> (full profile) to add it.</>}
+                  : admin
+                    ? <> Not deployed yet — run <span className="font-mono">make install</span> (full profile) to add it.</>
+                    : <> Dashboards are not available yet. Ask your platform administrator to enable them.</>}
           </p>
         </div>
         <div className="flex items-center gap-2">

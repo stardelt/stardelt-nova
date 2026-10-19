@@ -25,7 +25,7 @@ export default function Catalog() {
   const namespaces = useQuery({ queryKey: ['catalog', 'namespaces'], queryFn: api.namespaces })
 
   return (
-    <div className="grid grid-cols-[300px_1fr] gap-5 h-full min-h-0">
+    <div className="grid grid-cols-1 lg:grid-cols-[300px_minmax(0,1fr)] gap-5 h-full min-h-0">
       <aside className="card p-3 flex flex-col min-h-0">
         <div className="px-1 pb-2">
           <div className="label mb-1.5">Catalog</div>
@@ -173,7 +173,7 @@ function TableDetail({ ns, tbl }: Sel) {
       {tab === 'preview' && <Preview q={preview} />}
 
       {tab === 'columns' && (
-        <div className="card overflow-hidden">
+        <div className="card overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="bg-bg-soft/50">
               <tr>

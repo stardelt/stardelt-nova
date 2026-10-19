@@ -78,8 +78,8 @@ export default function Query() {
   }
 
   return (
-    <div className="grid grid-cols-[1fr_280px] gap-5 h-full min-h-0">
-      <div className="flex flex-col gap-4 min-h-0">
+    <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_280px] gap-5 h-full min-h-0">
+      <div className="flex flex-col gap-4 min-h-0 min-w-0">
         <div className="card p-3 focus-within:border-accent/60">
           <textarea
             ref={taRef}
@@ -102,7 +102,7 @@ export default function Query() {
         </div>
 
         {error && (
-          <div className="rounded-[14px] border border-red-500/40 bg-red-500/10 p-4 text-sm text-bad font-mono whitespace-pre-wrap">
+          <div className="rounded-[14px] border border-red-500/40 bg-red-500/10 p-4 text-sm text-bad font-mono whitespace-pre-wrap break-words">
             {error}
           </div>
         )}
