@@ -4,7 +4,7 @@
 //!
 //! It is best effort by design: a lost event costs one log row and never delays a query.
 //! Authentication is one shared bearer token (Secret `nova-events`), compared in constant
-//! time. The consumer is a task that only logs for now; the store ticket replaces it.
+//! time. The consumer is a task that stores each record when a state store is configured.
 
 use std::sync::Arc;
 
@@ -129,7 +129,7 @@ fn env_nonempty(name: &str) -> Option<String> {
 
 /// Start the collector when `NOVA_INTERNAL_ADDR` and `NOVA_EVENTS_TOKEN` are both set;
 /// otherwise do nothing (the default: no second port is opened).
-pub async fn start() -> anyhow::Result<()> {
+pub async fn start(db: Option<sqlx::PgPool>) -> anyhow::Result<()> {
     let Some(addr) = env_nonempty("NOVA_INTERNAL_ADDR") else {
         return Ok(());
     };
@@ -140,7 +140,7 @@ pub async fn start() -> anyhow::Result<()> {
         return Ok(());
     };
     let (tx, mut rx) = mpsc::channel::<Accepted>(QUEUE_LEN);
-    // Placeholder consumer: the store ticket replaces this log line with a database upsert.
+    // The consumer: store every record when there is a state store, otherwise just log it.
     tokio::spawn(async move {
         while let Some(a) = rx.recv().await {
             info!(
@@ -150,6 +150,11 @@ pub async fn start() -> anyhow::Result<()> {
                 warehouse = %a.warehouse,
                 "query event"
             );
+            if let Some(pool) = &db
+                && let Err(e) = crate::query_log_store::upsert(pool, &a).await
+            {
+                warn!(error = %e, query_id = %a.record.query_id, "could not store a query-log row");
+            }
         }
     });
     let listener = tokio::net::TcpListener::bind(&addr).await?;
