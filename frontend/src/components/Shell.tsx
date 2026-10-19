@@ -313,13 +313,19 @@ export default function Shell() {
           <AppSwitcher />
           {me.data?.auth_mode === 'oidc' && (
             <div className="flex items-center gap-2 pl-2 border-l border-border">
-              <div className="text-right leading-tight min-w-0 hidden sm:block" title={me.data.email ?? me.data.sub ?? ''}>
+              <div className="text-right leading-tight min-w-0 hidden sm:block" title={me.data.email ?? ''}>
                 <div className="text-sm truncate max-w-[12rem]">{me.data.user}</div>
-                {me.data.is_admin && <div className="text-[11px] text-text-mute">admin</div>}
+                {role && <div className="text-[11px] text-text-mute truncate max-w-[12rem]">{role}</div>}
               </div>
-              {/* A plain form POST: the backend clears the session and 303s to the IdP's logout. */}
+              {/* A plain form POST: the backend clears the session and 303s to the IdP's logout,
+                  ending the shared Keycloak session for Nova and all connected apps. */}
               <form method="post" action="/api/auth/logout">
-                <button type="submit" className="btn-ghost px-2.5 py-1.5 text-sm">
+                <button
+                  type="submit"
+                  className="btn-ghost px-2.5 py-1.5 text-sm"
+                  title="Sign out of Nova and all connected apps"
+                  aria-label="Sign out of Nova and all connected apps"
+                >
                   Sign out
                 </button>
               </form>
