@@ -123,6 +123,13 @@ pub(crate) mod test_support {
             .await
             .expect("connect with the test schema")
     }
+
+    /// `fresh_pool()` with every migration applied.
+    pub(crate) async fn migrated_pool() -> PgPool {
+        let pool = fresh_pool().await;
+        migrate(&pool).await.expect("apply the migrations");
+        pool
+    }
 }
 
 #[cfg(test)]
