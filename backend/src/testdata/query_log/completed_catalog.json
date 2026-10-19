@@ -1,0 +1,88 @@
+{
+  "createTime": "2026-10-19T11:34:37.348867747Z",
+  "executionStartTime": "2026-10-19T11:34:37.353920404Z",
+  "endTime": "2026-10-19T11:34:39.504280215Z",
+  "context": {
+    "user": "alice",
+    "principal": "alice",
+    "source": "nova-sql-editor",
+    "clientTags": [
+      "nova",
+      "warehouse-default"
+    ],
+    "catalog": "tpch",
+    "schema": "tiny",
+    "queryType": "SELECT",
+    "remoteClientAddress": "127.0.0.1",
+    "resourceGroupId": [
+      "global"
+    ],
+    "serverVersion": "480",
+    "environment": "scratch"
+  },
+  "metadata": {
+    "queryId": "20261019_113436_00001_xdgmj",
+    "query": "select * from nation",
+    "queryState": "FINISHED",
+    "tables": [
+      {
+        "catalog": "tpch",
+        "schema": "tiny",
+        "table": "nation",
+        "authorization": "alice",
+        "filters": [],
+        "columns": [
+          {
+            "column": "nationkey"
+          },
+          {
+            "column": "regionkey"
+          },
+          {
+            "column": "name"
+          },
+          {
+            "column": "comment"
+          }
+        ],
+        "directlyReferenced": true,
+        "referenceChain": []
+      }
+    ],
+    "uri": "http://10.244.0.209:8080/v1/query/20261019_113436_00001_xdgmj",
+    "plan": "(omitted: the real payload carries a plan of 90 KB here)"
+  },
+  "statistics": {
+    "cpuTime": 0.016,
+    "wallTime": 2.155412467,
+    "queuedTime": 0.001128023,
+    "analysisTime": 0.003613111,
+    "planningTime": 0.009285172,
+    "executionTime": 2.15035981,
+    "peakUserMemoryBytes": 3344,
+    "physicalInputBytes": 0,
+    "physicalInputRows": 25,
+    "processedInputBytes": 2734,
+    "processedInputRows": 25,
+    "outputBytes": 2734,
+    "outputRows": 25,
+    "writtenBytes": 0,
+    "writtenRows": 0,
+    "cumulativeMemory": 601237.4471999999,
+    "completedSplits": 8,
+    "complete": true,
+    "operatorSummaries": []
+  },
+  "ioMetadata": {
+    "inputs": [
+      {
+        "catalogName": "tpch",
+        "schema": "tiny",
+        "table": "nation",
+        "physicalInputBytes": 0,
+        "physicalInputRows": 25
+      }
+    ]
+  },
+  "warnings": []
+}

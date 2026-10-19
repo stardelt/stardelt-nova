@@ -1,0 +1,28 @@
+{
+  "createTime": "2026-10-19T11:33:25.058999857Z",
+  "context": {
+    "user": "alice",
+    "principal": "alice",
+    "source": "nova-sql-editor",
+    "clientTags": [
+      "nova",
+      "warehouse-default"
+    ],
+    "queryType": "SELECT",
+    "remoteClientAddress": "127.0.0.1",
+    "resourceGroupId": [
+      "global"
+    ],
+    "serverVersion": "480",
+    "environment": "scratch"
+  },
+  "metadata": {
+    "queryId": "20261019_113323_00000_tnvu4",
+    "query": "select 'alice-secret-literal' as c, count(*) from tpch.tiny.nation",
+    "queryState": "QUEUED",
+    "tables": [],
+    "uri": "http://10.244.0.209:8080/v1/query/20261019_113323_00000_tnvu4",
+    "plan": "(omitted: the real payload carries a plan of 90 KB here)"
+  },
+  "warnings": []
+}

@@ -1,0 +1,107 @@
+{
+  "createTime": "2026-10-19T11:34:35.170045148Z",
+  "executionStartTime": "2026-10-19T11:34:35.310584901Z",
+  "endTime": "2026-10-19T11:34:36.267877811Z",
+  "context": {
+    "user": "carol",
+    "principal": "carol",
+    "source": "airflow-task",
+    "clientTags": [
+      "airflow"
+    ],
+    "queryType": "SELECT",
+    "remoteClientAddress": "127.0.0.1",
+    "resourceGroupId": [
+      "global"
+    ],
+    "serverVersion": "480",
+    "environment": "scratch"
+  },
+  "metadata": {
+    "queryId": "20261019_113434_00000_xdgmj",
+    "query": "select count(*) from tpch.sf1.lineitem a join tpch.sf1.orders b on a.orderkey=b.orderkey",
+    "queryState": "FAILED",
+    "tables": [
+      {
+        "catalog": "tpch",
+        "schema": "sf1",
+        "table": "lineitem",
+        "authorization": "carol",
+        "filters": [],
+        "columns": [
+          {
+            "column": "orderkey"
+          }
+        ],
+        "directlyReferenced": true,
+        "referenceChain": []
+      },
+      {
+        "catalog": "tpch",
+        "schema": "sf1",
+        "table": "orders",
+        "authorization": "carol",
+        "filters": [],
+        "columns": [
+          {
+            "column": "orderkey"
+          }
+        ],
+        "directlyReferenced": true,
+        "referenceChain": []
+      }
+    ],
+    "uri": "http://10.244.0.209:8080/v1/query/20261019_113434_00000_xdgmj",
+    "plan": "(omitted: the real payload carries a plan of 90 KB here)"
+  },
+  "statistics": {
+    "cpuTime": 1.526,
+    "wallTime": 1.097832662,
+    "queuedTime": 0.059069283,
+    "analysisTime": 0.082371613,
+    "planningTime": 0.400523066,
+    "executionTime": 0.95729291,
+    "peakUserMemoryBytes": 5888,
+    "physicalInputBytes": 0,
+    "physicalInputRows": 0,
+    "processedInputBytes": 0,
+    "processedInputRows": 0,
+    "outputBytes": 0,
+    "outputRows": 0,
+    "writtenBytes": 0,
+    "writtenRows": 0,
+    "cumulativeMemory": 2659472.6554239998,
+    "completedSplits": 33,
+    "complete": true,
+    "operatorSummaries": []
+  },
+  "failureInfo": {
+    "errorCode": {
+      "code": 3,
+      "name": "USER_CANCELED",
+      "type": "USER_ERROR",
+      "fatal": true
+    },
+    "failureType": "io.trino.spi.TrinoException",
+    "failureMessage": "Query was canceled"
+  },
+  "ioMetadata": {
+    "inputs": [
+      {
+        "catalogName": "tpch",
+        "schema": "sf1",
+        "table": "lineitem",
+        "physicalInputBytes": 0,
+        "physicalInputRows": 0
+      },
+      {
+        "catalogName": "tpch",
+        "schema": "sf1",
+        "table": "orders",
+        "physicalInputBytes": 0,
+        "physicalInputRows": 0
+      }
+    ]
+  },
+  "warnings": []
+}

@@ -50,6 +50,9 @@ mod openapi;
 // Wired into the collector and the API by the follow-up query-log tickets (stardelt-nova#116).
 #[allow(dead_code)]
 mod query_log;
+// Maps the engine's event payloads to log records; wired up by the collector ticket.
+#[allow(dead_code)]
+mod query_log_event;
 mod saved_queries;
 mod trino;
 
