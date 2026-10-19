@@ -320,6 +320,7 @@ impl DemoState {
                 row_count: 1,
                 query_id,
                 stats: None,
+                truncated: false,
             });
         }
         let (ns, tbl) = extract_ref(&q).ok_or_else(|| {
@@ -340,6 +341,7 @@ impl DemoState {
                 row_count: 1,
                 query_id,
                 stats: None,
+                truncated: false,
             });
         }
 
@@ -351,6 +353,7 @@ impl DemoState {
             rows,
             query_id,
             stats: None,
+            truncated: false,
         })
     }
 

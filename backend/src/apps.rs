@@ -39,7 +39,7 @@ pub struct PlatformApp {
     /// no browsable surface of its own (an API-only catalog, say), which is
     /// independent of whether the app is installed or reachable.
     pub browsable: bool,
-    /// up | unreachable | unknown
+    /// up | unreachable | unknown | not-installed
     pub status: String,
     /// Images the app's workloads actually run, read from the cluster. Empty when
     /// there is no cluster to read (demo mode, local run) or the app is not installed.
@@ -336,7 +336,16 @@ fn targets(state: &AppState) -> Targets<'_> {
 }
 
 /// Build the list-page view of an app: status + images, both observed, not configured.
-async fn describe(s: &AppState, spec: &Spec, base: &str, snapshot: &[Workload]) -> PlatformApp {
+async fn describe(
+    s: &AppState,
+    spec: &Spec,
+    base: &str,
+    snapshot: &cluster::Snapshot,
+) -> PlatformApp {
+    let probed = probe(s, &spec.probe.url(&targets(s), spec.probe_path)).await;
+    let has_workloads =
+        !cluster::workloads_for(&snapshot.workloads, spec.workload_prefixes).is_empty();
+    let status = resolve_status(probed, snapshot.state != "unreachable", has_workloads);
     PlatformApp {
         id: spec.id.to_string(),
         name: spec.name.to_string(),
@@ -344,8 +353,8 @@ async fn describe(s: &AppState, spec: &Spec, base: &str, snapshot: &[Workload]) 
         category: spec.category.to_string(),
         external_url: public_url(base, spec),
         browsable: browsable(spec),
-        status: probe(s, &spec.probe.url(&targets(s), spec.probe_path)).await,
-        images: cluster::images_for(snapshot, spec.workload_prefixes),
+        status,
+        images: cluster::images_for(&snapshot.workloads, spec.workload_prefixes),
     }
 }
 
@@ -399,7 +408,7 @@ pub async fn list(State(s): State<Arc<AppState>>) -> Json<Vec<PlatformApp>> {
     let mut apps = Vec::with_capacity(SPECS.len());
 
     for spec in SPECS {
-        apps.push(describe(&s, spec, &base, &snapshot.workloads).await);
+        apps.push(describe(&s, spec, &base, &snapshot).await);
     }
 
     Json(apps)
@@ -422,13 +431,17 @@ pub struct EmbedApp {
 
 pub async fn embeds(State(s): State<Arc<AppState>>) -> Json<Vec<EmbedApp>> {
     let base = std::env::var("NOVA_BASE_DOMAIN").unwrap_or_default();
+    let snapshot = s.workloads.snapshot(s.kube.as_ref(), s.demo).await;
     let mut out = Vec::new();
     for spec in SPECS.iter().filter(|spec| spec.embed.is_some()) {
+        let probed = probe(&s, &spec.probe.url(&targets(&s), spec.probe_path)).await;
+        let has_workloads =
+            !cluster::workloads_for(&snapshot.workloads, spec.workload_prefixes).is_empty();
         out.push(EmbedApp {
             id: spec.id.to_string(),
             name: spec.name.to_string(),
             external_url: public_url(&base, spec),
-            status: probe(&s, &spec.probe.url(&targets(&s), spec.probe_path)).await,
+            status: resolve_status(probed, snapshot.state != "unreachable", has_workloads),
             embed: embed_report(&s, spec, &base).await,
         });
     }
@@ -453,7 +466,7 @@ pub async fn detail(State(s): State<Arc<AppState>>, Path(id): Path<String>) -> R
     let (ready, desired) = cluster::replicas(&workloads);
 
     Json(AppDetail {
-        app: describe(&s, spec, &base, &snapshot.workloads).await,
+        app: describe(&s, spec, &base, &snapshot).await,
         probe: spec.probe.url(&targets(&s), spec.probe_path),
         replicas: Replicas { ready, desired },
         workloads,
@@ -857,6 +870,17 @@ async fn probe(state: &AppState, url: &str) -> String {
     }
 }
 
+/// `up` stays `up`. Anything else is `not-installed` when the cluster was read
+/// and holds no workload for the app (not a failure); otherwise the probe's
+/// verdict stands.
+fn resolve_status(probed: String, cluster_read: bool, has_workloads: bool) -> String {
+    if probed != "up" && cluster_read && !has_workloads {
+        "not-installed".into()
+    } else {
+        probed
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1169,5 +1193,22 @@ mod tests {
             app_hosts("", "https://jupyter.alpha.dev.stardelt.io/hub/home"),
             vec!["jupyter.alpha.dev.stardelt.io".to_string()]
         );
+    }
+
+    #[test]
+    fn a_missing_workload_is_not_installed_not_unreachable() {
+        assert_eq!(
+            resolve_status("unreachable".into(), true, false),
+            "not-installed"
+        );
+        assert_eq!(
+            resolve_status("unreachable".into(), true, true),
+            "unreachable"
+        );
+        assert_eq!(
+            resolve_status("unreachable".into(), false, false),
+            "unreachable"
+        );
+        assert_eq!(resolve_status("up".into(), true, false), "up");
     }
 }
