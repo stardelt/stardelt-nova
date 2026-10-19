@@ -31,4 +31,10 @@ ENV NOVA_BIND_ADDR=0.0.0.0:8080 \
     NOVA_STATIC_DIR=/app/static \
     RUST_LOG=info
 EXPOSE 8080
+# Run as non-root (uid 65532, matching the platform's runAsUser/runAsGroup).
+# The binary only reads /app/static and listens on unprivileged 8080; sessions
+# are in-memory, so nothing needs to be writable. World-readable bits are
+# enforced here rather than assumed from the build stages' umask.
+RUN chmod 755 /usr/local/bin/nova && chmod -R a=rX /app/static
+USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/nova"]
