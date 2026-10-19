@@ -7,6 +7,8 @@
 //! are RFC 3339 strings. A completed event can be several hundred kilobytes (it carries
 //! the query plan), so only the fields below are read and everything else is ignored.
 
+use std::borrow::Cow;
+
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -66,9 +68,11 @@ pub struct QueryLogRecord {
     pub catalog: Option<String>,
     pub schema: Option<String>,
     pub query_type: Option<String>,
-    /// The statement, cut at [`MAX_SQL_BYTES`].
+    /// The statement with catalog credentials hidden ([`redact_catalog_secrets`]), cut at
+    /// [`MAX_SQL_BYTES`].
     pub sql_text: String,
-    /// Lower-case hex SHA-256 of the complete statement.
+    /// Lower-case hex SHA-256 of the complete statement after redaction, so the hash of a
+    /// catalog statement cannot be used to guess its password.
     pub sql_hash: String,
     pub created_at: String,
     pub started_at: Option<String>,
@@ -201,6 +205,141 @@ fn hex_sha256(text: &str) -> String {
         .collect()
 }
 
+/// Words that mark a catalog property as holding a credential (compared in lower case,
+/// as a substring of the property name: `connection-password`, `s3.aws-secret-key`,
+/// `iceberg.rest-catalog.oauth2.token`, `gcs.json-key`).
+const SECRET_NAME_PARTS: [&str; 8] = [
+    "password",
+    "passwd",
+    "passphrase",
+    "secret",
+    "token",
+    "credential",
+    "key",
+    "jaas",
+];
+
+/// What replaces the value of a credential property in the stored statement.
+const REDACTED: &str = "'***'";
+
+/// Hide the credentials a catalog statement carries.
+///
+/// The engine logs a complete `CREATE CATALOG` / `ALTER CATALOG` statement with its
+/// properties, passwords included. Users never write these statements (catalogs come
+/// from connections, D27); an administrator who does must not leave the password in a
+/// log that others can read. In such a statement the string literal after
+/// `<name> =` is replaced by `'***'` when the name contains one of
+/// [`SECRET_NAME_PARTS`]; a literal that is only a reference (`'${ENV:DB_PASSWORD}'`)
+/// stays. Every other statement is returned unchanged: a `WHERE password = 'x'` in a
+/// query is data, not configuration. Comments are skipped, not scanned.
+pub fn redact_catalog_secrets(sql: &str) -> Cow<'_, str> {
+    // Tokens that matter: names (unquoted words and "quoted" identifiers, lower case),
+    // single-quoted literals (byte range), and a lone `=`. Everything else is `Other`.
+    enum Tok {
+        Name(String),
+        /// Start and end of the whole literal, and the end of its text (before a closing quote).
+        Literal(usize, usize, usize),
+        Equals,
+        Other,
+    }
+
+    let bytes = sql.as_bytes();
+    let mut toks: Vec<Tok> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c.is_ascii_whitespace() {
+            i += 1;
+        } else if c == b'-' && bytes.get(i + 1) == Some(&b'-') {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+        } else if c == b'/' && bytes.get(i + 1) == Some(&b'*') {
+            i += 2;
+            while i < bytes.len() && !(bytes[i] == b'*' && bytes.get(i + 1) == Some(&b'/')) {
+                i += 1;
+            }
+            i = (i + 2).min(bytes.len());
+        } else if c == b'\'' || c == b'"' {
+            let start = i;
+            let mut closed = false;
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == c {
+                    if bytes.get(i + 1) == Some(&c) {
+                        i += 2; // a doubled quote is an escaped quote
+                        continue;
+                    }
+                    closed = true;
+                    break;
+                }
+                i += 1;
+            }
+            // `inner_end` is where the text stops: before the closing quote, or at the end
+            // of an unterminated one. Both are character boundaries.
+            let inner_end = i.min(bytes.len());
+            if closed {
+                i += 1;
+            }
+            if c == b'\'' {
+                toks.push(Tok::Literal(start, i, inner_end));
+            } else {
+                let name = sql[start + 1..inner_end].replace("\"\"", "\"");
+                toks.push(Tok::Name(name.to_ascii_lowercase()));
+            }
+        } else if c.is_ascii_alphabetic() || c == b'_' {
+            let start = i;
+            while i < bytes.len()
+                && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'$')
+            {
+                i += 1;
+            }
+            toks.push(Tok::Name(sql[start..i].to_ascii_lowercase()));
+        } else if matches!(c, b'<' | b'>' | b'!') && bytes.get(i + 1) == Some(&b'=') {
+            toks.push(Tok::Other);
+            i += 2;
+        } else if c == b'=' {
+            toks.push(Tok::Equals);
+            i += 1;
+        } else {
+            toks.push(Tok::Other);
+            i += 1;
+        }
+    }
+
+    let is_catalog_ddl = matches!(
+        (toks.first(), toks.get(1), toks.get(2)),
+        (Some(Tok::Name(a)), Some(Tok::Name(b)), _)
+            if (a == "create" || a == "alter") && b == "catalog"
+    );
+    if !is_catalog_ddl {
+        return Cow::Borrowed(sql);
+    }
+
+    let mut hidden: Vec<(usize, usize)> = Vec::new();
+    for w in toks.windows(3) {
+        if let [Tok::Name(name), Tok::Equals, Tok::Literal(a, b, inner_end)] = w {
+            let value = &sql[*a + 1..*inner_end];
+            let is_reference = value.starts_with("${") && value.ends_with('}');
+            if !is_reference && SECRET_NAME_PARTS.iter().any(|part| name.contains(part)) {
+                hidden.push((*a, *b));
+            }
+        }
+    }
+    if hidden.is_empty() {
+        return Cow::Borrowed(sql);
+    }
+    let mut out = String::with_capacity(sql.len());
+    let mut at = 0;
+    for (a, b) in hidden {
+        out.push_str(&sql[at..a]);
+        out.push_str(REDACTED);
+        at = b;
+    }
+    out.push_str(&sql[at..]);
+    Cow::Owned(out)
+}
+
 /// Parse the body of one `POST` from the engine's event listener.
 pub fn parse(body: &[u8]) -> Result<QueryLogRecord, ParseError> {
     let event: Event = serde_json::from_slice(body).map_err(|e| ParseError(e.to_string()))?;
@@ -240,6 +379,7 @@ pub fn parse(body: &[u8]) -> Result<QueryLogRecord, ParseError> {
     });
 
     let io = event.io_metadata.unwrap_or_default();
+    let sql = redact_catalog_secrets(&event.metadata.query);
     Ok(QueryLogRecord {
         query_id: event.metadata.query_id,
         state,
@@ -249,8 +389,8 @@ pub fn parse(body: &[u8]) -> Result<QueryLogRecord, ParseError> {
         catalog: event.context.catalog,
         schema: event.context.schema,
         query_type: event.context.query_type,
-        sql_hash: hex_sha256(&event.metadata.query),
-        sql_text: cut(&event.metadata.query, MAX_SQL_BYTES),
+        sql_hash: hex_sha256(&sql),
+        sql_text: cut(&sql, MAX_SQL_BYTES),
         created_at: event.create_time,
         started_at: event.execution_start_time,
         ended_at: event.end_time,
@@ -370,5 +510,82 @@ mod tests {
             parse(no_user),
             Err(ParseError("empty query id or user".to_string()))
         );
+    }
+
+    #[test]
+    fn a_catalog_statement_loses_its_credentials_and_keeps_the_rest() {
+        let sql = r#"CREATE CATALOG crm USING postgresql WITH ("connection-url" = 'jdbc:postgresql://db/crm', "connection-user" = 'etl', "connection-password" = 'p''w', "s3.aws-secret-key" = 'k')"#;
+        let out = redact_catalog_secrets(sql);
+        assert_eq!(
+            out,
+            r#"CREATE CATALOG crm USING postgresql WITH ("connection-url" = 'jdbc:postgresql://db/crm', "connection-user" = 'etl', "connection-password" = '***', "s3.aws-secret-key" = '***')"#
+        );
+    }
+
+    #[test]
+    fn alter_catalog_unquoted_names_and_leading_comments_are_covered() {
+        let sql = "-- rotate\n  /* by hand */ alter Catalog crm SET PROPERTIES password = 'x', \"Oauth2.Token\" = 'abc'";
+        let out = redact_catalog_secrets(sql);
+        assert!(out.contains("password = '***'") && out.contains("\"Oauth2.Token\" = '***'"));
+        assert!(out.starts_with("-- rotate\n  /* by hand */ alter Catalog"));
+        assert!(!out.contains("'x'") && !out.contains("abc"));
+    }
+
+    #[test]
+    fn a_reference_to_a_secret_is_not_a_secret() {
+        let sql = r#"CREATE CATALOG crm USING postgresql WITH ("connection-password" = '${ENV:DB_PASSWORD}')"#;
+        assert!(matches!(redact_catalog_secrets(sql), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn other_statements_are_never_changed() {
+        for sql in [
+            "SELECT * FROM users WHERE password = 'hunter2'",
+            "SET SESSION crm.token = 'abc'",
+            "CREATE TABLE t (a int) WITH (secret = 'x')",
+            "SELECT 'CREATE CATALOG x WITH (password = ''y'')'",
+        ] {
+            assert!(
+                matches!(redact_catalog_secrets(sql), Cow::Borrowed(s) if s == sql),
+                "{sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn comparisons_and_unterminated_text_do_not_confuse_the_scanner() {
+        let out = redact_catalog_secrets("CREATE CATALOG c USING x WITH (a >= 'k', token = 'v'");
+        assert_eq!(
+            out,
+            "CREATE CATALOG c USING x WITH (a >= 'k', token = '***'"
+        );
+        let cut_short = redact_catalog_secrets("CREATE CATALOG c USING x WITH (token = 'v");
+        assert_eq!(cut_short, "CREATE CATALOG c USING x WITH (token = '***'");
+    }
+
+    #[test]
+    fn the_stored_text_and_the_hash_follow_the_redacted_statement() {
+        let sql = r#"CREATE CATALOG crm USING postgresql WITH ("connection-password" = 'hunter2')"#;
+        let body = serde_json::json!({
+            "createTime": "2026-10-19T11:33:25.058999857Z",
+            "context": { "user": "admin" },
+            "metadata": { "queryId": "q2", "query": sql }
+        })
+        .to_string();
+        let r = parse(body.as_bytes()).unwrap();
+        assert!(!r.sql_text.contains("hunter2"));
+        assert!(r.sql_text.contains("'***'"));
+        assert_eq!(r.sql_hash, hex_sha256(&r.sql_text));
+        assert_ne!(r.sql_hash, hex_sha256(sql));
+    }
+
+    #[test]
+    fn no_prefix_of_a_statement_makes_the_scanner_panic() {
+        let sql = "CREATE CATALOG c\u{e9} USING x WITH (\"pass\u{e9}word\" = 'v\u{e9}''\u{e9}', token = '\u{e9}') /* \u{e9} */ -- \u{e9}";
+        for (end, _) in sql.char_indices().chain(std::iter::once((sql.len(), ' '))) {
+            let _ = redact_catalog_secrets(&sql[..end]);
+        }
+        let out = redact_catalog_secrets("CREATE CATALOG c USING x WITH (token = '\u{e9}");
+        assert_eq!(out, "CREATE CATALOG c USING x WITH (token = '***'");
     }
 }
