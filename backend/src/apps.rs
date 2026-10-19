@@ -204,7 +204,8 @@ const SPECS: &[Spec] = &[
         probe: Endpoint::Trino,
         probe_path: "/v1/info",
         workload_prefixes: &["trino-"],
-        paths: &[("Trino UI", "/ui"), ("Query list", "/ui/admin/query")],
+        // No browsable surface until the administrator gate exists (stardelt-platform#194): the public host serves only /v1/statement and /oauth2; administrators port-forward the UI.
+        paths: &[],
         embed: None,
     },
     Spec {
@@ -494,13 +495,18 @@ async fn facts(state: &AppState, spec: &Spec) -> Vec<Fact> {
     match spec.id {
         "nova" => vec![Fact::new("Nova build", env!("CARGO_PKG_VERSION"))],
         "trino" => {
+            let mut facts = vec![Fact::new(
+                "Open the UI",
+                "kubectl -n stardelt port-forward svc/trino 8443:8443, then open https://localhost:8443/ui/",
+            )];
             if state.demo {
-                return trino_facts(&demo_trino_info(), "demo stub");
+                facts.extend(trino_facts(&demo_trino_info(), "demo stub"));
+            } else if let Some(info) =
+                fetch_json(state, &format!("{}/v1/info", state.trino_url)).await
+            {
+                facts.extend(trino_facts(&info, "Trino /v1/info"));
             }
-            match fetch_json(state, &format!("{}/v1/info", state.trino_url)).await {
-                Some(info) => trino_facts(&info, "Trino /v1/info"),
-                None => Vec::new(),
-            }
+            facts
         }
         "lakekeeper" => {
             if state.demo {
@@ -989,7 +995,7 @@ mod tests {
     fn app_links_offer_the_browsable_apps_except_nova() {
         let links = links_for("alpha.dev.stardelt.io", true);
         let ids: Vec<&str> = links.iter().map(|l| l.id.as_str()).collect();
-        assert_eq!(ids, ["trino", "superset", "airflow", "jupyterhub"]);
+        assert_eq!(ids, ["superset", "airflow", "jupyterhub"]);
         assert!(
             links.iter().all(|l| l.external_url.starts_with("https://")),
             "every link must be an absolute https URL"
@@ -1000,8 +1006,9 @@ mod tests {
         // No base domain (demo mode, local run): no links, rather than empty hrefs.
         assert!(links_for("", true).is_empty());
 
-        // Non-admins get everything except the engine UI, whose activity is
-        // cluster-wide (platform#181).
+        // Both calls return the same list: the engine has no browsable surface
+        // (stardelt-platform#194), so there is nothing left to restrict from
+        // non-admins (platform#181).
         let user_links = links_for("alpha.dev.stardelt.io", false);
         let ids: Vec<&str> = user_links.iter().map(|l| l.id.as_str()).collect();
         assert_eq!(ids, ["superset", "airflow", "jupyterhub"]);
@@ -1009,15 +1016,25 @@ mod tests {
 
     #[test]
     fn an_app_with_no_browsable_surface_advertises_no_host() {
-        // Lakekeeper is the one app with `paths: &[]` and no Ingress. Its
-        // subdomain still resolves, which is exactly the trap: DNS says yes,
-        // the ingress controller's fake certificate says no, and HSTS
-        // `includeSubDomains` removes the click-through.
-        let lakekeeper = SPECS.iter().find(|s| s.id == "lakekeeper").unwrap();
+        // An app with `paths: &[]` still has a subdomain that wildcard DNS
+        // resolves, which is exactly the trap: DNS says yes, the ingress
+        // controller's fake certificate says no, and HSTS `includeSubDomains`
+        // removes the click-through. It has no Ingress, so it gets no URL.
+        let lakekeeper = spec("lakekeeper").unwrap();
         assert_eq!(public_url("alpha.dev.stardelt.io", lakekeeper), "");
         assert!(
             !browsable(lakekeeper),
             "Lakekeeper has no UI, so it is not browsable"
+        );
+
+        // The engine joins it until the administrator gate exists
+        // (stardelt-platform#194): the public host serves only /v1/statement and
+        // /oauth2, so the subdomain has nothing for a browser to open.
+        let trino = spec("trino").unwrap();
+        assert_eq!(public_url("alpha.dev.stardelt.io", trino), "");
+        assert!(
+            !browsable(trino),
+            "the engine UI is port-forwarded, not published, so it is not browsable"
         );
 
         // Everything with somewhere to go keeps its URL.
@@ -1033,12 +1050,11 @@ mod tests {
 
     #[test]
     fn deep_links_need_a_base_domain() {
+        // The engine has no browsable surface (stardelt-platform#194): no link
+        // to build, base domain or not.
         let trino = spec("trino").unwrap();
         assert!(deep_links(trino, "").is_empty());
-
-        let links = deep_links(trino, "alpha.dev.stardelt.io");
-        assert_eq!(links[0].label, "Trino UI");
-        assert_eq!(links[0].url, "https://trino.alpha.dev.stardelt.io/ui");
+        assert!(deep_links(trino, "alpha.dev.stardelt.io").is_empty());
 
         // Lakekeeper has no UI to link into, base domain or not.
         assert!(deep_links(spec("lakekeeper").unwrap(), "alpha.dev.stardelt.io").is_empty());
