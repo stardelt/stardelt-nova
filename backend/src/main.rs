@@ -41,6 +41,9 @@ mod demo;
 mod embed;
 mod jobs;
 mod openapi;
+// Wired into the collector and the API by the follow-up query-log tickets (stardelt-nova#116).
+#[allow(dead_code)]
+mod query_log;
 mod trino;
 
 use std::sync::{Arc, Mutex, RwLock};
