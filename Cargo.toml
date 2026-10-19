@@ -35,4 +35,4 @@ utoipa = { version = "5" }
 # State store (ticket stardelt-nova#103): PostgreSQL through sqlx. MIT OR Apache-2.0.
 # No `default` features: no sqlite/mysql drivers, no native-tls; rustls with `ring`
 # (the provider reqwest already uses) and the bundled WebPKI roots.
-sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-webpki", "postgres", "migrate", "macros"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-webpki", "postgres", "migrate", "macros", "json"] }

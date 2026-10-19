@@ -20,6 +20,9 @@
 //!   GET  /api/saved-queries                 — the caller's saved queries (state store)
 //!   POST /api/saved-queries                 — save one: {title, sql, warehouse?}
 //!   DELETE /api/saved-queries/:id           — delete one of the caller's own
+//!   GET  /api/settings                      — the caller's settings as one JSON object (state store)
+//!   PUT  /api/settings/:key                 — set one (body = the JSON value)
+//!   DELETE /api/settings/:key               — remove one
 //!   GET  /api/apps                          — installed apps, reachable URLs, live images
 //!   GET  /api/apps/:id                      — one app: workloads, facts, deep links
 //!   GET  /api/workloads                     — workloads in Nova's namespace + their images
@@ -55,6 +58,7 @@ mod query_log;
 mod query_log_event;
 mod saved_queries;
 mod trino;
+mod user_settings;
 
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -63,7 +67,7 @@ use axum::{
     extract::State,
     http::{HeaderValue, StatusCode},
     response::{IntoResponse, Response},
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
 };
 use serde::Serialize;
 use tokio::sync::OnceCell;
@@ -419,6 +423,12 @@ fn api_router() -> Router<Arc<AppState>> {
             get(saved_queries::list).post(saved_queries::create),
         )
         .route("/saved-queries/{id}", delete(saved_queries::remove))
+        // The caller's own settings: one JSON value per key (state store).
+        .route("/settings", get(user_settings::list))
+        .route(
+            "/settings/{key}",
+            put(user_settings::put).delete(user_settings::remove),
+        )
         // Every signed-in user: what the embedded pages need (see apps::embeds). The
         // operator routes live in admin_router() instead.
         .route("/embeds", get(apps::embeds))
@@ -974,6 +984,98 @@ mod router_tests {
         assert_eq!(list[0]["id"], second["id"]);
         assert_eq!(list[0]["warehouse"], "");
         assert_eq!(list.as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn settings_answer_503_without_a_state_store() {
+        let (app, _dir) = test_app("settings-503");
+        let unavailable = serde_json::json!({"error": "the state store is not configured"});
+        for (method, uri, body) in [
+            ("GET", "/api/settings", None),
+            ("PUT", "/api/settings/theme", Some(r#""dark""#)),
+            ("DELETE", "/api/settings/theme", None),
+        ] {
+            let (status, answer) = call(&app, method, uri, body).await;
+            assert_eq!(
+                (status, answer),
+                (StatusCode::SERVICE_UNAVAILABLE, unavailable.clone()),
+                "{method} {uri}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn settings_are_per_person_and_validated() {
+        let pool = db::test_support::migrated_pool().await;
+        let dir = StaticDir::new("settings");
+        let alice = saved_query_app(pool.clone(), Some("alice-sub"), &dir);
+        let bob = saved_query_app(pool, Some("bob-sub"), &dir);
+
+        assert_eq!(
+            call(&alice, "GET", "/api/settings", None).await.1,
+            serde_json::json!({})
+        );
+        let (status, body) = call(&alice, "PUT", "/api/settings/theme", Some(r#""dark""#)).await;
+        assert_eq!(
+            (status, body),
+            (
+                StatusCode::OK,
+                serde_json::json!({"key": "theme", "value": "dark"})
+            )
+        );
+        // Replace, and store a structured value.
+        call(&alice, "PUT", "/api/settings/theme", Some(r#""light""#)).await;
+        call(
+            &alice,
+            "PUT",
+            "/api/settings/query.page",
+            Some(r#"{"size":50}"#),
+        )
+        .await;
+        let (_, all) = call(&alice, "GET", "/api/settings", None).await;
+        assert_eq!(
+            all,
+            serde_json::json!({"query.page": {"size": 50}, "theme": "light"})
+        );
+
+        // Bob has none of it, and cannot delete Alice's.
+        assert_eq!(
+            call(&bob, "GET", "/api/settings", None).await.1,
+            serde_json::json!({})
+        );
+        assert_eq!(
+            call(&bob, "DELETE", "/api/settings/theme", None).await.0,
+            StatusCode::NOT_FOUND
+        );
+
+        // Validation: key shape and value size, both 400 JSON.
+        let (status, body) = call(&alice, "PUT", "/api/settings/Bad%20Key", Some("1")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body["error"].as_str().unwrap().starts_with("key must be"));
+        let big = format!("\"{}\"", "x".repeat(16 * 1024));
+        let (status, body) = call(&alice, "PUT", "/api/settings/big", Some(&big)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("value must be at most")
+        );
+
+        // Delete: 204, then 404.
+        assert_eq!(
+            call(&alice, "DELETE", "/api/settings/theme", None).await.0,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            call(&alice, "DELETE", "/api/settings/theme", None).await.0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            call(&alice, "GET", "/api/settings", None).await.1,
+            serde_json::json!({"query.page": {"size": 50}})
+        );
     }
 
     #[test]
