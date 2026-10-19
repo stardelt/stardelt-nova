@@ -28,6 +28,9 @@ Browser
          ├─ GET  /api/saved-queries    the caller's saved queries (needs the state store)
          ├─ POST /api/saved-queries    save one: {title, sql, warehouse?}
          ├─ DELETE /api/saved-queries/:id  delete one of the caller's own
+         ├─ GET  /api/settings         the caller's personal settings, one JSON object (needs the state store)
+         ├─ PUT  /api/settings/:key    set one (body = any JSON value, at most 16 KiB)
+         ├─ DELETE /api/settings/:key  remove one
          ├─ GET  /api/apps             installed apps: live status + images
          ├─ GET  /api/apps/:id         one app: workloads, facts, links, embed check
          ├─ GET  /api/workloads        workloads in Nova's namespace + read state (ok/stale/unreachable)
@@ -71,6 +74,7 @@ stardelt-nova/
 │   │   ├── catalog.rs Lakekeeper proxy routes
 │   │   ├── db.rs     optional PostgreSQL state store: pool, migrations, health
 │   │   ├── saved_queries.rs  /api/saved-queries (owner-scoped rows in the state store)
+│   │   ├── user_settings.rs  /api/settings (one JSON value per person and key)
 │   │   └── trino.rs  SQL query proxy
 │   └── migrations/   numbered `NNNN_name.sql` files, embedded in the binary (sqlx)
 ├── frontend/         Vite + React + TypeScript + Tailwind SPA
