@@ -23,5 +23,27 @@ export function isAdmin(me?: Me): boolean {
 /** Short label for the role badge, or `null` when there is no session to speak of. */
 export function roleLabel(me?: Me): string | null {
   if (!me) return null
-  return isAdmin(me) ? 'admin' : 'user'
+  if (isAdmin(me)) return 'admin'
+  const first = displayGroup(me.groups)
+  return first ?? 'member'
+}
+
+/**
+ * The one group shown in the UI: Keycloak sends full paths (`/analysts`), Entra
+ * can send object IDs. Show the last path segment, never a UUID, never the list.
+ */
+function displayGroup(groups?: string[]): string | null {
+  if (!groups) return null
+  for (const raw of groups) {
+    const last = raw.split('/').pop()?.trim()
+    if (!last) continue
+    if (isUuidLike(last)) continue
+    return last
+  }
+  return null
+}
+
+/** Entra group object IDs (or any UUID) are not a role a person recognises. */
+function isUuidLike(s: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)
 }
