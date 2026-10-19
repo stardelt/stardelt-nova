@@ -396,6 +396,7 @@ impl DemoState {
     }
 
     pub fn transfer(&mut self, source: &str, target: &str, mode: &str) -> Result<usize, String> {
+        crate::data::check_transfer_mode(mode)?;
         let (sns, stbl) = parse_ref(source)?;
         let (tns, ttbl) = parse_ref(target)?;
         let src = self
@@ -464,22 +465,35 @@ pub fn parse_ref(raw: &str) -> Result<(String, String), String> {
 }
 
 pub fn parse_csv(content: &str) -> Result<(Vec<String>, Vec<Vec<Value>>), String> {
-    let mut lines = content.lines().filter(|l| !l.trim().is_empty());
-    let header = lines.next().ok_or("empty CSV")?;
-    let columns: Vec<String> = split_csv(header)
+    let records = read_csv_records(content);
+    // Drop blank lines: a single unquoted empty cell is not a record.
+    let records: Vec<Vec<Cell>> = records
         .into_iter()
-        .map(|s| s.trim().to_string())
+        .filter(|r| !(r.len() == 1 && !r[0].1 && r[0].0.trim().is_empty()))
         .collect();
-    if columns.is_empty() {
+    let header = records.first().ok_or("empty CSV")?;
+    let columns: Vec<String> = header.iter().map(|(t, _)| t.trim().to_string()).collect();
+    if columns.is_empty() || columns.iter().all(|c| c.is_empty()) {
         return Err("missing CSV header".into());
     }
+    let want = columns.len();
     let mut rows = Vec::new();
-    for line in lines {
-        let cells = split_csv(line);
-        if cells.len() != columns.len() {
-            continue;
+    for (idx, rec) in records.iter().skip(1).enumerate() {
+        let n = idx + 1;
+        if rec.len() != want {
+            return Err(format!(
+                "row {n} has {} fields but the header has {want}",
+                rec.len()
+            ));
         }
-        rows.push(cells.into_iter().map(|c| coerce(c.trim())).collect());
+        rows.push(
+            rec.iter()
+                .map(|(t, quoted)| {
+                    let raw = if *quoted { t.as_str() } else { t.trim() };
+                    coerce(raw)
+                })
+                .collect(),
+        );
     }
     Ok((columns, rows))
 }
@@ -513,30 +527,169 @@ pub fn parse_json_table(content: &str) -> Result<(Vec<String>, Vec<Vec<Value>>),
     Ok((columns, rows))
 }
 
-fn split_csv(line: &str) -> Vec<String> {
-    let mut out = Vec::new();
+type Cell = (String, bool);
+
+fn read_csv_records(content: &str) -> Vec<Vec<Cell>> {
+    let mut records: Vec<Vec<Cell>> = Vec::new();
+    let mut row: Vec<Cell> = Vec::new();
     let mut cur = String::new();
-    let mut quoted = false;
-    for ch in line.chars() {
-        match ch {
-            '"' => quoted = !quoted,
-            ',' if !quoted => {
-                out.push(std::mem::take(&mut cur));
+    let mut was_quoted = false;
+    let mut in_quoted = false;
+    let mut after_quote = false;
+    let chars: Vec<char> = content.chars().collect();
+    let mut i = 0;
+    let mut field_has_content = false;
+    while i < chars.len() {
+        let ch = chars[i];
+        if in_quoted {
+            if ch == '"' {
+                if i + 1 < chars.len() && chars[i + 1] == '"' {
+                    cur.push('"');
+                    i += 2;
+                    field_has_content = true;
+                    continue;
+                } else {
+                    in_quoted = false;
+                    after_quote = true;
+                    i += 1;
+                    continue;
+                }
+            } else if ch == '\r' {
+                if i + 1 < chars.len() && chars[i + 1] == '\n' {
+                    cur.push('\n');
+                    i += 2;
+                } else {
+                    cur.push('\n');
+                    i += 1;
+                }
+                field_has_content = true;
+                continue;
+            } else {
+                cur.push(ch);
+                i += 1;
+                field_has_content = true;
+                continue;
             }
-            _ => cur.push(ch),
         }
+        // Not in quotes.
+        if !field_has_content && !was_quoted && cur.is_empty() && ch == '"' {
+            in_quoted = true;
+            was_quoted = true;
+            after_quote = false;
+            field_has_content = true;
+            i += 1;
+            continue;
+        }
+        if ch == ',' {
+            row.push((std::mem::take(&mut cur), std::mem::take(&mut was_quoted)));
+            field_has_content = false;
+            after_quote = false;
+            i += 1;
+            continue;
+        }
+        if ch == '\r' || ch == '\n' {
+            if ch == '\r' && i + 1 < chars.len() && chars[i + 1] == '\n' {
+                i += 2;
+            } else {
+                i += 1;
+            }
+            row.push((std::mem::take(&mut cur), std::mem::take(&mut was_quoted)));
+            field_has_content = false;
+            after_quote = false;
+            records.push(std::mem::take(&mut row));
+            continue;
+        }
+        if after_quote && ch == '"' {
+            // A quote after a closed quoted section is literal text.
+            cur.push(ch);
+            i += 1;
+            field_has_content = true;
+            continue;
+        }
+        cur.push(ch);
+        i += 1;
+        field_has_content = true;
     }
-    out.push(cur);
-    out
+    // Flush the trailing field/record when the input does not end with a newline.
+    if !cur.is_empty() || was_quoted || field_has_content || !row.is_empty() {
+        row.push((cur, was_quoted));
+        records.push(row);
+    }
+    records
+}
+
+fn is_integer_text(s: &str) -> bool {
+    let t = s.strip_prefix('-').unwrap_or(s);
+    if t.is_empty() {
+        return false;
+    }
+    if t == "0" {
+        return true;
+    }
+    if t.starts_with('0') {
+        return false;
+    }
+    !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn is_float_text(s: &str) -> bool {
+    let t = s.strip_prefix('-').unwrap_or(s);
+    if t.is_empty() {
+        return false;
+    }
+    // Split off a trailing exponent: e/E + optional sign + digits.
+    let (mantissa, exponent) = match t.find(['e', 'E']) {
+        Some(pos) => {
+            let (m, e) = t.split_at(pos);
+            let exp = &e[1..];
+            let exp = exp
+                .strip_prefix('+')
+                .unwrap_or_else(|| exp.strip_prefix('-').unwrap_or(exp));
+            if m.is_empty() || exp.is_empty() || !exp.bytes().all(|b| b.is_ascii_digit()) {
+                return false;
+            }
+            (m, true)
+        }
+        None => (t, false),
+    };
+    let _ = exponent;
+    let dot = match mantissa.find('.') {
+        Some(d) => d,
+        None => return false,
+    };
+    if mantissa[dot + 1..].contains('.') {
+        return false;
+    }
+    let (int_part, frac_part) = mantissa.split_at(dot);
+    let frac_part = &frac_part[1..];
+    if frac_part.is_empty() || !frac_part.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    if int_part.is_empty() {
+        return false;
+    }
+    if int_part == "0" {
+        return true;
+    }
+    if int_part.starts_with('0') {
+        return false;
+    }
+    int_part.bytes().all(|b| b.is_ascii_digit())
 }
 
 fn coerce(raw: &str) -> Value {
     if raw.is_empty() || raw.eq_ignore_ascii_case("null") {
         Value::Null
-    } else if let Ok(i) = raw.parse::<i64>() {
-        json!(i)
-    } else if let Ok(f) = raw.parse::<f64>() {
-        json!(f)
+    } else if is_integer_text(raw) {
+        match raw.parse::<i64>() {
+            Ok(i) => json!(i),
+            Err(_) => json!(raw),
+        }
+    } else if is_float_text(raw) {
+        match raw.parse::<f64>() {
+            Ok(f) if f.is_finite() => json!(f),
+            _ => json!(raw),
+        }
     } else {
         json!(raw)
     }
@@ -593,5 +746,50 @@ mod tests {
         );
         assert_eq!(parse_ref("a.b").unwrap(), ("a".into(), "b".into()));
         assert!(parse_ref("b").is_err());
+    }
+
+    #[test]
+    fn csv_escaped_quotes_survive() {
+        let (cols, rows) = parse_csv("a,b\n1,\"say \"\"hi\"\"\"").unwrap();
+        assert_eq!(cols, vec!["a", "b"]);
+        assert_eq!(rows, vec![vec![json!(1), json!("say \"hi\"")]]);
+    }
+
+    #[test]
+    fn csv_embedded_newline_stays_one_row() {
+        let (cols, rows) = parse_csv("a,b\n1,\"line1\nline2\"\n2,x").unwrap();
+        assert_eq!(cols, vec!["a", "b"]);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0][1], json!("line1\nline2"));
+    }
+
+    #[test]
+    fn csv_ragged_row_is_an_error_naming_the_row() {
+        let err = parse_csv("a,b\n1,2\n3\n").unwrap_err();
+        assert!(err.contains("row 2"), "{err}");
+        assert!(err.contains("1") && err.contains("2"), "{err}");
+    }
+
+    #[test]
+    fn leading_zero_stays_text() {
+        let (_, rows) = parse_csv("zip\n00501").unwrap();
+        assert_eq!(rows[0][0], json!("00501"));
+        let (_, rows) = parse_csv("v\n007.5").unwrap();
+        assert_eq!(rows[0][0], json!("007.5"));
+        let (_, rows) = parse_csv("v\n0.5").unwrap();
+        assert_eq!(rows[0][0], json!(0.5));
+    }
+
+    #[test]
+    fn nan_and_inf_stay_text() {
+        let (_, rows) = parse_csv("w\nnan\ninf\n").unwrap();
+        assert_eq!(rows[0][0], json!("nan"));
+        assert_eq!(rows[1][0], json!("inf"));
+    }
+
+    #[test]
+    fn huge_integer_stays_text() {
+        let (_, rows) = parse_csv("v\n9223372036854775808").unwrap();
+        assert_eq!(rows[0][0], json!("9223372036854775808"));
     }
 }

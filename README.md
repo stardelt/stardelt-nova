@@ -28,8 +28,8 @@ Browser
          ├─ GET  /api/apps             installed apps: live status + images
          ├─ GET  /api/apps/:id         one app: workloads, facts, links, embed check
          ├─ GET  /api/workloads        workloads in Nova's namespace + read state (ok/stale/unreachable)
-         ├─ POST /api/ingest/upload    load CSV/JSON into a table
-         ├─ POST /api/transfer         copy table → table
+         ├─ POST /api/ingest/upload    load CSV/JSON into a table (a failed load keeps the old table)
+         ├─ POST /api/transfer         copy table → table (a failed copy keeps the target)
          │
          └─ /*                        React SPA (static files)
 ```

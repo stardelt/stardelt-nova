@@ -80,6 +80,7 @@ export type Job = {
   started_at: number
   detail?: string | null
   rows?: number | null
+  user?: string
 }
 
 export type UploadRequest = {

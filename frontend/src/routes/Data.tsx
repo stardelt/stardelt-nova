@@ -188,7 +188,7 @@ function LoadForm() {
         <h3 className="text-sm font-semibold mb-2">How it works</h3>
         <ol className="text-sm text-text-dim space-y-2 list-decimal list-inside">
           <li>The file is parsed and column types are inferred.</li>
-          <li>A table is created (or replaced) in the selected schema.</li>
+          <li>A table is created (or replaced) in the selected schema; the schema is created if it does not exist.</li>
           <li>Rows are written through the engine into Iceberg.</li>
           <li>The job appears under Jobs with a row count.</li>
         </ol>

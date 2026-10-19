@@ -15,7 +15,7 @@ use serde_json::Value;
 
 use crate::{AppState, api_json::ApiJson, demo, jobs, trino};
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct UploadRequest {
     pub namespace: String,
     pub table: String,
@@ -36,7 +36,7 @@ pub struct UploadResult {
     pub job_id: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct TransferRequest {
     pub source: String,
     pub target: String,
@@ -64,6 +64,10 @@ pub async fn upload(
 ) -> Response {
     let fmt = req.format.to_lowercase();
     let title = format!("{}.{}", req.namespace, req.table);
+    let (user, owner) = caller
+        .as_ref()
+        .map(|c| (c.0.identity.display_name.clone(), c.0.identity.sub.clone()))
+        .unwrap_or_else(|| (s.dev_user.clone(), s.dev_user.clone()));
 
     if s.demo {
         let mut demo = s.demo_state.write().expect("demo state poisoned");
@@ -76,6 +80,8 @@ pub async fn upload(
                     "succeeded",
                     Some(format!("{} via {fmt}", rows(n))),
                     Some(n),
+                    &user,
+                    &owner,
                 );
                 Json(UploadResult {
                     namespace: req.namespace,
@@ -86,7 +92,16 @@ pub async fn upload(
                 .into_response()
             }
             Err(e) => {
-                jobs::record(&s.jobs, "load", title, "failed", Some(e.clone()), None);
+                jobs::record(
+                    &s.jobs,
+                    "load",
+                    title,
+                    "failed",
+                    Some(e.clone()),
+                    None,
+                    &user,
+                    &owner,
+                );
                 (
                     StatusCode::BAD_REQUEST,
                     Json(serde_json::json!({ "error": e })),
@@ -96,7 +111,13 @@ pub async fn upload(
         };
     }
 
-    match real_upload(&s, &req, &fmt, caller.as_ref().map(|c| &c.0)).await {
+    let (s2, req2, fmt2) = (s.clone(), req.clone(), fmt.clone());
+    let p = caller.map(|c| c.0);
+    let outcome = tokio::spawn(async move { real_upload(&s2, &req2, &fmt2, p.as_ref()).await })
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|r| r);
+    match outcome {
         Ok(n) => {
             let job = jobs::record(
                 &s.jobs,
@@ -105,6 +126,8 @@ pub async fn upload(
                 "succeeded",
                 Some(format!("{} via {fmt}", rows(n))),
                 Some(n),
+                &user,
+                &owner,
             );
             Json(UploadResult {
                 namespace: req.namespace,
@@ -115,7 +138,16 @@ pub async fn upload(
             .into_response()
         }
         Err(e) => {
-            jobs::record(&s.jobs, "load", title, "failed", Some(e.clone()), None);
+            jobs::record(
+                &s.jobs,
+                "load",
+                title,
+                "failed",
+                Some(e.clone()),
+                None,
+                &user,
+                &owner,
+            );
             (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({ "error": e })),
@@ -132,6 +164,10 @@ pub async fn transfer(
     ApiJson(req): ApiJson<TransferRequest>,
 ) -> Response {
     let title = format!("{} → {}", req.source, req.target);
+    let (user, owner) = caller
+        .as_ref()
+        .map(|c| (c.0.identity.display_name.clone(), c.0.identity.sub.clone()))
+        .unwrap_or_else(|| (s.dev_user.clone(), s.dev_user.clone()));
 
     if s.demo {
         let mut demo = s.demo_state.write().expect("demo state poisoned");
@@ -144,6 +180,8 @@ pub async fn transfer(
                     "succeeded",
                     Some(format!("{} {}", req.mode, rows(n))),
                     Some(n),
+                    &user,
+                    &owner,
                 );
                 Json(TransferResult {
                     source: req.source,
@@ -154,7 +192,16 @@ pub async fn transfer(
                 .into_response()
             }
             Err(e) => {
-                jobs::record(&s.jobs, "transfer", title, "failed", Some(e.clone()), None);
+                jobs::record(
+                    &s.jobs,
+                    "transfer",
+                    title,
+                    "failed",
+                    Some(e.clone()),
+                    None,
+                    &user,
+                    &owner,
+                );
                 (
                     StatusCode::BAD_REQUEST,
                     Json(serde_json::json!({ "error": e })),
@@ -164,7 +211,13 @@ pub async fn transfer(
         };
     }
 
-    match real_transfer(&s, &req, caller.as_ref().map(|c| &c.0)).await {
+    let (s2, req2) = (s.clone(), req.clone());
+    let p = caller.map(|c| c.0);
+    let outcome = tokio::spawn(async move { real_transfer(&s2, &req2, p.as_ref()).await })
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|r| r);
+    match outcome {
         Ok(n) => {
             let job = jobs::record(
                 &s.jobs,
@@ -173,6 +226,8 @@ pub async fn transfer(
                 "succeeded",
                 Some(format!("{} {}", req.mode, rows(n))),
                 Some(n),
+                &user,
+                &owner,
             );
             Json(TransferResult {
                 source: req.source,
@@ -183,7 +238,16 @@ pub async fn transfer(
             .into_response()
         }
         Err(e) => {
-            jobs::record(&s.jobs, "transfer", title, "failed", Some(e.clone()), None);
+            jobs::record(
+                &s.jobs,
+                "transfer",
+                title,
+                "failed",
+                Some(e.clone()),
+                None,
+                &user,
+                &owner,
+            );
             (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({ "error": e })),
@@ -191,6 +255,48 @@ pub async fn transfer(
                 .into_response()
         }
     }
+}
+
+/// Name of the staging table a load is built in before it replaces the target.
+/// The `__nova_load_` infix makes an orphan (left by a killed pod) recognisable.
+fn staging_name(table: &str, stamp: u64) -> String {
+    format!("{table}__nova_load_{stamp}")
+}
+
+async fn load_rows(
+    state: &AppState,
+    table: &str,
+    ddl_cols: &str,
+    rows: &[Vec<Value>],
+    types: &[String],
+    caller: Option<&crate::auth::Principal>,
+) -> Result<usize, String> {
+    trino::execute(state, format!("CREATE TABLE {table} ({ddl_cols})"), caller).await?;
+    let mut loaded = 0usize;
+    for chunk in rows.chunks(1000) {
+        let values = chunk
+            .iter()
+            .map(|row| {
+                format!(
+                    "({})",
+                    row.iter()
+                        .zip(types.iter())
+                        .map(|(v, ty)| sql_literal_for(v, ty))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        trino::execute(
+            state,
+            format!("INSERT INTO {table} VALUES {values}"),
+            caller,
+        )
+        .await?;
+        loaded += chunk.len();
+    }
+    Ok(loaded)
 }
 
 async fn real_upload(
@@ -209,6 +315,15 @@ async fn real_upload(
     }
 
     let types: Vec<String> = (0..columns.len()).map(|i| infer_type(&rows, i)).collect();
+    trino::execute(
+        state,
+        format!(
+            "CREATE SCHEMA IF NOT EXISTS warehouse.{}",
+            quote_ident(&req.namespace)
+        ),
+        caller,
+    )
+    .await?;
     let target = format!(
         "warehouse.{}.{}",
         quote_ident(&req.namespace),
@@ -221,29 +336,27 @@ async fn real_upload(
         .collect::<Vec<_>>()
         .join(", ");
 
-    trino::execute(state, format!("DROP TABLE IF EXISTS {target}"), caller).await?;
-    trino::execute(state, format!("CREATE TABLE {target} ({ddl_cols})"), caller).await?;
+    let staging = format!(
+        "warehouse.{}.{}",
+        quote_ident(&req.namespace),
+        quote_ident(&staging_name(&req.table, crate::jobs::now_ms()))
+    );
 
-    let mut loaded = 0usize;
-    for chunk in rows.chunks(100) {
-        let values = chunk
-            .iter()
-            .map(|row| {
-                format!(
-                    "({})",
-                    row.iter().map(sql_literal).collect::<Vec<_>>().join(", ")
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        trino::execute(
-            state,
-            format!("INSERT INTO {target} VALUES {values}"),
-            caller,
-        )
-        .await?;
-        loaded += chunk.len();
-    }
+    let loaded = match load_rows(state, &staging, &ddl_cols, &rows, &types, caller).await {
+        Ok(n) => n,
+        Err(e) => {
+            let _ = trino::execute(state, format!("DROP TABLE IF EXISTS {staging}"), caller).await;
+            return Err(e);
+        }
+    };
+    let swap = trino::execute(
+        state,
+        format!("CREATE OR REPLACE TABLE {target} AS SELECT * FROM {staging}"),
+        caller,
+    )
+    .await;
+    let _ = trino::execute(state, format!("DROP TABLE IF EXISTS {staging}"), caller).await;
+    swap?;
     Ok(loaded)
 }
 
@@ -266,10 +379,18 @@ async fn real_transfer(
         )
         .await?;
     } else {
-        trino::execute(state, format!("DROP TABLE IF EXISTS {target}"), caller).await?;
         trino::execute(
             state,
-            format!("CREATE TABLE {target} AS SELECT * FROM {source}"),
+            format!(
+                "CREATE SCHEMA IF NOT EXISTS warehouse.{}",
+                quote_ident(&tns)
+            ),
+            caller,
+        )
+        .await?;
+        trino::execute(
+            state,
+            format!("CREATE OR REPLACE TABLE {target} AS SELECT * FROM {source}"),
             caller,
         )
         .await?;
@@ -285,11 +406,21 @@ async fn real_transfer(
     Ok(n)
 }
 
+pub(crate) fn check_transfer_mode(mode: &str) -> Result<(), String> {
+    let m = mode.to_ascii_lowercase();
+    if m == "overwrite" || m == "append" {
+        Ok(())
+    } else {
+        Err("mode must be 'overwrite' or 'append'".into())
+    }
+}
+
 /// An overwrite drops the target before copying into it, so it must never be the
 /// source: the copy would read from a table that no longer exists, and the data
 /// would be gone. Trino folds unquoted identifiers to lower case, hence the
 /// case-insensitive comparison.
 fn check_transfer(mode: &str, source: (&str, &str), target: (&str, &str)) -> Result<(), String> {
+    check_transfer_mode(mode)?;
     let same = source.0.eq_ignore_ascii_case(target.0) && source.1.eq_ignore_ascii_case(target.1);
     if same && !mode.eq_ignore_ascii_case("append") {
         return Err(format!(
@@ -305,7 +436,7 @@ fn infer_type(rows: &[Vec<Value>], col: usize) -> String {
     let mut numbers = true;
     let mut bools = true;
     let mut seen = false;
-    for row in rows.iter().take(50) {
+    for row in rows.iter() {
         match row.get(col) {
             None | Some(Value::Null) => {}
             Some(Value::Bool(_)) => {
@@ -354,6 +485,20 @@ fn sql_literal(v: &Value) -> String {
     }
 }
 
+fn sql_literal_for(v: &Value, ty: &str) -> String {
+    if ty == "varchar" {
+        match v {
+            Value::Null => "NULL".into(),
+            Value::Bool(b) => format!("'{b}'"),
+            Value::Number(n) => format!("'{n}'"),
+            Value::String(s) => format!("'{}'", s.replace('\'', "''")),
+            other => format!("'{}'", other.to_string().replace('\'', "''")),
+        }
+    } else {
+        sql_literal(v)
+    }
+}
+
 pub fn quote_ident(raw: &str) -> String {
     format!("\"{}\"", raw.replace('"', "\"\""))
 }
@@ -369,7 +514,31 @@ fn rows(n: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::check_transfer;
+    use super::{check_transfer, staging_name};
+
+    #[test]
+    fn unknown_transfer_mode_is_refused() {
+        assert!(check_transfer("bogus", ("a", "b"), ("c", "d")).is_err());
+        assert!(check_transfer("REPLACE", ("a", "b"), ("c", "d")).is_err());
+        assert!(check_transfer("APPEND", ("a", "b"), ("c", "d")).is_ok());
+    }
+
+    #[test]
+    fn staging_name_is_distinct_from_target() {
+        let s = staging_name("Trips", 42).to_lowercase();
+        assert_eq!(s, "trips__nova_load_42");
+        assert_ne!(s, "trips");
+    }
+
+    #[test]
+    fn mixed_column_is_varchar_and_quotes_numbers() {
+        use serde_json::json;
+        let rows = vec![vec![json!(1), json!(2)], vec![json!("abc"), json!(3)]];
+        assert_eq!(super::infer_type(&rows, 0), "varchar");
+        assert_eq!(super::sql_literal_for(&json!(7), "varchar"), "'7'");
+        assert_eq!(super::sql_literal_for(&json!(true), "varchar"), "'true'");
+        assert_eq!(super::sql_literal_for(&json!(7), "bigint"), "7");
+    }
 
     #[test]
     fn rows_are_pluralised() {
