@@ -172,10 +172,43 @@ impl Drop for CancelOnDrop {
 
 /// Run SQL and return the aggregated result. Used by the query handler and by
 /// load/transfer, which issue DDL/DML through the same path.
+/// The engine's `source` for statements Nova runs on its own behalf (loads, transfers); the query
+/// log shows it so a person can tell where a statement came from.
+const SOURCE_NOVA: &str = "nova";
+
+/// The statement POST: the caller's identity plus where the statement comes from. The engine records
+/// `source` and the client tag in its query events, and the query log keeps them.
+fn statement_post(
+    state: &AppState,
+    caller: Option<&crate::auth::Principal>,
+    source: &str,
+) -> reqwest::RequestBuilder {
+    trino_request(
+        state,
+        caller,
+        state
+            .http
+            .post(format!("{}/v1/statement", state.trino_url))
+            .header("Content-Type", "text/plain")
+            .header("X-Trino-Source", source)
+            .header("X-Trino-Client-Tags", "nova"),
+    )
+}
+
 pub async fn execute(
     state: &AppState,
     sql: String,
     caller: Option<&crate::auth::Principal>,
+) -> Result<QueryResult, String> {
+    execute_from(state, sql, caller, SOURCE_NOVA).await
+}
+
+/// [`execute`] with an explicit `source` (the SQL editor passes `nova-sql-editor`).
+pub async fn execute_from(
+    state: &AppState,
+    sql: String,
+    caller: Option<&crate::auth::Principal>,
+    source: &str,
 ) -> Result<QueryResult, String> {
     let guard_user = caller
         .map(|c| c.identity.display_name.as_str())
@@ -189,14 +222,7 @@ pub async fn execute(
         auth: guard_auth,
     };
 
-    let request = trino_request(
-        state,
-        caller,
-        state
-            .http
-            .post(format!("{}/v1/statement", state.trino_url))
-            .header("Content-Type", "text/plain"),
-    );
+    let request = statement_post(state, caller, source);
     let initial = request.body(sql).send().await.map_err(|e| {
         tracing::warn!(error = %e, "trino request failed");
         "the query engine is not reachable".to_string()
@@ -386,7 +412,14 @@ pub async fn run_query(
         };
     }
 
-    match execute(&s, req.sql, caller.as_ref().map(|c| &c.0)).await {
+    match execute_from(
+        &s,
+        req.sql,
+        caller.as_ref().map(|c| &c.0),
+        "nova-sql-editor",
+    )
+    .await
+    {
         Ok(r) => {
             jobs::record(
                 &s.jobs,
@@ -563,6 +596,34 @@ mod tests {
         let off = upstream_headers("dev", false, Some(&p));
         assert_eq!(off.len(), 1);
         assert_eq!(off[0].1, "alice");
+    }
+
+    #[test]
+    fn the_statement_post_names_its_source_and_the_nova_tag() {
+        let state = test_state(true, "dev");
+        let p = alice(Some("t"));
+        let req = statement_post(&state, Some(&p), "nova-sql-editor")
+            .build()
+            .unwrap();
+        assert_eq!(req.method(), reqwest::Method::POST);
+        assert!(req.url().path().ends_with("/v1/statement"));
+        assert_eq!(
+            req.headers().get("x-trino-source").unwrap(),
+            "nova-sql-editor"
+        );
+        assert_eq!(req.headers().get("x-trino-client-tags").unwrap(), "nova");
+        assert_eq!(req.headers().get("x-trino-user").unwrap(), "alice");
+        assert_eq!(req.headers().get("content-type").unwrap(), "text/plain");
+
+        // Polls and cancels carry the identity but not the source (the engine takes it from the POST).
+        let poll = trino_request(&state, Some(&p), state.http.get("http://example/"))
+            .build()
+            .unwrap();
+        assert!(poll.headers().get("x-trino-source").is_none());
+
+        // Everything Nova runs for itself reports the generic source.
+        let own = statement_post(&state, None, SOURCE_NOVA).build().unwrap();
+        assert_eq!(own.headers().get("x-trino-source").unwrap(), "nova");
     }
 
     #[test]
