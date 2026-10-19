@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{
-    Json,
+    Extension, Json,
     extract::{Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -373,10 +373,12 @@ pub struct AppLink {
 /// browsable surface has no URL worth offering. When no base domain is configured
 /// (demo mode, a local run) every URL is empty, so the honest answer is no links
 /// at all rather than anchors that go nowhere.
-fn links_for(base: &str) -> Vec<AppLink> {
+fn links_for(base: &str, admin: bool) -> Vec<AppLink> {
     SPECS
         .iter()
         .filter(|spec| spec.id != "nova" && browsable(spec))
+        // The engine's own UI lists cluster-wide activity: administrators only.
+        .filter(|spec| admin || spec.id != "trino")
         .filter_map(|spec| {
             let external_url = public_url(base, spec);
             if external_url.is_empty() {
@@ -397,9 +399,14 @@ fn links_for(base: &str) -> Vec<AppLink> {
 /// Deliberately no status: liveness comes from cluster probes, which is operator
 /// information (see `apps::list`), and this endpoint is called by people who are
 /// not operators.
-pub async fn links() -> Json<Vec<AppLink>> {
+pub async fn links(principal: Option<Extension<crate::auth::Principal>>) -> Json<Vec<AppLink>> {
     let base = std::env::var("NOVA_BASE_DOMAIN").unwrap_or_default();
-    Json(links_for(&base))
+    // No principal means the static-dev mode, where everybody acts as an administrator.
+    let admin = match &principal {
+        None => true,
+        Some(Extension(p)) => p.identity.is_admin,
+    };
+    Json(links_for(&base, admin))
 }
 
 pub async fn list(State(s): State<Arc<AppState>>) -> Json<Vec<PlatformApp>> {
@@ -980,7 +987,7 @@ mod tests {
 
     #[test]
     fn app_links_offer_the_browsable_apps_except_nova() {
-        let links = links_for("alpha.dev.stardelt.io");
+        let links = links_for("alpha.dev.stardelt.io", true);
         let ids: Vec<&str> = links.iter().map(|l| l.id.as_str()).collect();
         assert_eq!(ids, ["trino", "superset", "airflow", "jupyterhub"]);
         assert!(
@@ -991,7 +998,13 @@ mod tests {
         assert!(links.iter().all(|l| l.id != "nova" && l.id != "lakekeeper"));
 
         // No base domain (demo mode, local run): no links, rather than empty hrefs.
-        assert!(links_for("").is_empty());
+        assert!(links_for("", true).is_empty());
+
+        // Non-admins get everything except the engine UI, whose activity is
+        // cluster-wide (platform#181).
+        let user_links = links_for("alpha.dev.stardelt.io", false);
+        let ids: Vec<&str> = user_links.iter().map(|l| l.id.as_str()).collect();
+        assert_eq!(ids, ["superset", "airflow", "jupyterhub"]);
     }
 
     #[test]
