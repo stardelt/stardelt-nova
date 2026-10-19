@@ -1,0 +1,73 @@
+{
+  "createTime": "2026-10-19T11:33:25.058999857Z",
+  "executionStartTime": "2026-10-19T11:33:25.196522191Z",
+  "endTime": "2026-10-19T11:33:27.382601364Z",
+  "context": {
+    "user": "alice",
+    "principal": "alice",
+    "source": "nova-sql-editor",
+    "clientTags": [
+      "nova",
+      "warehouse-default"
+    ],
+    "queryType": "SELECT",
+    "remoteClientAddress": "127.0.0.1",
+    "resourceGroupId": [
+      "global"
+    ],
+    "serverVersion": "480",
+    "environment": "scratch"
+  },
+  "metadata": {
+    "queryId": "20261019_113323_00000_tnvu4",
+    "query": "select 'alice-secret-literal' as c, count(*) from tpch.tiny.nation",
+    "queryState": "FINISHED",
+    "tables": [
+      {
+        "catalog": "tpch",
+        "schema": "tiny",
+        "table": "nation",
+        "authorization": "alice",
+        "filters": [],
+        "columns": [],
+        "directlyReferenced": true,
+        "referenceChain": []
+      }
+    ],
+    "uri": "http://10.244.0.209:8080/v1/query/20261019_113323_00000_tnvu4",
+    "plan": "(omitted: the real payload carries a plan of 90 KB here)"
+  },
+  "statistics": {
+    "cpuTime": 1.092,
+    "wallTime": 2.323601506,
+    "queuedTime": 0.069002628,
+    "analysisTime": 0.068729676,
+    "planningTime": 0.31146187,
+    "executionTime": 2.186079172,
+    "peakUserMemoryBytes": 448,
+    "physicalInputBytes": 0,
+    "physicalInputRows": 25,
+    "processedInputBytes": 0,
+    "processedInputRows": 25,
+    "outputBytes": 34,
+    "outputRows": 1,
+    "writtenBytes": 0,
+    "writtenRows": 0,
+    "cumulativeMemory": 211448.85984,
+    "completedSplits": 17,
+    "complete": true,
+    "operatorSummaries": []
+  },
+  "ioMetadata": {
+    "inputs": [
+      {
+        "catalogName": "tpch",
+        "schema": "tiny",
+        "table": "nation",
+        "physicalInputBytes": 0,
+        "physicalInputRows": 25
+      }
+    ]
+  },
+  "warnings": []
+}

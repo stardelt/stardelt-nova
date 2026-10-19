@@ -1,0 +1,61 @@
+{
+  "createTime": "2026-10-19T11:33:30.389294346Z",
+  "executionStartTime": "2026-10-19T11:33:30.396400640Z",
+  "endTime": "2026-10-19T11:33:30.396400640Z",
+  "context": {
+    "user": "bob",
+    "principal": "bob",
+    "source": "trino-jdbc",
+    "clientTags": [],
+    "queryType": "SELECT",
+    "remoteClientAddress": "127.0.0.1",
+    "resourceGroupId": [
+      "global"
+    ],
+    "serverVersion": "480",
+    "environment": "scratch"
+  },
+  "metadata": {
+    "queryId": "20261019_113329_00001_tnvu4",
+    "query": "select * from tpch.tiny.no_such_table",
+    "queryState": "FAILED",
+    "tables": [],
+    "uri": "http://10.244.0.209:8080/v1/query/20261019_113329_00001_tnvu4",
+    "plan": "(omitted: the real payload carries a plan of 90 KB here)"
+  },
+  "statistics": {
+    "cpuTime": 0.0,
+    "wallTime": 0.007106294,
+    "queuedTime": 0.001702135,
+    "analysisTime": 0.00589372,
+    "planningTime": 0.0,
+    "executionTime": 0.0,
+    "peakUserMemoryBytes": 0,
+    "physicalInputBytes": 0,
+    "physicalInputRows": 0,
+    "processedInputBytes": 0,
+    "processedInputRows": 0,
+    "outputBytes": 0,
+    "outputRows": 0,
+    "writtenBytes": 0,
+    "writtenRows": 0,
+    "cumulativeMemory": 0.0,
+    "completedSplits": 0,
+    "complete": true,
+    "operatorSummaries": []
+  },
+  "failureInfo": {
+    "errorCode": {
+      "code": 46,
+      "name": "TABLE_NOT_FOUND",
+      "type": "USER_ERROR",
+      "fatal": true
+    },
+    "failureType": "io.trino.spi.TrinoException",
+    "failureMessage": "line 1:15: Table 'tpch.tiny.no_such_table' does not exist"
+  },
+  "ioMetadata": {
+    "inputs": []
+  },
+  "warnings": []
+}

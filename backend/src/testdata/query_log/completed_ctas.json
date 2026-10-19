@@ -1,0 +1,106 @@
+{
+  "createTime": "2026-10-19T11:33:37.686731458Z",
+  "executionStartTime": "2026-10-19T11:33:37.697891006Z",
+  "endTime": "2026-10-19T11:33:40.796142615Z",
+  "context": {
+    "user": "alice",
+    "principal": "alice",
+    "source": "nova-sql-editor",
+    "clientTags": [
+      "nova",
+      "warehouse-default"
+    ],
+    "queryType": "INSERT",
+    "remoteClientAddress": "127.0.0.1",
+    "resourceGroupId": [
+      "global"
+    ],
+    "serverVersion": "480",
+    "environment": "scratch"
+  },
+  "metadata": {
+    "queryId": "20261019_113336_00003_tnvu4",
+    "query": "create table memory.s1.t as select * from tpch.tiny.orders",
+    "queryState": "FINISHED",
+    "tables": [
+      {
+        "catalog": "tpch",
+        "schema": "tiny",
+        "table": "orders",
+        "authorization": "alice",
+        "filters": [],
+        "columns": [
+          {
+            "column": "clerk"
+          },
+          {
+            "column": "orderkey"
+          },
+          {
+            "column": "orderstatus"
+          },
+          {
+            "column": "custkey"
+          },
+          {
+            "column": "totalprice"
+          },
+          {
+            "column": "comment"
+          },
+          {
+            "column": "orderdate"
+          },
+          {
+            "column": "orderpriority"
+          },
+          {
+            "column": "shippriority"
+          }
+        ],
+        "directlyReferenced": true,
+        "referenceChain": []
+      }
+    ],
+    "uri": "http://10.244.0.209:8080/v1/query/20261019_113336_00003_tnvu4",
+    "plan": "(omitted: the real payload carries a plan of 90 KB here)"
+  },
+  "statistics": {
+    "cpuTime": 0.393,
+    "wallTime": 3.109411156,
+    "queuedTime": 0.000766673,
+    "analysisTime": 0.010271105,
+    "planningTime": 0.049745971,
+    "executionTime": 3.098251608,
+    "peakUserMemoryBytes": 2044032,
+    "physicalInputBytes": 0,
+    "physicalInputRows": 15000,
+    "processedInputBytes": 1948552,
+    "processedInputRows": 15000,
+    "outputBytes": 9,
+    "outputRows": 1,
+    "writtenBytes": 1948552,
+    "writtenRows": 15000,
+    "cumulativeMemory": 0.0,
+    "completedSplits": 26,
+    "complete": true,
+    "operatorSummaries": []
+  },
+  "ioMetadata": {
+    "inputs": [
+      {
+        "catalogName": "tpch",
+        "schema": "tiny",
+        "table": "orders",
+        "physicalInputBytes": 0,
+        "physicalInputRows": 15000
+      }
+    ],
+    "output": {
+      "catalogName": "memory",
+      "schema": "s1",
+      "table": "t"
+    }
+  },
+  "warnings": []
+}
