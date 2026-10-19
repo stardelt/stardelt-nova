@@ -283,6 +283,82 @@ async function jpost<T>(path: string, body: unknown): Promise<T> {
 
 const seg = encodeURIComponent
 
+/** One row of the query log list (`GET /api/query-log`). Times are epoch milliseconds. */
+export type QueryLogItem = {
+  id: string
+  /** QUEUED (in progress), FINISHED, FAILED or CANCELED. */
+  state: string
+  user: string
+  source: string | null
+  warehouse: string
+  queryType: string | null
+  /** The first 300 characters of the statement. */
+  sql: string
+  createdAt: number
+  wallMs: number | null
+  outputRows: number | null
+  errorCode: string | null
+}
+
+export type QueryLogPage = { items: QueryLogItem[]; nextCursor: string | null }
+
+/** Everything stored about one query (`GET /api/query-log/{id}`). */
+export type QueryLogDetail = {
+  id: string
+  state: string
+  user: string
+  source: string | null
+  clientTags: string[]
+  warehouse: string
+  catalog: string | null
+  schema: string | null
+  queryType: string | null
+  sql: string
+  sqlHash: string
+  createdAt: number
+  startedAt: number | null
+  endedAt: number | null
+  timing: {
+    queuedMs: number | null
+    planningMs: number | null
+    executionMs: number | null
+    wallMs: number | null
+    cpuMs: number | null
+  }
+  data: {
+    inputRows: number | null
+    inputBytes: number | null
+    outputRows: number | null
+    outputBytes: number | null
+    writtenRows: number | null
+    writtenBytes: number | null
+    peakMemoryBytes: number | null
+  }
+  tablesRead: string[]
+  tablesWritten: string[]
+  error: { code: string; message: string | null } | null
+}
+
+export type QueryLogParams = {
+  scope: 'mine' | 'all'
+  state?: string
+  q?: string
+  /** Epoch milliseconds: only queries created at or after this. */
+  from?: number
+  cursor?: string
+  limit?: number
+}
+
+function queryLogUrl(p: QueryLogParams): string {
+  const qs = new URLSearchParams({ scope: p.scope })
+  if (p.state) qs.set('state', p.state)
+  if (p.q) qs.set('q', p.q)
+  if (p.from != null) qs.set('from', String(p.from))
+  if (p.cursor) qs.set('cursor', p.cursor)
+  qs.set('limit', String(p.limit ?? 50))
+  return `/api/query-log?${qs.toString()}`
+}
+
 export const api = {
   me:           ()                            => jget<Me>('/api/me'),
   trinoCluster: ()                            => jget<unknown>('/api/trino/cluster'),
@@ -294,6 +370,8 @@ export const api = {
   rollback:     (ns: string, tbl: string, snapshotId: string) => jpost<QueryResult>(`/api/catalog/tables/${seg(ns)}/${seg(tbl)}/rollback`, { snapshot_id: snapshotId }),
   query:        (sql: string)                 => jpost<QueryResult>('/api/query', { sql }),
   jobs:         ()                            => jget<Job[]>('/api/jobs'),
+  queryLog:     (p: QueryLogParams)           => jget<QueryLogPage>(queryLogUrl(p)),
+  queryLogDetail: (id: string)                => jget<QueryLogDetail>(`/api/query-log/${seg(id)}`),
   apps:         ()                            => jget<PlatformApp[]>('/api/apps'),
   embeds:       ()                            => jget<EmbedApp[]>('/api/embeds'),
   links:        ()                            => jget<AppShortcut[]>('/api/apps/links'),

@@ -6,6 +6,7 @@ import Catalog from './routes/Catalog'
 import Query from './routes/Query'
 import Data from './routes/Data'
 import Jobs from './routes/Jobs'
+import QueryLog from './routes/QueryLog'
 import Apps from './routes/Apps'
 import AppDetail from './routes/AppDetail'
 import Lineage from './routes/Lineage'
@@ -24,6 +25,7 @@ export default function App() {
         <Route path="/query"      element={<Query      />} />
         <Route path="/data"       element={<Data       />} />
         <Route path="/jobs"       element={<Jobs       />} />
+        <Route path="/queries"    element={<QueryLog   />} />
         <Route path="/apps"       element={<RequireAdmin><Apps      /></RequireAdmin>} />
         <Route path="/apps/:id"   element={<RequireAdmin><AppDetail /></RequireAdmin>} />
         <Route path="/lineage"    element={<Lineage    />} />
