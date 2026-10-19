@@ -17,6 +17,9 @@
 //!   POST /api/catalog/tables/:ns/:tbl/rollback — roll back to a snapshot
 //!   POST /api/query                         — run SQL
 //!   GET  /api/jobs                          — recent activity
+//!   GET  /api/saved-queries                 — the caller's saved queries (state store)
+//!   POST /api/saved-queries                 — save one: {title, sql, warehouse?}
+//!   DELETE /api/saved-queries/:id           — delete one of the caller's own
 //!   GET  /api/apps                          — installed apps, reachable URLs, live images
 //!   GET  /api/apps/:id                      — one app: workloads, facts, deep links
 //!   GET  /api/workloads                     — workloads in Nova's namespace + their images
@@ -47,6 +50,7 @@ mod openapi;
 // Wired into the collector and the API by the follow-up query-log tickets (stardelt-nova#116).
 #[allow(dead_code)]
 mod query_log;
+mod saved_queries;
 mod trino;
 
 use std::sync::{Arc, Mutex, RwLock};
@@ -56,7 +60,7 @@ use axum::{
     extract::State,
     http::{HeaderValue, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use serde::Serialize;
 use tokio::sync::OnceCell;
@@ -406,6 +410,12 @@ fn api_router() -> Router<Arc<AppState>> {
         )
         .route("/query", post(trino::run_query))
         .route("/jobs", get(jobs::list))
+        // The caller's own saved queries (state store; 503 while it is not configured).
+        .route(
+            "/saved-queries",
+            get(saved_queries::list).post(saved_queries::create),
+        )
+        .route("/saved-queries/{id}", delete(saved_queries::remove))
         // Every signed-in user: what the embedded pages need (see apps::embeds). The
         // operator routes live in admin_router() instead.
         .route("/embeds", get(apps::embeds))
@@ -619,6 +629,10 @@ mod router_tests {
     /// An `AppState` for the routing and header tests: no cluster, no upstream. Nothing
     /// here is reached by the paths under test.
     fn test_state() -> Arc<AppState> {
+        test_state_with_db(None)
+    }
+
+    fn test_state_with_db(db: Option<sqlx::PgPool>) -> Arc<AppState> {
         Arc::new(AppState {
             dev_user: "test".into(),
             trino_url: "http://127.0.0.1:1".into(),
@@ -635,7 +649,7 @@ mod router_tests {
             kube: None,
             workloads: cluster::WorkloadCache::default(),
             admin_console_url: admin_console_url("https://id.example.com/realms/stardelt"),
-            db: None,
+            db,
         })
     }
 
@@ -762,6 +776,201 @@ mod router_tests {
             .unwrap();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value, serde_json::json!({"status": "ok", "db": "disabled"}));
+    }
+
+    /// One request through `app`; the answer's status and JSON body (`null` when empty).
+    async fn call(
+        app: &Router,
+        method: &str,
+        uri: &str,
+        body: Option<&str>,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut request = Request::builder().method(method).uri(uri);
+        if body.is_some() {
+            request = request.header("content-type", "application/json");
+        }
+        let request = request
+            .body(body.map_or_else(Body::empty, |b| Body::from(b.to_string())))
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, value)
+    }
+
+    /// Without `NOVA_DATABASE_URL` the saved-query routes say so, in JSON; a path that
+    /// cannot be an id is a plain 404.
+    #[tokio::test]
+    async fn saved_queries_answer_503_without_a_state_store() {
+        let (app, _dir) = test_app("saved-503");
+        let unavailable = serde_json::json!({"error": "the state store is not configured"});
+        let (status, body) = call(&app, "GET", "/api/saved-queries", None).await;
+        assert_eq!(
+            (status, body),
+            (StatusCode::SERVICE_UNAVAILABLE, unavailable.clone())
+        );
+        let post = r#"{"title":"t","sql":"select 1"}"#;
+        let (status, body) = call(&app, "POST", "/api/saved-queries", Some(post)).await;
+        assert_eq!(
+            (status, body),
+            (StatusCode::SERVICE_UNAVAILABLE, unavailable.clone())
+        );
+        let (status, body) = call(&app, "DELETE", "/api/saved-queries/7", None).await;
+        assert_eq!(
+            (status, body),
+            (StatusCode::SERVICE_UNAVAILABLE, unavailable)
+        );
+        let (status, body) = call(&app, "DELETE", "/api/saved-queries/abc", None).await;
+        assert_eq!(
+            (status, body),
+            (
+                StatusCode::NOT_FOUND,
+                serde_json::json!({"error": "not found"})
+            )
+        );
+        // A malformed body is still the JSON 4xx every route answers.
+        let (status, body) = call(&app, "POST", "/api/saved-queries", Some("{bad")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body["error"].is_string());
+    }
+
+    /// A signed-in caller, as `require_auth` would have put it in the request.
+    fn signed_in(sub: &str) -> auth::Principal {
+        auth::Principal {
+            identity: auth::Identity {
+                sub: sub.into(),
+                display_name: sub.into(),
+                email: None,
+                name: None,
+                groups: vec![],
+                roles: vec![],
+                groups_overage: false,
+                is_admin: false,
+            },
+            via: "session",
+            access_token: None,
+        }
+    }
+
+    /// The API on a real database, with `who` signed in (`None` = `dev` mode).
+    fn saved_query_app(pool: sqlx::PgPool, who: Option<&str>, dir: &StaticDir) -> Router {
+        let mut api = api_router();
+        if let Some(sub) = who {
+            api = api.layer(Extension(signed_in(sub)));
+        }
+        app(test_state_with_db(Some(pool)), api, dir.path())
+    }
+
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn saved_queries_belong_to_their_owner() {
+        let pool = db::test_support::migrated_pool().await;
+        let dir = StaticDir::new("saved-owner");
+        let alice = saved_query_app(pool.clone(), Some("alice-sub"), &dir);
+        let bob = saved_query_app(pool.clone(), Some("bob-sub"), &dir);
+        let dev = saved_query_app(pool, None, &dir);
+
+        // Alice saves one: 201 and the stored row, trimmed.
+        let post = r#"{"title":" Daily trips ","sql":"select count(*) from trips","warehouse":"warehouse"}"#;
+        let (status, row) = call(&alice, "POST", "/api/saved-queries", Some(post)).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(row["title"], "Daily trips");
+        assert_eq!(row["sql"], "select count(*) from trips");
+        assert_eq!(row["warehouse"], "warehouse");
+        assert!(row["created_at"].as_i64().unwrap() > 1_700_000_000_000);
+        let id = row["id"].as_i64().unwrap();
+
+        // She sees it; Bob and the dev user do not.
+        let (status, list) = call(&alice, "GET", "/api/saved-queries", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(list.as_array().unwrap().len(), 1);
+        assert_eq!(list[0]["id"], id);
+        assert_eq!(
+            call(&bob, "GET", "/api/saved-queries", None).await.1,
+            serde_json::json!([])
+        );
+        assert_eq!(
+            call(&dev, "GET", "/api/saved-queries", None).await.1,
+            serde_json::json!([])
+        );
+
+        // Bob cannot delete it, and cannot tell it exists: the same 404 as a missing id.
+        let uri = format!("/api/saved-queries/{id}");
+        let (status, body) = call(&bob, "DELETE", &uri, None).await;
+        assert_eq!(
+            (status, body),
+            (
+                StatusCode::NOT_FOUND,
+                serde_json::json!({"error": "not found"})
+            )
+        );
+        let (status, _) = call(&alice, "GET", "/api/saved-queries", None).await;
+        assert_eq!(status, StatusCode::OK);
+
+        // Alice can; a second delete is a 404.
+        assert_eq!(
+            call(&alice, "DELETE", &uri, None).await.0,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            call(&alice, "DELETE", &uri, None).await.0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            call(&alice, "GET", "/api/saved-queries", None).await.1,
+            serde_json::json!([])
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn saved_queries_in_dev_mode_belong_to_the_dev_user_and_are_validated() {
+        let pool = db::test_support::migrated_pool().await;
+        let dir = StaticDir::new("saved-dev");
+        let app = saved_query_app(pool, None, &dir);
+
+        let (status, body) = call(
+            &app,
+            "POST",
+            "/api/saved-queries",
+            Some(r#"{"title":" ","sql":"select 1"}"#),
+        )
+        .await;
+        assert_eq!(
+            (status, body),
+            (
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({"error": "title must not be empty"})
+            )
+        );
+        let (status, body) =
+            call(&app, "POST", "/api/saved-queries", Some(r#"{"title":"t"}"#)).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(body["error"].is_string());
+
+        let (status, _) = call(
+            &app,
+            "POST",
+            "/api/saved-queries",
+            Some(r#"{"title":"one","sql":"select 1"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let (_, second) = call(
+            &app,
+            "POST",
+            "/api/saved-queries",
+            Some(r#"{"title":"two","sql":"select 2"}"#),
+        )
+        .await;
+        // Newest first.
+        let (_, list) = call(&app, "GET", "/api/saved-queries", None).await;
+        assert_eq!(list[0]["id"], second["id"]);
+        assert_eq!(list[0]["warehouse"], "");
+        assert_eq!(list.as_array().unwrap().len(), 2);
     }
 
     #[test]

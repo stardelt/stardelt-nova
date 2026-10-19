@@ -25,6 +25,9 @@ Browser
          ├─ POST /api/catalog/namespaces  create schema
          ├─ POST /api/query            → Trino query engine
          ├─ GET  /api/jobs             recent activity
+         ├─ GET  /api/saved-queries    the caller's saved queries (needs the state store)
+         ├─ POST /api/saved-queries    save one: {title, sql, warehouse?}
+         ├─ DELETE /api/saved-queries/:id  delete one of the caller's own
          ├─ GET  /api/apps             installed apps: live status + images
          ├─ GET  /api/apps/:id         one app: workloads, facts, links, embed check
          ├─ GET  /api/workloads        workloads in Nova's namespace + read state (ok/stale/unreachable)
@@ -67,6 +70,7 @@ stardelt-nova/
 │   │   ├── api_json.rs  `ApiJson` body extractor: JSON, never text, on rejection
 │   │   ├── catalog.rs Lakekeeper proxy routes
 │   │   ├── db.rs     optional PostgreSQL state store: pool, migrations, health
+│   │   ├── saved_queries.rs  /api/saved-queries (owner-scoped rows in the state store)
 │   │   └── trino.rs  SQL query proxy
 │   └── migrations/   numbered `NNNN_name.sql` files, embedded in the binary (sqlx)
 ├── frontend/         Vite + React + TypeScript + Tailwind SPA
