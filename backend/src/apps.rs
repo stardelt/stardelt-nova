@@ -756,9 +756,8 @@ async fn fetch_json(state: &AppState, url: &str) -> Option<Value> {
 /// that is down. The probe and the fact fetches are separate requests, but the
 /// worst case is bounded by the same budget.
 fn http_client(state: &AppState) -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(Duration::from_millis(1500))
-        .build()
+    crate::add_platform_ca(reqwest::Client::builder())
+        .and_then(|b| Ok(b.timeout(Duration::from_millis(1500)).build()?))
         .unwrap_or_else(|_| state.http.clone())
 }
 
@@ -852,18 +851,20 @@ fn app_hosts(checked: &str, public_url: &str) -> Vec<String> {
 /// login loop, then a stop — the journey off the app is what `sign_in_host`
 /// reports, not something to fetch).
 fn framing_client(state: &AppState, own_hosts: Vec<String>) -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(Duration::from_millis(1500))
-        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
-            if attempt.previous().len() >= 5 {
-                return attempt.stop();
-            }
-            match attempt.url().host_str() {
-                Some(host) if own_hosts.iter().any(|own| own == host) => attempt.follow(),
-                _ => attempt.stop(),
-            }
-        }))
-        .build()
+    crate::add_platform_ca(reqwest::Client::builder())
+        .and_then(|b| {
+            Ok(b.timeout(Duration::from_millis(1500))
+                .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+                    if attempt.previous().len() >= 5 {
+                        return attempt.stop();
+                    }
+                    match attempt.url().host_str() {
+                        Some(host) if own_hosts.iter().any(|own| own == host) => attempt.follow(),
+                        _ => attempt.stop(),
+                    }
+                }))
+                .build()?)
+        })
         .unwrap_or_else(|_| state.http.clone())
 }
 

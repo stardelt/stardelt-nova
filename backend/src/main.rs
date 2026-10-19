@@ -315,8 +315,10 @@ fn env_flag(name: &str) -> bool {
     )
 }
 
-/// The shared upstream HTTP client, with the platform's internal CA added when
-/// the platform hands one over (`NOVA_TRINO_CA_PEM`).
+/// Add the platform's internal CA to a client builder when the platform hands one over
+/// (`NOVA_TRINO_CA_PEM`). Every upstream client Nova builds goes through this, so a caller
+/// that adds its own options (a short timeout, a redirect policy) cannot lose the trust
+/// settings the shared client has.
 ///
 /// The Trino coordinator's in-cluster TLS certificate is signed by a
 /// namespace-local CA (`manifests/trino-tls.yaml` in stardelt-platform), which
@@ -328,8 +330,9 @@ fn env_flag(name: &str) -> bool {
 /// listener and no certificate. The CA is *added* to the public roots; nothing
 /// disables verification, and a value that is not a certificate is a startup
 /// error rather than a silently ignored variable.
-fn http_client() -> anyhow::Result<reqwest::Client> {
-    let mut builder = reqwest::Client::builder();
+pub(crate) fn add_platform_ca(
+    mut builder: reqwest::ClientBuilder,
+) -> anyhow::Result<reqwest::ClientBuilder> {
     if let Ok(pem) = std::env::var("NOVA_TRINO_CA_PEM")
         && !pem.trim().is_empty()
     {
@@ -338,12 +341,21 @@ fn http_client() -> anyhow::Result<reqwest::Client> {
         for cert in certs {
             builder = builder.add_root_certificate(cert);
         }
+    }
+    Ok(builder)
+}
+
+/// The shared upstream HTTP client (`AppState.http`), built from [`add_platform_ca`].
+fn http_client() -> anyhow::Result<reqwest::Client> {
+    if let Ok(pem) = std::env::var("NOVA_TRINO_CA_PEM")
+        && !pem.trim().is_empty()
+    {
         info!(
             certificates = pem.matches("BEGIN CERTIFICATE").count(),
             "trusting the platform's internal CA (NOVA_TRINO_CA_PEM)"
         );
     }
-    Ok(builder.build()?)
+    Ok(add_platform_ca(reqwest::Client::builder())?.build()?)
 }
 
 /// The realm's Keycloak admin console, derived from the configured issuer.
