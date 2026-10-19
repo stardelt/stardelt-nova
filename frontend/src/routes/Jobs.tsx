@@ -24,6 +24,7 @@ export default function Jobs() {
             <tr>
               <th className="th px-4 py-2.5">Kind</th>
               <th className="th px-4 py-2.5">Title</th>
+              <th className="th px-4 py-2.5">User</th>
               <th className="th px-4 py-2.5">Status</th>
               <th className="th px-4 py-2.5 text-right">Rows</th>
               <th className="th px-4 py-2.5 text-right">Started</th>
@@ -31,13 +32,13 @@ export default function Jobs() {
           </thead>
           <tbody>
             {jobs.isLoading && (
-              <tr><td className="px-4 py-5 text-text-mute" colSpan={5}>loading…</td></tr>
+              <tr><td className="px-4 py-5 text-text-mute" colSpan={6}>loading…</td></tr>
             )}
             {jobs.isError && !jobs.data && (
-              <tr><td className="px-4 py-5 text-bad" colSpan={5}>{String(jobs.error)}</td></tr>
+              <tr><td className="px-4 py-5 text-bad" colSpan={6}>{String(jobs.error)}</td></tr>
             )}
             {jobs.data && jobs.data.length === 0 && (
-              <tr><td className="px-4 py-5 text-text-mute" colSpan={5}>No jobs yet.</td></tr>
+              <tr><td className="px-4 py-5 text-text-mute" colSpan={6}>No jobs yet.</td></tr>
             )}
             {(jobs.data ?? []).map(j => (
               <tr key={j.id} className="border-t border-border/70 hover:bg-bg-soft/30">
@@ -46,6 +47,7 @@ export default function Jobs() {
                   <div className="font-mono text-xs truncate max-w-[520px]" title={j.title}>{j.title}</div>
                   {j.detail && <div className="text-[11px] text-text-mute mt-0.5 truncate max-w-[520px]">{j.detail}</div>}
                 </td>
+                <td className="td px-4 text-text-dim">{j.user ?? ''}</td>
                 <td className="td px-4"><Status status={j.status} /></td>
                 <td className="td px-4 text-right text-text-dim">{j.rows != null ? j.rows : '—'}</td>
                 <td className="td px-4 text-right text-text-mute text-xs whitespace-nowrap">{formatTime(j.started_at)}</td>

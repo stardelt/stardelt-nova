@@ -202,6 +202,10 @@ pub async fn run_query(
     ApiJson(req): ApiJson<QueryRequest>,
 ) -> Response {
     let title = truncate(&req.sql, 90);
+    let (user, owner) = caller
+        .as_ref()
+        .map(|c| (c.0.identity.display_name.clone(), c.0.identity.sub.clone()))
+        .unwrap_or_else(|| (s.dev_user.clone(), s.dev_user.clone()));
 
     if s.demo {
         let demo = s.demo_state.read().expect("demo state poisoned");
@@ -214,11 +218,22 @@ pub async fn run_query(
                     "succeeded",
                     r.query_id.clone(),
                     Some(r.row_count),
+                    &user,
+                    &owner,
                 );
                 Json(r).into_response()
             }
             Err(e) => {
-                jobs::record(&s.jobs, "query", title, "failed", Some(e.clone()), None);
+                jobs::record(
+                    &s.jobs,
+                    "query",
+                    title,
+                    "failed",
+                    Some(e.clone()),
+                    None,
+                    &user,
+                    &owner,
+                );
                 (
                     StatusCode::BAD_REQUEST,
                     Json(serde_json::json!({ "error": e })),
@@ -237,11 +252,22 @@ pub async fn run_query(
                 "succeeded",
                 r.query_id.clone(),
                 Some(r.row_count),
+                &user,
+                &owner,
             );
             Json(r).into_response()
         }
         Err(e) => {
-            jobs::record(&s.jobs, "query", title, "failed", Some(e.clone()), None);
+            jobs::record(
+                &s.jobs,
+                "query",
+                title,
+                "failed",
+                Some(e.clone()),
+                None,
+                &user,
+                &owner,
+            );
             (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({ "error": e })),

@@ -21,6 +21,19 @@
 
 use axum::{extract::Request, http::Method, middleware::Next, response::Response};
 
+/// The public path a caller used, including the `/api` prefix that nesting strips.
+///
+/// Inside `.nest("/api", ...)` the router rewrites `req.uri()` to the inner path
+/// (`/query`), while `OriginalUri` keeps what the caller sent (`/api/query`). Audit
+/// lines must carry the public path so a grep for `/api/` finds them. Falls back to
+/// `uri().path()` where no outer router set it (dev mode, tests).
+pub fn original_path(req: &Request) -> String {
+    req.extensions()
+        .get::<axum::extract::OriginalUri>()
+        .map(|u| u.0.path().to_string())
+        .unwrap_or_else(|| req.uri().path().to_string())
+}
+
 /// Fields an audit line carries, extracted before the request is consumed.
 struct Actor {
     name: String,
@@ -36,7 +49,7 @@ pub async fn record_mutations(req: Request, next: Next) -> Response {
     }
 
     let method = req.method().clone();
-    let path = req.uri().path().to_string();
+    let path = original_path(&req);
     // `require_auth` inserts a Principal; in dev mode there is none and the single user
     // is the operator, which is what the line should say rather than pretending.
     let actor = req
@@ -118,5 +131,42 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn original_path_prefers_the_public_uri() {
+        let mut req = Request::builder()
+            .method("POST")
+            .uri("/query")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        req.extensions_mut()
+            .insert(axum::extract::OriginalUri("/api/query".parse().unwrap()));
+        assert_eq!(original_path(&req), "/api/query");
+        let req = Request::builder()
+            .method("POST")
+            .uri("/query")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        assert_eq!(original_path(&req), "/query");
+    }
+
+    #[tokio::test]
+    async fn nested_router_keeps_the_public_path() {
+        let inner = Router::new()
+            .route("/thing", post(|| async { StatusCode::CREATED }))
+            .layer(axum::middleware::from_fn(record_mutations));
+        let app = Router::new().nest("/api", inner);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/thing")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
     }
 }

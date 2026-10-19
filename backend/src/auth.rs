@@ -1216,8 +1216,22 @@ pub async fn require_auth(
             next.run(req).await
         }
         Err(e) => {
-            if !matches!(e, AuthError::Unauthenticated) {
-                warn!(reason = %e, path = %req.uri().path(), "rejected API request");
+            if matches!(e, AuthError::Unauthenticated) {
+                if !matches!(
+                    *req.method(),
+                    axum::http::Method::GET
+                        | axum::http::Method::HEAD
+                        | axum::http::Method::OPTIONS
+                ) {
+                    tracing::warn!(
+                        target: "audit",
+                        method = %req.method(),
+                        path = %crate::audit::original_path(&req),
+                        "refused: not signed in"
+                    );
+                }
+            } else {
+                warn!(reason = %e, path = %crate::audit::original_path(&req), "rejected API request");
             }
             e.into_response()
         }
@@ -1253,10 +1267,12 @@ pub async fn require_admin(req: Request, next: Next) -> Response {
             actor = %p.identity.display_name,
             sub = %p.identity.sub,
             via = p.via,
-            path = %req.uri().path(),
+            path = %crate::audit::original_path(&req),
             "refused: not an administrator"
         ),
-        None => warn!(target: "audit", path = %req.uri().path(), "refused: no principal"),
+        None => {
+            warn!(target: "audit", path = %crate::audit::original_path(&req), "refused: no principal")
+        }
     }
     AuthError::Forbidden.into_response()
 }
@@ -1511,8 +1527,23 @@ async fn logout(State(auth): State<Arc<AuthState>>, headers: HeaderMap) -> Respo
         return (StatusCode::FORBIDDEN, "cross-origin logout refused").into_response();
     }
     let jar = auth.jar(&headers);
-    if let Some(sid) = jar.get(SESSION_COOKIE) {
+    let signed_out = jar.get(SESSION_COOKIE).and_then(|sid| {
+        let identity = auth
+            .sessions
+            .find(sid.value())
+            .and_then(|sess| sess.credentials.try_lock().ok().map(|c| c.identity.clone()));
         auth.sessions.remove(sid.value());
+        identity
+    });
+    if let Some(id) = signed_out {
+        tracing::info!(
+            target: "audit",
+            actor = %id.display_name,
+            sub = %id.sub,
+            method = "POST",
+            path = "/api/auth/logout",
+            "signed out"
+        );
     }
     let jar = jar.remove(AuthState::removal(SESSION_COOKIE, "/"));
     let target = match auth.provider.discovery().await {
