@@ -54,6 +54,7 @@ mod openapi;
 #[allow(dead_code)]
 mod query_log;
 // Maps the engine's event payloads to log records; wired up by the collector ticket.
+mod query_log_collector;
 #[allow(dead_code)]
 mod query_log_event;
 mod saved_queries;
@@ -626,6 +627,8 @@ async fn main() -> anyhow::Result<()> {
         auth = if auth.is_some() { "oidc" } else { "dev" },
         "nova backend starting"
     );
+    // Second listener for the engine's event feed; off unless NOVA_INTERNAL_ADDR is set.
+    query_log_collector::start().await?;
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     axum::serve(listener, app).await?;
     Ok(())
