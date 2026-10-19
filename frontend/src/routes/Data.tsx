@@ -87,8 +87,8 @@ function LoadForm() {
   })
 
   return (
-    <div className="grid lg:grid-cols-[1fr_320px] gap-4">
-      <div className="card p-5 space-y-4">
+    <div className="grid lg:grid-cols-[minmax(0,1fr)_320px] gap-4">
+      <div className="card p-5 space-y-4 min-w-0">
         <div className="grid sm:grid-cols-2 gap-4">
           <Field label="Schema">
             <input value={namespace} onChange={e => setNamespace(e.target.value)} className="input" placeholder="nyc_taxi" />
@@ -225,8 +225,8 @@ function TransferForm() {
   const refs = tables.data ?? []
 
   return (
-    <div className="grid lg:grid-cols-[1fr_320px] gap-4">
-      <div className="card p-5 space-y-4">
+    <div className="grid lg:grid-cols-[minmax(0,1fr)_320px] gap-4">
+      <div className="card p-5 space-y-4 min-w-0">
         <Field label="Source table">
           <select value={source} onChange={e => setSource(e.target.value)} className="input">
             <option value="">Select a table…</option>
@@ -312,7 +312,7 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 
 function ErrorBox({ text }: { text: string }) {
   return (
-    <div className="rounded-[10px] border border-red-500/40 bg-red-500/10 p-3 text-sm text-bad font-mono whitespace-pre-wrap">
+    <div className="rounded-[10px] border border-red-500/40 bg-red-500/10 p-3 text-sm text-bad font-mono whitespace-pre-wrap break-words">
       {text}
     </div>
   )

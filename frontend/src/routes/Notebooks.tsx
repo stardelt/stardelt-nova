@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../api'
+import { isAdmin } from '../roles'
 import { EmbedBadge, EmbedNotice, SignInNotice } from '../components/EmbedNotice'
 import { safeHttpUrl, statusLabel } from '../format'
 
@@ -23,6 +24,8 @@ const ENTRY_PATHS: Array<{ label: string; path: string }> = [
 
 export default function Notebooks() {
   const apps = useQuery({ queryKey: ['embeds'], queryFn: api.embeds, refetchInterval: 15_000 })
+  const me = useQuery({ queryKey: ['me'], queryFn: api.me })
+  const admin = isAdmin(me.data)
   const jupyter = apps.data?.find(a => a.id === 'jupyterhub')
   const up = jupyter?.status === 'up'
   // Only http(s) URLs may reach `href` / iframe `src`; anything else falls back, then to nothing.
@@ -47,7 +50,9 @@ export default function Notebooks() {
                 ? <> Checking whether it is deployed…</>
                 : apps.isError
                   ? <> Could not read the app list ({String(apps.error)}).</>
-                  : <> Not deployed yet — add it with <span className="font-mono">make install-notebooks</span>.</>}
+                  : admin
+                    ? <> Not deployed yet — add it with <span className="font-mono">make install-notebooks</span>.</>
+                    : <> Notebooks are not available yet. Ask your platform administrator to enable them.</>}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -105,16 +110,22 @@ export default function Notebooks() {
         <div className="card flex-1 grid place-items-center text-center p-10">
           <div>
             <div className="text-text-dim">
-              {apps.isLoading ? 'Checking JupyterHub…' : 'JupyterHub is not installed in this platform.'}
+              {apps.isLoading ? 'Checking JupyterHub…' : admin ? 'JupyterHub is not installed in this platform.' : 'Notebooks are not available yet.'}
             </div>
-            <div className="text-text-mute text-sm mt-1 max-w-md">
-              It fits on the dev node next to the core stack: it installs the hub, the
-              configurable-http-proxy, a user scheduler and a placeholder StatefulSet — and it
-              reaches the same Iceberg catalog every other workload does.
-            </div>
-            <div className="mt-4 rounded-[10px] border border-border bg-bg-soft/60 px-3 py-2 font-mono text-xs">
-              make install-notebooks
-            </div>
+            {admin ? (
+              <>
+                <div className="text-text-mute text-sm mt-1 max-w-md">
+                  It fits on the dev node next to the core stack: it installs the hub, the
+                  configurable-http-proxy, a user scheduler and a placeholder StatefulSet — and it
+                  reaches the same Iceberg catalog every other workload does.
+                </div>
+                <div className="mt-4 rounded-[10px] border border-border bg-bg-soft/60 px-3 py-2 font-mono text-xs">
+                  make install-notebooks
+                </div>
+              </>
+            ) : (
+              <div className="text-text-mute text-sm mt-1 max-w-md">Ask your platform administrator to enable them.</div>
+            )}
             {up && base && <a href={base} className="btn-ghost mt-4">Open {base}</a>}
           </div>
         </div>

@@ -251,6 +251,19 @@ async function jget<T>(path: string): Promise<T> {
   return readJson<T>(path, r)
 }
 
+/** The backend answers errors as `{"error": "<message>"}`; show the message, not the JSON. */
+function errorText(body: string): string {
+  try {
+    const parsed: unknown = JSON.parse(body)
+    if (parsed && typeof parsed === 'object' && 'error' in parsed && typeof parsed.error === 'string') {
+      return parsed.error
+    }
+  } catch {
+    /* not JSON: show it as it came */
+  }
+  return body
+}
+
 async function jpost<T>(path: string, body: unknown): Promise<T> {
   const r = await fetch(path, {
     method: 'POST',
@@ -260,7 +273,7 @@ async function jpost<T>(path: string, body: unknown): Promise<T> {
   checkAuth(path, r)
   if (!r.ok) {
     const text = await r.text().catch(() => '')
-    throw new ApiError(`${path} → ${r.status}: ${text}`, r.status)
+    throw new ApiError(`${path} → ${r.status}: ${errorText(text)}`, r.status)
   }
   return readJson<T>(path, r)
 }

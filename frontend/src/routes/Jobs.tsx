@@ -18,7 +18,7 @@ export default function Jobs() {
         </div>
       </header>
 
-      <div className="card overflow-hidden">
+      <div className="card overflow-x-auto">
         <table className="w-full text-sm">
           <thead className="bg-bg-soft/50">
             <tr>

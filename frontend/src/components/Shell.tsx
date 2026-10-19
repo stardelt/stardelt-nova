@@ -170,6 +170,8 @@ export default function Shell() {
   const title = titleFor(location.pathname)
   const admin = isAdmin(me.data)
   const role = roleLabel(me.data)
+  const [navOpen, setNavOpen] = useState(false)
+  useEffect(() => { setNavOpen(false) }, [location.pathname])
 
   useEffect(() => {
     document.title = title === 'Nova' ? 'stardelt Nova' : `${title} · stardelt Nova`
@@ -182,8 +184,24 @@ export default function Shell() {
   }
 
   return (
-    <div className="h-full grid grid-cols-[250px_1fr]">
-      <aside className="border-r border-border bg-bg-elev/50 backdrop-blur flex flex-col min-h-0">
+    <div className="h-full grid grid-cols-1 md:grid-cols-[250px_minmax(0,1fr)]">
+      {navOpen && (
+        <button
+          type="button"
+          aria-label="Close menu"
+          className="fixed inset-0 z-30 bg-black/50 md:hidden"
+          onClick={() => setNavOpen(false)}
+        />
+      )}
+      <aside
+        id="primary-nav"
+        className={[
+          'border-r border-border bg-bg-elev flex flex-col min-h-0',
+          'fixed inset-y-0 left-0 z-40 w-[250px] transition-transform',
+          'md:static md:z-auto md:translate-x-0 md:bg-bg-elev/50 md:backdrop-blur',
+          navOpen ? 'translate-x-0' : '-translate-x-full',
+        ].join(' ')}
+      >
         <div className="p-5 flex items-center gap-2.5">
           {/* The brand asset, not a stand-in: `logo-wordmark.svg` is the same file the
               favicon and the docs use, so the product and its documentation cannot drift. */}
@@ -266,10 +284,18 @@ export default function Shell() {
       </aside>
 
       <div className="flex flex-col min-w-0 min-h-0">
-        <header className="h-14 shrink-0 border-b border-border bg-bg/30 backdrop-blur flex items-center gap-4 px-6">
-          <div className="text-sm font-medium">{title}</div>
+        <header className="h-14 shrink-0 border-b border-border bg-bg/30 backdrop-blur flex items-center gap-2 sm:gap-4 px-3 sm:px-6">
+          <button
+            type="button"
+            className="btn-ghost px-2.5 py-2 md:hidden"
+            aria-label="Open menu"
+            aria-controls="primary-nav"
+            aria-expanded={navOpen}
+            onClick={() => setNavOpen(true)}
+          >☰</button>
+          <div className="text-sm font-medium truncate min-w-0 mr-auto">{title}</div>
           <form
-            className="ml-auto relative"
+            className="relative hidden sm:block"
             onSubmit={e => {
               e.preventDefault()
               if (q.trim()) navigate(`/catalog?q=${encodeURIComponent(q.trim())}`)
@@ -281,13 +307,13 @@ export default function Shell() {
               onChange={e => setQ(e.target.value)}
               placeholder="Search catalog…"
               aria-label="Search catalog"
-              className="input pl-9 w-64 py-1.5"
+              className="input pl-9 w-40 lg:w-64 py-1.5"
             />
           </form>
           <AppSwitcher />
           {me.data?.auth_mode === 'oidc' && (
             <div className="flex items-center gap-2 pl-2 border-l border-border">
-              <div className="text-right leading-tight min-w-0" title={me.data.email ?? me.data.sub ?? ''}>
+              <div className="text-right leading-tight min-w-0 hidden sm:block" title={me.data.email ?? me.data.sub ?? ''}>
                 <div className="text-sm truncate max-w-[12rem]">{me.data.user}</div>
                 {me.data.is_admin && <div className="text-[11px] text-text-mute">admin</div>}
               </div>
@@ -309,7 +335,7 @@ export default function Shell() {
           </button>
         </header>
 
-        <main className="flex-1 min-h-0 overflow-auto p-6">
+        <main className="flex-1 min-h-0 overflow-auto p-3 sm:p-6">
           <ErrorBoundary key={location.pathname}>
             <Outlet />
           </ErrorBoundary>
