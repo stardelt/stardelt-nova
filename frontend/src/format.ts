@@ -114,6 +114,7 @@ export function sourceLabel(source: string | null | undefined): string {
     'nova-sql-editor': 'SQL editor',
     nova: 'Nova',
     'stardelt-pipeline': 'Pipeline task',
+    'stardelt-notebook-helper': 'Notebook',
     superset: 'Superset',
     'trino-cli': 'Trino CLI',
     'trino-jdbc': 'JDBC client',
