@@ -57,6 +57,7 @@ mod query_log;
 mod query_log_collector;
 #[allow(dead_code)]
 mod query_log_event;
+mod query_log_store;
 mod saved_queries;
 mod trino;
 mod user_settings;
@@ -628,7 +629,10 @@ async fn main() -> anyhow::Result<()> {
         "nova backend starting"
     );
     // Second listener for the engine's event feed; off unless NOVA_INTERNAL_ADDR is set.
-    query_log_collector::start().await?;
+    query_log_collector::start(state.db.clone()).await?;
+    if let Some(pool) = state.db.clone() {
+        query_log_store::spawn_retention(pool);
+    }
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     axum::serve(listener, app).await?;
     Ok(())
