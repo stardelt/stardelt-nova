@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
 import { api, formatCell, formatTime, type QueryResult, type TableMetadata } from '../api'
 import { sqlTableRef, rowsLabel } from '../format'
+import { isAdmin } from '../roles'
 
 type Sel = { ns: string; tbl: string }
 
@@ -119,7 +120,7 @@ function NamespaceItem({ ns, filter, onSelect, selected }: {
 }
 
 function TableDetail({ ns, tbl }: Sel) {
-  const [tab, setTab] = useState<'preview' | 'columns' | 'details'>('preview')
+  const [tab, setTab] = useState<'preview' | 'columns' | 'details' | 'history'>('preview')
   const meta = useQuery({ queryKey: ['catalog', 'table', ns, tbl], queryFn: () => api.tableMeta(ns, tbl) })
   const preview = useQuery({
     queryKey: ['preview', ns, tbl],
@@ -151,7 +152,7 @@ function TableDetail({ ns, tbl }: Sel) {
       </header>
 
       <div className="flex gap-2">
-        {(['preview', 'columns', 'details'] as const).map(t => (
+        {(['preview', 'columns', 'details', 'history'] as const).map(t => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -199,6 +200,8 @@ function TableDetail({ ns, tbl }: Sel) {
       )}
 
       {tab === 'details' && meta.data && <Details meta={meta.data} partition={partSpec} />}
+
+      {tab === 'history' && <HistoryTab ns={ns} tbl={tbl} />}
     </div>
   )
 }
@@ -227,6 +230,186 @@ function Preview({ q }: { q: { data?: QueryResult; isLoading: boolean; error: un
           </tbody>
         </table>
       </div>
+    </div>
+  )
+}
+
+function HistoryTab({ ns, tbl }: Sel) {
+  const qc = useQueryClient()
+  const me = useQuery({ queryKey: ['me'], queryFn: api.me })
+  const history = useQuery({
+    queryKey: ['catalog', 'history', ns, tbl],
+    queryFn: () => api.tableHistory(ns, tbl),
+  })
+  const [previewId, setPreviewId] = useState<string | null>(null)
+  const [rollbackTarget, setRollbackTarget] = useState<string | null>(null)
+  const [confirmText, setConfirmText] = useState('')
+  const [rollbackOk, setRollbackOk] = useState<string | null>(null)
+
+  const preview = useQuery({
+    queryKey: ['history-preview', ns, tbl, previewId],
+    queryFn: () =>
+      api.query(`SELECT * FROM ${sqlTableRef(ns, tbl)} FOR VERSION AS OF ${previewId} LIMIT 100`),
+    enabled: previewId !== null,
+  })
+
+  const rollback = useMutation({
+    mutationFn: (snapshotId: string) => api.rollback(ns, tbl, snapshotId),
+    onSuccess: (_r, snapshotId) => {
+      setRollbackOk(`Rolled back to snapshot ${snapshotId}.`)
+      setRollbackTarget(null)
+      setConfirmText('')
+      qc.invalidateQueries({ queryKey: ['catalog', 'history', ns, tbl] })
+      qc.invalidateQueries({ queryKey: ['preview', ns, tbl] })
+      if (previewId !== null) qc.invalidateQueries({ queryKey: ['history-preview', ns, tbl, previewId] })
+    },
+  })
+
+  const admin = isAdmin(me.data)
+  const cols = history.data?.columns ?? []
+  const idx = (name: string) => cols.findIndex(c => c.name === name)
+  const iTime = idx('committed_at')
+  const iSnap = idx('snapshot_id')
+  const iOp = idx('operation')
+  const iSummary = idx('summary')
+
+  if (history.isLoading) return <div className="card p-6 text-text-mute text-sm">loading history…</div>
+  if (history.isError) return <div className="card p-6 text-bad text-sm">{String(history.error)}</div>
+  const rows = history.data?.rows ?? []
+  if (rows.length === 0) {
+    return (
+      <div className="card p-6 text-text-mute text-sm">
+        No snapshots recorded. {me.data?.demo ? 'Demo mode has no table history.' : 'The table has no snapshots yet.'}
+      </div>
+    )
+  }
+
+  const snapIdOf = (row: unknown[]): string | null => {
+    if (iSnap < 0) return null
+    const v = row[iSnap]
+    // The backend sends ids as strings to keep all 64 bits through JSON.parse;
+    // an old backend may still send a safe number. Anything else is unusable.
+    if (typeof v === 'string' && /^-?\d+$/.test(v)) return v
+    if (typeof v === 'number' && Number.isSafeInteger(v)) return String(v)
+    return null
+  }
+
+  const summaryText = (row: unknown[]): string => {
+    if (iSummary < 0) return '—'
+    const v = row[iSummary] as unknown
+    if (v === null || v === undefined) return '—'
+    if (typeof v === 'object') {
+      const o = v as Record<string, unknown>
+      // Iceberg snapshot summaries carry row/file counts under various keys;
+      // surface the familiar ones when present, else the raw map.
+      const picks = ['total-records', 'added-records', 'deleted-records', 'added-data-files', 'deleted-data-files']
+        .filter(k => o[k] !== undefined)
+        .map(k => `${k}=${String(o[k])}`)
+      if (picks.length > 0) return picks.join(' · ')
+      return JSON.stringify(o)
+    }
+    return String(v)
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="card overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead className="bg-bg-soft/50">
+            <tr>
+              <th className="th px-4 py-2.5">Time</th>
+              <th className="th px-4 py-2.5">Operation</th>
+              <th className="th px-4 py-2.5">Snapshot</th>
+              <th className="th px-4 py-2.5">Summary</th>
+              <th className="th px-4 py-2.5"><span className="sr-only">Actions</span></th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, i) => {
+              const id = snapIdOf(row)
+              return (
+                <tr key={i} className="border-t border-border/70">
+                  <td className="td px-4 font-mono whitespace-nowrap">{iTime >= 0 ? formatCell(row[iTime]) : '—'}</td>
+                  <td className="td px-4 font-mono">{iOp >= 0 ? formatCell(row[iOp]) : '—'}</td>
+                  <td className="td px-4 font-mono text-text-mute">{id !== null ? String(id) : '—'}</td>
+                  <td className="td px-4 font-mono text-text-dim break-all">{summaryText(row)}</td>
+                  <td className="td px-4 whitespace-nowrap text-right">
+                    {id !== null && (
+                      <button
+                        onClick={() => setPreviewId(id)}
+                        aria-pressed={previewId === id}
+                        className="btn-ghost py-1 px-2 text-xs"
+                      >
+                        Preview
+                      </button>
+                    )}
+                    {admin && id !== null && (
+                      <button
+                        onClick={() => { setRollbackTarget(id); setConfirmText(''); setRollbackOk(null); rollback.reset() }}
+                        className="btn-ghost py-1 px-2 text-xs text-bad ml-2"
+                      >
+                        Roll back…
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {rollbackTarget !== null && (
+        <div className="card p-5 border-red-500/40" role="dialog" aria-label="Confirm rollback">
+          <div className="text-sm font-semibold">Roll back {ns}.{tbl} to snapshot {rollbackTarget}?</div>
+          <p className="text-sm text-text-dim mt-1">
+            This moves the current pointer to that snapshot. No snapshots or files are deleted,
+            and the rollback itself appears in the history.
+          </p>
+          <label className="block mt-3">
+            <span className="label block mb-1.5">Type <span className="font-mono">{tbl}</span> to confirm</span>
+            <input
+              value={confirmText}
+              onChange={e => setConfirmText(e.target.value)}
+              className="input"
+              aria-label={`Type ${tbl} to confirm rollback`}
+            />
+          </label>
+          {rollback.isError && (
+            <div className="rounded-[10px] border border-red-500/40 bg-red-500/10 p-3 mt-3 text-sm text-bad font-mono whitespace-pre-wrap break-words">
+              {String(rollback.error)}
+            </div>
+          )}
+          <div className="flex gap-2 mt-4">
+            <button
+              disabled={confirmText !== tbl || rollback.isPending}
+              onClick={() => rollback.mutate(rollbackTarget)}
+              className="btn-primary disabled:opacity-40"
+            >
+              {rollback.isPending ? 'Rolling back…' : 'Roll back to this version'}
+            </button>
+            <button onClick={() => { setRollbackTarget(null); setConfirmText(''); rollback.reset() }} className="btn-ghost">
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+      {rollbackOk && <div className="rounded-[10px] border border-emerald-400/30 bg-emerald-400/10 p-3 text-sm text-ok">{rollbackOk}</div>}
+      {rollback.isError && rollbackTarget === null && (
+        <div className="rounded-[10px] border border-red-500/40 bg-red-500/10 p-3 text-sm text-bad font-mono whitespace-pre-wrap break-words">
+          {String(rollback.error)}
+        </div>
+      )}
+
+      {previewId !== null && (
+        <div className="space-y-2">
+          <div className="text-xs text-text-mute font-mono">
+            Time travel: <span className="text-text-dim">SELECT * FROM {sqlTableRef(ns, tbl)} FOR VERSION AS OF {previewId} LIMIT 100</span>
+            <button onClick={() => setPreviewId(null)} className="btn-ghost py-0.5 px-2 text-xs ml-3">Close</button>
+          </div>
+          <Preview q={preview} />
+        </div>
+      )}
     </div>
   )
 }

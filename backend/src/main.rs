@@ -12,6 +12,8 @@
 //!   POST /api/catalog/namespaces            — create a schema
 //!   GET  /api/catalog/namespaces/:ns/tables — list tables
 //!   GET  /api/catalog/tables/:ns/:tbl       — table metadata
+//!   GET  /api/catalog/tables/:ns/:tbl/history — last 100 snapshots
+//!   POST /api/catalog/tables/:ns/:tbl/rollback — roll back to a snapshot
 //!   POST /api/query                         — run SQL
 //!   GET  /api/jobs                          — recent activity
 //!   GET  /api/apps                          — installed apps, reachable URLs, live images
@@ -357,6 +359,14 @@ fn api_router() -> Router<Arc<AppState>> {
         )
         .route("/catalog/namespaces/{ns}/tables", get(catalog::list_tables))
         .route("/catalog/tables/{ns}/{tbl}", get(catalog::table_metadata))
+        .route(
+            "/catalog/tables/{ns}/{tbl}/history",
+            get(catalog::table_history),
+        )
+        .route(
+            "/catalog/tables/{ns}/{tbl}/rollback",
+            post(catalog::table_rollback),
+        )
         .route("/query", post(trino::run_query))
         .route("/jobs", get(jobs::list))
         // Every signed-in user: what the embedded pages need (see apps::embeds). The
