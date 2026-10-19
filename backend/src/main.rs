@@ -2,7 +2,7 @@
 //!
 //! Endpoints:
 //!   GET  /api/me                            — current user + demo flag
-//!   GET  /api/health                        — backend liveness
+//!   GET  /api/health                        — backend liveness + state-store status
 //!   GET  /api/openapi.json                  — the public API description (unauthenticated, no data)
 //!   GET  /api/auth/login                    — start OIDC sign-in (oidc mode)
 //!   GET  /api/auth/callback                 — OIDC redirect target (oidc mode)
@@ -26,6 +26,8 @@
 //! `NOVA_DEMO=1` serves an in-memory lakehouse so the UI runs with no cluster.
 //! `NOVA_AUTH_MODE=oidc` puts every `/api/*` route except `/api/health` and
 //! `/api/auth/*` behind OIDC sign-in (see `auth.rs`); `dev` (default) has no login.
+//! `NOVA_DATABASE_URL` (a PostgreSQL URL) switches on the state store (`db.rs`); unset,
+//! Nova behaves as before and `/api/health` says `"db":"disabled"`.
 //! `NOVA_QUERY_TIMEOUT_SECS` bounds how long `POST /api/query` waits for Trino
 //! (default 300 s): a slower query is cancelled server-side and answered
 //! `400 {"error":"query exceeded the Ns limit and was cancelled"}`.
@@ -37,6 +39,7 @@ mod auth;
 mod catalog;
 mod cluster;
 mod data;
+mod db;
 mod demo;
 mod embed;
 mod jobs;
@@ -90,6 +93,9 @@ pub struct AppState {
     /// issuer, and for the master realm: Nova never links where it cannot manage
     /// users. The frontend only shows the link; the console enforces the roles.
     pub admin_console_url: Option<String>,
+    /// The state store (`db.rs`). `None` when `NOVA_DATABASE_URL` is unset: every
+    /// feature that needs it must answer 503 then, never panic.
+    pub db: Option<sqlx::PgPool>,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -170,8 +176,13 @@ pub(crate) async fn me(
     }
 }
 
-async fn health() -> impl IntoResponse {
-    (StatusCode::OK, "ok")
+/// Always `200`: the kubelet's readiness probe must not take Trino queries offline because
+/// the state store is down. The body says what is wrong: `db` is `up`, `down` or `disabled`.
+async fn health(State(s): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "status": "ok",
+        "db": db::status(s.db.as_ref()).await,
+    }))
 }
 
 async fn trino_cluster(State(s): State<Arc<AppState>>) -> Response {
@@ -469,6 +480,25 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // Optional state store. Unset = disabled. Set = must connect and migrate, or Nova
+    // refuses to start (the URL holds the password and is never logged).
+    let db = match db::url_from_env() {
+        None => {
+            info!("NOVA_DATABASE_URL is not set — the state store is disabled");
+            None
+        }
+        Some(url) => {
+            let pool = db::connect(&url)
+                .await
+                .map_err(|e| anyhow::anyhow!("refusing to start: {e}"))?;
+            db::migrate(&pool)
+                .await
+                .map_err(|e| anyhow::anyhow!("refusing to start: {e}"))?;
+            info!("state store connected, migrations applied");
+            Some(pool)
+        }
+    };
+
     let state = Arc::new(AppState {
         dev_user: std::env::var("NOVA_DEV_USER").unwrap_or_else(|_| "stardelt-dev".into()),
         trino_url: std::env::var("NOVA_TRINO_URL")
@@ -489,6 +519,7 @@ async fn main() -> anyhow::Result<()> {
         kube,
         workloads: cluster::WorkloadCache::default(),
         admin_console_url: admin_console,
+        db,
     });
 
     let auth = match auth_mode {
@@ -604,6 +635,7 @@ mod router_tests {
             kube: None,
             workloads: cluster::WorkloadCache::default(),
             admin_console_url: admin_console_url("https://id.example.com/realms/stardelt"),
+            db: None,
         })
     }
 
@@ -714,6 +746,22 @@ mod router_tests {
             value["paths"].get("/api/me").is_some(),
             "the document describes /api/me"
         );
+    }
+
+    /// Without `NOVA_DATABASE_URL` the probe still answers 200 and says why.
+    #[tokio::test]
+    async fn health_reports_a_disabled_state_store() {
+        let dir = StaticDir::new("health");
+        // `/health` lives in `public_router()`, not in `api_router()`.
+        let api = Router::new().merge(public_router()).merge(api_router());
+        let app = app(test_state(), api, dir.path());
+        let response = get(app, "/api/health").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value, serde_json::json!({"status": "ok", "db": "disabled"}));
     }
 
     #[test]

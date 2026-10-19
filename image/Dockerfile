@@ -19,6 +19,9 @@ RUN mkdir -p backend/src && \
     cargo build --release -p stardelt-nova-backend && \
     rm -rf backend/src target/release/deps/stardelt_nova_backend* target/release/stardelt-nova-backend
 COPY backend/src backend/src
+# `sqlx::migrate!` embeds backend/migrations/*.sql at compile time: without this line the
+# build fails with "error canonicalizing migration directory".
+COPY backend/migrations backend/migrations
 RUN cargo build --release -p stardelt-nova-backend
 
 # ------- Stage 3: minimal runtime -------

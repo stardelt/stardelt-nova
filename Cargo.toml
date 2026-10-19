@@ -32,3 +32,7 @@ tower = { version = "0.5", features = ["util"] }
 # OpenAPI description of the public API (ticket #107). utoipa is MIT/Apache-2.0;
 # annotations only — no new runtime behaviour beyond serving the document.
 utoipa = { version = "5" }
+# State store (ticket stardelt-nova#103): PostgreSQL through sqlx. MIT OR Apache-2.0.
+# No `default` features: no sqlite/mysql drivers, no native-tls; rustls with `ring`
+# (the provider reqwest already uses) and the bundled WebPKI roots.
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-webpki", "postgres", "migrate", "macros"] }

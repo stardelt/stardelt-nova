@@ -15,7 +15,7 @@ Browser
   │
   └─── :5173 (dev) / :8080 (prod)
          │
-         ├─ GET  /api/health           liveness (never behind sign-in)
+         ├─ GET  /api/health           liveness + state-store status (never behind sign-in)
          ├─ GET  /api/me               current user + demo flag
          ├─ GET  /api/auth/login       start OIDC sign-in (oidc mode)
          ├─ GET  /api/auth/callback    OIDC redirect target (oidc mode)
@@ -61,12 +61,14 @@ In this mode every operation mutates memory and is recorded as a job. Set
 
 ```
 stardelt-nova/
-├── backend/          Rust crate (axum, tower-http, reqwest)
-│   └── src/
-│       ├── main.rs   server setup, /api/health, /api/me, /api/trino
-│       ├── api_json.rs  `ApiJson` body extractor: JSON, never text, on rejection
-│       ├── catalog.rs Lakekeeper proxy routes
-│       └── trino.rs  SQL query proxy
+├── backend/          Rust crate (axum, tower-http, reqwest, sqlx)
+│   ├── src/
+│   │   ├── main.rs   server setup, /api/health, /api/me, /api/trino
+│   │   ├── api_json.rs  `ApiJson` body extractor: JSON, never text, on rejection
+│   │   ├── catalog.rs Lakekeeper proxy routes
+│   │   ├── db.rs     optional PostgreSQL state store: pool, migrations, health
+│   │   └── trino.rs  SQL query proxy
+│   └── migrations/   numbered `NNNN_name.sql` files, embedded in the binary (sqlx)
 ├── frontend/         Vite + React + TypeScript + Tailwind SPA
 │   └── public/       brand assets (logo.svg, logo-wordmark.svg)
 ├── image/
@@ -185,6 +187,7 @@ The backend is configured entirely through environment variables:
 | `NOVA_BASE_DOMAIN` | — (empty) | Base domain for the app deep-links (`trino.<domain>`, …). Empty = the UI links nothing; the install sets it from a ConfigMap |
 | `NOVA_FORWARD_IDENTITY` | off | Send the caller's own token to Trino and the catalog (`Authorization: Bearer`). Only useful once the platform configures those to validate it — the identity contract's phase 2; until then the catalog sees Nova's service connection and `/api/me` says so |
 | `NOVA_QUERY_TIMEOUT_SECS` | `300` | How long `POST /api/query` waits for Trino before cancelling the query server-side and answering `400 {"error":"query exceeded the Ns limit and was cancelled"}`. A client disconnect cancels the Trino query too. Results larger than 50,000 rows are cut to exactly that many and answered with `"truncated": true` |
+| `NOVA_DATABASE_URL` | — (empty) | PostgreSQL URL of the state store (`postgres://user:password@host:5432/nova`). Unset = disabled: Nova behaves as before and `/api/health` answers `{"status":"ok","db":"disabled"}`. Set = connect and apply the migrations at start-up, or refuse to start; the platform fills it from the `nova-pg-app` Secret. After start-up an unreachable database only turns `db` into `down` (the probe still answers 200) |
 | `NOVA_DEV_USER` | `stardelt-dev` | Static user identity returned by `/api/me` (dev mode only) |
 | `NOVA_AUTH_MODE` | `dev` | `dev` (no login) or `oidc` — see [Sign-in](#sign-in-oidc) |
 | `RUST_LOG` | `info` | Tracing filter for the backend (`debug`, `info`, `warn`, …) |
