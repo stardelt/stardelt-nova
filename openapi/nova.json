@@ -1,0 +1,491 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Nova API",
+    "description": "The stardelt Nova gateway: catalog browse, queries and jobs over one identity. In `dev` mode (the default) every route answers without sign-in; in `oidc` mode every described route below requires a session or bearer token except this document itself. Only routes tagged `public` are promised stable.",
+    "license": {
+      "name": "Apache-2.0",
+      "identifier": "Apache-2.0"
+    },
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/api/catalog/namespaces": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "description": "List catalog namespaces (schemas). Each namespace is a list of levels.",
+        "operationId": "list_namespaces",
+        "responses": {
+          "200": {
+            "description": "Namespaces in the warehouse",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NamespacesResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The catalog is not reachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "internal"
+        ],
+        "description": "Create a schema via Trino (`CREATE SCHEMA IF NOT EXISTS`). UI-only for now: not promised stable.",
+        "operationId": "create_namespace",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateNamespaceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The created schema name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateNamespaceResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing name, or the engine refused it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/catalog/namespaces/{ns}/tables": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "description": "List tables in one namespace.",
+        "operationId": "list_tables",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "description": "Namespace (schema) name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Table identifiers in the namespace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TablesResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The name is not a single path segment",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The catalog is not reachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/catalog/tables/{ns}/{tbl}": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "description": "Iceberg metadata for one table (metadata location plus the metadata document).",
+        "operationId": "table_metadata",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "description": "Namespace (schema) name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tbl",
+            "in": "path",
+            "description": "Table name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The table metadata document",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TableMetadataResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A name is not a single path segment",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such table",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/catalog/warehouse": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "description": "The resolved warehouse name and id (`demo` in demo mode).",
+        "operationId": "warehouse_info",
+        "responses": {
+          "200": {
+            "description": "Warehouse name and id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WarehouseInfo"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The catalog is not reachable or has no such warehouse",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/me": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "description": "The caller: static user in `dev` mode, verified claims (never tokens) in `oidc` mode. The `oidc` shape is the documented `OidcMe` superset of this one.",
+        "operationId": "me",
+        "responses": {
+          "200": {
+            "description": "Current user, auth mode, demo flag and warehouse",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Me"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "CreateNamespaceRequest": {
+        "type": "object",
+        "required": [
+          "namespace"
+        ],
+        "properties": {
+          "namespace": {
+            "type": "string",
+            "description": "Schema name to create (surrounding whitespace is trimmed)."
+          }
+        }
+      },
+      "CreateNamespaceResponse": {
+        "type": "object",
+        "description": "The created schema's name.",
+        "required": [
+          "namespace"
+        ],
+        "properties": {
+          "namespace": {
+            "type": "string"
+          }
+        }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "description": "Every non-2xx answer under `/api/` is this envelope (see README \"HTTP\nconventions\"), so every error response in the document points here.",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "Human-readable sentence. Never contains tokens, URLs or stack traces."
+          }
+        }
+      },
+      "Me": {
+        "type": "object",
+        "required": [
+          "user",
+          "auth_mode",
+          "demo",
+          "warehouse"
+        ],
+        "properties": {
+          "admin_console_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`None` in `dev` mode: there is no IdP, so no console."
+          },
+          "auth_mode": {
+            "type": "string"
+          },
+          "demo": {
+            "type": "boolean"
+          },
+          "user": {
+            "type": "string"
+          },
+          "warehouse": {
+            "type": "string"
+          }
+        }
+      },
+      "NamespacesResponse": {
+        "type": "object",
+        "description": "Iceberg `ListNamespaces` result: each namespace is a list of levels.",
+        "required": [
+          "namespaces"
+        ],
+        "properties": {
+          "namespaces": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "OidcMe": {
+        "type": "object",
+        "description": "`/api/me` in `oidc` mode: claims, never tokens. Nova still talks to Trino and\nLakekeeper with its service connection, and says so (`identity_forwarding`).",
+        "required": [
+          "user",
+          "auth_mode",
+          "demo",
+          "warehouse",
+          "sub",
+          "groups",
+          "roles",
+          "groups_overage",
+          "is_admin",
+          "via",
+          "identity_forwarding"
+        ],
+        "properties": {
+          "admin_console_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Realm admin console derived from the issuer; `None` for non-Keycloak issuers."
+          },
+          "auth_mode": {
+            "type": "string"
+          },
+          "demo": {
+            "type": "boolean"
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "groups": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "groups_overage": {
+            "type": "boolean"
+          },
+          "identity_forwarding": {
+            "type": "boolean"
+          },
+          "is_admin": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "roles": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "sub": {
+            "type": "string"
+          },
+          "user": {
+            "type": "string"
+          },
+          "via": {
+            "type": "string"
+          },
+          "warehouse": {
+            "type": "string"
+          }
+        }
+      },
+      "TableIdentifier": {
+        "type": "object",
+        "description": "One Iceberg table identifier.",
+        "required": [
+          "namespace",
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "TableMetadataResponse": {
+        "type": "object",
+        "description": "Iceberg `LoadTable` result: where the metadata lives plus the metadata\ndocument itself (schema, partition specs, properties). The metadata body\nis the catalog's own document — Nova never reshapes it.",
+        "required": [
+          "metadata-location",
+          "metadata"
+        ],
+        "properties": {
+          "metadata": {},
+          "metadata-location": {
+            "type": "string"
+          }
+        }
+      },
+      "TablesResponse": {
+        "type": "object",
+        "description": "Iceberg `ListTables` result.",
+        "required": [
+          "identifiers"
+        ],
+        "properties": {
+          "identifiers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TableIdentifier"
+            }
+          }
+        }
+      },
+      "WarehouseInfo": {
+        "type": "object",
+        "description": "OpenAPI shapes for the catalog routes (first slice of ticket #107).\n\nNova proxies these bodies — from Lakekeeper upstream, or from the\nin-memory demo shapes in `demo.rs` — so the structs below mirror the\nproxied Iceberg REST shapes rather than being constructed anywhere.\n`#[schema(rename = …)]` keeps the hyphenated Iceberg field names.",
+        "required": [
+          "name",
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The Lakekeeper warehouse id, or `\"demo\"` in demo mode."
+          },
+          "name": {
+            "type": "string",
+            "description": "The configured warehouse name (`NOVA_WAREHOUSE_NAME`)."
+          }
+        }
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "public",
+      "description": "Stable surface for tools and scripts. Breaking changes bump `info.version`."
+    },
+    {
+      "name": "internal",
+      "description": "UI-only surface. May change or disappear without notice; do not build tools on it."
+    }
+  ]
+}

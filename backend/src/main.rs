@@ -3,6 +3,7 @@
 //! Endpoints:
 //!   GET  /api/me                            — current user + demo flag
 //!   GET  /api/health                        — backend liveness
+//!   GET  /api/openapi.json                  — the public API description (unauthenticated, no data)
 //!   GET  /api/auth/login                    — start OIDC sign-in (oidc mode)
 //!   GET  /api/auth/callback                 — OIDC redirect target (oidc mode)
 //!   POST /api/auth/logout                   — sign out locally and at the IdP
@@ -37,6 +38,7 @@ mod data;
 mod demo;
 mod embed;
 mod jobs;
+mod openapi;
 mod trino;
 
 use std::sync::{Arc, Mutex, RwLock};
@@ -85,7 +87,7 @@ pub struct AppState {
     pub admin_console_url: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct Me {
     user: String,
     auth_mode: &'static str,
@@ -97,7 +99,7 @@ struct Me {
 
 /// `/api/me` in `oidc` mode: claims, never tokens. Nova still talks to Trino and
 /// Lakekeeper with its service connection, and says so (`identity_forwarding`).
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct OidcMe<'a> {
     user: &'a str,
     auth_mode: &'static str,
@@ -116,7 +118,16 @@ struct OidcMe<'a> {
     admin_console_url: Option<&'a str>,
 }
 
-async fn me(
+#[utoipa::path(
+    get,
+    path = "/api/me",
+    tag = "public",
+    description = "The caller: static user in `dev` mode, verified claims (never tokens) in `oidc` mode. The `oidc` shape is the documented `OidcMe` superset of this one.",
+    responses(
+        (status = 200, description = "Current user, auth mode, demo flag and warehouse", body = Me),
+    )
+)]
+pub(crate) async fn me(
     State(s): State<Arc<AppState>>,
     principal: Option<Extension<auth::Principal>>,
 ) -> Response {
@@ -336,6 +347,17 @@ fn admin_console_url(issuer: &str) -> Option<String> {
     Some(url.to_string())
 }
 
+/// Routes that stay outside sign-in even in `oidc` mode: the kubelet probe and
+/// the API description. The document carries shapes, never data, so gating it
+/// would buy nothing and cost every unauthenticated client (editors, CI) a
+/// login. Everything else in `api_router` / `admin_router` requires a
+/// principal in `oidc` mode.
+fn public_router() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/health", get(health))
+        .route("/openapi.json", get(openapi::serve))
+}
+
 /// The API route table.
 ///
 /// Deliberately separate from `main`: axum validates path syntax when the router is
@@ -345,7 +367,8 @@ fn admin_console_url(issuer: &str) -> Option<String> {
 /// green — `api_router_builds` below now fails in CI instead.
 ///
 /// These are the routes that sit behind sign-in in oidc mode; `/health` and
-/// `/auth/*` are added (unprotected) in `main`, and the operator surfaces live in
+/// `/openapi.json` are added (unprotected) via `public_router()` in `main`,
+/// and `/auth/*` is nested after them. The operator surfaces live in
 /// `admin_router()` so they can carry an administrator check of their own.
 fn api_router() -> Router<Arc<AppState>> {
     Router::new()
@@ -480,8 +503,8 @@ async fn main() -> anyhow::Result<()> {
     let static_dir = std::env::var("NOVA_STATIC_DIR").unwrap_or_else(|_| "/app/static".into());
 
     let protected = api_router();
-    // Everything except /health and /auth/* requires a principal in oidc mode; the
-    // admin table additionally requires an administrator. In `dev` there is no IdP and
+    // Everything except /health, /openapi.json and /auth/* requires a principal
+    // in oidc mode; the admin table additionally requires an administrator. In `dev` there is no IdP and
     // one user, so both tables are served as they always were.
     let api = match &auth {
         Some(a) => {
@@ -511,12 +534,12 @@ async fn main() -> anyhow::Result<()> {
                         )),
                 );
             Router::new()
-                .route("/health", get(health))
+                .merge(public_router())
                 .merge(authed)
                 .nest("/auth", auth::router(a.clone()))
         }
         None => Router::new()
-            .route("/health", get(health))
+            .merge(public_router())
             .merge(protected)
             .merge(admin_router())
             .layer(axum::middleware::from_fn(audit::record_mutations))
@@ -644,6 +667,40 @@ mod router_tests {
             .headers()
             .get(name)
             .and_then(|value| value.to_str().ok())
+    }
+
+    /// `GET /api/openapi.json` is served outside sign-in and carries the
+    /// generated document with the crate version — shapes, never data.
+    #[tokio::test]
+    async fn openapi_document_is_public_and_versioned() {
+        let dir = StaticDir::new("openapi");
+        // Same shape as `main` in dev mode: public routes merged next to the
+        // API table, no auth layer anywhere.
+        let api = Router::new()
+            .merge(public_router())
+            .merge(api_router())
+            .merge(admin_router());
+        let app = app(test_state(), api, dir.path());
+        let response = get(app, "/api/openapi.json").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            header(&response, "content-type"),
+            Some("application/json"),
+            "the document is JSON"
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            value["info"]["version"].as_str(),
+            Some(env!("CARGO_PKG_VERSION")),
+            "the version field follows the crate version"
+        );
+        assert!(
+            value["paths"].get("/api/me").is_some(),
+            "the document describes /api/me"
+        );
     }
 
     #[test]
