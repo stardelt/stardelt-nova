@@ -24,6 +24,7 @@ const groups: NavGroup[] = [
     items: [
       { to: '/query', label: 'SQL editor', icon: 'terminal' },
       { to: '/data', label: 'Load & transfer', icon: 'upload' },
+      { to: '/queries', label: 'Query log', icon: 'table' },
       { to: '/jobs', label: 'Jobs', icon: 'clock' },
     ],
   },
@@ -57,6 +58,7 @@ const titles: Record<string, string> = {
   '/catalog': 'Catalog',
   '/query': 'SQL editor',
   '/data': 'Load & transfer',
+  '/queries': 'Query log',
   '/jobs': 'Jobs',
   '/apps': 'Platform apps',
   '/lineage': 'Lineage',

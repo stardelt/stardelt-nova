@@ -72,3 +72,52 @@ function sqlIdent(part: string): string {
 export function sqlTableRef(ns: string, tbl: string): string {
   return ['warehouse', ...ns.split('.').filter(Boolean), tbl].map(sqlIdent).join('.')
 }
+
+/** `850 ms`, `2.3 s`, `1 m 04 s`, `1 h 05 m`; a missing value is a dash. */
+export function formatDurationMs(ms: number | null | undefined): string {
+  if (ms == null) return '—'
+  if (ms < 1000) return `${Math.round(ms)} ms`
+  const s = ms / 1000
+  if (s < 60) return `${s.toFixed(s < 10 ? 1 : 0)} s`
+  const m = Math.floor(s / 60)
+  if (m < 60) return `${m} m ${String(Math.floor(s % 60)).padStart(2, '0')} s`
+  return `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, '0')} m`
+}
+
+/** Binary units: `512 B`, `1.5 KiB`, `3.2 MiB`; a missing value is a dash. */
+export function formatBytes(n: number | null | undefined): string {
+  if (n == null) return '—'
+  if (n < 1024) return `${n} B`
+  const units = ['KiB', 'MiB', 'GiB', 'TiB']
+  let v = n / 1024
+  let i = 0
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024
+    i++
+  }
+  return `${v.toFixed(v < 10 ? 1 : 0)} ${units[i]}`
+}
+
+/** `just now`, `5 min ago`, `3 h ago`, `2 d ago`. */
+export function relativeTime(ms: number, now: number = Date.now()): string {
+  const s = Math.max(0, Math.round((now - ms) / 1000))
+  if (s < 45) return 'just now'
+  if (s < 3600) return `${Math.max(1, Math.round(s / 60))} min ago`
+  if (s < 86400) return `${Math.round(s / 3600)} h ago`
+  return `${Math.round(s / 86400)} d ago`
+}
+
+/** Where a query came from, in words. Unknown clients keep the name they sent. */
+export function sourceLabel(source: string | null | undefined): string {
+  if (!source) return '—'
+  const known: Record<string, string> = {
+    'nova-sql-editor': 'SQL editor',
+    nova: 'Nova',
+    'stardelt-pipeline': 'Pipeline task',
+    superset: 'Superset',
+    'trino-cli': 'Trino CLI',
+    'trino-jdbc': 'JDBC client',
+    'trino-python-client': 'Python client',
+  }
+  return known[source] ?? source
+}
