@@ -54,6 +54,7 @@ mod openapi;
 #[allow(dead_code)]
 mod query_log;
 // Maps the engine's event payloads to log records; wired up by the collector ticket.
+mod query_log_api;
 mod query_log_collector;
 #[allow(dead_code)]
 mod query_log_event;
@@ -425,6 +426,9 @@ fn api_router() -> Router<Arc<AppState>> {
             get(saved_queries::list).post(saved_queries::create),
         )
         .route("/saved-queries/{id}", delete(saved_queries::remove))
+        // The query log: the caller's own queries, everybody's for administrators (state store).
+        .route("/query-log", get(query_log_api::list))
+        .route("/query-log/{id}", get(query_log_api::detail))
         // The caller's own settings: one JSON value per key (state store).
         .route("/settings", get(user_settings::list))
         .route(
@@ -1170,5 +1174,207 @@ mod router_tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         assert_eq!(header(&response, "cache-control"), Some("no-store"));
         assert_eq!(header(&response, "x-content-type-options"), Some("nosniff"));
+    }
+
+    fn signed_in_admin(sub: &str) -> auth::Principal {
+        let mut p = signed_in(sub);
+        p.identity.is_admin = true;
+        p
+    }
+
+    /// The API on a real database, with `who` signed in (`None` = `dev` mode).
+    fn log_app(pool: sqlx::PgPool, who: Option<auth::Principal>, dir: &StaticDir) -> Router {
+        let mut api = api_router();
+        if let Some(p) = who {
+            api = api.layer(Extension(p));
+        }
+        app(test_state_with_db(Some(pool)), api, dir.path())
+    }
+
+    /// Two queries of alice (a select on warehouse `default`, a create-table-as on `analytics`)
+    /// and one failed query of bob. Returns their ids in that order.
+    async fn seed_query_log(pool: &sqlx::PgPool) -> [String; 3] {
+        let mut ids = Vec::new();
+        for (body, warehouse) in [
+            (
+                include_str!("testdata/query_log/completed_select.json"),
+                "default",
+            ),
+            (
+                include_str!("testdata/query_log/completed_ctas.json"),
+                "analytics",
+            ),
+            (
+                include_str!("testdata/query_log/completed_failed.json"),
+                "default",
+            ),
+        ] {
+            let record = query_log_event::parse(body.as_bytes()).expect("a fixture");
+            ids.push(record.query_id.clone());
+            query_log_store::upsert(
+                pool,
+                &query_log_collector::Accepted {
+                    record,
+                    warehouse: warehouse.into(),
+                },
+            )
+            .await
+            .expect("store a fixture");
+        }
+        [ids[0].clone(), ids[1].clone(), ids[2].clone()]
+    }
+
+    fn item_ids(list: &serde_json::Value) -> Vec<String> {
+        list["items"]
+            .as_array()
+            .expect("an items array")
+            .iter()
+            .map(|i| i["id"].as_str().expect("an id").to_string())
+            .collect()
+    }
+
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn the_query_log_shows_people_their_own_queries_and_administrators_everything() {
+        let pool = db::test_support::migrated_pool().await;
+        let [select, ctas, failed] = seed_query_log(&pool).await;
+        let dir = StaticDir::new("query-log");
+        let alice = log_app(pool.clone(), Some(signed_in("alice")), &dir);
+        let bob = log_app(pool.clone(), Some(signed_in("bob")), &dir);
+        let admin = log_app(pool.clone(), Some(signed_in_admin("root")), &dir);
+
+        // Alice sees her two queries, newest first, and nothing of Bob's.
+        let (status, list) = call(&alice, "GET", "/api/query-log", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(item_ids(&list), [ctas.clone(), select.clone()]);
+        assert_eq!(list["items"][0]["user"], "alice");
+        assert_eq!(list["items"][1]["state"], "FINISHED");
+        assert_eq!(list["items"][1]["wallMs"], 2324);
+        assert!(list["nextCursor"].is_null());
+
+        // Bob sees his failed one with the engine's error code.
+        let (_, list) = call(&bob, "GET", "/api/query-log", None).await;
+        assert_eq!(item_ids(&list), vec![failed.clone()]);
+        assert_eq!(list["items"][0]["errorCode"], "TABLE_NOT_FOUND");
+
+        // The all scope is for administrators; the team scope is empty for now.
+        let (status, body) = call(&alice, "GET", "/api/query-log?scope=all", None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(body["error"].as_str().unwrap().contains("administrators"));
+        let (_, team) = call(&alice, "GET", "/api/query-log?scope=team", None).await;
+        assert_eq!(item_ids(&team), Vec::<String>::new());
+
+        // An administrator sees everything with scope=all, and nothing of their own.
+        let (_, all) = call(&admin, "GET", "/api/query-log?scope=all", None).await;
+        assert_eq!(item_ids(&all).len(), 3);
+        let (_, mine) = call(&admin, "GET", "/api/query-log", None).await;
+        assert_eq!(item_ids(&mine), Vec::<String>::new());
+
+        // Filters.
+        let uri = |q: &str| format!("/api/query-log?scope=all&{q}");
+        let (_, failed_only) = call(&admin, "GET", &uri("state=failed"), None).await;
+        assert_eq!(item_ids(&failed_only), vec![failed.clone()]);
+        let (_, analytics) = call(&admin, "GET", &uri("warehouse=analytics"), None).await;
+        assert_eq!(item_ids(&analytics), vec![ctas.clone()]);
+        let (_, nation) = call(&admin, "GET", &uri("q=nation"), None).await;
+        assert_eq!(item_ids(&nation), vec![select.clone()]);
+        let (_, by_id) = call(&admin, "GET", &uri(&format!("q={failed}")), None).await;
+        assert_eq!(item_ids(&by_id), vec![failed.clone()]);
+        let (_, wildcard) = call(&admin, "GET", &uri("q=%25"), None).await;
+        assert_eq!(
+            item_ids(&wildcard),
+            Vec::<String>::new(),
+            "a percent sign is a literal"
+        );
+
+        // Paging one at a time visits every row once.
+        let mut seen = Vec::new();
+        let mut cursor = String::new();
+        for _ in 0..5 {
+            let (_, page) = call(&admin, "GET", &uri(&format!("limit=1{cursor}")), None).await;
+            seen.extend(item_ids(&page));
+            match page["nextCursor"].as_str() {
+                Some(next) => cursor = format!("&cursor={next}"),
+                None => break,
+            }
+        }
+        let mut sorted = seen.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(seen.len(), 3);
+        assert_eq!(sorted.len(), 3, "no row twice: {seen:?}");
+
+        // Detail: the owner and administrators, not a stranger; a stranger gets a plain 404.
+        let (status, detail) = call(&alice, "GET", &format!("/api/query-log/{select}"), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            detail["sql"],
+            "select 'alice-secret-literal' as c, count(*) from tpch.tiny.nation"
+        );
+        assert_eq!(detail["timing"]["wallMs"], 2324);
+        assert_eq!(
+            detail["tablesRead"],
+            serde_json::json!(["tpch.tiny.nation"])
+        );
+        assert!(detail["error"].is_null());
+        let (status, body) = call(&bob, "GET", &format!("/api/query-log/{select}"), None).await;
+        assert_eq!(
+            (status, body),
+            (
+                StatusCode::NOT_FOUND,
+                serde_json::json!({"error": "not found"})
+            )
+        );
+        let (status, detail) = call(&bob, "GET", &format!("/api/query-log/{failed}"), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(detail["error"]["code"], "TABLE_NOT_FOUND");
+        assert_eq!(
+            call(&admin, "GET", &format!("/api/query-log/{select}"), None)
+                .await
+                .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            call(&alice, "GET", "/api/query-log/no-such-query", None)
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+
+        // A bad parameter is a sentence, not a stack trace.
+        let (status, body) = call(&alice, "GET", "/api/query-log?limit=0", None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body["error"].as_str().unwrap().contains("limit"));
+    }
+
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn in_dev_mode_the_one_user_is_the_operator_and_sees_all() {
+        let pool = db::test_support::migrated_pool().await;
+        seed_query_log(&pool).await;
+        let dir = StaticDir::new("query-log-dev");
+        let dev = log_app(pool, None, &dir);
+        let (_, all) = call(&dev, "GET", "/api/query-log?scope=all", None).await;
+        assert_eq!(item_ids(&all).len(), 3);
+        let (_, mine) = call(&dev, "GET", "/api/query-log", None).await;
+        assert_eq!(
+            item_ids(&mine),
+            Vec::<String>::new(),
+            "the dev user ran none of them"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_query_log_answers_503_without_a_state_store() {
+        let dir = StaticDir::new("query-log-503");
+        let app = app(test_state(), api_router(), dir.path());
+        assert_eq!(
+            call(&app, "GET", "/api/query-log", None).await.0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            call(&app, "GET", "/api/query-log/x", None).await.0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
     }
 }
