@@ -1,0 +1,170 @@
+//! Nova's public API description, generated from code (ticket #107).
+//!
+//! The `#[utoipa::path]` annotations live on the handlers (`main.rs` for
+//! `/api/me`, `catalog.rs` for the catalog routes) and the `ToSchema` derives
+//! on their request/response types; this module only collects them into one
+//! document and serves it. Nothing here is hand-written YAML, so the
+//! description cannot drift from the code — the `committed_document_is_fresh`
+//! test below fails CI when the checked-in document is stale.
+//!
+//! Routes carry one of two tags: `public` (stable — tools and scripts may rely
+//! on it) or `internal` (UI-only — may change without notice). Only `public`
+//! is promised stable. `info.version` is Nova's own crate version and follows
+//! semantic versioning for the `public` surface: a breaking change to a
+//! `public` route bumps it.
+//!
+//! `GET /api/openapi.json` is served **unauthenticated** on purpose: the
+//! document describes shapes, not data. It contains no user rows, no tokens,
+//! no secrets and no upstream URLs — only paths, schema names and prose. The
+//! `serves_the_document_unauthenticated` test pins that (status 200 with no
+//! session, and no secret-shaped word in the JSON).
+//!
+//! Regenerate the checked-in document after changing an annotation or schema:
+//!
+//! ```bash
+//! UPDATE_OPENAPI=1 cargo test -p stardelt-nova-backend openapi
+//! ```
+
+use axum::{http::header, response::IntoResponse};
+use serde::Serialize;
+use utoipa::OpenApi;
+
+/// Every non-2xx answer under `/api/` is this envelope (see README "HTTP
+/// conventions"), so every error response in the document points here.
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct ErrorResponse {
+    /// Human-readable sentence. Never contains tokens, URLs or stack traces.
+    pub error: String,
+}
+
+/// The collected document: every path in this first slice, with the schemas
+/// the `body = …` attributes point at.
+#[derive(utoipa::OpenApi)]
+#[openapi(
+    info(
+        title = "Nova API",
+        description = "The stardelt Nova gateway: catalog browse, queries and jobs over one identity. In `dev` mode (the default) every route answers without sign-in; in `oidc` mode every described route below requires a session or bearer token except this document itself. Only routes tagged `public` are promised stable."
+    ),
+    paths(
+        crate::me,
+        crate::catalog::warehouse_info,
+        crate::catalog::list_namespaces,
+        crate::catalog::create_namespace,
+        crate::catalog::list_tables,
+        crate::catalog::table_metadata,
+    ),
+    components(schemas(
+        crate::Me,
+        crate::OidcMe,
+        crate::catalog::WarehouseInfo,
+        crate::catalog::NamespacesResponse,
+        crate::catalog::TablesResponse,
+        crate::catalog::TableIdentifier,
+        crate::catalog::TableMetadataResponse,
+        crate::catalog::CreateNamespaceRequest,
+        crate::catalog::CreateNamespaceResponse,
+        ErrorResponse,
+    )),
+    tags(
+        (name = "public", description = "Stable surface for tools and scripts. Breaking changes bump `info.version`."),
+        (name = "internal", description = "UI-only surface. May change or disappear without notice; do not build tools on it."),
+    )
+)]
+pub struct ApiDoc;
+
+/// The served document. The version is stamped from the crate version at
+/// compile time (see the module docs for the semver promise).
+pub fn document() -> utoipa::openapi::OpenApi {
+    let mut doc = ApiDoc::openapi();
+    doc.info.version = env!("CARGO_PKG_VERSION").to_string();
+    doc
+}
+
+/// The exact bytes served at `GET /api/openapi.json` and committed to
+/// `openapi/nova.json` (plus one trailing newline in the file).
+pub fn document_json() -> String {
+    serde_json::to_string_pretty(&document()).expect("the OpenAPI document serializes")
+}
+
+/// Serve the document. Deliberately outside sign-in (wired next to
+/// `/api/health` in `main`): it carries shapes, not data.
+pub async fn serve() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "application/json")],
+        document_json(),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Path of the committed document, relative to the crate root.
+    fn committed_path() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../openapi/nova.json")
+    }
+
+    /// The CI check: the committed document must equal what the annotations
+    /// generate. Regenerate with `UPDATE_OPENAPI=1 cargo test -p
+    /// stardelt-nova-backend openapi` and commit the result alongside the
+    /// annotation change.
+    #[test]
+    fn committed_document_is_fresh() {
+        let path = committed_path();
+        let generated = format!("{}\n", document_json());
+        if std::env::var("UPDATE_OPENAPI").is_ok() {
+            std::fs::create_dir_all(path.parent().expect("openapi dir")).expect("openapi dir");
+            std::fs::write(&path, &generated).expect("write the regenerated document");
+            return;
+        }
+        let committed = std::fs::read_to_string(&path).unwrap_or_else(|_| {
+            panic!(
+                "missing {} — run UPDATE_OPENAPI=1 cargo test -p stardelt-nova-backend openapi",
+                path.display()
+            )
+        });
+        assert_eq!(
+            committed, generated,
+            "openapi/nova.json is stale — run UPDATE_OPENAPI=1 cargo test -p stardelt-nova-backend openapi and commit the result"
+        );
+    }
+
+    /// The document endpoint answers without a session and carries no data:
+    /// no tokens, no cookies, no secrets — only paths, schemas and prose.
+    #[test]
+    fn document_carries_no_secrets() {
+        let json = document_json();
+        for word in [
+            "access_token",
+            "refresh_token",
+            "id_token",
+            "cookie",
+            "Secret",
+            "Bearer",
+            "authorization",
+        ] {
+            assert!(
+                !json.contains(word),
+                "the public document must not mention {word:?}"
+            );
+        }
+        let value: serde_json::Value = serde_json::from_str(&json).expect("the document is JSON");
+        assert_eq!(
+            value["info"]["version"].as_str(),
+            Some(env!("CARGO_PKG_VERSION")),
+            "the version field follows the crate version"
+        );
+        for path in [
+            "/api/me",
+            "/api/catalog/warehouse",
+            "/api/catalog/namespaces",
+            "/api/catalog/namespaces/{ns}/tables",
+            "/api/catalog/tables/{ns}/{tbl}",
+        ] {
+            assert!(
+                value["paths"].get(path).is_some(),
+                "the document describes {path}"
+            );
+        }
+    }
+}

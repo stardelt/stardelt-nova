@@ -16,6 +16,55 @@ use tracing::warn;
 
 use crate::{AppState, api_json::ApiJson, auth, data};
 
+/// OpenAPI shapes for the catalog routes (first slice of ticket #107).
+///
+/// Nova proxies these bodies — from Lakekeeper upstream, or from the
+/// in-memory demo shapes in `demo.rs` — so the structs below mirror the
+/// proxied Iceberg REST shapes rather than being constructed anywhere.
+/// `#[schema(rename = …)]` keeps the hyphenated Iceberg field names.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct WarehouseInfo {
+    /// The configured warehouse name (`NOVA_WAREHOUSE_NAME`).
+    pub name: String,
+    /// The Lakekeeper warehouse id, or `"demo"` in demo mode.
+    pub id: String,
+}
+
+/// Iceberg `ListNamespaces` result: each namespace is a list of levels.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct NamespacesResponse {
+    pub namespaces: Vec<Vec<String>>,
+}
+
+/// One Iceberg table identifier.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct TableIdentifier {
+    pub namespace: Vec<String>,
+    pub name: String,
+}
+
+/// Iceberg `ListTables` result.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct TablesResponse {
+    pub identifiers: Vec<TableIdentifier>,
+}
+
+/// Iceberg `LoadTable` result: where the metadata lives plus the metadata
+/// document itself (schema, partition specs, properties). The metadata body
+/// is the catalog's own document — Nova never reshapes it.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct TableMetadataResponse {
+    #[schema(rename = "metadata-location")]
+    pub metadata_location: String,
+    pub metadata: serde_json::Value,
+}
+
+/// The created schema's name.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct CreateNamespaceResponse {
+    pub namespace: String,
+}
+
 #[derive(Deserialize)]
 struct WarehouseListItem {
     id: String,
@@ -27,8 +76,9 @@ struct WarehouseList {
     warehouses: Vec<WarehouseListItem>,
 }
 
-#[derive(Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 pub struct CreateNamespaceRequest {
+    /// Schema name to create (surrounding whitespace is trimmed).
     pub namespace: String,
 }
 
@@ -107,6 +157,16 @@ async fn warehouse_id_or_500(state: &AppState) -> Result<String, Box<Response>> 
     })
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/catalog/warehouse",
+    tag = "public",
+    description = "The resolved warehouse name and id (`demo` in demo mode).",
+    responses(
+        (status = 200, description = "Warehouse name and id", body = WarehouseInfo),
+        (status = 500, description = "The catalog is not reachable or has no such warehouse", body = crate::openapi::ErrorResponse),
+    )
+)]
 pub async fn warehouse_info(State(s): State<Arc<AppState>>) -> Response {
     if s.demo {
         return Json(serde_json::json!({ "name": s.warehouse_name, "id": "demo" })).into_response();
@@ -121,6 +181,16 @@ pub async fn warehouse_info(State(s): State<Arc<AppState>>) -> Response {
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/catalog/namespaces",
+    tag = "public",
+    description = "List catalog namespaces (schemas). Each namespace is a list of levels.",
+    responses(
+        (status = 200, description = "Namespaces in the warehouse", body = NamespacesResponse),
+        (status = 500, description = "The catalog is not reachable", body = crate::openapi::ErrorResponse),
+    )
+)]
 pub async fn list_namespaces(
     State(s): State<Arc<AppState>>,
     caller: Option<axum::Extension<auth::Principal>>,
@@ -141,6 +211,17 @@ pub async fn list_namespaces(
     .await
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/catalog/namespaces",
+    tag = "internal",
+    description = "Create a schema via Trino (`CREATE SCHEMA IF NOT EXISTS`). UI-only for now: not promised stable.",
+    request_body = CreateNamespaceRequest,
+    responses(
+        (status = 200, description = "The created schema name", body = CreateNamespaceResponse),
+        (status = 400, description = "Missing name, or the engine refused it", body = crate::openapi::ErrorResponse),
+    )
+)]
 pub async fn create_namespace(
     State(s): State<Arc<AppState>>,
     caller: Option<axum::Extension<auth::Principal>>,
@@ -178,6 +259,20 @@ pub async fn create_namespace(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/catalog/namespaces/{ns}/tables",
+    tag = "public",
+    description = "List tables in one namespace.",
+    params(
+        ("ns" = String, Path, description = "Namespace (schema) name"),
+    ),
+    responses(
+        (status = 200, description = "Table identifiers in the namespace", body = TablesResponse),
+        (status = 400, description = "The name is not a single path segment", body = crate::openapi::ErrorResponse),
+        (status = 500, description = "The catalog is not reachable", body = crate::openapi::ErrorResponse),
+    )
+)]
 pub async fn list_tables(
     State(s): State<Arc<AppState>>,
     Path(ns): Path<String>,
@@ -202,6 +297,21 @@ pub async fn list_tables(
     .await
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/catalog/tables/{ns}/{tbl}",
+    tag = "public",
+    description = "Iceberg metadata for one table (metadata location plus the metadata document).",
+    params(
+        ("ns" = String, Path, description = "Namespace (schema) name"),
+        ("tbl" = String, Path, description = "Table name"),
+    ),
+    responses(
+        (status = 200, description = "The table metadata document", body = TableMetadataResponse),
+        (status = 400, description = "A name is not a single path segment", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such table", body = crate::openapi::ErrorResponse),
+    )
+)]
 pub async fn table_metadata(
     State(s): State<Arc<AppState>>,
     Path((ns, tbl)): Path<(String, String)>,
