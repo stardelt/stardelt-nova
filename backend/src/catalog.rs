@@ -343,6 +343,145 @@ pub async fn table_metadata(
     .await
 }
 
+/// The last 100 snapshots of a table, newest first (Trino 480 Iceberg syntax).
+/// Names go through `quote_ident` only — never interpolated raw.
+fn history_sql(ns: &str, tbl: &str) -> String {
+    format!(
+        "SELECT committed_at, snapshot_id, parent_id, operation, summary FROM warehouse.{}.{} ORDER BY committed_at DESC LIMIT 100",
+        crate::data::quote_ident(ns),
+        crate::data::quote_ident(&format!("{tbl}$snapshots")),
+    )
+}
+
+/// Move the table's current pointer to an earlier snapshot. The snapshot id is
+/// an `i64`, so it is interpolated as an integer — never as a quoted string.
+fn rollback_sql(ns: &str, tbl: &str, snapshot_id: i64) -> String {
+    format!(
+        "ALTER TABLE warehouse.{}.{} EXECUTE rollback_to_snapshot({snapshot_id})",
+        crate::data::quote_ident(ns),
+        crate::data::quote_ident(tbl),
+    )
+}
+
+/// Accept the snapshot id as a JSON number or as a string of digits.
+///
+/// Iceberg snapshot ids are 64-bit (e.g. `5972469351597084165`), past JS's
+/// `Number.MAX_SAFE_INTEGER`. The History tab therefore keeps them as strings
+/// end-to-end (see `stringify_snapshot_ids`): a UI that parsed them as numbers
+/// would roll back to a rounded id Trino does not know. A string is parsed
+/// here and still interpolated as an integer — never as SQL text.
+fn deserialize_snapshot_id<'de, D>(deserializer: D) -> Result<i64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{Error, Unexpected};
+    struct Visit;
+    impl serde::de::Visitor<'_> for Visit {
+        type Value = i64;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a snapshot id as an integer or a string of digits")
+        }
+        fn visit_i64<E: Error>(self, v: i64) -> Result<i64, E> {
+            Ok(v)
+        }
+        fn visit_u64<E: Error>(self, v: u64) -> Result<i64, E> {
+            i64::try_from(v).map_err(|_| Error::invalid_value(Unexpected::Unsigned(v), &self))
+        }
+        fn visit_str<E: Error>(self, v: &str) -> Result<i64, E> {
+            v.parse::<i64>()
+                .map_err(|_| Error::invalid_value(Unexpected::Str(v), &self))
+        }
+    }
+    deserializer.deserialize_any(Visit)
+}
+
+#[derive(Deserialize)]
+pub struct RollbackRequest {
+    #[serde(deserialize_with = "deserialize_snapshot_id")]
+    pub snapshot_id: i64,
+}
+
+/// Render `snapshot_id`/`parent_id` as strings so the JSON keeps all 64 bits.
+///
+/// `serde_json` holds the full `i64` from Trino, but `JSON.parse` in the
+/// browser rounds past 2^53 — and a rounded id rolls back to
+/// `Cannot roll back to unknown snapshot id`. Strings survive intact; the
+/// History tab validates the digits before using them as an integer literal.
+fn stringify_snapshot_ids(mut r: crate::trino::QueryResult) -> crate::trino::QueryResult {
+    let mut snap = None;
+    let mut parent = None;
+    for (i, c) in r.columns.iter().enumerate() {
+        if c.name == "snapshot_id" && snap.is_none() {
+            snap = Some(i);
+        } else if c.name == "parent_id" && parent.is_none() {
+            parent = Some(i);
+        }
+    }
+    for row in r.rows.iter_mut() {
+        for idx in [snap, parent].into_iter().flatten() {
+            if let Some(cell) = row.get_mut(idx)
+                && let serde_json::Value::Number(n) = &*cell
+            {
+                *cell = serde_json::Value::String(n.to_string());
+            }
+        }
+    }
+    r
+}
+
+pub async fn table_history(
+    State(s): State<Arc<AppState>>,
+    Path((ns, tbl)): Path<(String, String)>,
+    caller: Option<axum::Extension<auth::Principal>>,
+) -> Response {
+    if s.demo {
+        return Json(serde_json::json!({"columns": [], "rows": []})).into_response();
+    }
+    if path_segment(&ns).is_none() || path_segment(&tbl).is_none() {
+        return bad_segment(&format!("{ns}.{tbl}"));
+    }
+    match crate::trino::execute(&s, history_sql(&ns, &tbl), caller.as_ref().map(|c| &c.0)).await {
+        Ok(r) => Json(stringify_snapshot_ids(r)).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn table_rollback(
+    State(s): State<Arc<AppState>>,
+    Path((ns, tbl)): Path<(String, String)>,
+    caller: Option<axum::Extension<auth::Principal>>,
+    ApiJson(req): ApiJson<RollbackRequest>,
+) -> Response {
+    if s.demo {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "rollback is not available in demo mode"})),
+        )
+            .into_response();
+    }
+    if path_segment(&ns).is_none() || path_segment(&tbl).is_none() {
+        return bad_segment(&format!("{ns}.{tbl}"));
+    }
+    match crate::trino::execute(
+        &s,
+        rollback_sql(&ns, &tbl, req.snapshot_id),
+        caller.as_ref().map(|c| &c.0),
+    )
+    .await
+    {
+        Ok(r) => Json(r).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
+    }
+}
+
 /// Percent-encode one URL path segment for the Lakekeeper proxy. Axum has already
 /// decoded the request path, so a namespace like `a%2F..%2Fb` arrives as `a/../b`;
 /// interpolated raw, the URL parser would collapse the dot segments and send the GET
@@ -375,7 +514,7 @@ fn bad_segment(what: &str) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use super::path_segment;
+    use super::{history_sql, path_segment, rollback_sql};
 
     #[test]
     fn plain_names_pass_through() {
@@ -399,5 +538,89 @@ mod tests {
         assert_eq!(path_segment(""), None);
         assert_eq!(path_segment("."), None);
         assert_eq!(path_segment(".."), None);
+    }
+
+    #[test]
+    fn history_sql_quotes_the_metadata_table() {
+        let sql = history_sql("demo", "t");
+        assert!(
+            sql.contains("\"t$snapshots\""),
+            "metadata table must stay quoted: {sql}"
+        );
+        assert!(sql.contains("LIMIT 100"), "history is bounded: {sql}");
+        assert!(sql.contains("\"demo\""), "namespace must be quoted: {sql}");
+    }
+
+    #[test]
+    fn rollback_sql_embeds_only_an_integer() {
+        assert_eq!(
+            rollback_sql("a", "t", 42),
+            "ALTER TABLE warehouse.\"a\".\"t\" EXECUTE rollback_to_snapshot(42)"
+        );
+    }
+
+    #[test]
+    fn sql_builders_escape_double_quotes() {
+        let sql = history_sql("a\"b", "t");
+        assert!(sql.contains("\"a\"\"b\""), "quote must be doubled: {sql}");
+        let sql = rollback_sql("a", "x\"y", 7);
+        assert!(sql.contains("\"x\"\"y\""), "quote must be doubled: {sql}");
+        // No raw interpolation: the doubled quote is the only quoting present.
+        assert!(!sql.contains("\"y\"\""), "unexpected quoting: {sql}");
+    }
+
+    #[test]
+    fn rollback_accepts_a_string_snapshot_id() {
+        // The UI keeps 64-bit ids as strings (past JS safe-integer range).
+        let req: super::RollbackRequest =
+            serde_json::from_value(serde_json::json!({"snapshot_id": "5972469351597084165"}))
+                .expect("string id");
+        assert_eq!(req.snapshot_id, 5_972_469_351_597_084_165);
+        let req: super::RollbackRequest =
+            serde_json::from_value(serde_json::json!({"snapshot_id": 42})).expect("number id");
+        assert_eq!(req.snapshot_id, 42);
+        assert!(
+            serde_json::from_value::<super::RollbackRequest>(
+                serde_json::json!({"snapshot_id": "not-an-id"})
+            )
+            .is_err(),
+            "a non-numeric string must not become SQL"
+        );
+    }
+
+    #[test]
+    fn history_stringifies_snapshot_ids_without_losing_bits() {
+        use serde_json::json;
+        let r = crate::trino::QueryResult {
+            columns: vec![
+                crate::trino::Column {
+                    name: "committed_at".into(),
+                    r#type: "timestamp".into(),
+                },
+                crate::trino::Column {
+                    name: "snapshot_id".into(),
+                    r#type: "bigint".into(),
+                },
+                crate::trino::Column {
+                    name: "parent_id".into(),
+                    r#type: "bigint".into(),
+                },
+            ],
+            rows: vec![vec![
+                json!("2026-10-17 19:58:01.577 UTC"),
+                json!(5_972_469_351_597_084_165_i64),
+                json!(null),
+            ]],
+            row_count: 1,
+            query_id: None,
+            stats: None,
+            truncated: false,
+        };
+        let out = super::stringify_snapshot_ids(r);
+        assert_eq!(
+            out.rows[0][1],
+            json!("5972469351597084165"),
+            "the id must survive JSON.parse in the browser"
+        );
     }
 }
