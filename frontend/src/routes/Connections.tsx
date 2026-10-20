@@ -1,7 +1,8 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { useState, type ReactNode } from 'react'
+import { useRef, useState, type ReactNode } from 'react'
 import { ApiError, api, formatTime, type Connection } from '../api'
 import {
+  BreakGlassDialog,
   DeleteConnectionDialog,
   NewConnectionDialog,
   RotateConnectionDialog,
@@ -14,18 +15,21 @@ import { isAdmin } from '../roles'
 
 /**
  * Connections: the credentials for systems outside the platform, listed by scope, and the
- * three dialogs that create, rotate and delete them.
+ * four dialogs that create, rotate, delete and (for an administrator, with a reason) read
+ * one group connection once. An administrator's break-glass read leaves the owning group a
+ * notice above its table, with a Rotate now action; a rotation clears the notice.
  *
  * This page is a ledger, never a vault. The API sends the *names* of the secret fields and
  * no value — by design, the store does not return one — so there is nothing here that could
- * print a credential. A value a person types lives only in the open dialog and the request
- * that sends it; success unmounts the dialog and takes every input with it.
+ * print a credential. The one exception is the answer to a break-glass read: it lives only
+ * in the open dialog's state, masked until Show, and is dropped after sixty seconds.
  */
 
 type OpenDialog =
   | { kind: 'new' }
   | { kind: 'rotate'; connection: Connection }
   | { kind: 'delete'; connection: Connection }
+  | { kind: 'break-glass'; connection: Connection; nonce: number }
 
 const PERSONAL_NOTE =
   'Only you can use these, from notebooks and the SQL editor. They are never used by pipelines.'
@@ -46,12 +50,26 @@ export default function Connections() {
   const list = useQuery({ queryKey: ['connections'], queryFn: api.connections })
   const [dialog, setDialog] = useState<OpenDialog | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
+  const breakGlassNonce = useRef(0)
 
   /** Close the dialog, say what happened, and read the list again. */
   function done(message: string) {
     setDialog(null)
     setNotice(message)
     void queryClient.invalidateQueries({ queryKey: ['connections'] })
+  }
+
+  /** A break-glass read leaves the group a notice; closing the dialog reads the list again. */
+  function closeBreakGlass() {
+    // The dialog closes itself and clears the answer before it goes quiet; the element
+    // stays mounted (a closed `<dialog>` is inert) until another dialog replaces it.
+    void queryClient.invalidateQueries({ queryKey: ['connections'] })
+  }
+
+  /** A new nonce remounts the closed dialog, so its one-shot listener shows it again. */
+  function openBreakGlass(connection: Connection) {
+    breakGlassNonce.current += 1
+    setDialog({ kind: 'break-glass', connection, nonce: breakGlassNonce.current })
   }
 
   const rows = list.data?.connections ?? []
@@ -98,8 +116,10 @@ export default function Connections() {
           <ConnectionTable
             caption="Personal connections"
             rows={personal}
+            admin={admin}
             onRotate={(connection) => setDialog({ kind: 'rotate', connection })}
             onDelete={(connection) => setDialog({ kind: 'delete', connection })}
+            onBreakGlass={openBreakGlass}
           />
         )}
       </Section>
@@ -109,8 +129,10 @@ export default function Connections() {
           <ConnectionTable
             caption={`Connections of the group ${group}`}
             rows={rows.filter(c => c.scope === 'group' && c.ownerGroup === group).sort(byName)}
+            admin={admin}
             onRotate={(connection) => setDialog({ kind: 'rotate', connection })}
             onDelete={(connection) => setDialog({ kind: 'delete', connection })}
+            onBreakGlass={openBreakGlass}
           />
         </Section>
       ))}
@@ -123,8 +145,10 @@ export default function Connections() {
             <ConnectionTable
               caption="Managed connections"
               rows={managed}
+              admin={admin}
               onRotate={(connection) => setDialog({ kind: 'rotate', connection })}
               onDelete={(connection) => setDialog({ kind: 'delete', connection })}
+              onBreakGlass={openBreakGlass}
             />
           )}
         </Section>
@@ -151,6 +175,13 @@ export default function Connections() {
           onDeleted={(name) => done(`Deleted ${name}.`)}
         />
       )}
+      {dialog?.kind === 'break-glass' && (
+        <BreakGlassDialog
+          key={dialog.nonce}
+          connection={dialog.connection}
+          onClose={closeBreakGlass}
+        />
+      )}
     </div>
   )
 }
@@ -172,50 +203,120 @@ function Section({ title, note, children }: { title: string; note: string; child
 }
 
 const COLUMNS = 7
+/** A notice shows at most this many characters of each API-supplied text; `title` holds it all. */
+const NOTICE_LIMIT = 200
+
+/** What a person sees of an API-supplied string, with the full text in `title`. */
+function clipped(value: string): { shown: string; full: string } {
+  return {
+    shown: value.length > NOTICE_LIMIT ? value.slice(0, NOTICE_LIMIT) : value,
+    full: value,
+  }
+}
+
+/** The read time as a date a person reads; the raw value only if the API sent something else. */
+function noticeDate(at: string): string {
+  const ms = Date.parse(at)
+  return Number.isFinite(ms) ? formatTime(ms) : at
+}
 
 function ConnectionTable({
   caption,
   rows,
+  admin,
   onRotate,
   onDelete,
+  onBreakGlass,
 }: {
   caption: string
   rows: Connection[]
+  admin: boolean
   onRotate: (connection: Connection) => void
   onDelete: (connection: Connection) => void
+  onBreakGlass: (connection: Connection) => void
 }) {
   return (
-    <table className="w-full text-sm">
-      <caption className="sr-only">{caption}</caption>
-      <thead className="bg-bg-soft/50">
-        <tr>
-          <th scope="col" className="th px-5 py-2.5">Name</th>
-          <th scope="col" className="th px-3 py-2.5">Type</th>
-          <th scope="col" className="th px-3 py-2.5">Settings</th>
-          <th scope="col" className="th px-3 py-2.5">Secret fields</th>
-          <th scope="col" className="th px-3 py-2.5">Changed</th>
-          <th scope="col" className="th px-3 py-2.5">Status</th>
-          <th scope="col" className="th px-3 py-2.5"><span className="sr-only">Actions</span></th>
-        </tr>
-      </thead>
-      <tbody>
-        {rows.length === 0 && (
+    <>
+      {/* A break-glass notice belongs to the owning group and sits above its table. */}
+      {rows.map(row => row.scope === 'group' && row.breakGlass
+        ? <BreakGlassBanner key={`notice-${row.name}`} notice={row.breakGlass} onRotate={() => onRotate(row)} />
+        : null)}
+      <table className="w-full text-sm">
+        <caption className="sr-only">{caption}</caption>
+        <thead className="bg-bg-soft/50">
           <tr>
-            <td className="px-5 py-4 text-text-mute" colSpan={COLUMNS}>Nothing here yet.</td>
+            <th scope="col" className="th px-5 py-2.5">Name</th>
+            <th scope="col" className="th px-3 py-2.5">Type</th>
+            <th scope="col" className="th px-3 py-2.5">Settings</th>
+            <th scope="col" className="th px-3 py-2.5">Secret fields</th>
+            <th scope="col" className="th px-3 py-2.5">Changed</th>
+            <th scope="col" className="th px-3 py-2.5">Status</th>
+            <th scope="col" className="th px-3 py-2.5"><span className="sr-only">Actions</span></th>
           </tr>
-        )}
-        {rows.map(row => (
-          <Row key={row.name} row={row} onRotate={() => onRotate(row)} onDelete={() => onDelete(row)} />
-        ))}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {rows.length === 0 && (
+            <tr>
+              <td className="px-5 py-4 text-text-mute" colSpan={COLUMNS}>Nothing here yet.</td>
+            </tr>
+          )}
+          {rows.map(row => (
+            <Row
+              key={row.name}
+              row={row}
+              admin={admin}
+              onRotate={() => onRotate(row)}
+              onDelete={() => onDelete(row)}
+              onBreakGlass={() => onBreakGlass(row)}
+            />
+          ))}
+        </tbody>
+      </table>
+    </>
   )
 }
 
-function Row({ row, onRotate, onDelete }: {
+/** The owning group's notice: an administrator read the credential, and why. */
+function BreakGlassBanner({
+  notice,
+  onRotate,
+}: {
+  notice: NonNullable<Connection['breakGlass']>
+  onRotate: () => void
+}) {
+  const by = clipped(notice.by)
+  const reason = clipped(notice.reason)
+  return (
+    <div
+      role="status"
+      className="mx-5 mt-4 mb-1 rounded-[10px] border border-amber-400/40 bg-amber-400/10 p-3 text-sm text-text-dim"
+    >
+      <div className="flex items-start gap-2">
+        <Icon name="key" className="mt-0.5 h-4 w-4 shrink-0" />
+        <div className="min-w-0 space-y-2">
+          <p className="break-words">
+            Read by <span title={by.full}>{by.shown}</span> on {noticeDate(notice.at)}:{' '}
+            <span title={reason.full}>{reason.shown}</span>. Consider rotating the credential.
+          </p>
+          <button
+            type="button"
+            className="btn-ghost py-1 px-2 text-xs"
+            onClick={onRotate}
+          >
+            Rotate now
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function Row({ row, admin, onRotate, onDelete, onBreakGlass }: {
   row: Connection
+  admin: boolean
   onRotate: () => void
   onDelete: () => void
+  onBreakGlass: () => void
 }) {
   const changed = row.lastRotated ? Date.parse(row.lastRotated) : Number.NaN
   const settings = Object.entries(row.config)
@@ -245,7 +346,7 @@ function Row({ row, onRotate, onDelete }: {
       </td>
       <td className="td px-3"><Status row={row} /></td>
       <td className="td px-3">
-        <div className="flex flex-wrap justify-end gap-2">
+        <div className="flex flex-wrap items-center justify-end gap-2">
           <button
             type="button"
             className="btn-ghost py-1 px-2 text-xs"
@@ -262,6 +363,18 @@ function Row({ row, onRotate, onDelete }: {
           >
             Delete
           </button>
+          {admin && row.scope === 'group' && (
+            <div className="border-l border-border/70 pl-2">
+              <button
+                type="button"
+                className="btn-ghost py-1 px-2 text-xs"
+                aria-label={`Break-glass read ${row.name}`}
+                onClick={onBreakGlass}
+              >
+                Break-glass read
+              </button>
+            </div>
+          )}
         </div>
       </td>
     </tr>

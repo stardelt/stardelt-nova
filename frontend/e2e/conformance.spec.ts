@@ -1,4 +1,4 @@
-import { test, expect, type Browser, type Page, type Route } from '@playwright/test'
+import { test, expect, type Browser, type Locator, type Page, type Route } from '@playwright/test'
 import { KNOWN, type Known } from './known'
 import { auditPage, focusAudit, type Finding } from './audit'
 
@@ -520,4 +520,313 @@ test.describe('connections', () => {
 test('known.ts has no stale entries', () => {
   const stale = KNOWN.filter((k) => !matched.has(k)).map((k) => `${k.ticket} ${k.rule} ${k.route ?? ''} ${k.contains ?? ''}`)
   expect(stale, 'these findings are fixed: delete their lines from e2e/known.ts').toEqual([])
+})
+
+test.describe('break-glass', () => {
+  const CANARY = 'canary-7f3a-DO-NOT-LEAK'
+  const REASON = 'incident 4711: pipeline blocked'
+  const ADMIN = {
+    user: 'alice', auth_mode: 'oidc', demo: false, warehouse: 'warehouse',
+    is_admin: true, groups: ['data-eng'],
+  }
+  const GROUP_ROW = {
+    name: 'team-db', scope: 'group', type: 'postgresql', ownerGroup: 'data-eng',
+    config: { host: 'db.internal' }, secretKeys: ['user', 'password'], version: 1,
+    sync: { ready: true, reason: 'Synced' },
+  }
+  const PERSONAL_ROW = {
+    name: 'my-db', scope: 'personal', type: 'postgresql',
+    config: { host: 'localhost' }, secretKeys: ['password'], version: 1,
+  }
+  const MANAGED_ROW = {
+    name: 'platform-s3', scope: 'managed', type: 's3',
+    config: { bucket: 'b' }, secretKeys: ['secretAccessKey'], version: 1,
+    sync: { ready: true, reason: 'Synced' },
+  }
+
+  type Recorded = { method: string; url: string; body: string | null; headers: Record<string, string> }
+
+  /** The Connections page with every `/api/**` call stubbed; the test decides the read's answer. */
+  async function open(browser: Browser, {
+    me = ADMIN,
+    rows = [GROUP_ROW] as unknown[],
+    afterRead,
+    read,
+    init,
+  }: {
+    me?: unknown
+    rows?: unknown[]
+    /** Rows returned by the list after a successful read (the one carrying the notice). */
+    afterRead?: unknown[]
+    read?: (route: Route, path: string, body: string | null) => void
+    init?: () => void
+  } = {}) {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 800 } })
+    const page = await context.newPage()
+    if (init) await page.addInitScript(init)
+    const requests: Recorded[] = []
+    const messages: string[] = []
+    page.on('request', (request) => requests.push({
+      method: request.method(),
+      url: request.url(),
+      body: request.postData(),
+      headers: request.headers(),
+    }))
+    page.on('console', (message) => messages.push(message.text()))
+    let gets = 0
+    let readDone = false
+    await page.route('**/api/**', (route) => {
+      const request = route.request()
+      const path = new URL(request.url()).pathname
+      const method = request.method()
+      if (path === '/api/me' && method === 'GET') return json(route, me)
+      if (path === '/api/connections' && method === 'GET') {
+        gets += 1
+        return json(route, { connections: readDone && afterRead ? afterRead : rows })
+      }
+      if (method === 'POST' && path.endsWith('/break-glass')) {
+        if (read) return read(route, path, request.postData())
+        readDone = true
+        return json(route, {
+          fields: { user: 'svc', password: CANARY },
+          readAt: '2026-10-20T12:00:00Z',
+        })
+      }
+      return json(route, [])
+    })
+    await page.goto('/connections')
+    await expect(page.locator('main')).not.toContainText('Loading connections')
+    return { context, page, requests, messages, gets: () => gets }
+  }
+
+  /** Open the dialog, give a reason and read; the dialog is on step 2. */
+  async function reveal(page: Page) {
+    await page.getByRole('button', { name: 'Break-glass read team-db' }).click()
+    // The page keeps a closed break-glass dialog mounted; only one is open at a time.
+    const dialog = page.locator('dialog[open]')
+    await dialog.getByLabel('Reason').fill(REASON)
+    await dialog.getByRole('button', { name: 'Read the credential' }).click()
+    await expect(dialog).toContainText('Credential team-db')
+    return dialog
+  }
+
+  /** Show the password field's plain value. */
+  async function showPassword(dialog: Locator) {
+    const field = dialog.locator('li', { hasText: 'password' })
+    await field.getByRole('button', { name: 'Show' }).click()
+    await expect(field).toContainText(CANARY)
+  }
+
+  async function stored(page: Page): Promise<string> {
+    return page.evaluate(() => {
+      const dump = (storage: Storage) => Object.fromEntries(
+        Array.from({ length: storage.length }, (_, index) => {
+          const key = storage.key(index) ?? ''
+          return [key, storage.getItem(key) ?? '']
+        }),
+      )
+      return JSON.stringify({ local: dump(localStorage), session: dump(sessionStorage) })
+    })
+  }
+
+  async function expectGone(page: Page) {
+    await expect.poll(async () => page.evaluate(() => document.documentElement.outerHTML).then((h) => h.includes(CANARY)))
+      .toBe(false)
+    expect(await stored(page)).not.toContain(CANARY)
+  }
+
+  test('P3 break-glass asks for a reason first', async ({ browser }) => {
+    const { context, page, requests } = await open(browser)
+    await page.getByRole('button', { name: 'Break-glass read team-db' }).click()
+    const dialog = page.getByRole('dialog', { name: 'Break-glass read of team-db' })
+    await expect(dialog).toBeVisible()
+    const read = page.getByRole('button', { name: 'Read the credential' })
+    const reason = page.getByLabel('Reason')
+
+    await expect(reason).toBeFocused()
+    await expect(read).toBeDisabled()
+    await reason.fill('x'.repeat(19))
+    await expect(read).toBeDisabled()
+    await expect(page.getByText('19 / 500')).toBeVisible()
+    await reason.fill(`  ${'x'.repeat(20)}  `)
+    await expect(read).toBeEnabled()
+    expect(requests.filter((request) => request.method === 'POST')).toEqual([])
+
+    await read.click()
+    const posts = requests.filter((request) => request.method === 'POST')
+    expect(posts).toHaveLength(1)
+    expect(new URL(posts[0].url).pathname).toBe('/api/connections/group/data-eng/team-db/break-glass')
+    expect(JSON.parse(posts[0].body ?? '{}')).toEqual({ reason: 'x'.repeat(20) })
+    await context.close()
+  })
+
+  test('P3 the value is masked until Show, and lives only in one element', async ({ browser }) => {
+    const { context, page } = await open(browser)
+    const dialog = await reveal(page)
+    const field = dialog.locator('li', { hasText: 'password' })
+
+    expect(await page.evaluate(() => document.documentElement.outerHTML)).not.toContain(CANARY)
+    const attrs = await page.evaluate(() => [...document.querySelectorAll('*')]
+      .flatMap((el) => [...el.attributes].map((a) => a.value)).join('\n'))
+    expect(attrs).not.toContain(CANARY)
+    await expect(field).toContainText('••••••••')
+    await expect(field.getByRole('button', { name: 'Show' })).toHaveAttribute('aria-pressed', 'false')
+
+    await field.getByRole('button', { name: 'Show' }).click()
+    await expect(field.getByRole('button', { name: 'Hide' })).toHaveAttribute('aria-pressed', 'true')
+    const shown = await page.evaluate(() => document.documentElement.outerHTML)
+    expect(shown.split(CANARY)).toHaveLength(2)
+
+    await field.getByRole('button', { name: 'Hide' }).click()
+    await expect(field.getByRole('button', { name: 'Show' })).toHaveAttribute('aria-pressed', 'false')
+    expect(await page.evaluate(() => document.documentElement.outerHTML)).not.toContain(CANARY)
+    await context.close()
+  })
+
+  test('P3 the value is gone after the time-to-live', async ({ browser }) => {
+    const { context, page, gets } = await open(browser)
+    await page.clock.install()
+    const dialog = await reveal(page)
+    await showPassword(dialog)
+    await expect(dialog.getByRole('timer')).toContainText('60 seconds')
+
+    const before = gets()
+    await page.clock.fastForward(10_000)
+    await expect(dialog.getByRole('timer')).toContainText('50 seconds')
+    await page.clock.fastForward(50_000)
+    await expect(dialog).not.toBeVisible()
+    await expectGone(page)
+    await expect.poll(() => gets(), { message: 'the list is read again after the dialog closes' }).toBeGreaterThan(before)
+    await context.close()
+  })
+
+  test('P3 closing, Escape and leaving the page drop the value', async ({ browser }) => {
+    const { context, page } = await open(browser)
+
+    let dialog = await reveal(page)
+    await showPassword(dialog)
+    await page.getByRole('button', { name: 'Close' }).click()
+    await expect(dialog).not.toBeVisible()
+    await expectGone(page)
+
+    dialog = await reveal(page)
+    await showPassword(dialog)
+    await page.keyboard.press('Escape')
+    await expect(dialog).not.toBeVisible()
+    await expectGone(page)
+
+    dialog = await reveal(page)
+    await showPassword(dialog)
+    await page.goto('/catalog')
+    await page.goBack()
+    await expect(page.getByRole('heading', { name: 'Connections' })).toBeVisible()
+    await expectGone(page)
+    await context.close()
+  })
+
+  test('P3 the value never leaves the one answer', async ({ browser }) => {
+    const { context, page, requests, messages } = await open(browser)
+    const dialog = await reveal(page)
+    await showPassword(dialog)
+    // While the value is on screen as text, no attribute may carry it.
+    const shownAttrs = await page.evaluate(() => [...document.querySelectorAll('*')]
+      .flatMap((el) => [...el.attributes].map((a) => a.value)).join('\n'))
+    expect(shownAttrs, 'an attribute holds the canary').not.toContain(CANARY)
+    await page.getByRole('button', { name: 'Close' }).click()
+    await expectGone(page)
+
+    const html = await page.evaluate(() => document.documentElement.outerHTML)
+    const attrs = await page.evaluate(() => [...document.querySelectorAll('*')]
+      .flatMap((el) => [...el.attributes].map((a) => a.value)).join('\n'))
+    const location = await page.evaluate(() => `${location.href}\n${JSON.stringify(history.state)}`)
+    for (const [where, text] of [
+      ['the DOM', html],
+      ['an attribute', attrs],
+      ['the URL or history', location],
+      ['storage', await stored(page)],
+      ['a console message', messages.join('\n')],
+      ['a request body', requests.map((request) => request.body ?? '').join('\n')],
+      ['a request URL', requests.map((request) => request.url).join('\n')],
+      ['a request header', requests.map((request) => JSON.stringify(request.headers)).join('\n')],
+    ] as const) {
+      expect(text, `the canary is in ${where}`).not.toContain(CANARY)
+    }
+    await context.close()
+  })
+
+  test('only administrators on group rows see the action', async ({ browser }) => {
+    const rows = [GROUP_ROW, PERSONAL_ROW, MANAGED_ROW]
+    const nonAdmin = await open(browser, { me: { ...ADMIN, is_admin: false }, rows })
+    expect(await nonAdmin.page.getByRole('button', { name: /^Break-glass read / }).count()).toBe(0)
+    await nonAdmin.context.close()
+
+    const admin = await open(browser, { rows })
+    await expect(admin.page.getByRole('button', { name: 'Break-glass read team-db' })).toHaveCount(1)
+    expect(await admin.page.getByRole('button', { name: 'Break-glass read my-db' }).count()).toBe(0)
+    expect(await admin.page.getByRole('button', { name: 'Break-glass read platform-s3' }).count()).toBe(0)
+    await admin.context.close()
+  })
+
+  test('the group sees the notice', async ({ browser }) => {
+    const evil = '<img src=x onerror="window.__xss=1">'
+    const reason = `${evil}${'x'.repeat(300)}`
+    const { context, page } = await open(browser, {
+      init: () => { (window as unknown as { __xss: number }).__xss = 0 },
+      rows: [{ ...GROUP_ROW, breakGlass: { by: evil, at: '2026-10-20T12:00:00Z', reason } }],
+    })
+    await page.setViewportSize({ width: 360, height: 740 })
+    const banner = page.getByRole('status')
+    await expect(banner).toContainText('Read by')
+    await expect(banner).toContainText(evil)
+    await expect(banner).toContainText('Consider rotating the credential.')
+    expect(await page.evaluate(() => (window as unknown as { __xss?: number }).__xss ?? 0)).toBe(0)
+    expect(await page.locator('img[src="x"]').count()).toBe(0)
+    // The human sees 200 characters; the full reason and name are only the title attribute.
+    await expect(banner).toContainText(reason.slice(0, 200))
+    expect(await page.evaluate(() => [...document.querySelectorAll('main [title]')]
+      .map((element) => element.getAttribute('title')))).toContain(reason)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1)
+
+    await banner.getByRole('button', { name: 'Rotate now' }).click()
+    await expect(page.getByRole('dialog')).toContainText('Rotate team-db')
+    await context.close()
+  })
+
+  test('errors keep the dialog and the reason', async ({ browser }) => {
+    for (const [status, sentence, body] of [
+      [403, 'only administrators may do this', 'only administrators may do this'],
+      [429, 'Too many break-glass reads. Wait ten minutes.', 'too many break-glass reads; wait'],
+    ] as const) {
+      const { context, page } = await open(browser, {
+        read: (route) => json(route, { error: body }, status),
+      })
+      await page.getByRole('button', { name: 'Break-glass read team-db' }).click()
+      await page.getByLabel('Reason').fill(REASON)
+      await page.getByRole('button', { name: 'Read the credential' }).click()
+
+      await expect(page.getByRole('alert'), `${status}`).toContainText(sentence)
+      await expect(page.getByLabel('Reason'), `${status}`).toHaveValue(REASON)
+      await expect(page.getByRole('dialog', { name: 'Break-glass read of team-db' })).toBeVisible()
+      await context.close()
+    }
+  })
+
+  test('U5 the break-glass dialog has accessible names at both steps', async ({ browser }) => {
+    const { context, page } = await open(browser)
+    // The page must stay inside a 360 px phone: the dialog is `min(44rem, 100vw - 2rem)`.
+    await page.setViewportSize({ width: 360, height: 740 })
+    await page.getByRole('button', { name: 'Break-glass read team-db' }).click()
+    expect((await auditPage(page)).filter((finding) => finding.rule === 'U5')).toEqual([])
+
+    await page.getByLabel('Reason').fill(REASON)
+    await page.getByRole('button', { name: 'Read the credential' }).click()
+    await expect(page.getByRole('dialog', { name: 'Credential team-db' })).toBeVisible()
+    expect((await auditPage(page)).filter((finding) => finding.rule === 'U5')).toEqual([])
+    const box = await page.getByRole('dialog').boundingBox()
+    expect(box).not.toBeNull()
+    expect(box!.x).toBeGreaterThanOrEqual(0)
+    expect(box!.x + box!.width).toBeLessThanOrEqual(361)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1)
+    await context.close()
+  })
 })
