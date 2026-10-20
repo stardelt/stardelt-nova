@@ -44,6 +44,7 @@ mod audit;
 mod auth;
 mod catalog;
 mod cluster;
+mod connections;
 mod data;
 mod db;
 mod demo;
