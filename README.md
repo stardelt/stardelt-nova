@@ -201,6 +201,9 @@ The backend is configured entirely through environment variables:
 | `NOVA_QUERY_TIMEOUT_SECS` | `300` | How long `POST /api/query` waits for Trino before cancelling the query server-side and answering `400 {"error":"query exceeded the Ns limit and was cancelled"}`. A client disconnect cancels the Trino query too. Results larger than 50,000 rows are cut to exactly that many and answered with `"truncated": true` |
 | `NOVA_DATABASE_URL` | — (empty) | PostgreSQL URL of the state store (`postgres://user:password@host:5432/nova`). Unset = disabled: Nova behaves as before and `/api/health` answers `{"status":"ok","db":"disabled"}`. Set = connect and apply the migrations at start-up, or refuse to start; the platform fills it from the `nova-pg-app` Secret. After start-up an unreachable database only turns `db` into `down` (the probe still answers 200) |
 | `NOVA_QUERY_LOG_RETENTION_DAYS` | `90` | How long query-log rows are kept; the backend purges hourly. `0` disables the purge; an unparsable value warns and uses the default |
+| `NOVA_SECRET_STORE_URL` | — (empty) | Base URL of the platform's secret store (OpenBao), for example `http://openbao.stardelt.svc.cluster.local:8200`. Unset = disabled: features that need the store answer 503. Nova signs in with the caller's own token and sees only what the store's policies give that person; values are never logged |
+| `NOVA_SECRET_STORE_ROLE` | `platform-users` | The store's JWT sign-in role used for the caller's token |
+| `NOVA_SECRET_STORE_MOUNT` | `secret` | The KV v2 mount that holds `connections/…` |
 | `NOVA_DEV_USER` | `stardelt-dev` | Static user identity returned by `/api/me` (dev mode only) |
 | `NOVA_AUTH_MODE` | `dev` | `dev` (no login) or `oidc` — see [Sign-in](#sign-in-oidc) |
 | `RUST_LOG` | `info` | Tracing filter for the backend (`debug`, `info`, `warn`, …) |
