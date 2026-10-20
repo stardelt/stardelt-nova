@@ -140,6 +140,10 @@ pub struct AppState {
     /// (stardelt-nova#196). Refusals before the limiter (unloaded, paused) never reach it;
     /// only a restart forgets it.
     pub run_starts: pipelines::RunStartsLimiter,
+    /// In-memory create rate limit: at most ten scheduled pipelines per user in an hour
+    /// (stardelt-nova#210). A refusal before the limiter (bad name, foreign group, missing
+    /// principal, bad body, name taken) never consumes a slot; only a restart forgets it.
+    pub pipeline_creates: pipelines::CreateLimiter,
     /// Airflow's REST API (`airflow.rs`), for the pipeline views. `None` unless
     /// `NOVA_AIRFLOW_URL`, `NOVA_AIRFLOW_USER` and `NOVA_AIRFLOW_PASSWORD` are all set.
     /// Nova signs in as one service user (built-in role `User`) and decides itself who may
@@ -681,6 +685,7 @@ async fn main() -> anyhow::Result<()> {
         store,
         break_glass_reads: Mutex::new(std::collections::HashMap::new()),
         run_starts: Mutex::new(std::collections::HashMap::new()),
+        pipeline_creates: Mutex::new(std::collections::HashMap::new()),
         airflow,
         table_locks: Mutex::new(HashMap::new()),
     });
@@ -812,6 +817,7 @@ mod router_tests {
             store: None,
             break_glass_reads: Mutex::new(std::collections::HashMap::new()),
             run_starts: Mutex::new(std::collections::HashMap::new()),
+            pipeline_creates: Mutex::new(std::collections::HashMap::new()),
             airflow: None,
             table_locks: Mutex::new(std::collections::HashMap::new()),
         })

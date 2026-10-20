@@ -170,9 +170,18 @@ pub fn pipeline_log_event(
     );
 }
 
-/// One pipeline action: run, pause, resume or stop. Who, which pipeline and run, and how it
-/// ended (`ok`, `refused:<why>`, `error`). **No field can hold a note or log text**: the note
-/// Nova sends to Airflow is a fixed sentence, and it is not repeated here either.
+/// What a pipeline write records beside the action: the statement's **length** and the cron
+/// text (stardelt-nova#210). There is deliberately no field for the statement itself — a line on
+/// the `audit` target must never start carrying SQL literals.
+#[derive(Debug, Clone, Copy)]
+pub struct PipelineWrite<'a> {
+    pub statement_chars: usize,
+    pub schedule: Option<&'a str>,
+}
+
+/// One pipeline action: run, pause, resume, stop, create, update or delete. Who, which pipeline
+/// and run, and how it ended (`ok`, `refused:<why>`, `error`). **No field can hold a note, log
+/// text or a statement**: a write adds the statement's length and the cron, never its text.
 pub fn pipeline_event(
     action: &str,
     who: &crate::auth::Identity,
@@ -180,7 +189,10 @@ pub fn pipeline_event(
     pipeline: &str,
     run: Option<&str>,
     outcome: &str,
+    write: Option<PipelineWrite<'_>>,
 ) {
+    let statement_chars = write.map(|write| write.statement_chars);
+    let schedule = write.and_then(|write| write.schedule);
     tracing::info!(
         target: "audit",
         action = %action,
@@ -188,6 +200,8 @@ pub fn pipeline_event(
         pipeline = %pipeline,
         run = run.unwrap_or(""),
         outcome = %outcome,
+        statement_chars = statement_chars.unwrap_or(0),
+        schedule = schedule.unwrap_or(""),
         actor = %who.display_name,
         sub = %who.sub,
         "pipeline action"
@@ -201,6 +215,8 @@ pub fn pipeline_event(
         pipeline: pipeline.to_string(),
         run: run.map(str::to_string),
         outcome: outcome.to_string(),
+        statement_chars,
+        schedule: schedule.map(str::to_string),
     });
 }
 
@@ -215,7 +231,8 @@ pub fn pipeline_event(
 pub(crate) mod test_sink {
     use std::sync::{Mutex, OnceLock};
 
-    /// The fields a pipeline audit line carries. There is no field for a note or log text.
+    /// The fields a pipeline audit line carries. There is no field for a note, log text or a
+    /// statement: a write adds the statement's length and the cron, nothing more.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct Record {
         pub action: String,
@@ -225,6 +242,8 @@ pub(crate) mod test_sink {
         pub pipeline: String,
         pub run: Option<String>,
         pub outcome: String,
+        pub statement_chars: Option<usize>,
+        pub schedule: Option<String>,
     }
 
     static RECORDS: OnceLock<Mutex<Vec<Record>>> = OnceLock::new();
@@ -240,9 +259,21 @@ pub(crate) mod test_sink {
             .push(record);
     }
 
-    /// Drain everything recorded so far.
-    pub fn take() -> Vec<Record> {
-        std::mem::take(&mut *records().lock().expect("audit test sink poisoned"))
+    /// Drain one actor's records, leaving everybody else's for their own test. The sink is
+    /// process-wide and tests run in parallel, so a test must never drain another's records.
+    pub fn take_for(sub: &str) -> Vec<Record> {
+        let mut records = records().lock().expect("audit test sink poisoned");
+        let mut mine = Vec::new();
+        let mut theirs = Vec::new();
+        for record in records.drain(..) {
+            if record.sub == sub {
+                mine.push(record);
+            } else {
+                theirs.push(record);
+            }
+        }
+        *records = theirs;
+        mine
     }
 }
 

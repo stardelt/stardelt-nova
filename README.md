@@ -45,7 +45,11 @@ Browser
          ├─ POST /api/connections/group/:group/:name/break-glass  emergency read (administrators only)
          ├─ GET  /api/connections/break-glass-log  who used break-glass and why (administrators only)
          ├─ GET  /api/pipelines        the pipelines of the caller's groups (administrators: all)
+         ├─ GET  /api/pipelines/principals  each of the caller's groups and its pipeline principal
+         ├─ POST /api/pipelines        schedule a statement: a Nova-owned Pipeline for one of the caller's groups
          ├─ GET  /api/pipelines/:namespace/:name  one pipeline: latest runs, params, retries
+         ├─ PUT  /api/pipelines/:namespace/:name  change the statement and the schedule of a Nova pipeline
+         ├─ DELETE /api/pipelines/:namespace/:name  delete a Nova pipeline (kubectl/GitOps ones are 409)
          ├─ POST /api/pipelines/:namespace/:name/runs  run now (409 paused/active/unloaded, 429 over 10 a minute)
          ├─ POST /api/pipelines/:namespace/:name/pause  pause (idempotent, answers the fresh view)
          ├─ POST /api/pipelines/:namespace/:name/resume  resume (idempotent, answers the fresh view)
@@ -342,6 +346,41 @@ at most five attempts per administrator in ten minutes (`429`). If the notice ca
 is returned (`502`) and the attempt is recorded as `notice-failed`. `GET /api/connections/break-glass-log`
 returns the last 200 events (newest first) to administrators. Without a state store the log answers
 `503 the state store is not configured`; the read itself needs only the secret store.
+
+## Pipelines
+
+A pipeline is a `Pipeline` resource (`stardelt.io/v1alpha1`) plus what Airflow says about it. Nova
+shows the pipelines whose `spec.ownerGroup` is one of the caller's groups; an administrator sees all,
+and a pipeline without an `ownerGroup` is administrators-only. Whoever may see one may act on it — v1
+has no read-only role — and a pipeline of another group answers `404`, not `403`.
+
+*Schedule* in the SQL editor writes the resource; the loader turns it into a DAG. Nova validates what
+the loader would refuse, so a pipeline it writes always becomes a DAG: the name (1 to 40 lower-case
+letters, digits and dashes, starting with a letter), the statement (at most 20,000 characters, one
+trailing `;` dropped), a five-field cron no more often than every five minutes, and an IANA timezone.
+The owner group must be one of the caller's own — an administrator schedules for the groups they
+belong to, never on somebody else's behalf — and the group's principal must exist and be ready:
+
+```bash
+# one principal per group; the convention is `pipeline-<group>`
+make sync-principal NAME=pipeline-analytics GROUP=analytics
+```
+
+`GET /api/pipelines/principals` answers every group of the caller with `principal`, `ready` and, when
+not ready, a `message` — the `Ready` condition's, or the `make sync-principal` command for a group
+without one. A create for a group without a ready principal answers `409` with that sentence; the
+resource carries `runAs: pipeline-<group>` next to `ownerGroup`.
+
+Only a pipeline labelled `app.kubernetes.io/managed-by: stardelt-nova` may be changed or deleted: a
+`kubectl` or GitOps manifest answers `409 this pipeline is managed outside Nova (kubectl or Git);
+change it there`, so Nova never rewrites somebody's file. `PUT` changes `spec.tasks[0].sql` and
+`spec.schedule` and nothing else, carrying the `resourceVersion` it read (a concurrent change is `409
+the pipeline changed while you edited it: reload`); a task shape other than one `sql` task named `run`
+is `409`. At most ten pipelines may be created per person per hour (`429`, in memory). Airflow is not
+needed to create, change or delete one — the resource is the source of truth and the loader removes a
+deleted DAG from its default list after about 90 seconds, while the run history stays readable; the
+read routes keep answering `503` without Airflow. Each create, change and delete writes one `audit`
+line with the statement's **length** and the cron, never the statement.
 
 ## Sign-in (OIDC)
 

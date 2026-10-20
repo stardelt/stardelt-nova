@@ -2493,6 +2493,7 @@ mod tests {
             store,
             break_glass_reads: Mutex::new(HashMap::new()),
             run_starts: std::sync::Mutex::new(std::collections::HashMap::new()),
+            pipeline_creates: Mutex::new(std::collections::HashMap::new()),
             airflow: None,
             table_locks: Mutex::new(HashMap::new()),
         })
