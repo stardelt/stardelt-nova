@@ -144,8 +144,10 @@ export const CONNECTION_TYPES: Record<string, TypeSpec> = {
     ],
   },
   // Free rows: settings (name and value, up to 32) and secret fields (name and a password
-  // value, up to 16). The dialog renders the rows; the type carries no fixed fields.
-  generic: { label: 'Generic', config: [], variants: [{ id: 'free', label: 'Free fields', secret: [] }] },
+  // value, up to 16). The dialog renders the rows; the type carries no fixed fields. This is
+  // the type for a secret that fits none of the named types — the label says so, because a
+  // person who only wants to keep a secret does not know what "Generic" means.
+  generic: { label: 'Other secret (any fields)', config: [], variants: [{ id: 'free', label: 'Free fields', secret: [] }] },
 }
 
 /** The label for a connection type; the raw name when the list above has never heard of it. */

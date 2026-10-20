@@ -31,12 +31,18 @@ type OpenDialog =
   | { kind: 'delete'; connection: Connection }
   | { kind: 'break-glass'; connection: Connection; nonce: number }
 
+/**
+ * What each scope's sentence may claim: only what works today (stardelt-nova#202). A
+ * connection is read from a Python notebook; no SQL statement, Spark notebook, pipeline
+ * task or catalog consumes one yet. The ticket that builds one of those changes the
+ * sentence here in the same pull request.
+ */
 const PERSONAL_NOTE =
-  'Only you can use these, from notebooks and the SQL editor. They are never used by pipelines.'
+  'Only you can see and use these, from a Python notebook. They are never used by pipelines or SQL.'
 const GROUP_NOTE =
-  'Every member of the group can use and rotate these, including pipelines that run as the group.'
+  'Every member of the group can use and rotate these from a Python notebook.'
 const MANAGED_NOTE =
-  'Used by platform services only: connection tests, federated catalogs, ingestion. Nobody can read the values.'
+  'For platform services only. Nobody can read the values.'
 
 /** Name order, so the sections do not reshuffle between two reads of the same list. */
 function byName(a: Connection, b: Connection): number {
@@ -311,6 +317,62 @@ function BreakGlassBanner({
   )
 }
 
+/** A copy that fails leaves the text selectable and says what to do; the clipboard may be refused. */
+const COPY_FAILED = 'Copy failed: select the text and copy it'
+
+/**
+ * The lines a person pastes into a Python notebook, built from the row's own data as plain
+ * text. They name the connection and its first secret field; the page never holds a value,
+ * so nothing here could print one. A name or group is data, never markup: it reaches the
+ * page as a text node in `<pre>`.
+ */
+function notebookSnippet(row: Connection): string {
+  const group = row.scope === 'group' ? `, group="${row.ownerGroup ?? ''}"` : ''
+  const lines = ['import stardelt', `c = stardelt.connection("${row.name}"${group})`]
+  const first = row.secretKeys[0]
+  if (first) lines.push(`c.value("${first}")`)
+  return lines.join('\n')
+}
+
+/**
+ * How to use the connection, folded away until asked for: the snippet, its Copy button and
+ * nothing else. A managed connection has no Python reader, so it never renders this.
+ */
+function UseDisclosure({ row }: { row: Connection }) {
+  const [copyFailed, setCopyFailed] = useState(false)
+  const snippet = notebookSnippet(row)
+
+  async function copy() {
+    setCopyFailed(false)
+    try {
+      if (!navigator.clipboard) throw new Error('no clipboard')
+      await navigator.clipboard.writeText(snippet)
+    } catch {
+      setCopyFailed(true)
+    }
+  }
+
+  return (
+    <details className="mt-1">
+      <summary className="cursor-pointer whitespace-nowrap text-xs font-normal text-accent">Use in a notebook</summary>
+      {/* The snippet keeps a readable width and the table scrolls inside its card: a phone
+          shows the three lines, not one word per line (rule U4 concerns the page, not the card). */}
+      <div className="mt-2 space-y-1">
+        <pre className="min-w-[16rem] whitespace-pre-wrap wrap-anywhere rounded-[8px] border border-border/70 bg-bg-soft/50 p-2 font-mono text-[11px] select-all">{snippet}</pre>
+        <button
+          type="button"
+          className="btn-ghost py-1 px-2 text-xs"
+          aria-label={`Copy the snippet for ${row.name}`}
+          onClick={() => void copy()}
+        >
+          Copy
+        </button>
+        {copyFailed && <p role="alert" className="text-xs text-bad break-words">{COPY_FAILED}</p>}
+      </div>
+    </details>
+  )
+}
+
 function Row({ row, admin, onRotate, onDelete, onBreakGlass }: {
   row: Connection
   admin: boolean
@@ -322,7 +384,10 @@ function Row({ row, admin, onRotate, onDelete, onBreakGlass }: {
   const settings = Object.entries(row.config)
   return (
     <tr className="border-t border-border/70 hover:bg-bg-soft/30">
-      <td className="td px-5 font-mono text-xs break-all">{row.name}</td>
+      <td className="td px-5">
+        <div className="font-mono text-xs break-all">{row.name}</div>
+        {row.scope !== 'managed' && <UseDisclosure row={row} />}
+      </td>
       <td className="td px-3 whitespace-nowrap">{connectionTypeLabel(row.type)}</td>
       <td className="td px-3">
         {settings.length === 0 ? (
