@@ -10,10 +10,7 @@
 //! This module holds the decisions as pure functions so they are tested without a cluster or a
 //! store: validation, who may do what to which scope, what goes into the store and into the
 //! resource, how a rotation merges, and what the API shows. It never sees a secret value except
-//! to move it, and nothing here logs.
-//!
-//! The routes that call it come next, which is why the module silences `dead_code` for now.
-#![allow(dead_code)]
+//! to move it, and nothing here logs. The routes that call it live in `connection_routes.rs`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -57,7 +54,7 @@ const SECRET_WORDS: [&str; 6] = [
     "credential",
 ];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Scope {
     Personal,
@@ -67,7 +64,7 @@ pub enum Scope {
 
 /// `POST /api/connections` body. `secret` holds the values; they are written to the store and
 /// never returned.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize, utoipa::ToSchema)]
 pub struct NewConnection {
     pub name: String,
     #[serde(rename = "type")]
@@ -79,9 +76,25 @@ pub struct NewConnection {
     pub usable_by: Vec<String>,
     #[serde(default)]
     pub config: BTreeMap<String, String>,
+    /// The secret field values. Write-only: Nova stores them and never reads them back.
+    #[schema(write_only)]
     pub secret: BTreeMap<String, String>,
     #[serde(default, rename = "refreshInterval")]
     pub refresh_interval: Option<String>,
+}
+
+/// Prints the names of the secret fields, never a value: a request may end up in a log line
+/// through an `{:?}` nobody thought about, and that must not leak a password.
+impl std::fmt::Debug for NewConnection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NewConnection")
+            .field("name", &self.name)
+            .field("type", &self.kind)
+            .field("scope", &self.scope)
+            .field("owner_group", &self.owner_group)
+            .field("secret_keys", &self.secret.keys().collect::<Vec<_>>())
+            .finish_non_exhaustive()
+    }
 }
 
 /// What a caller wants to do with a scope.
@@ -390,7 +403,7 @@ pub fn connection_resource(req: &NewConnection, namespace: &str) -> Option<Value
 }
 
 /// One row of `GET /api/connections`. Never carries a value.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 pub struct ConnectionView {
     pub name: String,
     pub scope: Scope,
@@ -412,7 +425,7 @@ pub struct ConnectionView {
     pub sync: Option<SyncView>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 pub struct SyncView {
     pub ready: bool,
     pub reason: String,
@@ -516,6 +529,25 @@ mod tests {
             }
         }
         serde_json::from_value(v).unwrap()
+    }
+
+    #[test]
+    fn a_new_connection_never_prints_its_values() {
+        let req = with(json!({ "secret": { "user": "etl", "password": "canary-7f3a" } }));
+        let printed = format!("{req:?}");
+        assert!(
+            !printed.contains("canary-7f3a"),
+            "the secret value must not be printed"
+        );
+        assert!(!printed.contains("etl"), "no field value is printed");
+        assert!(
+            printed.contains("password") && printed.contains("user"),
+            "the field names are fine: {printed}"
+        );
+        assert!(
+            printed.contains("crm-db"),
+            "what the request is about stays visible"
+        );
     }
 
     #[test]

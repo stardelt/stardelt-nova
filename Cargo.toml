@@ -29,6 +29,9 @@ getrandom = "0.4"
 sha2 = "0.11"
 url = "2"
 tower = { version = "0.5", features = ["util"] }
+# Bounded concurrency for the connection listing (ticket #171): at most eight metadata
+# reads in flight. MIT OR Apache-2.0.
+futures = { version = "0.3", default-features = false, features = ["std"] }
 # OpenAPI description of the public API (ticket #107). utoipa is MIT/Apache-2.0;
 # annotations only — no new runtime behaviour beyond serving the document.
 utoipa = { version = "5" }

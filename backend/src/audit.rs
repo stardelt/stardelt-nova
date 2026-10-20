@@ -88,6 +88,39 @@ pub async fn record_mutations(req: Request, next: Next) -> Response {
     response
 }
 
+/// One connection event: what was done, to which scope, group and name, by whom. Never a value,
+/// never a field's value — the field *names* are fine. The line goes to the `audit` target, so a
+/// deployment that routes `audit` separately gets these beside the mutating-request lines.
+pub fn connection_event(
+    action: &str,
+    who: &crate::auth::Identity,
+    scope: &str,
+    group: Option<&str>,
+    name: &str,
+) {
+    match group {
+        Some(group) => tracing::info!(
+            target: "audit",
+            action,
+            scope,
+            group = %group,
+            name = %name,
+            actor = %who.display_name,
+            sub = %who.sub,
+            "connection"
+        ),
+        None => tracing::info!(
+            target: "audit",
+            action,
+            scope,
+            name = %name,
+            actor = %who.display_name,
+            sub = %who.sub,
+            "connection"
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
