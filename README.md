@@ -165,6 +165,14 @@ make image   # build container image locally (tag: ghcr.io/stardelt/nova:dev)
 
 ---
 
+## UI conformance suite
+
+`npm --prefix frontend run e2e` opens every page in a real browser (dark and light, desktop and phone width)
+against the backend with no cluster behind it and checks the rules in the design note (accessible names,
+contrast, page headings, readable errors, admin pages hidden from ordinary users, hostile names). Needs
+`cargo build`, `npm --prefix frontend run build` and `npx playwright install chromium` once. A finding that already has
+a ticket is listed in `frontend/e2e/known.ts`; a new finding fails the run. CI runs it as the job `ui-conformance`.
+
 ## Building the image
 
 ```bash

@@ -87,3 +87,52 @@ jobs:
 
       - name: Build
         run: npm run build
+
+  # Opens every page in a real browser (light and dark, desktop and phone width) against the
+  # backend with no cluster behind it, and fails on a rule from
+  # stardelt-internal/design/ui-conformance.md. Findings that have a ticket are listed in
+  # frontend/e2e/known.ts; a new finding fails the run.
+  ui-conformance:
+    name: UI conformance (Playwright)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build the backend
+        run: cargo build
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build the frontend
+        working-directory: frontend
+        run: npm run build
+
+      - name: Install the browser
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+
+      - name: Run the suite
+        working-directory: frontend
+        run: npm run e2e
