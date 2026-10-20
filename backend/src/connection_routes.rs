@@ -2267,6 +2267,7 @@ mod tests {
             store,
             break_glass_reads: Mutex::new(HashMap::new()),
             airflow: None,
+            table_locks: Mutex::new(HashMap::new()),
         })
     }
 

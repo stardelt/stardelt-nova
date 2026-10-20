@@ -1561,6 +1561,7 @@ mod tests {
             store: Some(store),
             break_glass_reads: Mutex::new(std::collections::HashMap::new()),
             airflow: Some(airflow),
+            table_locks: Mutex::new(std::collections::HashMap::new()),
         })
     }
 
