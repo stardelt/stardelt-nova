@@ -1359,7 +1359,7 @@ pub async fn require_auth(
 /// one `/api/me` reports (`is_admin`), so the UI and the API cannot drift apart.
 ///
 /// Only mounted in `oidc` mode: in `dev` there is no IdP and the single user is the
-/// operator, which is what CI, `make demo` and the kind gate depend on.
+/// operator, which is what CI and `make demo` depend on.
 pub async fn require_admin(req: Request, next: Next) -> Response {
     // `require_auth` inserts a `Principal` (identity + how it arrived), not the bare
     // `Identity` — reading the wrong type silently refuses everyone, which is exactly
