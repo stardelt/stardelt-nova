@@ -65,6 +65,29 @@ test.describe('every page, every variant', () => {
   }
 })
 
+test.describe('keyboard', () => {
+  test('U17 the first tab stop is a Skip to content link that focuses main', async ({ browser }) => {
+    const page = await (await browser.newContext({ viewport: { width: 1280, height: 800 } })).newPage()
+    await page.goto('/')
+    await expect(page.getByRole('link', { name: 'Skip to content' })).toBeAttached()
+
+    await page.keyboard.press('Tab')
+    const focused = page.locator(':focus')
+    await expect(focused).toHaveText('Skip to content')
+    const box = await focused.boundingBox()
+    const viewport = page.viewportSize()!
+    expect(box).not.toBeNull()
+    expect(box!.x).toBeGreaterThanOrEqual(0)
+    expect(box!.y).toBeGreaterThanOrEqual(0)
+    expect(box!.x + box!.width).toBeLessThanOrEqual(viewport.width)
+    expect(box!.y + box!.height).toBeLessThanOrEqual(viewport.height)
+
+    await page.keyboard.press('Enter')
+    expect(await page.evaluate(() => document.activeElement?.id)).toBe('main')
+    await page.context().close()
+  })
+})
+
 test.describe('roles', () => {
   test('U13 a signed-in non-admin sees no admin surface and calls no admin endpoint', async ({ browser }) => {
     const page = await (await browser.newContext({ viewport: { width: 1280, height: 800 } })).newPage()
