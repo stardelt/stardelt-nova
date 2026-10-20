@@ -51,6 +51,22 @@
 //!   (never `EXPLAIN ANALYZE`, never the statement itself), and `POST /api/pipelines/preview-schedule`
 //!   lists the next fire times in the schedule's zone.
 //!
+//! - **Notebooks** (#237): the same two routes schedule a published notebook version instead of a
+//!   statement. A body gives *either* a non-empty `sql` or a `notebook`
+//!   (`{ name, objectVersion, params }`) — both or neither is a 400. The resource's one task is
+//!   then `{"name": "run", "kind": "notebook", "config": {notebook, objectVersion, params}}`, where
+//!   `params` is the task's JSON object string with sorted keys; everything else (runAs, retries,
+//!   timeout, concurrency, schedule) is the SQL shape's. Nova refuses what the CRD or the loader
+//!   would refuse: the `.ipynb` name rule, at most 32 parameters named `[A-Za-z_][A-Za-z0-9_]{0,63}`,
+//!   values up to 256 characters without NUL, a JSON text of at most 4096 characters — and a version
+//!   that is **not in the store**: `notebooks::head_version` asks S3 (503 without `NOVA_S3_*`, 502
+//!   when it does not answer), so a schedule always pins bytes that exist. A version is never a
+//!   branch or a tag: the loader reads `<ownerGroup>/<notebook>` at exactly that version, so a group
+//!   the caller does not belong to can never be named. An update changes the notebook it names, its
+//!   version and its parameters, never what the pipeline runs: `sql` on a notebook pipeline is 400
+//!   `this pipeline runs a notebook`, a notebook on a statement pipeline 400 `this pipeline runs a
+//!   statement`.
+//!
 //! The route logic sits in plain `async fn`s that take their inputs, so the tests call them
 //! without a router; each handler is the thin axum wrapper that checks sign-in and the two
 //! clients. The whole surface is uncacheable (`Cache-Control: no-store`).
@@ -86,6 +102,7 @@ use crate::api_json::ApiJson;
 use crate::audit::{self, PipelineWrite};
 use crate::auth::{Identity, Principal};
 use crate::connection_routes::{Fail, SignedIn};
+use crate::notebooks::{self, NotebookStore};
 
 /// The `Pipeline` resources of the platform namespace: the cluster, or memory in tests.
 pub enum PipelineResources {
@@ -433,9 +450,10 @@ fn schedule_of(spec: &Value) -> Option<String> {
     }
 }
 
-/// The task names and kinds the resource declares, in declaration order. `with_sql` adds each
-/// `sql` task's statement: only the detail route asks for it, so the list stays small.
-fn task_specs(spec: &Value, with_sql: bool) -> Vec<TaskSpecView> {
+/// The task names and kinds the resource declares, in declaration order. `detailed` adds what
+/// only the edit dialog needs — a `sql` task's statement, a notebook task's file name, version
+/// and parameters — so the list stays small.
+fn task_specs(spec: &Value, detailed: bool) -> Vec<TaskSpecView> {
     spec.get("tasks")
         .and_then(Value::as_array)
         .map(|tasks| {
@@ -443,11 +461,37 @@ fn task_specs(spec: &Value, with_sql: bool) -> Vec<TaskSpecView> {
                 .iter()
                 .filter_map(|task| {
                     let kind = task.get("kind").and_then(Value::as_str).unwrap_or_default();
+                    let config = task.get("config");
+                    let notebook = detailed && kind == "notebook";
                     Some(TaskSpecView {
                         name: task.get("name")?.as_str()?.to_string(),
                         kind: kind.to_string(),
-                        sql: if with_sql && kind == "sql" {
+                        sql: if detailed && kind == "sql" {
                             task.get("sql").and_then(Value::as_str).map(str::to_string)
+                        } else {
+                            None
+                        },
+                        notebook: if notebook {
+                            config
+                                .and_then(|config| config.get("notebook"))
+                                .and_then(Value::as_str)
+                                .map(str::to_string)
+                        } else {
+                            None
+                        },
+                        object_version: if notebook {
+                            config
+                                .and_then(|config| config.get("objectVersion"))
+                                .and_then(Value::as_str)
+                                .map(str::to_string)
+                        } else {
+                            None
+                        },
+                        notebook_params: if notebook {
+                            config
+                                .and_then(|config| config.get("params"))
+                                .and_then(Value::as_str)
+                                .and_then(|params| serde_json::from_str(params).ok())
                         } else {
                             None
                         },
@@ -809,6 +853,140 @@ fn validate_params(params: &BTreeMap<String, String>) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// The notebook task (`Schedule`, #237)
+// ---------------------------------------------------------------------------
+
+/// The most parameters one notebook task may pass to papermill — the CRD's
+/// `maxProperties` for `config.params`.
+const MAX_NOTEBOOK_PARAMS: usize = 32;
+/// The longest one notebook parameter value may be, in characters.
+const MAX_NOTEBOOK_PARAM_VALUE_CHARS: usize = 256;
+/// The longest the `params` JSON object string may be — the CRD's CEL limit.
+const MAX_NOTEBOOK_PARAMS_JSON_CHARS: usize = 4096;
+
+const ONE_OF_STATEMENT_OR_NOTEBOOK: &str = "give a statement or a notebook";
+const NOTEBOOK_NAME_RULE: &str = "the notebook name is a .ipynb file name (letters, digits, \
+                                  dots, dashes, underscores and spaces)";
+const NOTEBOOK_PARAM_NAMES: &str = "parameter names are letters, digits and underscores";
+const NOTEBOOK_TOO_MANY_PARAMS: &str = "at most 32 parameters";
+const NOTEBOOK_PARAM_VALUE: &str = "a parameter value is at most 256 characters";
+const NOTEBOOK_PARAMS_TOO_LONG: &str = "the parameters are too long";
+/// An update cannot change what a pipeline runs (#237): the kind is the resource's.
+const NOTEBOOK_PIPELINE: &str = "this pipeline runs a notebook";
+const STATEMENT_PIPELINE: &str = "this pipeline runs a statement";
+
+/// `^[A-Za-z_][A-Za-z0-9_]{0,63}$`: the parameter names papermill binds. Notebook names are
+/// valid under the publish route's rule, so a schedule can only name a notebook a publish
+/// accepts (`notebooks::valid_name`, the CRD's own regular expression).
+fn valid_notebook_param_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 64
+        && (bytes[0].is_ascii_alphabetic() || bytes[0] == b'_')
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || *b == b'_')
+}
+
+/// The notebook a schedule pins, checked the way the CRD and the loader check it. `Err` is the
+/// sentence the caller sees; `Ok` is the `config.params` JSON text, keys sorted by
+/// [`BTreeMap`], which is what the task carries.
+fn validate_notebook(notebook: &NotebookRequest) -> Result<String, String> {
+    if !notebooks::valid_name(&notebook.name) {
+        return Err(NOTEBOOK_NAME_RULE.into());
+    }
+    if notebook.params.len() > MAX_NOTEBOOK_PARAMS {
+        return Err(NOTEBOOK_TOO_MANY_PARAMS.into());
+    }
+    for (name, value) in &notebook.params {
+        if !valid_notebook_param_name(name) {
+            return Err(NOTEBOOK_PARAM_NAMES.into());
+        }
+        // The one sentence covers both: a value that would not fit papermill's call.
+        if value.chars().count() > MAX_NOTEBOOK_PARAM_VALUE_CHARS || value.contains('\0') {
+            return Err(NOTEBOOK_PARAM_VALUE.into());
+        }
+    }
+    let params = serde_json::to_string(&notebook.params)
+        .map_err(|_| NOTEBOOK_PARAMS_TOO_LONG.to_string())?;
+    if params.chars().count() > MAX_NOTEBOOK_PARAMS_JSON_CHARS {
+        return Err(NOTEBOOK_PARAMS_TOO_LONG.into());
+    }
+    Ok(params)
+}
+
+/// The `run` task of a Nova-written pipeline as a write stores it (#210, #237): exactly one of a
+/// statement and a pinned notebook version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Statement {
+    /// The statement as stored: trimmed, one trailing `;` dropped.
+    Sql(String),
+    /// The notebook fields as stored: the file name, the immutable object version and the
+    /// parameter JSON text with sorted keys.
+    Notebook {
+        name: String,
+        object_version: String,
+        params: String,
+    },
+}
+
+/// The body's statement with the rules of its kind applied: the SQL ones (statement, template
+/// parameters, placeholders), or the notebook ones (name, parameters, and a pinned version that
+/// exists in the group). `Err` is the sentence and the audit's reason. A body gives exactly one
+/// of a non-empty `sql` and a `notebook`; both or neither is the same sentence (#237).
+async fn checked_statement(
+    sql: &str,
+    notebook: Option<&NotebookRequest>,
+    template_params: &BTreeMap<String, String>,
+    notebooks: Option<&NotebookStore>,
+    group: &str,
+) -> Result<Statement, ActionError> {
+    let refused = |reason: &'static str, message: String| {
+        ActionError::refused(reason, Fail::new(StatusCode::BAD_REQUEST, message))
+    };
+    match (sql.trim().is_empty(), notebook) {
+        (false, None) => {
+            let sql = validate_sql(sql).map_err(|message| refused("sql", message))?;
+            validate_params(template_params).map_err(|message| refused("params", message))?;
+            check_placeholders(&sql, template_params)
+                .map_err(|message| refused("params", message))?;
+            Ok(Statement::Sql(sql))
+        }
+        (true, Some(notebook)) => {
+            let params =
+                validate_notebook(notebook).map_err(|message| refused("notebook", message))?;
+            if !notebooks::object_version_ok(&notebook.object_version) {
+                // Nothing with a space in it, or longer than 128 characters, ever came out of
+                // a publish: it cannot be in the store.
+                return Err(refused("version", no_such_version_message(group)));
+            }
+            match notebooks::head_version(
+                notebooks,
+                group,
+                &notebook.name,
+                &notebook.object_version,
+            )
+            .await
+            {
+                Ok(true) => Ok(Statement::Notebook {
+                    name: notebook.name.clone(),
+                    object_version: notebook.object_version.clone(),
+                    params,
+                }),
+                Ok(false) => Err(refused("version", no_such_version_message(group))),
+                Err(fail) => Err(ActionError::refused("store", fail)),
+            }
+        }
+        _ => Err(refused("body", ONE_OF_STATEMENT_OR_NOTEBOOK.into())),
+    }
+}
+
+/// The sentence a version that is not in the store answers (#237).
+fn no_such_version_message(group: &str) -> String {
+    format!("that notebook version does not exist in group {group}")
 }
 
 /// One `${…}` the loader's `expand.py` would replace: the offset of its `${`, the offset just
@@ -1186,21 +1364,52 @@ fn nova_managed(resource: &Value) -> bool {
         == Some(MANAGED_BY_NOVA)
 }
 
+/// The kind of the pipeline's single `run` task when the form may edit it — `sql` or
+/// `notebook` (#210, #237). Anything else is a shape the form does not edit, and an update
+/// never changes the kind.
+fn run_task_kind(resource: &Value) -> Option<&str> {
+    let task = resource
+        .get("spec")?
+        .get("tasks")?
+        .as_array()
+        .filter(|tasks| tasks.len() == 1)?
+        .first()?;
+    if task.get("name").and_then(Value::as_str) != Some("run") {
+        return None;
+    }
+    match task.get("kind").and_then(Value::as_str)? {
+        kind @ ("sql" | "notebook") => Some(kind),
+        _ => None,
+    }
+}
+
 /// The `Pipeline` *Schedule* writes: the ticket's shape (#210), the caller's parameters and
-/// options (#223), nothing else.
+/// options (#223), a statement or a pinned notebook version (#237), nothing else.
 fn pipeline_resource(
     name: &str,
     group: &str,
-    sql: &str,
+    statement: &Statement,
     schedule: Option<&(String, String)>,
     params: &BTreeMap<String, String>,
     options: &PipelineOptionsView,
     created_by: &str,
 ) -> Value {
+    let task = match statement {
+        Statement::Sql(sql) => json!({ "name": "run", "kind": "sql", "sql": sql }),
+        Statement::Notebook {
+            name,
+            object_version,
+            params,
+        } => json!({
+            "name": "run",
+            "kind": "notebook",
+            "config": { "notebook": name, "objectVersion": object_version, "params": params },
+        }),
+    };
     let mut spec = json!({
         "ownerGroup": group,
         "runAs": format!("pipeline-{group}"),
-        "tasks": [{ "name": "run", "kind": "sql", "sql": sql }],
+        "tasks": [task],
         "concurrency": options.concurrency,
         "retries": { "attempts": options.retries, "backoff": format!("{}m", options.backoff_minutes) },
         "timeout": format!("{}m", options.timeout_minutes),
@@ -1326,16 +1535,38 @@ impl PipelineOptions {
     }
 }
 
+/// The published notebook version a schedule pins (#237): the `.ipynb` file name, the immutable
+/// object version a publish answered, and the parameters the run passes to papermill.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct NotebookRequest {
+    /// `<group>/<name>` is the object key; the group is the pipeline's `ownerGroup`, so a
+    /// notebook of another group can never be named.
+    pub name: String,
+    /// The S3 object version, never a branch or a tag: exactly the bytes a person published.
+    pub object_version: String,
+    /// Parameter values by name; at most 32, names `[A-Za-z_][A-Za-z0-9_]{0,63}`, values up to
+    /// 256 characters. Written as the task's `config.params` JSON object string.
+    #[serde(default)]
+    pub params: BTreeMap<String, String>,
+}
+
 /// `POST /api/pipelines`: schedule a statement for one of the caller's own groups.
 #[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CreatePipelineRequest {
     pub name: String,
     pub owner_group: String,
+    /// The statement to run; exactly one of this and `notebook` is given.
+    #[serde(default)]
     pub sql: String,
+    /// A published notebook version to run instead of a statement (#237).
+    #[serde(default)]
+    pub notebook: Option<NotebookRequest>,
     #[serde(default)]
     pub schedule: Option<ScheduleRequest>,
-    /// Values for `${params.<name>}` in the statement; at most 16.
+    /// Values for `${params.<name>}` in the statement; at most 16. A notebook's values are in
+    /// `notebook.params`, not here.
     #[serde(default)]
     pub params: BTreeMap<String, String>,
     /// Retries, the wait between them, the time limit and the run mode; omitted fields keep the
@@ -1345,11 +1576,19 @@ pub struct CreatePipelineRequest {
 }
 
 /// `PUT /api/pipelines/{namespace}/{name}`: change the statement, the schedule, the parameters
-/// and the options. Every other field of the resource stays as it is.
+/// and the options — or, for a notebook pipeline, the notebook, its version and its parameters.
+/// Every other field of the resource stays as it is, and what the pipeline runs never changes
+/// kind.
 #[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdatePipelineRequest {
+    /// The statement of a statement pipeline; a notebook pipeline refuses it.
+    #[serde(default)]
     pub sql: String,
+    /// The notebook, its version and its parameters for a notebook pipeline; a statement
+    /// pipeline refuses it.
+    #[serde(default)]
+    pub notebook: Option<NotebookRequest>,
     /// Omitted means no schedule: the pipeline then runs on demand only.
     #[serde(default)]
     pub schedule: Option<ScheduleRequest>,
@@ -1421,14 +1660,25 @@ pub struct PrincipalsResponse {
 // Views (serde camelCase; no raw Airflow field names and no `sources`)
 // ---------------------------------------------------------------------------
 
-/// One task as the resource declares it. `sql` is the statement of a `kind: "sql"` task, and
-/// only the detail route carries it (Schedule's edit dialog prefills from it).
+/// One task as the resource declares it. A `sql` task's statement and a `notebook` task's file
+/// name, version and parameters are carried only by the detail route (Schedule's edit dialog
+/// prefills from them).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct TaskSpecView {
     pub name: String,
     pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sql: Option<String>,
+    /// The `.ipynb` file name of a `kind: "notebook"` task (#237).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notebook: Option<String>,
+    /// The immutable object version a notebook task pins.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object_version: Option<String>,
+    /// The parameters a notebook task passes, parsed back from `config.params`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notebook_params: Option<BTreeMap<String, String>>,
 }
 
 /// One pipeline in the list: the resource plus what Airflow says about it.
@@ -2412,31 +2662,92 @@ fn audit_name(name: &str) -> String {
     name.chars().take(64).collect()
 }
 
-/// The facts a create or update records beside the action: the statement's **length** and the
-/// cron text, never the statement.
-fn write_facts(sql: &str, schedule: Option<&ScheduleRequest>) -> (usize, Option<String>) {
-    (
-        sql.trim().chars().count(),
-        schedule.map(|schedule| schedule.cron.trim().to_string()),
-    )
+/// The facts a create or update records beside the action (#210, #223, #237): the statement's
+/// **length**, the cron text and — for a notebook — the group, the file name and the pinned
+/// version. Never the statement, never a parameter value.
+struct WriteFacts {
+    statement_chars: usize,
+    cron: Option<String>,
+    kind: &'static str,
+    notebook: Option<(String, String, String)>,
+}
+
+impl WriteFacts {
+    fn of(
+        sql: &str,
+        notebook: Option<&NotebookRequest>,
+        schedule: Option<&ScheduleRequest>,
+        group: &str,
+    ) -> Self {
+        Self {
+            statement_chars: sql.trim().chars().count(),
+            cron: schedule.map(|schedule| schedule.cron.trim().to_string()),
+            kind: if notebook.is_some() {
+                "notebook"
+            } else {
+                "sql"
+            },
+            notebook: notebook.map(|notebook| {
+                (
+                    group.to_string(),
+                    notebook.name.clone(),
+                    notebook.object_version.clone(),
+                )
+            }),
+        }
+    }
+
+    fn write(&self) -> PipelineWrite<'_> {
+        PipelineWrite {
+            statement_chars: self.statement_chars,
+            schedule: self.cron.as_deref(),
+            kind: self.kind,
+            notebook: self
+                .notebook
+                .as_ref()
+                .map(|(group, name, version)| audit::NotebookTarget {
+                    group,
+                    name,
+                    version,
+                }),
+        }
+    }
+}
+
+/// The owner group of a pipeline, for an audit line: empty when the resource cannot be read
+/// (the caller's answer is then a refusal anyway, and an audit line may not hold a guess).
+async fn audit_group(resources: Option<&PipelineResources>, name: &str) -> String {
+    let Some(resources) = resources else {
+        return String::new();
+    };
+    let Ok(Some(resource)) = resources.get(name).await else {
+        return String::new();
+    };
+    spec_of(&resource)
+        .get("ownerGroup")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
 }
 
 /// `POST /api/pipelines`: create the resource, then answer its view (`loaded: false`, because
 /// Airflow has not seen it yet). Audited whatever happens.
 async fn create_pipeline(
     resources: Option<&PipelineResources>,
+    notebooks: Option<&NotebookStore>,
     limiter: &CreateLimiter,
     who: &Identity,
     body: CreatePipelineRequest,
 ) -> Result<PipelineView, Fail> {
     let namespace = crate::cluster::namespace();
     let pipeline = audit_name(&body.name);
-    let (statement_chars, cron) = write_facts(&body.sql, body.schedule.as_ref());
-    let result = create_pipeline_inner(resources, limiter, who, body).await;
-    let write = PipelineWrite {
-        statement_chars,
-        schedule: cron.as_deref(),
-    };
+    let facts = WriteFacts::of(
+        &body.sql,
+        body.notebook.as_ref(),
+        body.schedule.as_ref(),
+        &body.owner_group,
+    );
+    let result = create_pipeline_inner(resources, notebooks, limiter, who, body).await;
     match &result {
         Ok(_) => audit::pipeline_event(
             "create",
@@ -2445,7 +2756,7 @@ async fn create_pipeline(
             &pipeline,
             None,
             "ok",
-            Some(write),
+            Some(facts.write()),
         ),
         Err(e) => audit::pipeline_event(
             "create",
@@ -2454,7 +2765,7 @@ async fn create_pipeline(
             &pipeline,
             None,
             &e.outcome,
-            Some(write),
+            Some(facts.write()),
         ),
     }
     result.map_err(|e| e.fail)
@@ -2462,6 +2773,7 @@ async fn create_pipeline(
 
 async fn create_pipeline_inner(
     resources: Option<&PipelineResources>,
+    notebooks_store: Option<&NotebookStore>,
     limiter: &CreateLimiter,
     who: &Identity,
     body: CreatePipelineRequest,
@@ -2500,20 +2812,19 @@ async fn create_pipeline_inner(
         ));
     }
 
-    // 4. The statement.
-    let sql = validate_sql(&body.sql).map_err(|message| {
-        ActionError::refused("sql", Fail::new(StatusCode::BAD_REQUEST, message))
-    })?;
+    // 4. What it runs: exactly one of a statement and a notebook (#237), with the rules of its
+    //    kind — the statement's parameters and placeholders, or the notebook's name,
+    //    parameters and a pinned version that exists in the group.
+    let statement = checked_statement(
+        &body.sql,
+        body.notebook.as_ref(),
+        &body.params,
+        notebooks_store,
+        &body.owner_group,
+    )
+    .await?;
 
-    // 5. The parameters and their placeholders: an unknown one would fail the run.
-    validate_params(&body.params).map_err(|message| {
-        ActionError::refused("params", Fail::new(StatusCode::BAD_REQUEST, message))
-    })?;
-    check_placeholders(&sql, &body.params).map_err(|message| {
-        ActionError::refused("params", Fail::new(StatusCode::BAD_REQUEST, message))
-    })?;
-
-    // 6. The advanced options, defaults filled in.
+    // 5. The advanced options, defaults filled in.
     let options = body
         .options
         .clone()
@@ -2523,12 +2834,12 @@ async fn create_pipeline_inner(
             ActionError::refused("options", Fail::new(StatusCode::BAD_REQUEST, message))
         })?;
 
-    // 7. The schedule (or none, for on demand).
+    // 6. The schedule (or none, for on demand).
     let schedule = validate_schedule(body.schedule.as_ref()).map_err(|message| {
         ActionError::refused("schedule", Fail::new(StatusCode::BAD_REQUEST, message))
     })?;
 
-    // 8. The name is free.
+    // 7. The name is free.
     if resources
         .get(&body.name)
         .await
@@ -2538,7 +2849,7 @@ async fn create_pipeline_inner(
         return Err(ActionError::refused("exists", pipeline_exists()));
     }
 
-    // 9. The rate limit comes last: a refusal above never consumes a slot.
+    // 8. The rate limit comes last: a refusal above never consumes a slot.
     if !take_create_slot(limiter, &who.sub) {
         return Err(ActionError::refused("rate-limited", too_many_creates()));
     }
@@ -2546,7 +2857,7 @@ async fn create_pipeline_inner(
     let resource = pipeline_resource(
         &body.name,
         &body.owner_group,
-        &sql,
+        &statement,
         schedule.as_ref(),
         &body.params,
         &options,
@@ -2602,24 +2913,38 @@ async fn view_after_write(
     view_of(namespace, name, resource, dag.as_ref(), last_run.as_ref())
 }
 
-/// `PUT /api/pipelines/{namespace}/{name}`: change the statement and the schedule of a pipeline
-/// Nova wrote, and nothing else. Audited whatever happens.
+/// `PUT /api/pipelines/{namespace}/{name}`: change the statement and the schedule of a statement
+/// pipeline, or the version and parameters of a notebook pipeline, and nothing else. Audited
+/// whatever happens.
 async fn update_pipeline(
     resources: Option<&PipelineResources>,
+    notebooks: Option<&NotebookStore>,
     airflow: Option<&AirflowClient>,
     who: &Identity,
     namespace: &str,
     name: &str,
     body: UpdatePipelineRequest,
 ) -> Result<PipelineView, Fail> {
-    let (statement_chars, cron) = write_facts(&body.sql, body.schedule.as_ref());
-    let result = update_pipeline_inner(resources, airflow, who, namespace, name, body).await;
-    let write = PipelineWrite {
-        statement_chars,
-        schedule: cron.as_deref(),
-    };
+    // The update keeps the pipeline's group, so the audit's group is read from the resource.
+    let group = audit_group(resources, name).await;
+    let facts = WriteFacts::of(
+        &body.sql,
+        body.notebook.as_ref(),
+        body.schedule.as_ref(),
+        &group,
+    );
+    let result =
+        update_pipeline_inner(resources, notebooks, airflow, who, namespace, name, body).await;
     match &result {
-        Ok(_) => audit::pipeline_event("update", who, namespace, name, None, "ok", Some(write)),
+        Ok(_) => audit::pipeline_event(
+            "update",
+            who,
+            namespace,
+            name,
+            None,
+            "ok",
+            Some(facts.write()),
+        ),
         Err(e) => audit::pipeline_event(
             "update",
             who,
@@ -2627,7 +2952,7 @@ async fn update_pipeline(
             name,
             None,
             &e.outcome,
-            Some(write),
+            Some(facts.write()),
         ),
     }
     result.map_err(|e| e.fail)
@@ -2635,6 +2960,7 @@ async fn update_pipeline(
 
 async fn update_pipeline_inner(
     resources: Option<&PipelineResources>,
+    notebooks_store: Option<&NotebookStore>,
     airflow: Option<&AirflowClient>,
     who: &Identity,
     namespace: &str,
@@ -2653,15 +2979,51 @@ async fn update_pipeline_inner(
         return Err(ActionError::refused("not-nova", managed_outside()));
     }
 
-    let sql = validate_sql(&body.sql).map_err(|message| {
-        ActionError::refused("sql", Fail::new(StatusCode::BAD_REQUEST, message))
-    })?;
-    validate_params(&body.params).map_err(|message| {
-        ActionError::refused("params", Fail::new(StatusCode::BAD_REQUEST, message))
-    })?;
-    check_placeholders(&sql, &body.params).map_err(|message| {
-        ActionError::refused("params", Fail::new(StatusCode::BAD_REQUEST, message))
-    })?;
+    // The pipeline's group: both the refusal sentence and the notebook's object key.
+    let group = spec_of(&resource)
+        .get("ownerGroup")
+        .and_then(Value::as_str)
+        .filter(|group| !group.is_empty())
+        .ok_or_else(|| ActionError::refused("shape", shape_not_editable()))?
+        .to_string();
+
+    // A body names exactly one of a statement and a notebook (#237); an update never changes
+    // what the pipeline runs, only the text or the pinned version.
+    let requested_kind = match (body.sql.trim().is_empty(), body.notebook.is_some()) {
+        (false, false) => "sql",
+        (true, true) => "notebook",
+        _ => {
+            return Err(ActionError::refused(
+                "body",
+                Fail::new(StatusCode::BAD_REQUEST, ONE_OF_STATEMENT_OR_NOTEBOOK),
+            ));
+        }
+    };
+    match (run_task_kind(&resource), requested_kind) {
+        (Some("notebook"), "sql") => {
+            return Err(ActionError::refused(
+                "kind",
+                Fail::new(StatusCode::BAD_REQUEST, NOTEBOOK_PIPELINE),
+            ));
+        }
+        (Some("sql"), "notebook") => {
+            return Err(ActionError::refused(
+                "kind",
+                Fail::new(StatusCode::BAD_REQUEST, STATEMENT_PIPELINE),
+            ));
+        }
+        _ => {}
+    }
+
+    let statement = checked_statement(
+        &body.sql,
+        body.notebook.as_ref(),
+        &body.params,
+        notebooks_store,
+        &group,
+    )
+    .await?;
+
     let options = body
         .options
         .clone()
@@ -2676,17 +3038,11 @@ async fn update_pipeline_inner(
 
     // The principal of the pipeline's own group must still be ready, or the change would make a
     // pipeline the loader refuses.
-    let group = resource
-        .get("spec")
-        .and_then(|spec| spec.get("ownerGroup"))
-        .and_then(Value::as_str)
-        .filter(|group| !group.is_empty())
-        .ok_or_else(|| ActionError::refused("shape", shape_not_editable()))?;
     let principals = resources
         .principals()
         .await
         .map_err(|e| ActionError::error(resource_fail(e)))?;
-    let principal = principal_view(&principals, group);
+    let principal = principal_view(&principals, &group);
     if !principal.ready {
         return Err(ActionError::refused(
             "no-principal",
@@ -2694,23 +3050,28 @@ async fn update_pipeline_inner(
         ));
     }
 
-    // The form edits exactly one `sql` task named `run`.
-    let editable = resource
-        .get("spec")
-        .and_then(|spec| spec.get("tasks"))
-        .and_then(Value::as_array)
-        .filter(|tasks| tasks.len() == 1)
-        .and_then(|tasks| tasks.first())
-        .is_some_and(|task| {
-            task.get("name").and_then(Value::as_str) == Some("run")
-                && task.get("kind").and_then(Value::as_str) == Some("sql")
-        });
-    if !editable {
+    // The form edits exactly one `run` task, of the kind it already has.
+    if run_task_kind(&resource).is_none() {
         return Err(ActionError::refused("shape", shape_not_editable()));
     }
 
     let mut updated = resource.clone();
-    updated["spec"]["tasks"][0]["sql"] = json!(sql);
+    match &statement {
+        Statement::Sql(sql) => updated["spec"]["tasks"][0]["sql"] = json!(sql),
+        // The body describes the whole notebook state: the version and the parameters are
+        // written, not merged.
+        Statement::Notebook {
+            name,
+            object_version,
+            params,
+        } => {
+            updated["spec"]["tasks"][0]["config"] = json!({
+                "notebook": name,
+                "objectVersion": object_version,
+                "params": params,
+            });
+        }
+    }
     // The body describes the whole editable state: the options are written, not merged.
     updated["spec"]["concurrency"] = json!(options.concurrency);
     updated["spec"]["retries"] = json!({
@@ -3076,7 +3437,7 @@ pub(crate) async fn preview(
     post,
     path = "/api/pipelines",
     tag = "public",
-    description = "Schedule a statement: create a `Pipeline` for one of the caller's owner groups (`runAs: pipeline-<group>`), validated so the loader accepts it. Refusals, in this order: a name outside 1 to 40 lower-case letters, digits and dashes starting with a letter 400; a group the caller is not a member of 403 (`you are not a member of the group <g>` — administrators included); a group without a ready `ServicePrincipal` 409 with the `principals` route's message; an empty, over-20,000-character or NUL-carrying statement 400; a parameter name, a parameter count or value, or a `${…}` placeholder the loader cannot fill 400; a retry, wait, time-limit or run-mode option out of range 400; a cron that is not five in-range fields or fires more often than every five minutes 400; an unknown IANA timezone 400; a name that already exists 409; more than ten creations per user per hour 429. `options` and `params` are optional: an omitted option keeps its default (1 retry after 5 minutes, a 120-minute time limit, `Forbid`). Airflow is not needed: the resource is the source of truth, and the answer is the new pipeline with `loaded: false`, `state: \"loading\"`. The audit line carries the statement's length and the cron, never the statement. Answers `Cache-Control: no-store`.",
+    description = "Schedule a statement or a published notebook: create a `Pipeline` for one of the caller's owner groups (`runAs: pipeline-<group>`), validated so the loader accepts it. A body gives exactly one of a non-empty `sql` and a `notebook` (`{ name, objectVersion, params }`, #237) — both or neither is 400 `give a statement or a notebook`. Refusals, in this order: a name outside 1 to 40 lower-case letters, digits and dashes starting with a letter 400; a group the caller is not a member of 403 (`you are not a member of the group <g>` — administrators included); a group without a ready `ServicePrincipal` 409 with the `principals` route's message; an empty, over-20,000-character or NUL-carrying statement 400; a parameter name, a parameter count or value, or a `${…}` placeholder the loader cannot fill 400; a notebook name outside `^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}\\.ipynb$` 400, more than 32 notebook parameters, a value over 256 characters or NUL, or a `params` JSON text over 4096 characters 400, and a version that is not in the store 400 `that notebook version does not exist in group <g>` (503 when `NOVA_S3_*` is unset, 502 when S3 does not answer); a retry, wait, time-limit or run-mode option out of range 400; a cron that is not five in-range fields or fires more often than every five minutes 400; an unknown IANA timezone 400; a name that already exists 409; more than ten creations per user per hour 429. `options` and `params` are optional: an omitted option keeps its default (1 retry after 5 minutes, a 120-minute time limit, `Forbid`); `params` are the statement's `${params.<name>}` values, a notebook's values are in `notebook.params`. Airflow is not needed: the resource is the source of truth, and the answer is the new pipeline with `loaded: false`, `state: \"loading\"`. The audit line carries the statement's length, the cron and, for a notebook, the group, the file name and the pinned version — never the statement and never a parameter value. Answers `Cache-Control: no-store`.",
     request_body = CreatePipelineRequest,
     responses(
         (status = 201, description = "The resource as written", body = PipelineView),
@@ -3097,6 +3458,7 @@ pub(crate) async fn create(
         StatusCode::CREATED,
         create_pipeline(
             resources(signed.state()).as_ref(),
+            signed.state().notebooks.as_ref(),
             &signed.state().pipeline_creates,
             signed.identity(),
             body,
@@ -3109,7 +3471,7 @@ pub(crate) async fn create(
     put,
     path = "/api/pipelines/{namespace}/{name}",
     tag = "public",
-    description = "Change the statement, the schedule, the parameters and the options of a pipeline Nova created (`app.kubernetes.io/managed-by: stardelt-nova`); every other field stays. The body describes the whole editable state: an omitted `schedule` removes it, an omitted `params` removes the table, an omitted option keeps its default. Refusals: a pipeline the caller may not act on 404; a pipeline Nova did not write, or one whose task shape is not exactly one `sql` task named `run` 409; the statement, a parameter, a placeholder, an option, the cron or the timezone as on create 400; the group's principal no longer ready 409 with the `principals` route's message; a concurrent change to the resource 409 `the pipeline changed while you edited it: reload`. The audit line carries the statement's length and the cron, never the statement. Answers `Cache-Control: no-store`.",
+    description = "Change a pipeline Nova created (`app.kubernetes.io/managed-by: stardelt-nova`) and nothing else. A statement pipeline's body carries `sql`; a notebook pipeline's carries `notebook` (`{ name, objectVersion, params }`), and an update never changes which of the two it is: `sql` on a notebook pipeline is 400 `this pipeline runs a notebook`, a notebook on a statement pipeline 400 `this pipeline runs a statement`, and both or neither 400 `give a statement or a notebook`. The body describes the whole editable state: an omitted `schedule` removes it, an omitted `params` removes the table, an omitted option keeps its default, and a notebook body's file name, version and parameters replace the task's `config`. Refusals: a pipeline the caller may not act on 404; a pipeline Nova did not write, or one whose task shape is not exactly one `run` task of kind `sql` or `notebook` 409; the statement, a parameter, a placeholder, a notebook name, a parameter value or count, or a version that is not in the store (503 without `NOVA_S3_*`, 502 when S3 does not answer), an option, the cron or the timezone as on create 400; the group's principal no longer ready 409 with the `principals` route's message; a concurrent change to the resource 409 `the pipeline changed while you edited it: reload`. The audit line carries the statement's length, the cron and, for a notebook, the group, the file name and the pinned version — never the statement and never a parameter value. Answers `Cache-Control: no-store`.",
     params(
         ("namespace" = String, Path, description = "The Pipeline's namespace (Nova's own)"),
         ("name" = String, Path, description = "Pipeline name"),
@@ -3133,6 +3495,7 @@ pub(crate) async fn update(
     answer(
         update_pipeline(
             resources(signed.state()).as_ref(),
+            signed.state().notebooks.as_ref(),
             signed.state().airflow.as_ref(),
             signed.identity(),
             &namespace,
@@ -3454,6 +3817,8 @@ mod tests {
     use super::*;
     use crate::airflow::{AirflowConfig, DagRun, DagSummary};
     use crate::auth::{Principal, Secret};
+    use crate::notebooks::NotebookStore;
+    use crate::notebooks::fake::{FakeS3, notebook_store};
     use crate::secret_store::StoreClient;
 
     /// A value that must never appear in a log answer: the marker's `sources` path.
@@ -5883,6 +6248,7 @@ mod tests {
             name: name.into(),
             owner_group: group.into(),
             sql: sql.into(),
+            notebook: None,
             schedule: Some(ScheduleRequest {
                 cron: "0 3 * * *".into(),
                 timezone: "Europe/Berlin".into(),
@@ -5895,6 +6261,7 @@ mod tests {
     fn update_body(sql: &str) -> UpdatePipelineRequest {
         UpdatePipelineRequest {
             sql: sql.into(),
+            notebook: None,
             schedule: None,
             params: BTreeMap::new(),
             options: None,
@@ -5917,7 +6284,7 @@ mod tests {
         let mut resource = pipeline_resource(
             name,
             group,
-            "select 1",
+            &Statement::Sql("select 1".into()),
             Some(&("0 3 * * *".to_string(), "Europe/Berlin".to_string())),
             &BTreeMap::new(),
             &default_options(),
@@ -5995,6 +6362,7 @@ mod tests {
 
         let view = create_pipeline(
             Some(&resources),
+            None,
             &create_limiter(),
             &ada,
             create_body("daily-trips", "analytics", "select 1;"),
@@ -6049,6 +6417,7 @@ mod tests {
 
         let view = create_pipeline(
             Some(&resources),
+            None,
             &create_limiter(),
             &who("sub-ada", &["analytics"], false),
             body,
@@ -6073,6 +6442,7 @@ mod tests {
         let ada = who("sub-ada", &["analytics"], false);
         let error = create_pipeline(
             Some(&resources),
+            None,
             &create_limiter(),
             &ada,
             create_body("smoke", "finance", "select 1"),
@@ -6090,6 +6460,7 @@ mod tests {
         let root = who("sub-root", &["stardelt-admins"], true);
         let error = create_pipeline(
             Some(&resources),
+            None,
             &create_limiter(),
             &root,
             create_body("smoke", "analytics", "select 1"),
@@ -6113,6 +6484,7 @@ mod tests {
         let resources = memory(&[]);
         let error = create_pipeline(
             Some(&resources),
+            None,
             &limiter,
             &ada,
             create_body("smoke", "analytics", "select 1"),
@@ -6133,6 +6505,7 @@ mod tests {
         );
         let error = create_pipeline(
             Some(&resources),
+            None,
             &limiter,
             &ada,
             create_body("smoke", "analytics", "select 1"),
@@ -6153,6 +6526,7 @@ mod tests {
         );
         let error = create_pipeline(
             Some(&resources),
+            None,
             &limiter,
             &ada,
             create_body("smoke", "analytics", "select 1"),
@@ -6180,6 +6554,7 @@ mod tests {
         ] {
             let error = create_pipeline(
                 Some(&resources),
+                None,
                 &limiter,
                 &ada,
                 create_body(name, "analytics", "select 1"),
@@ -6190,14 +6565,27 @@ mod tests {
             assert_eq!(error.message(), invalid_name(), "{name:?}");
         }
 
+        // A blank statement is neither a statement nor a notebook (#237).
+        let error = create_pipeline(
+            Some(&resources),
+            None,
+            &limiter,
+            &ada,
+            create_body("smoke", "analytics", "   "),
+        )
+        .await
+        .expect_err("no statement");
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(error.message(), ONE_OF_STATEMENT_OR_NOTEBOOK);
+
         for sql in [
-            "   ".to_string(),
             "x".repeat(MAX_STATEMENT_CHARS + 1),
             "select 1\0".to_string(),
             ";".to_string(),
         ] {
             let error = create_pipeline(
                 Some(&resources),
+                None,
                 &limiter,
                 &ada,
                 create_body("smoke", "analytics", &sql),
@@ -6213,7 +6601,7 @@ mod tests {
             cron: "0 3 * * *".into(),
             timezone: "Mars/Olympus".into(),
         });
-        let error = create_pipeline(Some(&resources), &limiter, &ada, body)
+        let error = create_pipeline(Some(&resources), None, &limiter, &ada, body)
             .await
             .expect_err("not an IANA zone");
         assert_eq!(error.status(), StatusCode::BAD_REQUEST);
@@ -6225,7 +6613,7 @@ mod tests {
                 cron: cron.into(),
                 timezone: "UTC".into(),
             });
-            let error = create_pipeline(Some(&resources), &limiter, &ada, body)
+            let error = create_pipeline(Some(&resources), None, &limiter, &ada, body)
                 .await
                 .expect_err("invalid cron");
             assert_eq!(error.status(), StatusCode::BAD_REQUEST);
@@ -6239,6 +6627,7 @@ mod tests {
         // One trailing `;` is dropped from the stored statement; the rest is trimmed.
         create_pipeline(
             Some(&resources),
+            None,
             &limiter,
             &ada,
             create_body("trailing", "analytics", "  select 42 ;  "),
@@ -6259,6 +6648,7 @@ mod tests {
 
         create_pipeline(
             Some(&resources),
+            None,
             &limiter,
             &ada,
             create_body("smoke", "analytics", "select 1"),
@@ -6268,6 +6658,7 @@ mod tests {
 
         let error = create_pipeline(
             Some(&resources),
+            None,
             &limiter,
             &ada,
             create_body("smoke", "analytics", "select 2"),
@@ -6294,6 +6685,7 @@ mod tests {
         for index in 0..CREATES_PER_HOUR {
             create_pipeline(
                 Some(&resources),
+                None,
                 &limiter,
                 &ada,
                 create_body(&format!("daily-{index}"), "analytics", "select 1"),
@@ -6303,6 +6695,7 @@ mod tests {
         }
         let error = create_pipeline(
             Some(&resources),
+            None,
             &limiter,
             &ada,
             create_body("one-more", "analytics", "select 1"),
@@ -6323,6 +6716,7 @@ mod tests {
         // Another person has their own ten.
         create_pipeline(
             Some(&resources),
+            None,
             &limiter,
             &who("sub-bob", &["analytics"], false),
             create_body("bobs-job", "analytics", "select 1"),
@@ -6349,6 +6743,7 @@ mod tests {
         // The body carries the whole editable state: statement, schedule, params, options.
         let update = UpdatePipelineRequest {
             sql: "select 2;".into(),
+            notebook: None,
             schedule: None,
             params: BTreeMap::from([
                 ("days".to_string(), "7".to_string()),
@@ -6360,9 +6755,17 @@ mod tests {
                 ..PipelineOptions::default()
             }),
         };
-        let view = update_pipeline(Some(&resources), None, &ada, &namespace, "smoke", update)
-            .await
-            .expect("the update succeeds");
+        let view = update_pipeline(
+            Some(&resources),
+            None,
+            None,
+            &ada,
+            &namespace,
+            "smoke",
+            update,
+        )
+        .await
+        .expect("the update succeeds");
         assert_eq!(view.schedule, None);
 
         let stored = stored_pipeline(&resources, "smoke").await.expect("written");
@@ -6397,11 +6800,13 @@ mod tests {
         let view = update_pipeline(
             Some(&resources),
             None,
+            None,
             &ada,
             &namespace,
             "smoke",
             UpdatePipelineRequest {
                 sql: "select 3".into(),
+                notebook: None,
                 schedule: Some(ScheduleRequest {
                     cron: "30 6 * * mon-fri".into(),
                     timezone: "UTC".into(),
@@ -6446,6 +6851,7 @@ mod tests {
         for caller in [&ada, &admin()] {
             let error = update_pipeline(
                 Some(&resources),
+                None,
                 None,
                 caller,
                 &namespace,
@@ -6492,6 +6898,7 @@ mod tests {
         for name in ["two-tasks", "other-name"] {
             let error = update_pipeline(
                 Some(&resources),
+                None,
                 None,
                 &ada,
                 &namespace,
@@ -6573,6 +6980,7 @@ mod tests {
         let error = update_pipeline(
             Some(&resources),
             None,
+            None,
             &ada,
             &namespace,
             "smoke",
@@ -6591,6 +6999,7 @@ mod tests {
         let resources = memory_with(&[("smoke", nova_pipeline("smoke", "analytics"))], &[]);
         let error = update_pipeline(
             Some(&resources),
+            None,
             None,
             &ada,
             &namespace,
@@ -6724,6 +7133,7 @@ mod tests {
 
         create_pipeline(
             Some(&resources),
+            None,
             &limiter,
             &actor,
             create_body("canary", "analytics", CANARY),
@@ -6732,6 +7142,7 @@ mod tests {
         .expect("create");
         update_pipeline(
             Some(&resources),
+            None,
             None,
             &actor,
             &namespace,
@@ -7007,6 +7418,7 @@ mod tests {
 
         create_pipeline(
             Some(&resources),
+            None,
             &create_limiter(),
             &who("sub-ada", &["analytics"], false),
             body,
@@ -7046,6 +7458,7 @@ mod tests {
 
         create_pipeline(
             Some(&resources),
+            None,
             &create_limiter(),
             &ada,
             create_body("plain", "analytics", "select 1"),
@@ -7074,6 +7487,7 @@ mod tests {
         });
         update_pipeline(
             Some(&resources),
+            None,
             None,
             &ada,
             &crate::cluster::namespace(),
@@ -7180,7 +7594,7 @@ mod tests {
             let mut body = create_body(&format!("refused-{index}"), "analytics", "select 1");
             body.params = parameters;
             body.options = Some(options);
-            let error = create_pipeline(Some(&resources), &limiter, &ada, body)
+            let error = create_pipeline(Some(&resources), None, &limiter, &ada, body)
                 .await
                 .expect_err("the option is out of range");
             assert_eq!(error.status(), StatusCode::BAD_REQUEST, "{sentence}");
@@ -7212,7 +7626,7 @@ mod tests {
         ] {
             let mut body = create_body("typo", "analytics", sql);
             body.params = params;
-            let error = create_pipeline(Some(&resources), &limiter, &ada, body)
+            let error = create_pipeline(Some(&resources), None, &limiter, &ada, body)
                 .await
                 .expect_err("the loader would fail this run");
             assert_eq!(error.status(), StatusCode::BAD_REQUEST, "{sql}");
@@ -7225,7 +7639,7 @@ mod tests {
         let statement = "select '${run.date}', '${run.id}', '${params.day}', '${a-b}'";
         let mut body = create_body("defined", "analytics", statement);
         body.params = params(&[("day", "2026-10-01")]);
-        create_pipeline(Some(&resources), &limiter, &ada, body)
+        create_pipeline(Some(&resources), None, &limiter, &ada, body)
             .await
             .expect("every placeholder is one the loader fills");
         let stored = stored_pipeline(&resources, "defined")
@@ -7650,6 +8064,754 @@ mod tests {
         assert!(
             fake.lock().expect("fake trino").statements.is_empty(),
             "an anonymous caller never reaches the engine"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Notebook schedules (#237)
+    // -----------------------------------------------------------------------
+
+    /// A create body that schedules `notebook` at `version` for `group`, no statement.
+    fn notebook_body(
+        name: &str,
+        group: &str,
+        notebook: &str,
+        version: &str,
+    ) -> CreatePipelineRequest {
+        CreatePipelineRequest {
+            name: name.into(),
+            owner_group: group.into(),
+            sql: String::new(),
+            notebook: Some(NotebookRequest {
+                name: notebook.into(),
+                object_version: version.into(),
+                params: BTreeMap::new(),
+            }),
+            schedule: Some(ScheduleRequest {
+                cron: "0 3 * * *".into(),
+                timezone: "Europe/Berlin".into(),
+            }),
+            params: BTreeMap::new(),
+            options: None,
+        }
+    }
+
+    fn update_notebook_body(notebook: &str, version: &str) -> UpdatePipelineRequest {
+        UpdatePipelineRequest {
+            sql: String::new(),
+            notebook: Some(NotebookRequest {
+                name: notebook.into(),
+                object_version: version.into(),
+                params: BTreeMap::new(),
+            }),
+            schedule: None,
+            params: BTreeMap::new(),
+            options: None,
+        }
+    }
+
+    /// A notebook pipeline Nova wrote, as a `head_version` needs nothing: the resource only.
+    fn stored_notebook_pipeline(name: &str, group: &str, notebook: &str, version: &str) -> Value {
+        let mut resource = pipeline_resource(
+            name,
+            group,
+            &Statement::Notebook {
+                name: notebook.into(),
+                object_version: version.into(),
+                params: "{}".into(),
+            },
+            Some(&("0 3 * * *".to_string(), "Europe/Berlin".to_string())),
+            &BTreeMap::new(),
+            &default_options(),
+            "sub-ada",
+        );
+        resource["metadata"]["resourceVersion"] = json!("7");
+        resource
+    }
+
+    #[tokio::test]
+    async fn notebook_request_builds_the_notebook_task() {
+        let resources = analytics_ready();
+        let s3 = FakeS3::start().await;
+        let version = s3.put_raw("analytics/report.ipynb", b"{\"nbformat\":4}", "ada");
+        let store = notebook_store(&s3.base);
+        let ada = who("sub-ada", &["analytics"], false);
+
+        let mut body = notebook_body("nightly-report", "analytics", "report.ipynb", &version);
+        // Deliberately not sorted: the task's `params` must be, whatever the body's order.
+        body.notebook.as_mut().expect("notebook").params = BTreeMap::from([
+            ("region".to_string(), "eu".to_string()),
+            ("days".to_string(), "7".to_string()),
+        ]);
+
+        let view = create_pipeline(
+            Some(&resources),
+            Some(&store),
+            &create_limiter(),
+            &ada,
+            body,
+        )
+        .await
+        .expect("a notebook schedule");
+
+        assert!(!view.loaded, "the loader has not seen it yet");
+        assert_eq!(view.state, "loading");
+        assert_eq!(view.tasks.len(), 1);
+        assert_eq!(view.tasks[0].kind, "notebook");
+        assert_eq!(view.tasks[0].sql, None);
+
+        let stored = stored_pipeline(&resources, "nightly-report")
+            .await
+            .expect("written");
+        assert_eq!(
+            stored["spec"],
+            json!({
+                "ownerGroup": "analytics",
+                "runAs": "pipeline-analytics",
+                "tasks": [{
+                    "name": "run",
+                    "kind": "notebook",
+                    "config": {
+                        "notebook": "report.ipynb",
+                        "objectVersion": version,
+                        "params": "{\"days\":\"7\",\"region\":\"eu\"}",
+                    },
+                }],
+                "concurrency": "Forbid",
+                "retries": { "attempts": 1, "backoff": "5m" },
+                "timeout": "120m",
+                "schedule": { "cron": "0 3 * * *", "timezone": "Europe/Berlin" },
+            }),
+            "the notebook task exactly: one config object, params as a sorted JSON string, no sql"
+        );
+        assert!(
+            stored["spec"]["tasks"][0].get("sql").is_none(),
+            "a notebook task carries no statement: {stored}"
+        );
+        assert!(
+            stored["spec"].get("params").is_none(),
+            "the notebook's values live in config.params, not in spec.params: {stored}"
+        );
+        assert_eq!(
+            stored["metadata"]["labels"],
+            json!({
+                MANAGED_BY_LABEL: MANAGED_BY_NOVA,
+                "stardelt.io/owner-group": "analytics",
+            }),
+            "the label set stays what it was: no kind label is added"
+        );
+        assert_eq!(
+            stored["metadata"]["annotations"]["stardelt.io/created-by"],
+            "sub-ada"
+        );
+    }
+
+    #[tokio::test]
+    async fn exactly_one_of_sql_and_notebook() {
+        const SENTENCE: &str = "give a statement or a notebook";
+        let resources = analytics_ready();
+        let s3 = FakeS3::start().await;
+        let version = s3.put_raw("analytics/report.ipynb", b"{}", "ada");
+        let store = notebook_store(&s3.base);
+        let ada = who("sub-ada", &["analytics"], false);
+        let limiter = create_limiter();
+
+        // Neither: no statement and no notebook.
+        let mut body = notebook_body("either", "analytics", "report.ipynb", &version);
+        body.notebook = None;
+        let error = create_pipeline(Some(&resources), Some(&store), &limiter, &ada, body)
+            .await
+            .expect_err("neither");
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(error.message(), SENTENCE);
+
+        // Both: the body would have to choose.
+        let mut body = notebook_body("either", "analytics", "report.ipynb", &version);
+        body.sql = "select 1".into();
+        let error = create_pipeline(Some(&resources), Some(&store), &limiter, &ada, body)
+            .await
+            .expect_err("both");
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(error.message(), SENTENCE);
+
+        // An update says the same: it changes one or the other, never both.
+        let resources_with_pipeline = memory_with(
+            &[(
+                "nightly",
+                stored_notebook_pipeline("nightly", "analytics", "report.ipynb", &version),
+            )],
+            &[(
+                "pipeline-analytics",
+                service_principal("pipeline-analytics", "analytics", Some(true)),
+            )],
+        );
+        let mut update = update_notebook_body("report.ipynb", &version);
+        update.sql = "select 1".into();
+        let error = update_pipeline(
+            Some(&resources_with_pipeline),
+            Some(&store),
+            None,
+            &ada,
+            &crate::cluster::namespace(),
+            "nightly",
+            update,
+        )
+        .await
+        .expect_err("an update gives one of them too");
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(error.message(), SENTENCE);
+
+        // A blank statement is no statement: the notebook is what runs.
+        let mut body = notebook_body("blank-sql", "analytics", "report.ipynb", &version);
+        body.sql = "  \n\t ".into();
+        create_pipeline(Some(&resources), Some(&store), &limiter, &ada, body)
+            .await
+            .expect("a blank statement next to a notebook is not a second one");
+        let stored = stored_pipeline(&resources, "blank-sql")
+            .await
+            .expect("written");
+        assert_eq!(stored["spec"]["tasks"][0]["kind"], "notebook");
+    }
+
+    /// One refused notebook body, with the sentence the ticket names.
+    async fn create_refused(
+        resources: &PipelineResources,
+        store: &NotebookStore,
+        limiter: &CreateLimiter,
+        who: &Identity,
+        notebook: NotebookRequest,
+        expected: &str,
+    ) {
+        let printed = format!("{notebook:?}");
+        let mut body = notebook_body("smoke", "analytics", "report.ipynb", "v1");
+        body.notebook = Some(notebook);
+        let error = create_pipeline(Some(resources), Some(store), limiter, who, body)
+            .await
+            .expect_err(&printed);
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST, "{expected}");
+        assert_eq!(error.message(), expected);
+    }
+
+    #[tokio::test]
+    async fn bad_names_and_params_refused_with_sentences() {
+        let resources = analytics_ready();
+        let s3 = FakeS3::start().await;
+        let version = s3.put_raw("analytics/report.ipynb", b"{}", "ada");
+        let store = notebook_store(&s3.base);
+        let ada = who("sub-ada", &["analytics"], false);
+        let limiter = create_limiter();
+
+        for name in [
+            "report",
+            "report.txt",
+            "-report.ipynb",
+            "re/port.ipynb",
+            ".ipynb",
+        ] {
+            create_refused(
+                &resources,
+                &store,
+                &limiter,
+                &ada,
+                NotebookRequest {
+                    name: name.into(),
+                    object_version: version.clone(),
+                    params: BTreeMap::new(),
+                },
+                NOTEBOOK_NAME_RULE,
+            )
+            .await;
+        }
+        create_refused(
+            &resources,
+            &store,
+            &limiter,
+            &ada,
+            NotebookRequest {
+                name: format!("{}.ipynb", "a".repeat(129)),
+                object_version: version.clone(),
+                params: BTreeMap::new(),
+            },
+            NOTEBOOK_NAME_RULE,
+        )
+        .await;
+
+        for name in ["re-gion", "re.gion", "", "1region", "reg ion", "region!"] {
+            create_refused(
+                &resources,
+                &store,
+                &limiter,
+                &ada,
+                NotebookRequest {
+                    name: "report.ipynb".into(),
+                    object_version: version.clone(),
+                    params: BTreeMap::from([(name.to_string(), "eu".to_string())]),
+                },
+                NOTEBOOK_PARAM_NAMES,
+            )
+            .await;
+        }
+
+        let too_many: BTreeMap<String, String> = (0..=MAX_NOTEBOOK_PARAMS)
+            .map(|i| (format!("p{i}"), "1".to_string()))
+            .collect();
+        create_refused(
+            &resources,
+            &store,
+            &limiter,
+            &ada,
+            NotebookRequest {
+                name: "report.ipynb".into(),
+                object_version: version.clone(),
+                params: too_many,
+            },
+            NOTEBOOK_TOO_MANY_PARAMS,
+        )
+        .await;
+
+        create_refused(
+            &resources,
+            &store,
+            &limiter,
+            &ada,
+            NotebookRequest {
+                name: "report.ipynb".into(),
+                object_version: version.clone(),
+                params: BTreeMap::from([(
+                    "region".to_string(),
+                    "x".repeat(MAX_NOTEBOOK_PARAM_VALUE_CHARS + 1),
+                )]),
+            },
+            NOTEBOOK_PARAM_VALUE,
+        )
+        .await;
+        create_refused(
+            &resources,
+            &store,
+            &limiter,
+            &ada,
+            NotebookRequest {
+                name: "report.ipynb".into(),
+                object_version: version.clone(),
+                params: BTreeMap::from([("region".to_string(), "eu\0us".to_string())]),
+            },
+            NOTEBOOK_PARAM_VALUE,
+        )
+        .await;
+
+        // Every value fits, the JSON text does not: 32 × 200 characters is over 4096.
+        let long: BTreeMap<String, String> = (0..MAX_NOTEBOOK_PARAMS)
+            .map(|i| (format!("p{i}"), "y".repeat(200)))
+            .collect();
+        assert!(
+            serde_json::to_string(&long).expect("json").chars().count()
+                > MAX_NOTEBOOK_PARAMS_JSON_CHARS
+        );
+        create_refused(
+            &resources,
+            &store,
+            &limiter,
+            &ada,
+            NotebookRequest {
+                name: "report.ipynb".into(),
+                object_version: version.clone(),
+                params: long,
+            },
+            NOTEBOOK_PARAMS_TOO_LONG,
+        )
+        .await;
+
+        assert!(
+            stored_pipeline(&resources, "smoke").await.is_none(),
+            "a refused body writes nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_version_refused_400() {
+        let resources = analytics_ready();
+        let s3 = FakeS3::start().await;
+        let version = s3.put_raw("analytics/report.ipynb", b"{}", "ada");
+        let store = notebook_store(&s3.base);
+        let ada = who("sub-ada", &["analytics"], false);
+        let limiter = create_limiter();
+        let sentence = "that notebook version does not exist in group analytics";
+
+        // A deleted (or never published) version of a notebook that does exist.
+        for pinned in ["v99".to_string(), "v1 ".to_string(), "v".repeat(129)] {
+            let body = notebook_body("smoke", "analytics", "report.ipynb", &pinned);
+            let error = create_pipeline(Some(&resources), Some(&store), &limiter, &ada, body)
+                .await
+                .expect_err("no such version");
+            assert_eq!(error.status(), StatusCode::BAD_REQUEST, "{pinned:?}");
+            assert_eq!(error.message(), sentence, "{pinned:?}");
+        }
+
+        // A notebook nobody published.
+        let body = notebook_body("smoke", "analytics", "missing.ipynb", &version);
+        let error = create_pipeline(Some(&resources), Some(&store), &limiter, &ada, body)
+            .await
+            .expect_err("no such notebook");
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(error.message(), sentence);
+
+        assert!(
+            stored_pipeline(&resources, "smoke").await.is_none(),
+            "nothing is pinned to bytes that do not exist"
+        );
+        assert!(!s3.is_empty());
+    }
+
+    #[tokio::test]
+    async fn s3_unconfigured_503() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        // No `NOVA_S3_*`: Nova cannot prove the version exists, so it schedules nothing.
+        let body = notebook_body("smoke", "analytics", "report.ipynb", "v1");
+        let error = create_pipeline(Some(&resources), None, &create_limiter(), &ada, body)
+            .await
+            .expect_err("no store");
+        assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.message(), "notebook storage is not configured");
+        assert!(stored_pipeline(&resources, "smoke").await.is_none());
+
+        // A statement pipeline needs no store at all: nothing changed for it.
+        create_pipeline(
+            Some(&resources),
+            None,
+            &create_limiter(),
+            &ada,
+            create_body("statement", "analytics", "select 1"),
+        )
+        .await
+        .expect("a statement schedule still works without S3");
+    }
+
+    #[tokio::test]
+    async fn foreign_group_403() {
+        let resources = analytics_ready();
+        let s3 = FakeS3::start().await;
+        let version = s3.put_raw("finance/budget.ipynb", b"{}", "fin");
+        let store = notebook_store(&s3.base);
+        let ada = who("sub-ada", &["analytics"], false);
+
+        // The owner group must be one of the caller's own — an administrator included.
+        for caller in [&ada, &admin()] {
+            let body = notebook_body("their-budget", "finance", "budget.ipynb", &version);
+            let error = create_pipeline(
+                Some(&resources),
+                Some(&store),
+                &create_limiter(),
+                caller,
+                body,
+            )
+            .await
+            .expect_err("another group's notebook");
+            assert_eq!(error.status(), StatusCode::FORBIDDEN);
+            assert_eq!(error.message(), "you are not a member of the group finance");
+        }
+        assert!(stored_pipeline(&resources, "their-budget").await.is_none());
+
+        // A notebook pipeline of another group is hidden: 404, exactly like an absent one,
+        // so a schedule never tells an outsider that the notebook exists.
+        let resources = memory_with(
+            &[(
+                "budget",
+                stored_notebook_pipeline("budget", "finance", "budget.ipynb", &version),
+            )],
+            &[],
+        );
+        let error = update_pipeline(
+            Some(&resources),
+            Some(&store),
+            None,
+            &ada,
+            &crate::cluster::namespace(),
+            "budget",
+            update_notebook_body("budget.ipynb", &version),
+        )
+        .await
+        .expect_err("hidden");
+        assert_eq!(error.status(), StatusCode::NOT_FOUND);
+        assert_eq!(error.message(), "no such pipeline");
+    }
+
+    #[tokio::test]
+    async fn update_changes_version_and_params_not_kind() {
+        let s3 = FakeS3::start().await;
+        let first = s3.put_raw("analytics/report.ipynb", b"{\"v\":1}", "ada");
+        let second = s3.put_raw("analytics/report.ipynb", b"{\"v\":2}", "ada");
+        let store = notebook_store(&s3.base);
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        let namespace = crate::cluster::namespace();
+
+        let mut body = notebook_body("nightly-report", "analytics", "report.ipynb", &first);
+        body.notebook.as_mut().expect("notebook").params =
+            BTreeMap::from([("days".to_string(), "1".to_string())]);
+        create_pipeline(
+            Some(&resources),
+            Some(&store),
+            &create_limiter(),
+            &ada,
+            body,
+        )
+        .await
+        .expect("create");
+
+        // The version and the parameters change; the notebook and the kind stay.
+        let mut update = update_notebook_body("report.ipynb", &second);
+        update.notebook.as_mut().expect("notebook").params = BTreeMap::from([
+            ("region".to_string(), "eu".to_string()),
+            ("days".to_string(), "7".to_string()),
+        ]);
+        update.schedule = Some(ScheduleRequest {
+            cron: "30 6 * * mon-fri".into(),
+            timezone: "UTC".into(),
+        });
+        let view = update_pipeline(
+            Some(&resources),
+            Some(&store),
+            None,
+            &ada,
+            &namespace,
+            "nightly-report",
+            update,
+        )
+        .await
+        .expect("the update succeeds");
+        assert_eq!(view.schedule.as_deref(), Some("30 6 * * mon-fri (UTC)"));
+
+        let stored = stored_pipeline(&resources, "nightly-report")
+            .await
+            .expect("written");
+        assert_eq!(
+            stored["spec"]["tasks"][0],
+            json!({
+                "name": "run",
+                "kind": "notebook",
+                "config": {
+                    "notebook": "report.ipynb",
+                    "objectVersion": second,
+                    "params": "{\"days\":\"7\",\"region\":\"eu\"}",
+                },
+            }),
+            "the whole notebook state is written, and the kind does not change"
+        );
+        assert!(
+            stored["spec"]["tasks"][0].get("sql").is_none(),
+            "a notebook pipeline never grows a statement: {stored}"
+        );
+
+        // `sql` on a notebook pipeline: the schema would have to change, so it is refused.
+        let error = update_pipeline(
+            Some(&resources),
+            Some(&store),
+            None,
+            &ada,
+            &namespace,
+            "nightly-report",
+            update_body("select 2"),
+        )
+        .await
+        .expect_err("a notebook pipeline runs a notebook");
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(error.message(), NOTEBOOK_PIPELINE);
+        assert_eq!(
+            stored_pipeline(&resources, "nightly-report")
+                .await
+                .expect("unchanged")["spec"]["tasks"][0]["config"]["objectVersion"],
+            second,
+            "a refused update changes nothing"
+        );
+
+        // And a statement pipeline does not turn into a notebook one.
+        let mut statement = create_body("nightly-sql", "analytics", "select 1");
+        statement.schedule = None;
+        create_pipeline(
+            Some(&resources),
+            Some(&store),
+            &create_limiter(),
+            &ada,
+            statement,
+        )
+        .await
+        .expect("create a statement pipeline");
+        let error = update_pipeline(
+            Some(&resources),
+            Some(&store),
+            None,
+            &ada,
+            &namespace,
+            "nightly-sql",
+            update_notebook_body("report.ipynb", &second),
+        )
+        .await
+        .expect_err("a statement pipeline runs a statement");
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(error.message(), STATEMENT_PIPELINE);
+        assert_eq!(
+            stored_pipeline(&resources, "nightly-sql")
+                .await
+                .expect("unchanged")["spec"]["tasks"][0]["sql"],
+            "select 1"
+        );
+    }
+
+    #[tokio::test]
+    async fn detail_returns_notebook_fields() {
+        let version = "v-7f3a";
+        let resources = memory_with(
+            &[(
+                "nightly",
+                stored_notebook_pipeline("nightly", "analytics", "report.ipynb", version),
+            )],
+            &[],
+        );
+        let (airflow, _fake) = fake_airflow::start().await;
+        let ada = who("sub-ada", &["analytics"], false);
+        let namespace = crate::cluster::namespace();
+
+        let detail = pipeline_detail(
+            Some(&resources),
+            Some(&airflow),
+            &ada,
+            &namespace,
+            "nightly",
+        )
+        .await
+        .expect("the detail is readable");
+        assert_eq!(
+            detail.pipeline.tasks,
+            vec![TaskSpecView {
+                name: "run".into(),
+                kind: "notebook".into(),
+                sql: None,
+                notebook: Some("report.ipynb".into()),
+                object_version: Some(version.into()),
+                notebook_params: Some(BTreeMap::new()),
+            }],
+            "the edit dialog gets the version and the parameters it must prefill"
+        );
+
+        // The list stays small: the fields are the detail's, like `sql` since #218.
+        let list = list_pipelines(Some(&resources), Some(&airflow), &ada)
+            .await
+            .expect("the list succeeds");
+        assert_eq!(
+            list.pipelines[0].tasks,
+            vec![TaskSpecView {
+                name: "run".into(),
+                kind: "notebook".into(),
+                sql: None,
+                notebook: None,
+                object_version: None,
+                notebook_params: None,
+            }]
+        );
+
+        // A statement pipeline keeps carrying its `sql` and none of the notebook fields.
+        let resources = memory(&[("smoke", nova_pipeline("smoke", "analytics"))]);
+        let detail = pipeline_detail(Some(&resources), Some(&airflow), &ada, &namespace, "smoke")
+            .await
+            .expect("the detail is readable");
+        assert_eq!(
+            detail.pipeline.tasks,
+            vec![TaskSpecView {
+                name: "run".into(),
+                kind: "sql".into(),
+                sql: Some("select 1".into()),
+                notebook: None,
+                object_version: None,
+                notebook_params: None,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn audit_has_no_param_values() {
+        const CANARY: &str = "CANARY-param-4b1d";
+        const SUB: &str = "sub-audit-237";
+        let s3 = FakeS3::start().await;
+        let version = s3.put_raw("analytics/report.ipynb", b"{}", "ada");
+        let store = notebook_store(&s3.base);
+        let resources = analytics_ready();
+        let ada = who(SUB, &["analytics"], false);
+        let namespace = crate::cluster::namespace();
+        let _ = audit::test_sink::take_for(SUB);
+
+        let mut body = notebook_body("nightly-report", "analytics", "report.ipynb", &version);
+        body.notebook.as_mut().expect("notebook").params = BTreeMap::from([
+            ("region".to_string(), CANARY.to_string()),
+            ("days".to_string(), "7".to_string()),
+        ]);
+        create_pipeline(
+            Some(&resources),
+            Some(&store),
+            &create_limiter(),
+            &ada,
+            body,
+        )
+        .await
+        .expect("create");
+
+        let mut update = update_notebook_body("report.ipynb", &version);
+        update.notebook.as_mut().expect("notebook").params =
+            BTreeMap::from([("region".to_string(), CANARY.to_string())]);
+        update_pipeline(
+            Some(&resources),
+            Some(&store),
+            None,
+            &ada,
+            &namespace,
+            "nightly-report",
+            update,
+        )
+        .await
+        .expect("update");
+
+        let records = audit::test_sink::take_for(SUB);
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.action.as_str())
+                .collect::<Vec<_>>(),
+            ["create", "update"]
+        );
+        for record in &records {
+            assert_eq!(record.kind, "notebook", "the audit says what it runs");
+            assert_eq!(record.notebook_group.as_deref(), Some("analytics"));
+            assert_eq!(record.notebook.as_deref(), Some("report.ipynb"));
+            assert_eq!(record.version.as_deref(), Some(version.as_str()));
+            assert_eq!(
+                record.statement_chars,
+                Some(0),
+                "a notebook has no statement to measure"
+            );
+        }
+        assert_eq!(records[0].schedule.as_deref(), Some("0 3 * * *"));
+        assert_eq!(
+            records[1].schedule, None,
+            "the update's body carries no schedule, so it removes it"
+        );
+        let serialized = format!("{records:?}");
+        assert!(
+            !serialized.contains(CANARY),
+            "no parameter value is ever audited: {serialized}"
+        );
+        assert!(
+            !serialized.contains("region"),
+            "not even a parameter name: {serialized}"
+        );
+        let stored = stored_pipeline(&resources, "nightly-report")
+            .await
+            .expect("written");
+        assert!(
+            stored["spec"]["tasks"][0]["config"]["params"]
+                .as_str()
+                .expect("params")
+                .contains(CANARY),
+            "the value is in the resource, where papermill reads it"
         );
     }
 }

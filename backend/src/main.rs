@@ -43,6 +43,7 @@
 //!   PUT  /api/notebooks/{group}/{name}      — publish a notebook (outputs stripped)
 //!   GET  /api/notebooks                     — the caller's groups' notebooks
 //!   GET  /api/notebooks/{group}/{name}/versions — one notebook's versions
+//!   GET  /api/notebooks/{group}/{name}/parameters — one version's parameters (Schedule, #237)
 //!
 //! `NOVA_DEMO=1` serves an in-memory lakehouse so the UI runs with no cluster.
 //! `NOVA_AUTH_MODE=oidc` puts every `/api/*` route except `/api/health` and

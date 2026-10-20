@@ -23,7 +23,9 @@
 //!   The stored bytes are compact JSON, and the answer's `sha256` identifies them.
 //! - **Parameters** are the `name = literal` lines of the first cell tagged
 //!   `parameters` (papermill's convention): at most 32, the default exactly as it would
-//!   run (a string literal without its quotes), never evaluated.
+//!   run (a string literal without its quotes), never evaluated. The Schedule dialog
+//!   reads them for one pinned version with `GET …/parameters` (#237), so it offers
+//!   exactly the form the bytes it will run declare.
 //! - **Visibility** is owner-group scoped: a person lists and versions the notebooks of
 //!   their own groups; an administrator gets no wider view here, because the platform's
 //!   administrators are not automatically members of a tenant's group.
@@ -47,7 +49,7 @@ use std::time::{Duration, Instant};
 
 use axum::{
     Extension, Json, Router,
-    extract::{Path, Request, State},
+    extract::{Path, Query, Request, State},
     http::{HeaderValue, StatusCode, header},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -57,7 +59,7 @@ use futures::stream::{self, StreamExt};
 use instant_xml::FromXml;
 use percent_encoding::{AsciiSet, CONTROLS, percent_decode_str, utf8_percent_encode};
 use rusty_s3::S3Action;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use url::Url;
 
@@ -265,6 +267,34 @@ impl NotebookStore {
                 .unwrap_or_default(),
             sha256: text("x-amz-meta-sha256").unwrap_or_default(),
         })
+    }
+
+    /// One object version's bytes and its version id: `version: None` reads the latest.
+    /// The version comes from the response, so a read of the latest still names the bytes
+    /// it answered (#237). A body over [`MAX_NOTEBOOK_BYTES`] is refused rather than
+    /// buffered: the bucket is shared, and a foreign key must not become a 5 MiB read.
+    async fn get(&self, key: &str, version: Option<&str>) -> Result<(Vec<u8>, String), StoreError> {
+        let mut action = self.bucket.get_object(Some(&self.credentials), key);
+        if let Some(version) = version {
+            action.query_mut().insert("versionId", version.to_string());
+        }
+        let url = action.sign(PRESIGN_TTL);
+        let response = self.send(self.http.get(url)).await?;
+        let object_version = version_id(&response).ok_or(StoreError::Unversioned)?;
+        let too_large = response
+            .headers()
+            .get("content-length")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+            .is_some_and(|size| size > MAX_NOTEBOOK_BYTES as u64);
+        if too_large {
+            return Err(StoreError::Malformed);
+        }
+        let body = response.bytes().await.map_err(|_| StoreError::Malformed)?;
+        if body.len() > MAX_NOTEBOOK_BYTES {
+            return Err(StoreError::Malformed);
+        }
+        Ok((body.to_vec(), object_version))
     }
 
     /// Every object key under `prefix`, latest version only (one page after another, up
@@ -491,6 +521,35 @@ fn store_fail(error: StoreError) -> Fail {
     }
 }
 
+/// Whether `version` of `group/name` exists in the store — the check a notebook schedule
+/// makes before it pins one (stardelt-nova#237). `Ok(false)` means the store answered
+/// `404`: the version was never published, or it is gone. `Err` is the sentence the
+/// caller sees: unset `NOVA_S3_*` is 503, an S3 that is down or refuses is 502.
+pub(crate) async fn head_version(
+    store: Option<&NotebookStore>,
+    group: &str,
+    name: &str,
+    version: &str,
+) -> Result<bool, Fail> {
+    let store = store.ok_or_else(no_storage)?;
+    // No such key can exist: the caller's own rules already refuse these names, and a
+    // version with whitespace in it could not have been written by a publish.
+    if !valid_group(group) || !valid_name(name) || !object_version_ok(version) {
+        return Ok(false);
+    }
+    match store.head(&object_key(group, name), Some(version)).await {
+        Ok(_) => Ok(true),
+        Err(StoreError::Refused(404)) => Ok(false),
+        Err(error) => Err(store_fail(error)),
+    }
+}
+
+/// `^\S{1,128}$`: the object-version shape the CRD accepts (`config.objectVersion`).
+pub(crate) fn object_version_ok(version: &str) -> bool {
+    let count = version.chars().count();
+    (1..=128).contains(&count) && !version.chars().any(char::is_whitespace)
+}
+
 struct HeadObject {
     object_version: String,
     size: u64,
@@ -585,14 +644,34 @@ pub struct NotebookVersion {
     pub sha256: String,
 }
 
+/// `GET /api/notebooks/{group}/{name}/parameters`: the parameters of one pinned version
+/// (stardelt-nova#237).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct NotebookParameters {
+    /// The `name = literal` lines of the first cell tagged `parameters`, in order, at most
+    /// 32; empty when no cell carries the tag.
+    pub parameters: Vec<NotebookParameter>,
+    /// The version the answer describes — the one asked for, or the latest when the query
+    /// named none. A schedule pins this exact id.
+    pub object_version: String,
+}
+
+/// The `?version=` of the parameters route: omitted means the latest version.
+#[derive(Debug, Clone, Default, Deserialize, utoipa::IntoParams)]
+pub struct ParametersQuery {
+    pub version: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Validation
 // ---------------------------------------------------------------------------
 
 /// `^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}\.ipynb$`, without a regex dependency: the
 /// suffix is literal, the stem is 1 to 128 ASCII characters, and it cannot contain a
-/// slash (so a name can never escape its group's prefix).
-fn valid_name(name: &str) -> bool {
+/// slash (so a name can never escape its group's prefix). Shared with the schedule rules
+/// (`pipelines.rs`), so a notebook a publish accepts is one a schedule can name.
+pub(crate) fn valid_name(name: &str) -> bool {
     let Some(stem) = name.strip_suffix(".ipynb") else {
         return false;
     };
@@ -677,6 +756,11 @@ fn too_many_publishes() -> Fail {
         StatusCode::TOO_MANY_REQUESTS,
         "too many notebooks published this hour; wait before publishing another",
     )
+}
+
+/// The version the caller named is not in the store (#237): never published, or gone.
+fn no_such_version() -> Fail {
+    Fail::new(StatusCode::NOT_FOUND, "no such notebook version")
 }
 
 // ---------------------------------------------------------------------------
@@ -814,6 +898,7 @@ pub(crate) fn router() -> Router<Arc<AppState>> {
         .route("/notebooks", get(list))
         .route("/notebooks/{group}/{name}", put(publish))
         .route("/notebooks/{group}/{name}/versions", get(versions))
+        .route("/notebooks/{group}/{name}/parameters", get(parameters))
         .route_layer(axum::middleware::from_fn(no_store))
 }
 
@@ -1022,6 +1107,82 @@ pub(crate) async fn versions(
     }
 }
 
+/// `GET /api/notebooks/{group}/{name}/parameters`: the parameters of one version, so the
+/// Schedule dialog can offer the form the notebook declares (stardelt-nova#237).
+#[utoipa::path(
+    get,
+    path = "/api/notebooks/{group}/{name}/parameters",
+    tag = "public",
+    description = "The parameters of one published version of a notebook, read from the stored bytes: the `name = literal` lines of the first cell tagged `parameters`, in order, at most 32, defaults as text and never evaluated. `?version=<id>` names the immutable version; omitted, the latest is read and its id answered. Needs a member of `{group}` (403 `you are not a member of the group <g>`; administrators are not exempt). An unknown version is 404 `no such notebook version`. The answer carries `parameters` and the `objectVersion` it describes — a schedule pins that id. Unset `NOVA_S3_*` is 503 `notebook storage is not configured`; an S3 that is down or refuses is 502. Answers `Cache-Control: no-store`.",
+    params(
+        ("group" = String, Path, description = "One of the caller's groups"),
+        ("name" = String, Path, description = "Notebook file name, ending in .ipynb"),
+        ParametersQuery,
+    ),
+    responses(
+        (status = 200, description = "The parameters and the version they belong to", body = NotebookParameters),
+        (status = 400, description = "Bad name", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "Not a member of the group", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such notebook version", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The notebook store did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "Notebook storage is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn parameters(
+    State(state): State<Arc<AppState>>,
+    principal: Option<Extension<Principal>>,
+    Path((group, name)): Path<(String, String)>,
+    Query(query): Query<ParametersQuery>,
+) -> Response {
+    let Some(store) = state.notebooks.as_ref() else {
+        return no_storage().into_response();
+    };
+    let Some(Extension(principal)) = principal else {
+        return sign_in_again().into_response();
+    };
+    if !principal.identity.groups.iter().any(|g| g == &group) {
+        return forbidden_group(&group).into_response();
+    }
+    if !valid_group(&group) {
+        return Fail::new(
+            StatusCode::BAD_REQUEST,
+            "the group name cannot be used as a notebook prefix",
+        )
+        .into_response();
+    }
+    if !valid_name(&name) {
+        return bad_name().into_response();
+    }
+    let version = query
+        .version
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    if version.is_some_and(|version| !object_version_ok(version)) {
+        // A version with whitespace or over 128 characters never came from a publish.
+        return no_such_version().into_response();
+    }
+
+    let (bytes, object_version) = match store.get(&object_key(&group, &name), version).await {
+        Ok(read) => read,
+        Err(StoreError::Refused(404)) => return no_such_version().into_response(),
+        Err(error) => return store_fail(error).into_response(),
+    };
+    // The stored bytes are Nova's own compact JSON (outputs already stripped), so this is a
+    // parse, not a validation: a key something else wrote is not a notebook here, and the
+    // store's answer is what was unexpected.
+    let notebook: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(notebook) => notebook,
+        Err(_) => return store_fail(StoreError::Malformed).into_response(),
+    };
+    Json(NotebookParameters {
+        parameters: parameters_of(&notebook),
+        object_version,
+    })
+    .into_response()
+}
+
 /// The caller's groups, deduplicated and sorted, for a deterministic listing order
 /// before the rows are sorted by time.
 fn caller_groups(identity: &Identity) -> Vec<String> {
@@ -1047,63 +1208,50 @@ async fn read_body(request: Request) -> Result<Vec<u8>, Fail> {
     }
 }
 
+/// The fake S3 gateway the notebook tests use (stardelt-nova#225), shared with the
+/// schedule tests in `pipelines.rs` (#237): PUT, HEAD, GET of one version, ListObjectsV2
+/// and ListObjectVersions, all in memory.
 #[cfg(test)]
-mod tests {
+pub(crate) mod fake {
     use super::*;
 
     use std::collections::HashMap as Map;
 
-    use axum::body::{Body, Bytes};
+    use axum::body::Bytes;
     use axum::extract::DefaultBodyLimit;
-    use axum::http::{HeaderMap, Method, Request as HttpRequest, Uri};
+    use axum::http::{HeaderMap, Method, Uri};
     use axum::routing::any;
-    use jsonwebtoken::jwk::Jwk;
-    use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
-    use serde_json::{Value, json};
-    use tokio::sync::OnceCell;
-    use tower::ServiceExt;
-
-    use crate::auth::{
-        AuthError, AuthState, BearerValidator, BoxFuture, ClaimConfig, Expect, OidcConfig, Provider,
-    };
-    use crate::cluster::WorkloadCache;
-    use crate::demo::DemoState;
-
-    const TEST_KEY_DER: &[u8] = include_bytes!("testdata/test-rsa-pkcs1.der");
-    const TEST_KEY_N: &str = include_str!("testdata/test-rsa-n.txt");
-    const ISSUER: &str = "https://id.example.com/realms/stardelt";
-    const CLIENT_ID: &str = "nova";
 
     // -----------------------------------------------------------------------
     // A fake S3 gateway: PUT, HEAD, ListObjectsV2 and ListObjectVersions
     // -----------------------------------------------------------------------
 
     #[derive(Clone)]
-    struct FakeS3 {
-        state: Arc<Mutex<FakeState>>,
-        base: String,
+    pub(crate) struct FakeS3 {
+        pub(crate) state: Arc<Mutex<FakeState>>,
+        pub(crate) base: String,
     }
 
     #[derive(Default)]
-    struct FakeState {
-        objects: Vec<StoredObject>,
-        next: u64,
+    pub(crate) struct FakeState {
+        pub(crate) objects: Vec<StoredObject>,
+        pub(crate) next: u64,
     }
 
     #[derive(Clone)]
-    struct StoredObject {
-        key: String,
-        version: String,
-        body: Vec<u8>,
-        content_type: String,
-        uploaded_by: String,
-        sha256: String,
-        last_modified: String,
-        seq: u64,
+    pub(crate) struct StoredObject {
+        pub(crate) key: String,
+        pub(crate) version: String,
+        pub(crate) body: Vec<u8>,
+        pub(crate) content_type: String,
+        pub(crate) uploaded_by: String,
+        pub(crate) sha256: String,
+        pub(crate) last_modified: String,
+        pub(crate) seq: u64,
     }
 
     impl FakeS3 {
-        async fn start() -> Self {
+        pub(crate) async fn start() -> Self {
             let state = Arc::new(Mutex::new(FakeState::default()));
             let app = Router::new()
                 .fallback(any(fake_s3))
@@ -1121,7 +1269,7 @@ mod tests {
         }
 
         /// Write a version directly, for tests that only need a listing to exist.
-        fn put_raw(&self, key: &str, body: &[u8], uploaded_by: &str) -> String {
+        pub(crate) fn put_raw(&self, key: &str, body: &[u8], uploaded_by: &str) -> String {
             let mut state = self.state.lock().expect("fake S3 state");
             state.next += 1;
             let seq = state.next;
@@ -1139,11 +1287,11 @@ mod tests {
             version
         }
 
-        fn objects(&self) -> Vec<StoredObject> {
+        pub(crate) fn objects(&self) -> Vec<StoredObject> {
             self.state.lock().expect("fake S3 state").objects.clone()
         }
 
-        fn object(&self, key: &str) -> StoredObject {
+        pub(crate) fn object(&self, key: &str) -> StoredObject {
             self.objects()
                 .into_iter()
                 .rev()
@@ -1151,7 +1299,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("no stored object {key}"))
         }
 
-        fn is_empty(&self) -> bool {
+        pub(crate) fn is_empty(&self) -> bool {
             self.state.lock().expect("fake S3 state").objects.is_empty()
         }
     }
@@ -1247,6 +1395,33 @@ mod tests {
             return (StatusCode::OK, answer).into_response();
         }
 
+        if method == Method::GET && !key.is_empty() && !query.contains_key("versions") {
+            // One object version (the parameters route, #237): the body and the version id
+            // a real gateway answers in `x-amz-version-id`.
+            let state = state.lock().expect("fake S3 state");
+            let wanted = query.get("versionId");
+            let object = state.objects.iter().rev().find(|object| {
+                object.key == key && wanted.is_none_or(|version| object.version == *version)
+            });
+            let Some(object) = object else {
+                return StatusCode::NOT_FOUND.into_response();
+            };
+            let mut answer = HeaderMap::new();
+            answer.insert(
+                "x-amz-version-id",
+                HeaderValue::from_str(&object.version).expect("version header"),
+            );
+            answer.insert(
+                "content-length",
+                HeaderValue::from_str(&object.body.len().to_string()).expect("size header"),
+            );
+            answer.insert(
+                "content-type",
+                HeaderValue::from_str(&object.content_type).expect("type header"),
+            );
+            return (StatusCode::OK, answer, object.body.clone()).into_response();
+        }
+
         if method == Method::GET && query.contains_key("versions") {
             let prefix = query.get("prefix").cloned().unwrap_or_default();
             let state = state.lock().expect("fake S3 state");
@@ -1319,11 +1494,7 @@ mod tests {
         StatusCode::METHOD_NOT_ALLOWED.into_response()
     }
 
-    // -----------------------------------------------------------------------
-    // App and request helpers
-    // -----------------------------------------------------------------------
-
-    fn notebook_store(base: &str) -> NotebookStore {
+    pub(crate) fn notebook_store(base: &str) -> NotebookStore {
         NotebookStore::new(
             reqwest::Client::new(),
             NotebookConfig {
@@ -1335,6 +1506,36 @@ mod tests {
         )
         .expect("notebook store")
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use axum::body::Body;
+    use axum::http::Request as HttpRequest;
+    use jsonwebtoken::jwk::Jwk;
+    use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+    use serde_json::{Value, json};
+    use tokio::sync::OnceCell;
+    use tower::ServiceExt;
+
+    use crate::auth::{
+        AuthError, AuthState, BearerValidator, BoxFuture, ClaimConfig, Expect, OidcConfig, Provider,
+    };
+    use crate::cluster::WorkloadCache;
+    use crate::demo::DemoState;
+
+    use super::fake::{FakeS3, notebook_store};
+
+    const TEST_KEY_DER: &[u8] = include_bytes!("testdata/test-rsa-pkcs1.der");
+    const TEST_KEY_N: &str = include_str!("testdata/test-rsa-n.txt");
+    const ISSUER: &str = "https://id.example.com/realms/stardelt";
+    const CLIENT_ID: &str = "nova";
+
+    // -----------------------------------------------------------------------
+    // App and request helpers
+    // -----------------------------------------------------------------------
 
     fn state(store: Option<NotebookStore>) -> Arc<AppState> {
         Arc::new(AppState {
@@ -1702,6 +1903,143 @@ mod tests {
         assert_eq!(answer["parameters"], json!([]));
     }
 
+    /// stardelt-nova#237: the Schedule dialog reads the parameters of the exact version it
+    /// will pin, and only for its own groups.
+    #[tokio::test]
+    async fn parameters_route_parses_the_tagged_cell_and_filters_groups() {
+        let s3 = FakeS3::start().await;
+        let state = state(Some(notebook_store(&s3.base)));
+        let alice = app(
+            Arc::clone(&state),
+            Some(principal("alice", &["analytics"], false)),
+        );
+
+        fn tagged(source: &str) -> Value {
+            let mut cell = code_cell(json!(source));
+            cell["metadata"]["tags"] = json!(["parameters"]);
+            cell
+        }
+
+        let first_notebook = notebook(vec![
+            json!({"cell_type": "markdown", "metadata": {}, "source": ["# Report\n"]}),
+            tagged("region = \"eu\"\ndays = 7\n# ignored = 1\n"),
+        ]);
+        let (status, published) = call(
+            &alice,
+            "PUT",
+            "/notebooks/analytics/report.ipynb",
+            Some(&body(&first_notebook)),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{published}");
+        let first = published["objectVersion"]
+            .as_str()
+            .expect("the first version")
+            .to_string();
+
+        // A later publish of the same name: a different version, different parameters.
+        let second_notebook = notebook(vec![tagged("region = \"us\"\n")]);
+        let (status, published) = call(
+            &alice,
+            "PUT",
+            "/notebooks/analytics/report.ipynb",
+            Some(&body(&second_notebook)),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{published}");
+        let second = published["objectVersion"]
+            .as_str()
+            .expect("the second version")
+            .to_string();
+        assert_ne!(first, second);
+
+        // No `version`: the latest, and the answer names it.
+        let (status, answer) = call(
+            &alice,
+            "GET",
+            "/notebooks/analytics/report.ipynb/parameters",
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        assert_eq!(answer["objectVersion"], second.as_str());
+        assert_eq!(
+            answer["parameters"],
+            json!([{"name": "region", "default": "us"}])
+        );
+
+        // A pinned version: exactly its parameters, never the latest one's.
+        let (status, answer) = call(
+            &alice,
+            "GET",
+            &format!("/notebooks/analytics/report.ipynb/parameters?version={first}"),
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        assert_eq!(answer["objectVersion"], first.as_str());
+        assert_eq!(
+            answer["parameters"],
+            json!([
+                {"name": "region", "default": "eu"},
+                {"name": "days", "default": "7"},
+            ]),
+            "the tagged cell's assignments, in order, the comment skipped"
+        );
+
+        // An unknown version is a 404, never an empty list a schedule could pin.
+        for version in ["nope", "v999"] {
+            let uri = format!("/notebooks/analytics/report.ipynb/parameters?version={version}");
+            let (status, answer) = call(&alice, "GET", &uri, None, &[]).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{version}: {answer}");
+            assert_eq!(answer["error"], "no such notebook version");
+        }
+
+        // A notebook nobody published is the same 404.
+        let (status, _) = call(
+            &alice,
+            "GET",
+            "/notebooks/analytics/missing.ipynb/parameters",
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // Another group's notebook stays hidden: 403 here, and a schedule of it is refused
+        // with the same sentence, so its bytes and its parameters never leak.
+        let (status, answer) = call(
+            &alice,
+            "GET",
+            "/notebooks/other/secret.ipynb/parameters",
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(answer["error"], "you are not a member of the group other");
+
+        // An administrator gets no wider view: being one does not make them a member.
+        let admin = app(
+            state,
+            Some(principal("root", &["analytics", "stardelt-admins"], true)),
+        );
+        let (status, answer) = call(
+            &admin,
+            "GET",
+            "/notebooks/other/secret.ipynb/parameters",
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(answer["error"], "you are not a member of the group other");
+    }
+
     #[tokio::test]
     async fn list_and_versions_filtered_to_own_groups() {
         let s3 = FakeS3::start().await;
@@ -1836,6 +2174,18 @@ mod tests {
             &app,
             "GET",
             "/notebooks/analytics/x.ipynb/versions",
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(
+            (status, answer),
+            (StatusCode::SERVICE_UNAVAILABLE, expected.clone())
+        );
+        let (status, answer) = call(
+            &app,
+            "GET",
+            "/notebooks/analytics/x.ipynb/parameters?version=v1",
             None,
             &[],
         )
