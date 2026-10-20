@@ -798,6 +798,8 @@ export function DeleteConnectionDialog({
   const consequence = connection.scope === 'personal'
     ? 'Notebooks that use it will fail.'
     : 'Notebooks that use it will fail. Pipelines and catalogs that use it will stop working.'
+  // The administrator's incident case (#204): say plainly that this row belongs to someone else.
+  const otherGroup = connection.scope === 'group' && connection.member === false
 
   async function remove() {
     if (submitting) return
@@ -827,7 +829,12 @@ export function DeleteConnectionDialog({
         </>
       }
     >
-      <p className="text-sm text-text-dim">{consequence}</p>
+      <div className="space-y-2">
+        {otherGroup && (
+          <p className="text-sm text-text-dim">You are deleting a connection of a group you are not in.</p>
+        )}
+        <p className="text-sm text-text-dim">{consequence}</p>
+      </div>
       {error && (
         <div role="alert" className="mt-3 rounded-[10px] border border-red-500/40 bg-red-500/10 p-3 text-sm text-bad break-words">
           {error}

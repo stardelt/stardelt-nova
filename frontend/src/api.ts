@@ -275,6 +275,13 @@ export type Connection = {
   config: Record<string, string>
   /** Names of the secret fields; the values are never sent. */
   secretKeys: string[]
+  /**
+   * Whether the caller belongs to the connection's scope. Always true for personal and managed
+   * rows, and for a group row of one of the caller's own groups. `false` only on a group row an
+   * administrator sees because they are an administrator (stardelt-nova#203): they may delete it
+   * and read it through break-glass, but they cannot rotate it.
+   */
+  member: boolean
   /** ISO time of the last rotation. */
   lastRotated?: string
   version: number
