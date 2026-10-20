@@ -244,11 +244,23 @@ pub(crate) struct Fail {
 }
 
 impl Fail {
-    fn new(status: StatusCode, message: impl Into<String>) -> Self {
+    pub(crate) fn new(status: StatusCode, message: impl Into<String>) -> Self {
         Self {
             status,
             message: message.into(),
         }
+    }
+
+    /// The status, for a test that inspects a refusal without serialising it.
+    #[cfg(test)]
+    pub(crate) fn status(&self) -> StatusCode {
+        self.status
+    }
+
+    /// The sentence, for a test that inspects a refusal.
+    #[cfg(test)]
+    pub(crate) fn message(&self) -> &str {
+        &self.message
     }
 }
 
@@ -1145,6 +1157,16 @@ impl SignedIn {
             .store
             .as_ref()
             .expect("the extractor checked the store")
+    }
+
+    /// The application state, for a route (like the pipelines one) that needs another client.
+    pub(crate) fn state(&self) -> &Arc<AppState> {
+        &self.state
+    }
+
+    /// Who is signed in; the pipelines routes check the owner group against these groups.
+    pub(crate) fn identity(&self) -> &Identity {
+        &self.identity
     }
 }
 

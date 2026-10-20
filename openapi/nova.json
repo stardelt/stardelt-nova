@@ -1219,6 +1219,357 @@
           }
         }
       }
+    },
+    "/api/pipelines": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "description": "The pipelines the caller may see: their groups' pipelines, and every pipeline for an administrator. A pipeline without `spec.ownerGroup` is administrators-only. `state` is one of `loading`, `paused`, `running`, `failed`, `succeeded`, `idle`; `loaded` is false while Airflow has no DAG for a new pipeline yet. Answers `Cache-Control: no-store`.",
+        "operationId": "list",
+        "responses": {
+          "200": {
+            "description": "The visible pipelines, sorted by name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PipelineListResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token to sign in with",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The scheduler or the cluster did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No cluster connection, or the scheduler is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/pipelines/{namespace}/{name}": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "description": "One pipeline: the list fields, the latest 20 runs, and the resource's `params` and `retries`. A pipeline whose DAG does not exist yet answers 200 with `loaded: false` and `state: \"loading\"`. A pipeline of another group answers 404. History of a deleted pipeline is not offered in this version: without the resource the answer is 404.",
+        "operationId": "detail",
+        "parameters": [
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "The Pipeline's namespace (Nova's own)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Pipeline name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The pipeline, its latest runs, params and retries",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PipelineDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token to sign in with",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such pipeline for this caller",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The scheduler or the cluster did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No cluster connection, or the scheduler is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/pipelines/{namespace}/{name}/runs/{run_id}": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "description": "One run of a pipeline with its task instances. The run id is looked up through this pipeline's DAG id, so a run id of another pipeline answers 404. Answers `Cache-Control: no-store`.",
+        "operationId": "run",
+        "parameters": [
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "The Pipeline's namespace (Nova's own)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Pipeline name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "run_id",
+            "in": "path",
+            "description": "Airflow's run id, for example `manual__2026-10-20T07:23:50.608876+00:00`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The run and its tasks",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token to sign in with",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such pipeline for this caller, or no such run",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The scheduler or the cluster did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No cluster connection, or the scheduler is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/pipelines/{namespace}/{name}/runs/{run_id}/tasks/{task_id}/logs": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "description": "One page of a task's log: at most 2000 lines and 512 KiB, ANSI escapes removed, the `::group::` source marker dropped (it names internal object-store paths and is never returned). `try` defaults to the task's last attempt; `token` is the `nextToken` of the previous answer. Every read writes one audit line with user, pipeline, run and task — never the content. Answers `Cache-Control: no-store`.",
+        "operationId": "logs",
+        "parameters": [
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "The Pipeline's namespace (Nova's own)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Pipeline name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "run_id",
+            "in": "path",
+            "description": "Airflow's run id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "task_id",
+            "in": "path",
+            "description": "Task id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "try",
+            "in": "query",
+            "description": "Attempt number; defaults to the task's last try",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "token",
+            "in": "query",
+            "description": "Continuation token from a previous answer",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The log page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`try` is not a positive number",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token to sign in with",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such pipeline for this caller, no such run, or no such task",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The scheduler or the cluster did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No cluster connection, or the scheduler is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1461,6 +1812,55 @@
           }
         }
       },
+      "LogLine": {
+        "type": "object",
+        "description": "One log message. `sources` is deliberately absent: it names internal object-store paths.",
+        "required": [
+          "text"
+        ],
+        "properties": {
+          "level": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "text": {
+            "type": "string"
+          },
+          "timestamp": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "LogView": {
+        "type": "object",
+        "description": "One page of a task's log.",
+        "required": [
+          "lines",
+          "truncated"
+        ],
+        "properties": {
+          "lines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LogLine"
+            }
+          },
+          "nextToken": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        }
+      },
       "Me": {
         "type": "object",
         "required": [
@@ -1646,6 +2046,160 @@
           }
         }
       },
+      "PipelineDetail": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/PipelineView"
+          },
+          {
+            "type": "object",
+            "required": [
+              "runs",
+              "params"
+            ],
+            "properties": {
+              "params": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "propertyNames": {
+                  "type": "string"
+                }
+              },
+              "retries": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/RetriesView"
+                  }
+                ]
+              },
+              "runs": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/RunView"
+                }
+              }
+            }
+          }
+        ],
+        "description": "`GET /api/pipelines/{namespace}/{name}`: the view, the latest runs and the resource's\nparameters and retry policy."
+      },
+      "PipelineListResponse": {
+        "type": "object",
+        "description": "`GET /api/pipelines`.",
+        "required": [
+          "pipelines"
+        ],
+        "properties": {
+          "pipelines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PipelineView"
+            }
+          }
+        }
+      },
+      "PipelineView": {
+        "type": "object",
+        "description": "One pipeline in the list: the resource plus what Airflow says about it.",
+        "required": [
+          "name",
+          "namespace",
+          "paused",
+          "loaded",
+          "state",
+          "tasks",
+          "concurrency"
+        ],
+        "properties": {
+          "concurrency": {
+            "type": "string",
+            "description": "`spec.concurrency` as the resource carries it (`Allow`, `Forbid`, `Replace`)."
+          },
+          "lastRun": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RunView"
+              }
+            ]
+          },
+          "loaded": {
+            "type": "boolean",
+            "description": "`false` while Airflow has no DAG for the resource yet; the loader needs about 25 seconds."
+          },
+          "name": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "nextRun": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ownerGroup": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`spec.ownerGroup`; `None` means administrators only."
+          },
+          "paused": {
+            "type": "boolean"
+          },
+          "runAs": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "schedule": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The cron schedule, with the time zone in parentheses when there is one."
+          },
+          "state": {
+            "type": "string",
+            "description": "`loading`, `paused`, `running`, `failed`, `succeeded` or `idle`."
+          },
+          "tasks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TaskSpecView"
+            }
+          }
+        }
+      },
+      "RetriesView": {
+        "type": "object",
+        "description": "The retry policy of a pipeline.",
+        "required": [
+          "attempts"
+        ],
+        "properties": {
+          "attempts": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "backoff": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "RotateRequest": {
         "type": "object",
         "description": "`PUT …/secret` body: the field values to write. Write-only, like the create body, and never\nprinted — no `Debug` on purpose.",
@@ -1664,6 +2218,82 @@
               "type": "string",
               "writeOnly": true
             }
+          }
+        }
+      },
+      "RunResponse": {
+        "type": "object",
+        "description": "`GET …/runs/{run_id}`: one run and its task instances.",
+        "required": [
+          "run",
+          "tasks"
+        ],
+        "properties": {
+          "run": {
+            "$ref": "#/components/schemas/RunView"
+          },
+          "tasks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TaskView"
+            }
+          }
+        }
+      },
+      "RunView": {
+        "type": "object",
+        "description": "One DagRun. `type` is Airflow's `run_type` under the name the UI uses.",
+        "required": [
+          "runId",
+          "state",
+          "type"
+        ],
+        "properties": {
+          "durationSeconds": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "endedAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "logicalDate": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "runId": {
+            "type": "string"
+          },
+          "startedAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "type": "string"
+          },
+          "triggeredBy": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string"
           }
         }
       },
@@ -1741,6 +2371,69 @@
             "items": {
               "$ref": "#/components/schemas/TableIdentifier"
             }
+          }
+        }
+      },
+      "TaskSpecView": {
+        "type": "object",
+        "description": "One task as the resource declares it.",
+        "required": [
+          "name",
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "TaskView": {
+        "type": "object",
+        "description": "One task instance of a run.",
+        "required": [
+          "taskId",
+          "state",
+          "tryNumber"
+        ],
+        "properties": {
+          "durationSeconds": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "endedAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "operator": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "startedAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "type": "string"
+          },
+          "taskId": {
+            "type": "string"
+          },
+          "tryNumber": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
           }
         }
       },

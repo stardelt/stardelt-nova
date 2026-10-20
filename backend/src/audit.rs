@@ -122,6 +122,28 @@ pub fn connection_event(
     }
 }
 
+/// One pipeline log read: who read which task's log. **No field can hold log content**, and the
+/// run and task come from the checked pipeline, never from an unchecked browser value.
+pub fn pipeline_log_event(
+    who: &crate::auth::Identity,
+    namespace: &str,
+    pipeline: &str,
+    run: &str,
+    task: &str,
+) {
+    tracing::info!(
+        target: "audit",
+        action = "pipeline-log",
+        namespace = %namespace,
+        pipeline = %pipeline,
+        run = %run,
+        task = %task,
+        actor = %who.display_name,
+        sub = %who.sub,
+        "pipeline log read"
+    );
+}
+
 /// One break-glass read or refusal: administrator, connection, owner group, reason, outcome and
 /// the request that carried it. **No field can hold a value**, so neither the tracing line nor
 /// the state-store row can leak the thing that was read.
