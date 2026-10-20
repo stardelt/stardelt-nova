@@ -2244,6 +2244,7 @@ mod tests {
             db,
             store,
             break_glass_reads: Mutex::new(HashMap::new()),
+            airflow: None,
         })
     }
 
