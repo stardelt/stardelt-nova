@@ -82,7 +82,35 @@ pub struct CreateNamespaceRequest {
     pub namespace: String,
 }
 
-pub(crate) async fn resolve_warehouse_id(state: &AppState) -> Result<String, String> {
+/// Why the warehouse id could not be resolved.
+#[derive(Debug)]
+pub(crate) enum WarehouseError {
+    Unreachable,
+    Malformed,
+    NotFound(String),
+}
+
+impl WarehouseError {
+    /// 502 when the catalog did not answer or answered nonsense; 503 when Nova is pointed at a warehouse that does not exist.
+    pub(crate) fn status(&self) -> StatusCode {
+        match self {
+            Self::Unreachable | Self::Malformed => StatusCode::BAD_GATEWAY,
+            Self::NotFound(_) => StatusCode::SERVICE_UNAVAILABLE,
+        }
+    }
+}
+
+impl std::fmt::Display for WarehouseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unreachable => f.write_str("the catalog is not reachable"),
+            Self::Malformed => f.write_str("the catalog returned an unexpected response"),
+            Self::NotFound(name) => write!(f, "warehouse '{name}' not found"),
+        }
+    }
+}
+
+pub(crate) async fn resolve_warehouse_id(state: &AppState) -> Result<String, WarehouseError> {
     state
         .warehouse_id
         .get_or_try_init(|| async {
@@ -94,19 +122,19 @@ pub(crate) async fn resolve_warehouse_id(state: &AppState) -> Result<String, Str
                 .await
                 .map_err(|e| {
                     warn!("lakekeeper unreachable: {e}");
-                    "the catalog is not reachable".to_string()
+                    WarehouseError::Unreachable
                 })?
                 .json()
                 .await
                 .map_err(|e| {
                     warn!("lakekeeper warehouse list malformed: {e}");
-                    "the catalog returned an unexpected response".to_string()
+                    WarehouseError::Malformed
                 })?;
             resp.warehouses
                 .into_iter()
                 .find(|w| w.name == state.warehouse_name)
                 .map(|w| w.id)
-                .ok_or_else(|| format!("warehouse '{}' not found", state.warehouse_name))
+                .ok_or_else(|| WarehouseError::NotFound(state.warehouse_name.clone()))
         })
         .await
         .cloned()
@@ -142,15 +170,15 @@ async fn proxy(state: &AppState, path: String, authorization: Option<&str>) -> R
     }
 }
 
-/// Resolve the warehouse id, or the 500 to send back. The error is boxed: an
+/// Resolve the warehouse id, or the response to send back. The error is boxed: an
 /// unboxed `Response` in the `Err` variant trips `clippy::result_large_err`, and the
 /// happy path is what this function is for.
-async fn warehouse_id_or_500(state: &AppState) -> Result<String, Box<Response>> {
+async fn warehouse_id_or_error(state: &AppState) -> Result<String, Box<Response>> {
     resolve_warehouse_id(state).await.map_err(|e| {
         Box::new(
             (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e})),
+                e.status(),
+                Json(serde_json::json!({"error": e.to_string()})),
             )
                 .into_response(),
         )
@@ -164,7 +192,8 @@ async fn warehouse_id_or_500(state: &AppState) -> Result<String, Box<Response>> 
     description = "The resolved warehouse name and id (`demo` in demo mode).",
     responses(
         (status = 200, description = "Warehouse name and id", body = WarehouseInfo),
-        (status = 500, description = "The catalog is not reachable or has no such warehouse", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The catalog is not reachable", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "The configured warehouse does not exist", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn warehouse_info(State(s): State<Arc<AppState>>) -> Response {
@@ -174,8 +203,8 @@ pub async fn warehouse_info(State(s): State<Arc<AppState>>) -> Response {
     match resolve_warehouse_id(&s).await {
         Ok(id) => Json(serde_json::json!({ "name": s.warehouse_name, "id": id })).into_response(),
         Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e})),
+            e.status(),
+            Json(serde_json::json!({"error": e.to_string()})),
         )
             .into_response(),
     }
@@ -188,7 +217,7 @@ pub async fn warehouse_info(State(s): State<Arc<AppState>>) -> Response {
     description = "List catalog namespaces (schemas). Each namespace is a list of levels.",
     responses(
         (status = 200, description = "Namespaces in the warehouse", body = NamespacesResponse),
-        (status = 500, description = "The catalog is not reachable", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The catalog is not reachable", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn list_namespaces(
@@ -199,7 +228,7 @@ pub async fn list_namespaces(
         let demo = s.demo_state.read().expect("demo state poisoned");
         return Json(demo.namespaces_json()).into_response();
     }
-    let id = match warehouse_id_or_500(&s).await {
+    let id = match warehouse_id_or_error(&s).await {
         Ok(v) => v,
         Err(r) => return *r,
     };
@@ -267,7 +296,7 @@ pub async fn create_namespace(
     responses(
         (status = 200, description = "Table identifiers in the namespace", body = TablesResponse),
         (status = 400, description = "The name is not a single path segment", body = crate::openapi::ErrorResponse),
-        (status = 500, description = "The catalog is not reachable", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The catalog is not reachable", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn list_tables(
@@ -279,7 +308,7 @@ pub async fn list_tables(
         let demo = s.demo_state.read().expect("demo state poisoned");
         return Json(demo.tables_json(&ns)).into_response();
     }
-    let id = match warehouse_id_or_500(&s).await {
+    let id = match warehouse_id_or_error(&s).await {
         Ok(v) => v,
         Err(r) => return *r,
     };
@@ -325,7 +354,7 @@ pub async fn table_metadata(
                 .into_response(),
         };
     }
-    let id = match warehouse_id_or_500(&s).await {
+    let id = match warehouse_id_or_error(&s).await {
         Ok(v) => v,
         Err(r) => return *r,
     };
@@ -503,7 +532,37 @@ fn bad_segment(what: &str) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use super::{history_sql, path_segment, rollback_sql};
+    use super::{WarehouseError, history_sql, path_segment, rollback_sql};
+    use axum::http::StatusCode;
+
+    #[test]
+    fn warehouse_errors_carry_upstream_statuses() {
+        assert_eq!(
+            WarehouseError::Unreachable.status(),
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(WarehouseError::Malformed.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            WarehouseError::NotFound("warehouse".into()).status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[test]
+    fn warehouse_errors_keep_their_sentences() {
+        assert_eq!(
+            WarehouseError::Unreachable.to_string(),
+            "the catalog is not reachable"
+        );
+        assert_eq!(
+            WarehouseError::Malformed.to_string(),
+            "the catalog returned an unexpected response"
+        );
+        assert_eq!(
+            WarehouseError::NotFound("warehouse".into()).to_string(),
+            "warehouse 'warehouse' not found"
+        );
+    }
 
     #[test]
     fn plain_names_pass_through() {

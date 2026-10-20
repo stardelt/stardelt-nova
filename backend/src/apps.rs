@@ -529,7 +529,7 @@ async fn facts(state: &AppState, spec: &Spec) -> Vec<Fact> {
                         "Lakekeeper /management/v1/warehouse",
                     ));
                 }
-                Err(e) => facts.push(Fact::new("Warehouse", e).with_tone("bad")),
+                Err(e) => facts.push(Fact::new("Warehouse", e.to_string()).with_tone("bad")),
             }
             if let Some(info) = fetch_json(
                 state,
