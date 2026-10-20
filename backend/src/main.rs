@@ -26,6 +26,10 @@
 //!   GET  /api/apps                          — installed apps, reachable URLs, live images
 //!   GET  /api/apps/:id                      — one app: workloads, facts, deep links
 //!   GET  /api/workloads                     — workloads in Nova's namespace + their images
+//!   GET  /api/connections                   — the caller's connections (needs the secret store)
+//!   POST /api/connections                   — create one: values go to the store, never back
+//!   PUT  /api/connections/{scope}/…/secret  — rotate fields
+//!   DELETE /api/connections/{scope}/…       — delete one
 //!   POST /api/ingest/upload                 — load CSV/JSON into a table
 //!   POST /api/transfer                      — copy table → table
 //!
@@ -44,6 +48,7 @@ mod audit;
 mod auth;
 mod catalog;
 mod cluster;
+mod connection_routes;
 mod connections;
 mod data;
 mod db;
@@ -104,6 +109,10 @@ pub struct AppState {
     /// Nova runs outside a cluster / lacks RBAC — the UI then simply omits images.
     pub kube: Option<kube::Client>,
     pub workloads: cluster::WorkloadCache,
+    /// The platform's secret store (`secret_store.rs`). `None` when `NOVA_SECRET_STORE_URL`
+    /// is unset: the Connections API then answers 503 and says so, never panics. Its client
+    /// is the shared upstream one, signed in per request with that caller's own token.
+    pub store: Option<secret_store::StoreClient>,
     /// The Keycloak admin console for the configured realm, derived from
     /// `NOVA_OIDC_ISSUER` at startup. `None` in dev mode, for a non-Keycloak
     /// issuer, and for the master realm: Nova never links where it cannot manage
@@ -454,6 +463,36 @@ fn api_router() -> Router<Arc<AppState>> {
         .route("/embeds", get(apps::embeds))
         // Same audience, same rule: only what a person can open, never workload data.
         .route("/apps/links", get(apps::links))
+        // Connections: a person's own, their groups', and administrators' managed ones. The
+        // secret store is signed in with the caller's own token (503 while it is not configured).
+        .route(
+            "/connections",
+            get(connection_routes::list).post(connection_routes::create),
+        )
+        .route(
+            "/connections/personal/{name}/secret",
+            put(connection_routes::rotate_personal),
+        )
+        .route(
+            "/connections/group/{group}/{name}/secret",
+            put(connection_routes::rotate_group),
+        )
+        .route(
+            "/connections/managed/{name}/secret",
+            put(connection_routes::rotate_managed),
+        )
+        .route(
+            "/connections/personal/{name}",
+            delete(connection_routes::delete_personal),
+        )
+        .route(
+            "/connections/group/{group}/{name}",
+            delete(connection_routes::delete_group),
+        )
+        .route(
+            "/connections/managed/{name}",
+            delete(connection_routes::delete_managed),
+        )
         .route("/ingest/upload", post(data::upload))
         .route("/transfer", post(data::transfer))
 }
@@ -542,6 +581,15 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // One client for every upstream call, so the platform CA is trusted everywhere. The secret
+    // store is plain HTTP in-cluster, so it adds no trust configuration of its own.
+    let http = http_client()?;
+    let store = secret_store::StoreConfig::from_env()
+        .map(|cfg| secret_store::StoreClient::new(http.clone(), cfg));
+    if store.is_none() {
+        info!("NOVA_SECRET_STORE_URL is not set — the Connections API answers 503");
+    }
+
     let state = Arc::new(AppState {
         dev_user: std::env::var("NOVA_DEV_USER").unwrap_or_else(|_| "stardelt-dev".into()),
         trino_url: std::env::var("NOVA_TRINO_URL")
@@ -554,7 +602,7 @@ async fn main() -> anyhow::Result<()> {
             .unwrap_or_else(|_| "http://proxy-public:80".into()),
         warehouse_name: std::env::var("NOVA_WAREHOUSE_NAME").unwrap_or_else(|_| "warehouse".into()),
         warehouse_id: OnceCell::new(),
-        http: http_client()?,
+        http,
         demo: demo_mode,
         forward_identity: env_flag("NOVA_FORWARD_IDENTITY"),
         jobs: Mutex::new(Vec::new()),
@@ -563,6 +611,7 @@ async fn main() -> anyhow::Result<()> {
         workloads: cluster::WorkloadCache::default(),
         admin_console_url: admin_console,
         db,
+        store,
     });
 
     let auth = match auth_mode {
@@ -644,6 +693,7 @@ async fn main() -> anyhow::Result<()> {
         static_dir = %static_dir,
         demo = state.demo,
         auth = if auth.is_some() { "oidc" } else { "dev" },
+        store = state.store.is_some(),
         "nova backend starting"
     );
     // Second listener for the engine's event feed; off unless NOVA_INTERNAL_ADDR is set.
@@ -688,6 +738,7 @@ mod router_tests {
             workloads: cluster::WorkloadCache::default(),
             admin_console_url: admin_console_url("https://id.example.com/realms/stardelt"),
             db,
+            store: None,
         })
     }
 

@@ -36,6 +36,10 @@ Browser
          ├─ GET  /api/apps             installed apps: live status + images
          ├─ GET  /api/apps/:id         one app: workloads, facts, links, embed check
          ├─ GET  /api/workloads        workloads in Nova's namespace + read state (ok/stale/unreachable)
+         ├─ GET  /api/connections      the caller's connections (needs the secret store)
+         ├─ POST /api/connections      create one: the values go to the store, never back
+         ├─ PUT  /api/connections/…/secret  rotate fields of one connection
+         ├─ DELETE /api/connections/…  delete one connection
          ├─ POST /api/ingest/upload    load CSV/JSON into a table (a failed load keeps the old table)
          ├─ POST /api/transfer         copy table → table (a failed copy keeps the target)
          │
@@ -74,6 +78,9 @@ stardelt-nova/
 │   │   ├── main.rs   server setup, /api/health, /api/me, /api/trino
 │   │   ├── api_json.rs  `ApiJson` body extractor: JSON, never text, on rejection
 │   │   ├── catalog.rs Lakekeeper proxy routes
+│   │   ├── connection_routes.rs  `/api/connections`: list, create, rotate, delete
+│   │   ├── connections.rs  connection rules: validation, authorization, payloads
+│   │   ├── secret_store.rs  secret store client, signed in with the caller's own token
 │   │   ├── db.rs     optional PostgreSQL state store: pool, migrations, health
 │   │   ├── saved_queries.rs  /api/saved-queries (owner-scoped rows in the state store)
 │   │   ├── user_settings.rs  /api/settings (one JSON value per person and key)
@@ -240,6 +247,30 @@ Route it separately from the application log:
 ```
 RUST_LOG=audit=info,info
 ```
+
+## Connections
+
+A connection is typed settings plus secret fields — a database password, an S3 key. Nova keeps it in
+the platform's secret store, never in its own database, and **a value is written and never read back**:
+no answer, error sentence or log line carries one, only the field *names* (`secretKeys`).
+
+| Scope | Who may create, rotate, delete | Where the value lives | A `Connection` resource too |
+|---|---|---|---|
+| `personal` | the person, only their own | `connections/user/<sub>/<name>` | no |
+| `group` | a **member** of the owner group; being an administrator is not enough | `connections/group/<group>/<name>` | yes, the operator syncs it |
+| `managed` | administrators only; nobody can read it | `connections/managed/<name>` | yes |
+
+Every route signs in to the store with the caller's own token (never a service identity), so the
+store's policies decide what is possible and its audit log names the person. Without
+`NOVA_SECRET_STORE_URL` the routes answer `503 {"error":"the secret store is not configured"}`; without
+a cluster client the group and managed routes answer `503 {"error":"no cluster connection"}`. An
+unreachable store or cluster is `502`, never `500`.
+
+A rotation sends only the fields to change; a managed connection cannot be read, so it sends every
+field. Deleting removes the value first and the resource second — if the second step fails the value is
+gone and the entry stays visible as not-ready, which is retryable. Each create, rotation and delete
+also writes a `connection` line on the `audit` target with the scope, the group, the name and the
+person — never a value.
 
 ## Sign-in (OIDC)
 

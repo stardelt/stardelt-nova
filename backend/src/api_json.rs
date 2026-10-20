@@ -46,6 +46,18 @@ impl IntoResponse for ApiError {
     }
 }
 
+impl ApiError {
+    /// The status axum chose: 400 malformed, 415 wrong content-type, 413 too large, 422 wrong shape.
+    pub fn status(&self) -> StatusCode {
+        self.status
+    }
+
+    /// The sentence, for a route that answers one status for every rejection of its body.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

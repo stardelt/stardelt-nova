@@ -590,6 +590,7 @@ mod tests {
             workloads: crate::cluster::WorkloadCache::default(),
             admin_console_url: None,
             db: None,
+            store: None,
         }
     }
 

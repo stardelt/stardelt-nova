@@ -8,9 +8,7 @@
 //! Values are never logged and never part of an error: an error carries the store's own first
 //! message (which does not echo values) or a fixed text. [`StoreToken`] redacts its `Debug`.
 //!
-//! This module is the client only. The Connections API that uses it comes next, which is why the
-//! module silences `dead_code` for now.
-#![allow(dead_code)]
+//! This module is the client only; the HTTP routes that use it live in `connection_routes.rs`.
 
 use std::collections::BTreeMap;
 
@@ -369,8 +367,13 @@ impl StoreClient {
     }
 }
 
+/// An in-memory store for tests, shared by this module's tests and `connection_routes`':
+/// only the routes the client uses, with the answers the real OpenBao gives. It refuses
+/// another group's paths (`finance`) as the store's policies would, and its token is
+/// `tok-alice`, handed out for the JWT `good`.
 #[cfg(test)]
-mod tests {
+pub(crate) mod fake {
+    use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
 
     use axum::{
@@ -379,124 +382,44 @@ mod tests {
         http::{HeaderMap, StatusCode},
         routing::{get, post},
     };
+    use serde_json::{Value, json};
 
-    use super::*;
+    use super::{StoreClient, StoreConfig};
 
-    fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
-        let map: BTreeMap<String, String> = pairs
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
-        move |k| map.get(k).cloned()
-    }
-
-    #[test]
-    fn the_config_needs_a_url_and_has_defaults() {
-        assert_eq!(StoreConfig::from_env_with(env(&[])), None);
-        assert_eq!(
-            StoreConfig::from_env_with(env(&[("NOVA_SECRET_STORE_URL", "  ")])),
-            None
-        );
-        let cfg = StoreConfig::from_env_with(env(&[(
-            "NOVA_SECRET_STORE_URL",
-            "http://openbao.stardelt.svc:8200/",
-        )]))
-        .unwrap();
-        assert_eq!(cfg.url, "http://openbao.stardelt.svc:8200");
-        assert_eq!(
-            (cfg.role.as_str(), cfg.mount.as_str()),
-            ("platform-users", "secret")
-        );
-        let cfg = StoreConfig::from_env_with(env(&[
-            ("NOVA_SECRET_STORE_URL", "http://x"),
-            ("NOVA_SECRET_STORE_ROLE", "other-role"),
-            ("NOVA_SECRET_STORE_MOUNT", "bad/mount"),
-        ]))
-        .unwrap();
-        assert_eq!(cfg.role, "other-role");
-        assert_eq!(
-            cfg.mount, "secret",
-            "a mount with a slash falls back to the default"
-        );
-    }
-
-    #[test]
-    fn paths_follow_the_scope_and_match_the_operator() {
-        let me = StoreScope::Personal {
-            sub: "3f2a-uuid".into(),
-        };
-        let team = StoreScope::Group {
-            group: "analytics".into(),
-        };
-        assert_eq!(
-            secret_path(&me, "pat").unwrap(),
-            "connections/user/3f2a-uuid/pat"
-        );
-        assert_eq!(
-            secret_path(&team, "crm-db").unwrap(),
-            "connections/group/analytics/crm-db"
-        );
-        assert_eq!(
-            secret_path(&StoreScope::Managed, "sftp").unwrap(),
-            "connections/managed/sftp"
-        );
-        assert_eq!(scope_prefix(&team).unwrap(), "connections/group/analytics");
-    }
-
-    #[test]
-    fn hostile_names_never_reach_a_path() {
-        for name in [
-            "",
-            "Crm",
-            "1crm",
-            "a/b",
-            "..",
-            "a b",
-            "crm-",
-            &"a".repeat(41),
-        ] {
-            assert!(
-                matches!(
-                    secret_path(&StoreScope::Managed, name),
-                    Err(StoreError::Invalid(_))
-                ),
-                "{name}"
-            );
-        }
-        for group in ["", "a/b", "..", "../finance", "-x", "a b", &"g".repeat(65)] {
-            let scope = StoreScope::Group {
-                group: group.into(),
-            };
-            assert!(
-                matches!(secret_path(&scope, "crm"), Err(StoreError::Invalid(_))),
-                "{group}"
-            );
-        }
-        for sub in ["", "a/b", "..", "a b"] {
-            let scope = StoreScope::Personal { sub: sub.into() };
-            assert!(
-                matches!(secret_path(&scope, "crm"), Err(StoreError::Invalid(_))),
-                "{sub}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_store_token_never_prints() {
-        let t = StoreToken::new("hvs.super-secret");
-        assert!(!format!("{t:?}").contains("super-secret"));
-    }
-
-    // --- a fake store: the few routes the client uses, with the answers the real one gives ---------
+    // --- a fake store: the few routes the client uses, with the answers the real one gives ---
 
     #[derive(Default)]
-    struct Fake {
-        data: BTreeMap<String, BTreeMap<String, String>>,
-        custom: BTreeMap<String, BTreeMap<String, String>>,
-        versions: BTreeMap<String, u64>,
+    pub(crate) struct Fake {
+        /// The secret fields, by path.
+        pub(crate) data: BTreeMap<String, BTreeMap<String, String>>,
+        /// The custom metadata (type, key names, settings), by path.
+        pub(crate) custom: BTreeMap<String, BTreeMap<String, String>>,
+        /// The current version, by path.
+        pub(crate) versions: BTreeMap<String, u64>,
     }
 
-    type Shared = Arc<Mutex<Fake>>;
+    pub(crate) type Shared = Arc<Mutex<Fake>>;
+
+    fn pairs(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    impl Fake {
+        /// Put one secret as an earlier request would have left it, without going through the client.
+        pub(crate) fn seed(
+            &mut self,
+            path: &str,
+            fields: &[(&str, &str)],
+            custom: &[(&str, &str)],
+        ) {
+            self.data.insert(path.to_string(), pairs(fields));
+            self.custom.insert(path.to_string(), pairs(custom));
+            *self.versions.entry(path.to_string()).or_insert(0) += 1;
+        }
+    }
 
     fn allowed(headers: &HeaderMap, path: &str) -> Result<(), (StatusCode, Json<Value>)> {
         let ok = headers.get("x-vault-token").and_then(|v| v.to_str().ok()) == Some("tok-alice")
@@ -618,7 +541,7 @@ mod tests {
         Ok(StatusCode::NO_CONTENT)
     }
 
-    async fn start_fake() -> StoreClient {
+    pub(crate) async fn start() -> (StoreClient, Shared) {
         let shared: Shared = Arc::default();
         let app = Router::new()
             .route("/v1/auth/jwt/login", post(fake_login))
@@ -627,20 +550,131 @@ mod tests {
                 "/v1/secret/metadata/{*path}",
                 get(fake_meta_get).post(fake_meta_set).delete(fake_delete),
             )
-            .with_state(shared);
+            .with_state(Arc::clone(&shared));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        StoreClient::new(
+        let client = StoreClient::new(
             reqwest::Client::new(),
             StoreConfig {
                 url: format!("http://{addr}"),
                 role: "platform-users".into(),
                 mount: "secret".into(),
             },
-        )
+        );
+        (client, shared)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let map: BTreeMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        move |k| map.get(k).cloned()
+    }
+
+    #[test]
+    fn the_config_needs_a_url_and_has_defaults() {
+        assert_eq!(StoreConfig::from_env_with(env(&[])), None);
+        assert_eq!(
+            StoreConfig::from_env_with(env(&[("NOVA_SECRET_STORE_URL", "  ")])),
+            None
+        );
+        let cfg = StoreConfig::from_env_with(env(&[(
+            "NOVA_SECRET_STORE_URL",
+            "http://openbao.stardelt.svc:8200/",
+        )]))
+        .unwrap();
+        assert_eq!(cfg.url, "http://openbao.stardelt.svc:8200");
+        assert_eq!(
+            (cfg.role.as_str(), cfg.mount.as_str()),
+            ("platform-users", "secret")
+        );
+        let cfg = StoreConfig::from_env_with(env(&[
+            ("NOVA_SECRET_STORE_URL", "http://x"),
+            ("NOVA_SECRET_STORE_ROLE", "other-role"),
+            ("NOVA_SECRET_STORE_MOUNT", "bad/mount"),
+        ]))
+        .unwrap();
+        assert_eq!(cfg.role, "other-role");
+        assert_eq!(
+            cfg.mount, "secret",
+            "a mount with a slash falls back to the default"
+        );
+    }
+
+    #[test]
+    fn paths_follow_the_scope_and_match_the_operator() {
+        let me = StoreScope::Personal {
+            sub: "3f2a-uuid".into(),
+        };
+        let team = StoreScope::Group {
+            group: "analytics".into(),
+        };
+        assert_eq!(
+            secret_path(&me, "pat").unwrap(),
+            "connections/user/3f2a-uuid/pat"
+        );
+        assert_eq!(
+            secret_path(&team, "crm-db").unwrap(),
+            "connections/group/analytics/crm-db"
+        );
+        assert_eq!(
+            secret_path(&StoreScope::Managed, "sftp").unwrap(),
+            "connections/managed/sftp"
+        );
+        assert_eq!(scope_prefix(&team).unwrap(), "connections/group/analytics");
+    }
+
+    #[test]
+    fn hostile_names_never_reach_a_path() {
+        for name in [
+            "",
+            "Crm",
+            "1crm",
+            "a/b",
+            "..",
+            "a b",
+            "crm-",
+            &"a".repeat(41),
+        ] {
+            assert!(
+                matches!(
+                    secret_path(&StoreScope::Managed, name),
+                    Err(StoreError::Invalid(_))
+                ),
+                "{name}"
+            );
+        }
+        for group in ["", "a/b", "..", "../finance", "-x", "a b", &"g".repeat(65)] {
+            let scope = StoreScope::Group {
+                group: group.into(),
+            };
+            assert!(
+                matches!(secret_path(&scope, "crm"), Err(StoreError::Invalid(_))),
+                "{group}"
+            );
+        }
+        for sub in ["", "a/b", "..", "a b"] {
+            let scope = StoreScope::Personal { sub: sub.into() };
+            assert!(
+                matches!(secret_path(&scope, "crm"), Err(StoreError::Invalid(_))),
+                "{sub}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_store_token_never_prints() {
+        let t = StoreToken::new("hvs.super-secret");
+        assert!(!format!("{t:?}").contains("super-secret"));
     }
 
     fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
@@ -652,7 +686,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_person_signs_in_and_a_refused_sign_in_says_why_without_a_token() {
-        let store = start_fake().await;
+        let (store, _fake) = fake::start().await;
         let token = store.login(&Secret::new("good")).await.unwrap();
         assert!(!format!("{token:?}").contains("tok-alice"));
         match store.login(&Secret::new("issued-to-another-client")).await {
@@ -666,7 +700,7 @@ mod tests {
 
     #[tokio::test]
     async fn write_read_list_describe_and_destroy_round_trip() {
-        let store = start_fake().await;
+        let (store, _fake) = fake::start().await;
         let token = store.login(&Secret::new("good")).await.unwrap();
         let team = StoreScope::Group {
             group: "analytics".into(),
@@ -729,7 +763,7 @@ mod tests {
 
     #[tokio::test]
     async fn another_groups_path_is_refused_by_the_store_not_by_nova() {
-        let store = start_fake().await;
+        let (store, _fake) = fake::start().await;
         let token = store.login(&Secret::new("good")).await.unwrap();
         let path = secret_path(
             &StoreScope::Group {
