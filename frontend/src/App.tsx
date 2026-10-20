@@ -18,6 +18,7 @@ import Dashboards from './routes/Dashboards'
 import Notebooks from './routes/Notebooks'
 import Settings from './routes/Settings'
 import Preferences from './routes/Preferences'
+import Profile from './routes/Profile'
 import NotFound from './routes/NotFound'
 
 export default function App() {
@@ -41,6 +42,7 @@ export default function App() {
         <Route path="/health"     element={<RequireAdmin><Health    /></RequireAdmin>} />
         <Route path="/settings"   element={<RequireAdmin><Settings  /></RequireAdmin>} />
         <Route path="/preferences" element={<Preferences />} />
+        <Route path="/profile"   element={<Profile />} />
         {/* Last, so an unknown path renders the shell with a message instead of nothing. */}
         <Route path="*"           element={<NotFound   />} />
       </Route>

@@ -6,7 +6,8 @@ import { formatTime, setTimeDisplay } from '../src/format'
 // Rules U1–U13 are written down in stardelt-internal/design/ui-conformance.md.
 
 const ROUTES = ['/', '/catalog', '/query', '/data', '/connections', '/jobs', '/pipelines', '/queries',
-  '/apps', '/lineage', '/dashboards', '/notebooks', '/health', '/settings', '/preferences', '/no-such-page']
+  '/apps', '/lineage', '/dashboards', '/notebooks', '/health', '/settings', '/preferences', '/profile',
+  '/no-such-page']
 const VARIANTS = [
   { name: 'desktop-dark', viewport: { width: 1280, height: 800 }, theme: 'dark', keyboard: true },
   { name: 'desktop-light', viewport: { width: 1280, height: 800 }, theme: 'light', keyboard: false },
@@ -2552,6 +2553,173 @@ test.describe('preferences', () => {
   test('U5 the page has accessible names', async ({ browser }) => {
     const { context, page } = await open(browser)
     await page.goto('/preferences')
+    expect((await auditPage(page)).filter((finding) => finding.rule === 'U5')).toEqual([])
+    await context.close()
+  })
+})
+
+test.describe('profile', () => {
+  const ME = {
+    user: 'alice', auth_mode: 'oidc', demo: false, warehouse: 'warehouse',
+    name: 'Alice Anders', email: 'alice@example.test', sub: '1f0c4a52-6b3e-4f1a-9c2d-8e7f6a5b4c3d',
+    groups: ['analysts', 'data-eng', '/stardelt/platform'], is_admin: false, via: 'session',
+  }
+  const MEMBER =
+    'Administrators run the platform: they see all connections and pipelines of all groups and manage the platform apps. Ask one to change your role.'
+  const NO_GROUPS =
+    'You are not in any group. Personal connections and the SQL editor work; features that belong to a group need one.'
+  const OVERAGE =
+    'Your identity provider sent more groups than fit in your sign-in token, so Nova sees only some of them. Ask an administrator.'
+
+  /** The Profile page with every `/api/**` call stubbed; the caller closes the context. */
+  async function open(
+    browser: Browser,
+    me: Record<string, unknown>,
+    {
+      permissions = [] as string[],
+      viewport = { width: 1280, height: 800 },
+      init,
+    }: { permissions?: string[]; viewport?: { width: number; height: number }; init?: () => void } = {},
+  ) {
+    const context = await browser.newContext({ viewport, permissions })
+    if (init) await context.addInitScript(init)
+    const page = await context.newPage()
+    await page.route('**/api/**', (route) => {
+      const path = new URL(route.request().url()).pathname
+      if (path === '/api/me') return json(route, me)
+      if (path === '/api/settings') return json(route, {})
+      if (path === '/api/apps/links') return json(route, [])
+      return json(route, [])
+    })
+    await page.goto('/profile')
+    return { context, page }
+  }
+
+  test('shows account, groups and role', async ({ browser }) => {
+    const { context, page } = await open(browser, ME, {
+      permissions: ['clipboard-read', 'clipboard-write'],
+    })
+
+    await expect(page.getByRole('heading', { level: 1, name: 'Profile' })).toBeVisible()
+    await expect(page.getByText('Who Nova thinks you are, and what that gives you.')).toBeVisible()
+    const main = page.locator('#main')
+
+    // Account rows and the sign-in facts.
+    for (const label of ['Name', 'Username', 'Email', 'User id', 'Method', 'Session']) {
+      await expect(main.getByText(label, { exact: true })).toBeVisible()
+    }
+    for (const value of [ME.name, ME.user, ME.email, ME.sub, 'Single sign-on', 'Browser session']) {
+      await expect(main.getByText(value, { exact: true })).toBeVisible()
+    }
+
+    // Every group is a chip, and the heading counts them.
+    await expect(page.getByRole('heading', { level: 2, name: 'Groups (3)' })).toBeVisible()
+    for (const group of ME.groups) {
+      await expect(main.getByText(group, { exact: true })).toBeVisible()
+    }
+
+    await expect(main.getByText('Member', { exact: true })).toBeVisible()
+    await expect(main.getByText(MEMBER)).toBeVisible()
+
+    await page.getByRole('button', { name: 'Copy your user id' }).click()
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(ME.sub)
+    await context.close()
+  })
+
+  test('administrator sentence names the group', async ({ browser }) => {
+    const byGroup = await open(browser, {
+      ...ME, is_admin: true, admin_group: 'stardelt-admins', admin_by: 'group',
+    })
+    await expect(
+      byGroup.page.getByText('You are an administrator because you belong to the group stardelt-admins.', { exact: true }),
+    ).toBeVisible()
+    await expect(byGroup.page.getByText('Administrator', { exact: true })).toBeVisible()
+    await byGroup.context.close()
+
+    const byRole = await open(browser, {
+      ...ME, is_admin: true, admin_group: 'stardelt-admin', admin_by: 'role',
+    })
+    await expect(
+      byRole.page.getByText('You are an administrator because you hold the role stardelt-admin.', { exact: true }),
+    ).toBeVisible()
+    await byRole.context.close()
+  })
+
+  test('no groups and overage', async ({ browser }) => {
+    const { context, page } = await open(browser, {
+      ...ME, groups: [], groups_overage: true,
+    })
+    await expect(page.getByRole('heading', { level: 2, name: 'Groups (0)' })).toBeVisible()
+    await expect(page.getByText(NO_GROUPS)).toBeVisible()
+    await expect(page.getByRole('status')).toHaveText(OVERAGE)
+    await context.close()
+  })
+
+  test('session end', async ({ browser }) => {
+    const epoch = Date.UTC(2026, 9, 20, 14, 5, 9) / 1000
+    const withEnd = await open(browser, { ...ME, session_expires_at: epoch })
+    const sentence = withEnd.page.getByText(/Your session ends \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}.* You sign in again then\./)
+    await expect(sentence).toBeVisible()
+    await expect(sentence).toHaveAttribute('title', new Date(epoch * 1000).toISOString())
+    await withEnd.context.close()
+
+    const withoutEnd = await open(browser, ME)
+    await expect(withoutEnd.page.getByText(/Your session ends/)).toHaveCount(0)
+    await withoutEnd.context.close()
+  })
+
+  test('dev mode', async ({ browser }) => {
+    const { context, page } = await open(browser, {
+      user: 'operator', auth_mode: 'static-dev', demo: false, warehouse: 'warehouse',
+    })
+    await expect(
+      page.getByText('Development mode: nobody signs in; you are the operator of this installation.'),
+    ).toBeVisible()
+    await expect(page.getByText('None (development mode)', { exact: true })).toBeVisible()
+    // No rows that would hold nothing: dev mode has no sub, name, email or groups.
+    await expect(page.getByText('User id', { exact: true })).toHaveCount(0)
+    await expect(page.getByText('Name', { exact: true })).toHaveCount(0)
+    await expect(page.getByText('Email', { exact: true })).toHaveCount(0)
+    await expect(page.getByRole('list', { name: 'Your groups' })).toHaveCount(0)
+    // The operator still sees the role `isAdmin()` grants without `is_admin`.
+    await expect(page.getByText('Administrator', { exact: true })).toBeVisible()
+    await expect(page.getByText(MEMBER)).toHaveCount(0)
+    await context.close()
+  })
+
+  test('hostile text', async ({ browser }) => {
+    const evil = '<img src=x onerror="window.__xss=1">'
+    const long = 'x'.repeat(400)
+    const { context, page } = await open(
+      browser,
+      {
+        ...ME,
+        name: evil,
+        email: evil,
+        groups: Array.from({ length: 60 }, (_, i) => (i === 0 ? evil : long)),
+      },
+      { init: () => { (window as unknown as { __xss: number }).__xss = 0 } },
+    )
+
+    await expect(page.getByRole('heading', { level: 2, name: 'Groups (60)' })).toBeVisible()
+    await expect(page.getByText(evil, { exact: true }).first()).toBeVisible()
+
+    for (const width of [1280, 360]) {
+      await page.setViewportSize({ width, height: 800 })
+      const s = await page.evaluate(() => ({
+        xss: (window as unknown as { __xss: number }).__xss,
+        imgs: document.querySelectorAll('img[src="x"]').length,
+        overflow: document.documentElement.scrollWidth - window.innerWidth,
+      }))
+      expect(s, `${width}px`).toEqual({ xss: 0, imgs: 0, overflow: expect.any(Number) })
+      expect(s.overflow, `${width}px overflow`).toBeLessThanOrEqual(1)
+    }
+    await context.close()
+  })
+
+  test('U5 the page has accessible names', async ({ browser }) => {
+    const { context, page } = await open(browser, ME)
+    await expect(page.getByRole('heading', { level: 1, name: 'Profile' })).toBeVisible()
     expect((await auditPage(page)).filter((finding) => finding.rule === 'U5')).toEqual([])
     await context.close()
   })

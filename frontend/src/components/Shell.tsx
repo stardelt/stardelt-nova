@@ -71,6 +71,7 @@ const titles: Record<string, string> = {
   '/health': 'Health',
   '/settings': 'Settings',
   '/preferences': 'Preferences',
+  '/profile': 'Profile',
 }
 
 /** The app detail route carries its own id, so the header can be specific. */
