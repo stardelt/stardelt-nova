@@ -4,7 +4,7 @@ import { auditPage, focusAudit, type Finding } from './audit'
 
 // Rules U1–U13 are written down in stardelt-internal/design/ui-conformance.md.
 
-const ROUTES = ['/', '/catalog', '/query', '/data', '/connections', '/jobs', '/queries',
+const ROUTES = ['/', '/catalog', '/query', '/data', '/connections', '/jobs', '/pipelines', '/queries',
   '/apps', '/lineage', '/dashboards', '/notebooks', '/health', '/settings', '/no-such-page']
 const VARIANTS = [
   { name: 'desktop-dark', viewport: { width: 1280, height: 800 }, theme: 'dark', keyboard: true },
@@ -1179,6 +1179,565 @@ test.describe('table documentation', () => {
 
     await page.getByRole('button', { name: 'columns' }).click()
     await page.getByRole('button', { name: 'Edit description of amount' }).click()
+    expect((await auditPage(page)).filter((finding) => finding.rule === 'U5')).toEqual([])
+    await context.close()
+  })
+})
+
+test.describe('pipelines', () => {
+  // The Pipelines page (J1): every state is a word, the actions send one request and show
+  // the API's own sentence when it refuses, and a run's log stays text.
+  const ADMIN = {
+    user: 'alice', auth_mode: 'oidc', demo: false, warehouse: 'warehouse',
+    is_admin: true, groups: ['analytics'],
+  }
+  const NS = 'stardelt'
+  const NOT_LOADED_TEXT =
+    'The scheduler did not accept this pipeline. Ask an administrator to check the loader log.'
+
+  type Recorded = { method: string; url: string; body: string | null }
+
+  function run(overrides: Record<string, unknown> = {}) {
+    return {
+      runId: 'manual__2026-10-20T08:00:00+00:00',
+      state: 'failed',
+      type: 'manual',
+      logicalDate: '2026-10-20T08:00:00Z',
+      startedAt: '2026-10-20T08:00:01Z',
+      endedAt: '2026-10-20T08:00:09Z',
+      durationSeconds: 8,
+      triggeredBy: 'alice',
+      note: 'Started from Nova by Alice',
+      ...overrides,
+    }
+  }
+
+  function pipeline(overrides: Record<string, unknown> = {}) {
+    return {
+      name: 'team-smoke',
+      namespace: NS,
+      ownerGroup: 'analytics',
+      schedule: '0 3 * * * (Europe/Berlin)',
+      paused: false,
+      loaded: true,
+      nextRun: '2026-10-21T01:00:00Z',
+      state: 'idle',
+      lastRun: null,
+      tasks: [{ name: 'load', kind: 'sql' }],
+      runAs: 'sp-analytics',
+      concurrency: 'Forbid',
+      createdAt: '2026-10-19T10:00:00Z',
+      ...overrides,
+    }
+  }
+
+  const STATE_ROWS = [
+    pipeline({ name: 'loading-one', state: 'loading', loaded: false }),
+    pipeline({ name: 'refused-one', state: 'not-loaded', loaded: false }),
+    pipeline({ name: 'paused-one', state: 'paused', paused: true }),
+    pipeline({ name: 'running-one', state: 'running', lastRun: run({ state: 'running', endedAt: null, durationSeconds: null }) }),
+    pipeline({ name: 'failed-one', state: 'failed', lastRun: run() }),
+    pipeline({ name: 'succeeded-one', state: 'succeeded', lastRun: run({ state: 'success', note: null }) }),
+    pipeline({ name: 'idle-one', state: 'idle' }),
+  ]
+
+  /** A Pipelines page with every `/api/**` call stubbed; `read`/`write` decide the rest. */
+  async function open(browser: Browser, {
+    me = ADMIN,
+    rows = [] as unknown[],
+    start = '/pipelines',
+    init,
+    clock,
+    read,
+    write,
+  }: {
+    me?: unknown
+    rows?: unknown[]
+    start?: string
+    init?: () => void
+    clock?: boolean
+    read?: (route: Route, path: string, method: string, url: URL) => boolean
+    write?: (route: Route, path: string, method: string) => boolean
+  } = {}) {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 800 } })
+    const page = await context.newPage()
+    if (init) await page.addInitScript(init)
+    if (clock) await page.clock.install()
+    const requests: Recorded[] = []
+    page.on('request', (request) => requests.push({
+      method: request.method(),
+      url: request.url(),
+      body: request.postData(),
+    }))
+    await page.route('**/api/**', (route) => {
+      const request = route.request()
+      const url = new URL(request.url())
+      const path = url.pathname
+      const method = request.method()
+      if (path === '/api/me' && method === 'GET') return json(route, me)
+      if (read?.(route, path, method, url)) return
+      if (path === '/api/pipelines' && method === 'GET') return json(route, { pipelines: rows })
+      if (method !== 'GET' && write?.(route, path, method)) return
+      return json(route, [])
+    })
+    await page.goto(start)
+    return { context, page, requests }
+  }
+
+  const pathOf = (request: Recorded) => new URL(request.url).pathname
+  const postsTo = (requests: Recorded[], suffix: string) =>
+    requests.filter((request) => request.method === 'POST' && pathOf(request).endsWith(suffix)).length
+
+  test('list shows every state in words', async ({ browser }) => {
+    const { context, page, requests } = await open(browser, { rows: STATE_ROWS, clock: true })
+    await expect(page.getByRole('heading', { name: 'Pipelines' })).toBeVisible()
+    const expected = [
+      ['loading-one', 'Loading into the scheduler'],
+      ['refused-one', 'Not loaded'],
+      ['paused-one', 'Paused'],
+      ['running-one', 'Running'],
+      ['failed-one', 'Failed'],
+      ['succeeded-one', 'Succeeded'],
+      ['idle-one', 'Not run yet'],
+    ] as const
+    for (const [name, word] of expected) {
+      await expect(page.locator('tbody tr', { hasText: name }), name).toContainText(word)
+    }
+    await expect(page.locator('tbody tr', { hasText: 'refused-one' })).toContainText(NOT_LOADED_TEXT)
+
+    const gets = () =>
+      requests.filter((request) => request.method === 'GET' && pathOf(request) === '/api/pipelines').length
+    const before = gets()
+    await page.clock.fastForward(10_000)
+    await expect.poll(gets, { message: 'the list refetches after the interval' }).toBeGreaterThan(before)
+    await context.close()
+  })
+
+  test('hostile names are text', async ({ browser }) => {
+    const evil = '<img src=x onerror="window.__xss=1">'
+    const long = 'x'.repeat(400)
+    const evilRow = pipeline({ name: evil, ownerGroup: evil, state: 'failed', lastRun: run({ note: evil }) })
+    const longRow = pipeline({ name: long, ownerGroup: long, state: 'failed', lastRun: run({ note: long }) })
+
+    const detailFor = (name: string) => ({
+      ...(name === long ? longRow : evilRow),
+      runs: [run({ runId: name, note: name })],
+      params: {},
+      retries: null,
+    })
+    const runFor = (name: string) => ({
+      run: run({ runId: name }),
+      tasks: [{
+        taskId: name, state: 'failed', tryNumber: 1,
+        startedAt: '2026-10-20T08:00:01Z', endedAt: '2026-10-20T08:00:09Z',
+        durationSeconds: 8, operator: name,
+      }],
+    })
+
+    const { context, page } = await open(browser, {
+      rows: [evilRow, longRow],
+      init: () => { (window as unknown as { __xss: number }).__xss = 0 },
+      read: (route, path, method) => {
+        if (method !== 'GET' || !path.startsWith('/api/pipelines/')) return false
+        const parts = path.split('/')
+        const last = decodeURIComponent(parts[parts.length - 1] ?? '')
+        if (path.endsWith('/logs')) {
+          json(route, {
+            lines: [
+              { timestamp: '2026-10-20T08:00:02Z', level: 'error', text: evil },
+              { timestamp: '2026-10-20T08:00:03Z', level: 'info', text: long },
+            ],
+            nextToken: null,
+            truncated: false,
+          })
+          return true
+        }
+        if (parts.includes('runs')) {
+          json(route, runFor(last === long ? long : evil))
+          return true
+        }
+        json(route, detailFor(last === long ? long : evil))
+        return true
+      },
+    })
+
+    async function openLog(name: string) {
+      await page.getByRole('button', { name: `Show tasks of run ${name}` }).click()
+      await page.getByRole('button', { name: `View log of ${name} try 1` }).click()
+      await expect(page.locator('main')).toContainText(evil)
+    }
+
+    async function expectNoOverflow(label: string) {
+      await page.waitForTimeout(300)
+      const s = await page.evaluate(() => ({
+        xss: (window as unknown as { __xss?: number }).__xss ?? 0,
+        imgs: document.querySelectorAll('img[src="x"]').length,
+        overflow: document.documentElement.scrollWidth - window.innerWidth,
+      }))
+      expect(s, label).toEqual({ xss: 0, imgs: 0, overflow: expect.any(Number) })
+      expect(s.overflow, `${label} overflow`).toBeLessThanOrEqual(1)
+    }
+
+    await page.getByRole('link', { name: evil }).click()
+    await expect(page.getByRole('heading', { name: evil })).toBeVisible()
+    await openLog(evil)
+    await expectNoOverflow('1280px')
+
+    for (const width of [1280, 360]) {
+      await page.setViewportSize({ width, height: 740 })
+      await page.goto(`/pipelines/${NS}/${encodeURIComponent(long)}`)
+      await expect(page.getByRole('heading', { name: long })).toBeVisible()
+      await openLog(long)
+      await expectNoOverflow(`${width}px long`)
+    }
+    await context.close()
+  })
+
+  test('run now', async ({ browser }) => {
+    const queued = run({ state: 'queued', startedAt: null, endedAt: null, durationSeconds: null })
+    const rows = [
+      pipeline({ name: 'team-a' }),
+      pipeline({ name: 'team-b' }),
+      pipeline({ name: 'team-paused', paused: true, state: 'paused' }),
+    ]
+    const { context, page, requests } = await open(browser, {
+      rows,
+      write: (route, path, method) => {
+        if (method !== 'POST' || !path.endsWith('/runs')) return false
+        if (path.includes('/team-b/')) {
+          json(route, { error: 'the pipeline is paused: resume it first' }, 409)
+        } else {
+          json(route, queued, 201)
+        }
+        return true
+      },
+    })
+
+    const pausedRun = page.getByRole('button', { name: 'Run now team-paused' })
+    await expect(pausedRun).toBeDisabled()
+    await expect(pausedRun).toHaveAttribute('title', 'Resume the pipeline first')
+
+    await page.getByRole('button', { name: 'Run now team-a' }).click()
+    await expect(page.getByRole('status')).toHaveText('Started a run of team-a.')
+
+    await page.getByRole('button', { name: 'Run now team-b' }).click()
+    await expect(page.getByRole('alert')).toHaveText('the pipeline is paused: resume it first')
+
+    expect(postsTo(requests, '/runs')).toBe(2)
+    expect(requests.filter((request) => request.method === 'POST').map(pathOf).sort()).toEqual([
+      `/api/pipelines/${NS}/team-a/runs`,
+      `/api/pipelines/${NS}/team-b/runs`,
+    ])
+    await context.close()
+  })
+
+  test('pause and resume', async ({ browser }) => {
+    let paused = false
+    const { context, page, requests } = await open(browser, {
+      read: (route, path, method) => {
+        if (path !== '/api/pipelines' || method !== 'GET') return false
+        json(route, { pipelines: [pipeline({ name: 'team-a', paused, state: paused ? 'paused' : 'idle' })] })
+        return true
+      },
+      write: (route, path, method) => {
+        if (method !== 'POST') return false
+        if (path.endsWith('/pause')) {
+          paused = true
+          json(route, pipeline({ name: 'team-a', paused: true, state: 'paused' }))
+          return true
+        }
+        if (path.endsWith('/resume')) {
+          paused = false
+          json(route, pipeline({ name: 'team-a' }))
+          return true
+        }
+        return false
+      },
+    })
+
+    const gets = () =>
+      requests.filter((request) => request.method === 'GET' && pathOf(request) === '/api/pipelines').length
+    const beforePause = gets()
+    await page.getByRole('button', { name: 'Pause team-a' }).click()
+    await expect(page.getByRole('button', { name: 'Resume team-a' })).toBeVisible()
+    await expect.poll(gets, { message: 'the list is read again after pause' }).toBeGreaterThan(beforePause)
+    await expect(page.getByRole('dialog')).toHaveCount(0)
+
+    const beforeResume = gets()
+    await page.getByRole('button', { name: 'Resume team-a' }).click()
+    await expect(page.getByRole('button', { name: 'Pause team-a' })).toBeVisible()
+    await expect.poll(gets, { message: 'the list is read again after resume' }).toBeGreaterThan(beforeResume)
+    expect(postsTo(requests, '/pause')).toBe(1)
+    expect(postsTo(requests, '/resume')).toBe(1)
+    await context.close()
+  })
+
+  test('pause and resume refusals show the API sentence', async ({ browser }) => {
+    const sentence = 'the scheduler has not loaded this pipeline yet'
+    for (const [name, paused] of [['pause-me', false], ['resume-me', true]] as const) {
+      const { context, page } = await open(browser, {
+        rows: [pipeline({ name, paused, state: paused ? 'paused' : 'idle' })],
+        write: (route, _path, method) => {
+          if (method !== 'POST') return false
+          json(route, { error: sentence }, 409)
+          return true
+        },
+      })
+      await page.getByRole('button', { name: paused ? `Resume ${name}` : `Pause ${name}` }).click()
+      await expect(page.getByRole('alert'), name).toHaveText(sentence)
+      await expect(page.getByRole('dialog'), name).toHaveCount(0)
+      await context.close()
+    }
+  })
+
+  test('P4 stop run names the run, asks once, and Escape cancels', async ({ browser }) => {
+    const running = run({
+      runId: 'manual__2026-10-20T09:00:00+00:00', state: 'running',
+      startedAt: '2026-10-20T09:00:01Z', endedAt: null, durationSeconds: null, note: null,
+    })
+    const detail = {
+      ...pipeline({ name: 'team-a', state: 'running', lastRun: running }),
+      runs: [running], params: {}, retries: null,
+    }
+    let stopCalls = 0
+    const { context, page, requests } = await open(browser, {
+      start: `/pipelines/${NS}/team-a`,
+      read: (route, path, method) => {
+        if (method !== 'GET') return false
+        if (path.endsWith(`/runs/${encodeURIComponent(running.runId)}`)) {
+          json(route, { run: running, tasks: [] })
+          return true
+        }
+        if (path === `/api/pipelines/${NS}/team-a`) {
+          json(route, detail)
+          return true
+        }
+        return false
+      },
+      write: (route, path, method) => {
+        if (method !== 'POST' || !path.endsWith('/stop')) return false
+        stopCalls += 1
+        if (stopCalls === 1) json(route, { error: 'the run is not active' }, 409)
+        else json(route, running)
+        return true
+      },
+    })
+
+    const opener = page.getByRole('button', { name: `Stop run ${running.runId}` })
+    await expect(opener).toBeVisible()
+    await opener.click()
+    const dialog = page.getByRole('dialog', { name: 'Stop this run?' })
+    await expect(dialog).toBeVisible()
+    await expect(dialog).toContainText(running.runId)
+    await expect(dialog.getByRole('button', { name: 'Cancel' })).toBeFocused()
+    expect(postsTo(requests, '/stop')).toBe(0)
+
+    await page.keyboard.press('Escape')
+    await expect(dialog).toHaveCount(0)
+    expect(postsTo(requests, '/stop')).toBe(0)
+    await expect(opener).toBeFocused()
+
+    await opener.click()
+    await expect(dialog).toBeVisible()
+    await dialog.getByRole('button', { name: 'Stop run' }).click()
+    await expect(dialog.getByRole('alert')).toHaveText('the run is not active')
+    await expect(dialog).toBeVisible()
+    expect(postsTo(requests, '/stop')).toBe(1)
+
+    await dialog.getByRole('button', { name: 'Stop run' }).click()
+    await expect(page.getByRole('status')).toHaveText(`Stopped run ${running.runId}.`)
+    await expect(dialog).toHaveCount(0)
+    expect(postsTo(requests, '/stop')).toBe(2)
+    await context.close()
+  })
+
+  test('log viewer', async ({ browser }) => {
+    const failed = run({ state: 'failed', note: null })
+    const detail = {
+      ...pipeline({ name: 'team-a', state: 'failed', lastRun: failed }),
+      runs: [failed], params: {}, retries: null,
+    }
+    const script = '<script>window.__xss=1</script>'
+    const { context, page, requests } = await open(browser, {
+      start: `/pipelines/${NS}/team-a`,
+      init: () => { (window as unknown as { __xss: number }).__xss = 0 },
+      read: (route, path, method, url) => {
+        if (method !== 'GET') return false
+        if (path.endsWith('/logs')) {
+          if (url.searchParams.get('token') === 'T') {
+            json(route, {
+              lines: [{ timestamp: '2026-10-20T08:00:05Z', level: 'warning', text: 'second page' }],
+              nextToken: null,
+              truncated: false,
+            })
+          } else {
+            json(route, {
+              lines: [
+                { timestamp: '2026-10-20T08:00:02Z', level: 'error', text: 'first line' },
+                { timestamp: '2026-10-20T08:00:03Z', level: 'info', text: script },
+              ],
+              nextToken: 'T',
+              truncated: true,
+            })
+          }
+          return true
+        }
+        if (path.endsWith(`/runs/${encodeURIComponent(failed.runId)}`)) {
+          json(route, {
+            run: failed,
+            tasks: [{
+              taskId: 'load', state: 'failed', tryNumber: 1,
+              startedAt: '2026-10-20T08:00:01Z', endedAt: '2026-10-20T08:00:09Z',
+              durationSeconds: 8, operator: 'BashOperator',
+            }],
+          })
+          return true
+        }
+        if (path === `/api/pipelines/${NS}/team-a`) {
+          json(route, detail)
+          return true
+        }
+        return false
+      },
+    })
+
+    await page.getByRole('button', { name: `Show tasks of run ${failed.runId}` }).click()
+    await page.getByRole('button', { name: 'View log of load try 1' }).click()
+
+    const main = page.locator('main')
+    await expect(main).toContainText('first line')
+    // Levels are words; the script-like line is text, not an element.
+    await expect(main).toContainText('Error')
+    await expect(main).toContainText('Info')
+    await expect(main).toContainText(script)
+    await expect(main).toContainText('The log was cut at 2000 lines.')
+    expect(await page.locator('script', { hasText: 'window.__xss=1' }).count()).toBe(0)
+    expect(await page.evaluate(() => (window as unknown as { __xss?: number }).__xss ?? 0)).toBe(0)
+
+    const logCalls = (token: string | null) => requests.filter((request) => {
+      const url = new URL(request.url)
+      return url.pathname.endsWith('/logs') && url.searchParams.get('token') === token
+    }).length
+    expect(logCalls('T')).toBe(0)
+    expect(requests.filter((request) => new URL(request.url).searchParams.get('try') === '1')).toHaveLength(1)
+
+    await page.getByRole('button', { name: 'Load more' }).click()
+    await expect(main).toContainText('second page')
+    await expect.poll(() => logCalls('T'), { message: 'one request carries the token' }).toBe(1)
+    await expect(page.getByRole('button', { name: 'Load more' })).toHaveCount(0)
+    await context.close()
+  })
+
+  test('404 for a hidden pipeline', async ({ browser }) => {
+    const { context, page } = await open(browser, {
+      start: `/pipelines/${NS}/hidden`,
+      read: (route, path, method) => {
+        if (method !== 'GET' || path !== `/api/pipelines/${NS}/hidden`) return false
+        json(route, { error: 'no such pipeline' }, 404)
+        return true
+      },
+    })
+    await expect(page.getByRole('heading', { name: 'Not found' })).toBeVisible()
+    await expect(page.getByRole('link', { name: 'Back to Pipelines' })).toBeVisible()
+    await expect(page.locator('main')).toContainText('no such pipeline')
+    await context.close()
+  })
+
+  test('states: loading, empty, a retryable error and 503 without Retry', async ({ browser }) => {
+    const empty = await open(browser)
+    await expect(empty.page.getByText('No pipelines yet. Pipelines you or your groups own appear here.')).toBeVisible()
+    await empty.context.close()
+
+    const loading = await open(browser, {
+      read: (route, path, method) => {
+        if (path !== '/api/pipelines' || method !== 'GET') return false
+        void new Promise((resolve) => setTimeout(resolve, 1500)).then(() => json(route, { pipelines: [] }))
+        return true
+      },
+    })
+    await expect(loading.page.getByText('Loading pipelines…')).toBeVisible()
+    await expect(loading.page.getByText('No pipelines yet. Pipelines you or your groups own appear here.')).toBeVisible()
+    await loading.context.close()
+
+    const broken = await open(browser, {
+      read: (route, path, method) => {
+        if (path !== '/api/pipelines' || method !== 'GET') return false
+        json(route, { error: 'the scheduler did not answer' }, 502)
+        return true
+      },
+    })
+    await expect(broken.page.getByText('the scheduler did not answer')).toBeVisible()
+    const retry = broken.page.getByRole('button', { name: 'Retry' })
+    await expect(retry).toBeVisible()
+    const gets = () => broken.requests.filter((request) => request.method === 'GET' && pathOf(request) === '/api/pipelines').length
+    const before = gets()
+    await retry.click()
+    await expect.poll(gets, { message: 'Retry asks again' }).toBeGreaterThan(before)
+    await broken.context.close()
+
+    const missing = await open(browser, {
+      read: (route, path, method) => {
+        if (path !== '/api/pipelines' || method !== 'GET') return false
+        json(route, { error: 'the scheduler is not configured' }, 503)
+        return true
+      },
+    })
+    await expect(missing.page.getByText('the scheduler is not configured')).toBeVisible()
+    await expect(missing.page.getByText('An administrator has to set up the scheduler connection for this installation.')).toBeVisible()
+    await expect(missing.page.getByRole('button', { name: 'Retry' })).toHaveCount(0)
+    await missing.context.close()
+  })
+
+  test('U5 the list, a run, the stop dialog and the log have accessible names', async ({ browser }) => {
+    const running = run({
+      runId: 'manual__2026-10-20T10:00:00+00:00', state: 'running',
+      startedAt: '2026-10-20T10:00:01Z', endedAt: null, durationSeconds: null, note: null,
+    })
+    const detail = {
+      ...pipeline({ name: 'team-a', state: 'running', lastRun: running }),
+      runs: [running], params: {}, retries: null,
+    }
+    const { context, page } = await open(browser, {
+      rows: [pipeline({ name: 'team-a', state: 'running', lastRun: running })],
+      read: (route, path, method) => {
+        if (method !== 'GET') return false
+        if (path.endsWith('/logs')) {
+          json(route, { lines: [{ timestamp: '2026-10-20T10:00:02Z', level: 'info', text: 'hello' }], nextToken: null, truncated: false })
+          return true
+        }
+        if (path.endsWith(`/runs/${encodeURIComponent(running.runId)}`)) {
+          json(route, {
+            run: running,
+            tasks: [{
+              taskId: 'load', state: 'running', tryNumber: 1,
+              startedAt: '2026-10-20T10:00:01Z', endedAt: null,
+              durationSeconds: null, operator: 'BashOperator',
+            }],
+          })
+          return true
+        }
+        if (path === `/api/pipelines/${NS}/team-a`) {
+          json(route, detail)
+          return true
+        }
+        return false
+      },
+    })
+
+    expect((await auditPage(page)).filter((finding) => finding.rule === 'U5')).toEqual([])
+
+    await page.getByRole('link', { name: 'team-a' }).click()
+    await expect(page.getByRole('heading', { name: 'team-a' })).toBeVisible()
+    expect((await auditPage(page)).filter((finding) => finding.rule === 'U5')).toEqual([])
+
+    await page.getByRole('button', { name: `Show tasks of run ${running.runId}` }).click()
+    await page.getByRole('button', { name: `Stop run ${running.runId}` }).click()
+    await expect(page.getByRole('dialog', { name: 'Stop this run?' })).toBeVisible()
+    expect((await auditPage(page)).filter((finding) => finding.rule === 'U5')).toEqual([])
+
+    await page.keyboard.press('Escape')
+    await page.getByRole('button', { name: 'View log of load try 1' }).click()
+    await expect(page.locator('main')).toContainText('hello')
     expect((await auditPage(page)).filter((finding) => finding.rule === 'U5')).toEqual([])
     await context.close()
   })

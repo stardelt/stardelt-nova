@@ -297,6 +297,97 @@ export type BreakGlassAnswer = {
 }
 
 /**
+ * The single state the Pipelines page shows (`GET /api/pipelines`, stardelt-nova#188).
+ * The backend computes it so the UI cannot disagree with the API about it.
+ */
+export type PipelineState =
+  | 'loading'
+  | 'not-loaded'
+  | 'paused'
+  | 'running'
+  | 'failed'
+  | 'succeeded'
+  | 'idle'
+
+/** One task as the `Pipeline` resource declares it. */
+export type PipelineTaskSpec = { name: string; kind: string }
+
+/**
+ * One run, as the list and the detail share it. Times are Airflow's RFC 3339 strings;
+ * `durationSeconds` is null until the run has ended and both times parsed.
+ */
+export type RunView = {
+  runId: string
+  /** `queued`, `running`, `success`, `failed`, `upstream_failed`, `skipped`, … */
+  state: string
+  /** Airflow's `run_type`: `scheduled`, `manual`, … */
+  type: string
+  logicalDate: string | null
+  startedAt: string | null
+  endedAt: string | null
+  durationSeconds: number | null
+  triggeredBy: string | null
+  note: string | null
+}
+
+/** One pipeline in the list: the resource plus what the scheduler says about it. */
+export type PipelineView = {
+  name: string
+  namespace: string
+  /** The owning group; null means administrators only. */
+  ownerGroup: string | null
+  /** The cron, with the time zone in parentheses when the resource has one. */
+  schedule: string | null
+  paused: boolean
+  /** False while the scheduler has no DAG for the resource yet. */
+  loaded: boolean
+  nextRun: string | null
+  state: PipelineState
+  lastRun: RunView | null
+  tasks: PipelineTaskSpec[]
+  /** The service principal a run acts as. */
+  runAs: string | null
+  /** `Allow`, `Forbid` or `Replace`. */
+  concurrency: string
+  createdAt: string | null
+}
+
+/** `GET /api/pipelines/{namespace}/{name}`: the view plus the latest 20 runs. */
+export type PipelineDetail = PipelineView & {
+  runs: RunView[]
+  params: Record<string, string>
+  retries: { attempts: number; backoff: string | null } | null
+}
+
+/** One task instance of a run. */
+export type TaskView = {
+  taskId: string
+  state: string
+  tryNumber: number
+  startedAt: string | null
+  endedAt: string | null
+  durationSeconds: number | null
+  operator: string | null
+}
+
+/** `GET …/runs/{runId}`: one run and its task instances. */
+export type RunResponse = { run: RunView; tasks: TaskView[] }
+
+/** One log message. Plain text: it is rendered as text, never as markup. */
+export type LogLine = {
+  timestamp: string | null
+  level: string | null
+  text: string
+}
+
+/** One page of a task's log; `nextToken` asks for the next page, `truncated` says it was cut. */
+export type LogPage = {
+  lines: LogLine[]
+  nextToken: string | null
+  truncated: boolean
+}
+
+/**
  * `POST /api/connections` body (stardelt-nova#173). `secret` holds the values; they are
  * written to the store and never returned. Casing matters: the backend reads
  * `ownerGroup`, `usableBy` and `refreshInterval`.
@@ -486,6 +577,25 @@ export type QueryLogParams = {
   limit?: number
 }
 
+/** One page of a task's log; `tryNumber` and `token` are optional, as the backend's own query. */
+export type PipelineLogParams = { tryNumber?: number; token?: string }
+
+function pipelineLogUrl(
+  namespace: string,
+  name: string,
+  runId: string,
+  taskId: string,
+  p: PipelineLogParams,
+): string {
+  const qs = new URLSearchParams()
+  // `try=0` is refused by the API; omitting it lets the backend pick the task's last attempt.
+  if (p.tryNumber != null && p.tryNumber > 0) qs.set('try', String(p.tryNumber))
+  if (p.token) qs.set('token', p.token)
+  const query = qs.toString()
+  const base = `/api/pipelines/${seg(namespace)}/${seg(name)}/runs/${seg(runId)}/tasks/${seg(taskId)}/logs`
+  return query ? `${base}?${query}` : base
+}
+
 function queryLogUrl(p: QueryLogParams): string {
   const qs = new URLSearchParams({ scope: p.scope })
   if (p.state) qs.set('state', p.state)
@@ -521,6 +631,17 @@ export const api = {
   jobs:         ()                            => jget<Job[]>('/api/jobs'),
   queryLog:     (p: QueryLogParams)           => jget<QueryLogPage>(queryLogUrl(p)),
   queryLogDetail: (id: string)                => jget<QueryLogDetail>(`/api/query-log/${seg(id)}`),
+  pipelines:    ()                            => jget<{ pipelines: PipelineView[] }>('/api/pipelines'),
+  pipeline:     (ns: string, name: string)    => jget<PipelineDetail>(`/api/pipelines/${seg(ns)}/${seg(name)}`),
+  startPipelineRun: (ns: string, name: string) => jpost<RunView>(`/api/pipelines/${seg(ns)}/${seg(name)}/runs`, {}),
+  pausePipeline: (ns: string, name: string)   => jpost<PipelineView>(`/api/pipelines/${seg(ns)}/${seg(name)}/pause`, {}),
+  resumePipeline: (ns: string, name: string)  => jpost<PipelineView>(`/api/pipelines/${seg(ns)}/${seg(name)}/resume`, {}),
+  pipelineRun:  (ns: string, name: string, runId: string) =>
+    jget<RunResponse>(`/api/pipelines/${seg(ns)}/${seg(name)}/runs/${seg(runId)}`),
+  stopPipelineRun: (ns: string, name: string, runId: string) =>
+    jpost<RunView>(`/api/pipelines/${seg(ns)}/${seg(name)}/runs/${seg(runId)}/stop`, {}),
+  pipelineLog:  (ns: string, name: string, runId: string, taskId: string, p: PipelineLogParams = {}) =>
+    jget<LogPage>(pipelineLogUrl(ns, name, runId, taskId, p)),
   apps:         ()                            => jget<PlatformApp[]>('/api/apps'),
   embeds:       ()                            => jget<EmbedApp[]>('/api/embeds'),
   links:        ()                            => jget<AppShortcut[]>('/api/apps/links'),
