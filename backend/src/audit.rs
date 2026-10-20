@@ -20,6 +20,7 @@
 //! from the application log (`RUST_LOG=audit=info,info`).
 
 use axum::{extract::Request, http::Method, middleware::Next, response::Response};
+use serde::Serialize;
 
 /// The public path a caller used, including the `/api` prefix that nesting strips.
 ///
@@ -119,6 +120,39 @@ pub fn connection_event(
             "connection"
         ),
     }
+}
+
+/// One break-glass read or refusal: administrator, connection, owner group, reason, outcome and
+/// the request that carried it. **No field can hold a value**, so neither the tracing line nor
+/// the state-store row can leak the thing that was read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BreakGlassRecord {
+    pub admin: String,
+    pub admin_sub: String,
+    pub owner_group: String,
+    pub connection: String,
+    pub scope: String,
+    pub reason: String,
+    pub outcome: String,
+    pub request_id: Option<String>,
+}
+
+/// The break-glass audit line on the `audit` target: what happened, by whom, to which group and
+/// connection, why, and how it ended. Never a value. The state-store row is written by the route.
+pub fn break_glass_event(rec: &BreakGlassRecord) {
+    tracing::info!(
+        target: "audit",
+        action = "break-glass",
+        admin = %rec.admin,
+        sub = %rec.admin_sub,
+        owner_group = %rec.owner_group,
+        connection = %rec.connection,
+        scope = %rec.scope,
+        reason = %rec.reason,
+        outcome = %rec.outcome,
+        request_id = rec.request_id.as_deref().unwrap_or(""),
+        "break-glass read"
+    );
 }
 
 #[cfg(test)]
