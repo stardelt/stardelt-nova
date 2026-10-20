@@ -593,6 +593,7 @@ mod tests {
             store: None,
             break_glass_reads: std::sync::Mutex::new(std::collections::HashMap::new()),
             run_starts: std::sync::Mutex::new(std::collections::HashMap::new()),
+            pipeline_creates: std::sync::Mutex::new(std::collections::HashMap::new()),
             airflow: None,
             table_locks: std::sync::Mutex::new(std::collections::HashMap::new()),
         }

@@ -25,6 +25,7 @@ base64.workspace = true
 getrandom.workspace = true
 sha2.workspace = true
 url.workspace = true
+chrono-tz.workspace = true
 utoipa.workspace = true
 sqlx.workspace = true
 futures.workspace = true
