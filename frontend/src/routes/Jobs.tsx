@@ -59,7 +59,7 @@ export default function Jobs() {
 
       <div className="flex items-center gap-2 text-xs text-text-mute">
         <Icon name="clock" className="w-3.5 h-3.5" />
-        Refreshes every 5s. History is kept in memory for the MVP.
+        Refreshes every 5 s. This list lives in memory and starts empty when Nova restarts; the Query log keeps older queries.
       </div>
     </div>
   )
