@@ -193,6 +193,18 @@ fn statement_post(
     )
 }
 
+/// The text of the error when the engine did not answer at all (not a failed statement).
+pub const ENGINE_UNREACHABLE: &str = "the query engine is not reachable";
+
+/// The HTTP status for an error from [`execute_from`]: 502 when the engine did not answer, 400 for a failed statement.
+pub fn error_status(message: &str) -> StatusCode {
+    if message == ENGINE_UNREACHABLE {
+        StatusCode::BAD_GATEWAY
+    } else {
+        StatusCode::BAD_REQUEST
+    }
+}
+
 /// Run SQL and return the aggregated result. Used by the query handler and by
 /// load/transfer, which issue DDL/DML through the same path.
 pub async fn execute(
@@ -225,7 +237,7 @@ pub async fn execute_from(
     let request = statement_post(state, caller, source);
     let initial = request.body(sql).send().await.map_err(|e| {
         tracing::warn!(error = %e, "trino request failed");
-        "the query engine is not reachable".to_string()
+        ENGINE_UNREACHABLE.to_string()
     })?;
 
     let mut current: TrinoResponse = initial
@@ -299,7 +311,7 @@ pub async fn execute_from(
                 .await
                 .map_err(|e| {
                     tracing::warn!(error = %e, "trino paginated request failed");
-                    "the query engine is not reachable".to_string()
+                    ENGINE_UNREACHABLE.to_string()
                 })?;
             current = response
                 .json()
@@ -403,11 +415,7 @@ pub async fn run_query(
                     &user,
                     &owner,
                 );
-                (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({ "error": e })),
-                )
-                    .into_response()
+                (error_status(&e), Json(serde_json::json!({ "error": e }))).into_response()
             }
         };
     }
@@ -444,11 +452,7 @@ pub async fn run_query(
                 &user,
                 &owner,
             );
-            (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({ "error": e })),
-            )
-                .into_response()
+            (error_status(&e), Json(serde_json::json!({ "error": e }))).into_response()
         }
     }
 }
@@ -509,6 +513,19 @@ mod tests {
             client_error(&serde_json::json!({})),
             "Trino query failed",
             "an error document Nova cannot read still yields one line"
+        );
+    }
+
+    #[test]
+    fn an_unreachable_engine_is_a_bad_gateway() {
+        assert_eq!(error_status(ENGINE_UNREACHABLE), StatusCode::BAD_GATEWAY);
+    }
+
+    #[test]
+    fn a_failed_statement_stays_a_bad_request() {
+        assert_eq!(
+            error_status("line 1:8: Column 'x' cannot be resolved"),
+            StatusCode::BAD_REQUEST
         );
     }
 

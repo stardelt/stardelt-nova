@@ -14,7 +14,7 @@ use axum::{
 use serde::Deserialize;
 use tracing::warn;
 
-use crate::{AppState, api_json::ApiJson, auth, data};
+use crate::{AppState, api_json::ApiJson, auth, data, trino::error_status};
 
 /// OpenAPI shapes for the catalog routes (first slice of ticket #107).
 ///
@@ -220,6 +220,7 @@ pub async fn list_namespaces(
     responses(
         (status = 200, description = "The created schema name", body = CreateNamespaceResponse),
         (status = 400, description = "Missing name, or the engine refused it", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The query engine is not reachable", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn create_namespace(
@@ -251,11 +252,7 @@ pub async fn create_namespace(
     );
     match crate::trino::execute(&s, sql, caller.as_ref().map(|c| &c.0)).await {
         Ok(_) => Json(serde_json::json!({ "namespace": ns })).into_response(),
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": e})),
-        )
-            .into_response(),
+        Err(e) => (error_status(&e), Json(serde_json::json!({"error": e}))).into_response(),
     }
 }
 
@@ -442,11 +439,7 @@ pub async fn table_history(
     }
     match crate::trino::execute(&s, history_sql(&ns, &tbl), caller.as_ref().map(|c| &c.0)).await {
         Ok(r) => Json(stringify_snapshot_ids(r)).into_response(),
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": e})),
-        )
-            .into_response(),
+        Err(e) => (error_status(&e), Json(serde_json::json!({"error": e}))).into_response(),
     }
 }
 
@@ -474,11 +467,7 @@ pub async fn table_rollback(
     .await
     {
         Ok(r) => Json(r).into_response(),
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": e})),
-        )
-            .into_response(),
+        Err(e) => (error_status(&e), Json(serde_json::json!({"error": e}))).into_response(),
     }
 }
 
