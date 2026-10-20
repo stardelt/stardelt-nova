@@ -1,6 +1,6 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Link } from 'react-router-dom'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { ApiError, api, errorMessage, type PipelineView } from '../api'
 import ErrorBox from '../components/ErrorBox'
 import { Icon } from '../components/Icon'
@@ -196,6 +196,9 @@ export function PipelineActions({
 
 export default function Pipelines() {
   const queryClient = useQueryClient()
+  const location = useLocation()
+  const navigate = useNavigate()
+  const [routedNotice, setRoutedNotice] = useState<string | null>(null)
   const list = useQuery({
     queryKey: ['pipelines'],
     queryFn: api.pipelines,
@@ -206,6 +209,15 @@ export default function Pipelines() {
     },
   })
   const actions = usePipelineActions(() => queryClient.invalidateQueries({ queryKey: ['pipelines'] }))
+
+  // A delete on the detail page comes back here with its notice in the route state; show it
+  // once, then replace the entry so Back does not bring the sentence along.
+  useEffect(() => {
+    const state = location.state as { notice?: unknown } | null
+    if (typeof state?.notice !== 'string') return
+    setRoutedNotice(state.notice)
+    navigate(location.pathname, { replace: true, state: null })
+  }, [location.pathname, location.state, navigate])
 
   const pipelines = list.data?.pipelines ?? []
   const failed = list.isError && !list.data
@@ -220,7 +232,7 @@ export default function Pipelines() {
         <p className="text-text-dim text-sm mt-1">Scheduled work you and your groups own.</p>
       </header>
 
-      <PipelineFeedback notice={actions.notice} error={actions.error} />
+      <PipelineFeedback notice={routedNotice ?? actions.notice} error={actions.error} />
 
       <div className="card relative overflow-x-auto">
         {list.isLoading && <p className="px-5 py-5 text-sm text-text-mute">Loading pipelines…</p>}
@@ -239,7 +251,9 @@ export default function Pipelines() {
         )}
         {list.data && pipelines.length === 0 && (
           <p className="px-5 py-5 text-sm text-text-mute">
-            No pipelines yet. Pipelines you or your groups own appear here.
+            No pipelines yet.{' '}
+            <Link to="/query" className="underline">Open the SQL editor</Link>, write a statement
+            and press Schedule.
           </p>
         )}
         {list.data && pipelines.length > 0 && (
