@@ -79,6 +79,7 @@ export default function Query() {
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_280px] gap-5 h-full min-h-0">
+      <h1 className="sr-only">SQL editor</h1>
       <div className="flex flex-col gap-4 min-h-0 min-w-0">
         <div className="card p-3 focus-within:border-accent/60">
           <textarea
