@@ -3,7 +3,8 @@ import { defineConfig } from '@playwright/test'
 // UI conformance suite (`npm run e2e`). It starts the real backend in its no-login dev mode
 // with no cluster behind it, so every page also shows how it behaves when its upstreams are
 // unreachable. Needs `npm run build` (the backend serves `dist/`) and a built backend binary.
-const port = 18080
+// `NOVA_E2E_PORT` lets parallel checkouts run at the same time; it defaults to the CI port.
+const port = Number(process.env.NOVA_E2E_PORT ?? 18080)
 export default defineConfig({
   testDir: 'e2e',
   workers: 1,
