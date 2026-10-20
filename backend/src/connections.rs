@@ -402,6 +402,17 @@ pub fn connection_resource(req: &NewConnection, namespace: &str) -> Option<Value
     }))
 }
 
+/// The notice an administrator's break-glass read leaves on a group's `Connection` resource and
+/// that the listing shows to the group. It never carries a value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct BreakGlassNotice {
+    /// The administrator's display name.
+    pub by: String,
+    /// RFC 3339 UTC.
+    pub at: String,
+    pub reason: String,
+}
+
 /// One row of `GET /api/connections`. Never carries a value.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 pub struct ConnectionView {
@@ -423,6 +434,9 @@ pub struct ConnectionView {
     /// `Ready` and its reason from the resource's status; absent for a personal connection.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sync: Option<SyncView>,
+    /// The last break-glass read of a group connection; absent for personal and managed rows.
+    #[serde(rename = "breakGlass", skip_serializing_if = "Option::is_none")]
+    pub break_glass: Option<BreakGlassNotice>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
@@ -470,7 +484,15 @@ pub fn view_from_store(
         last_rotated: meta.updated_time.clone(),
         version: meta.version,
         sync,
+        break_glass: None,
     }
+}
+
+/// The break-glass notice from a `Connection` resource's annotation; an annotation that does not
+/// parse is ignored (a half-written or foreign value must not break the listing).
+pub fn break_glass_notice(resource: &Value) -> Option<BreakGlassNotice> {
+    let text = resource["metadata"]["annotations"]["stardelt.io/break-glass"].as_str()?;
+    serde_json::from_str(text).ok()
 }
 
 /// `Ready` and its reason from a `Connection` resource's status.

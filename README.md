@@ -40,6 +40,8 @@ Browser
          ├─ POST /api/connections      create one: the values go to the store, never back
          ├─ PUT  /api/connections/…/secret  rotate fields of one connection
          ├─ DELETE /api/connections/…  delete one connection
+         ├─ POST /api/connections/group/:group/:name/break-glass  emergency read (administrators only)
+         ├─ GET  /api/connections/break-glass-log  who used break-glass and why (administrators only)
          ├─ POST /api/ingest/upload    load CSV/JSON into a table (a failed load keeps the old table)
          ├─ POST /api/transfer         copy table → table (a failed copy keeps the target)
          │
@@ -78,7 +80,7 @@ stardelt-nova/
 │   │   ├── main.rs   server setup, /api/health, /api/me, /api/trino
 │   │   ├── api_json.rs  `ApiJson` body extractor: JSON, never text, on rejection
 │   │   ├── catalog.rs Lakekeeper proxy routes
-│   │   ├── connection_routes.rs  `/api/connections`: list, create, rotate, delete
+│   │   ├── connection_routes.rs  `/api/connections`: list, create, rotate, delete, break-glass
 │   │   ├── connections.rs  connection rules: validation, authorization, payloads
 │   │   ├── secret_store.rs  secret store client, signed in with the caller's own token
 │   │   ├── db.rs     optional PostgreSQL state store: pool, migrations, health
@@ -218,6 +220,7 @@ The backend is configured entirely through environment variables:
 | `NOVA_QUERY_LOG_RETENTION_DAYS` | `90` | How long query-log rows are kept; the backend purges hourly. `0` disables the purge; an unparsable value warns and uses the default |
 | `NOVA_SECRET_STORE_URL` | — (empty) | Base URL of the platform's secret store (OpenBao), for example `http://openbao.stardelt.svc.cluster.local:8200`. Unset = disabled: features that need the store answer 503. Nova signs in with the caller's own token and sees only what the store's policies give that person; values are never logged |
 | `NOVA_SECRET_STORE_ROLE` | `platform-users` | The store's JWT sign-in role used for the caller's token |
+| `NOVA_SECRET_STORE_BREAKGLASS_ROLE` | `breakglass` | The store's JWT sign-in role for an administrator's break-glass read of a group connection: read on `connections/group/*` only, bound to `azp = nova` and the administrator group, 15-minute token. Declared and audited on the store side (stardelt-platform#225) |
 | `NOVA_SECRET_STORE_MOUNT` | `secret` | The KV v2 mount that holds `connections/…` |
 | `NOVA_DEV_USER` | `stardelt-dev` | Static user identity returned by `/api/me` (dev mode only) |
 | `NOVA_AUTH_MODE` | `dev` | `dev` (no login) or `oidc` — see [Sign-in](#sign-in-oidc) |
@@ -271,6 +274,20 @@ field. Deleting removes the value first and the resource second — if the secon
 gone and the entry stays visible as not-ready, which is retryable. Each create, rotation and delete
 also writes a `connection` line on the `audit` target with the scope, the group, the name and the
 person — never a value.
+
+**Break-glass.** In an emergency an administrator may read a **group** connection through
+`POST /api/connections/group/<group>/<name>/break-glass` with `{"reason": "…"}` (20 to 500 characters).
+The route signs in to the store's `breakglass` role with the administrator's **own** token, reads only
+that group's path, revokes the 15-minute store token, and returns the fields **once** with
+`Cache-Control: no-store` and `Pragma: no-cache`. Before answering it writes the notice
+`stardelt.io/break-glass` (`by`, `at`, `reason`) on the `Connection`, which the group's Connections page
+shows as `breakGlass`; a rotation clears it. Every attempt — also a refusal — writes an `audit` line and
+a row in `break_glass_read`, which never has a column for a value. Personal and managed connections are
+always refused (`403 break-glass covers group connections only`); only administrators may call it, and
+at most five attempts per administrator in ten minutes (`429`). If the notice cannot be written, nothing
+is returned (`502`) and the attempt is recorded as `notice-failed`. `GET /api/connections/break-glass-log`
+returns the last 200 events (newest first) to administrators. Without a state store the log answers
+`503 the state store is not configured`; the read itself needs only the secret store.
 
 ## Sign-in (OIDC)
 

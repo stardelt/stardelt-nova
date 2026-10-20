@@ -19,26 +19,40 @@
 //! The route logic sits in plain `async fn`s that take their inputs, so the tests call them
 //! without a router; each handler is the thin axum wrapper that checks sign-in and the store.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::{
     Json,
-    extract::{FromRequest, FromRequestParts, Path},
-    http::{StatusCode, request::Parts},
+    extract::{FromRequest, FromRequestParts, Path, State},
+    http::{StatusCode, header, request::Parts},
     response::{IntoResponse, Response},
 };
 use futures::stream::{self, StreamExt};
-use kube::api::{Api, ApiResource, DynamicObject, GroupVersionKind};
+use kube::api::{Api, ApiResource, DynamicObject, GroupVersionKind, Patch, PatchParams};
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::AppState;
 use crate::api_json::ApiJson;
-use crate::audit;
+use crate::audit::{self, BreakGlassRecord};
 use crate::auth::{Identity, Principal, Secret};
-use crate::connections::{self, Action, ConnectionView, NewConnection, Scope, SyncView};
+use crate::connections::{
+    self, Action, BreakGlassNotice, ConnectionView, NewConnection, Scope, SyncView,
+};
 use crate::secret_store::{self, SecretMeta, StoreClient, StoreError, StoreScope, StoreToken};
+
+/// The annotation a break-glass read leaves on the group's `Connection`. The listing turns it
+/// into `breakGlass`; a rotation removes it.
+pub const BREAK_GLASS_ANNOTATION: &str = "stardelt.io/break-glass";
+
+/// At most this many attempted break-glass reads per administrator in [`BREAK_GLASS_WINDOW`].
+const BREAK_GLASS_LIMIT: usize = 5;
+const BREAK_GLASS_WINDOW: Duration = Duration::from_secs(10 * 60);
+
+/// The in-memory per-admin rate limit (`AppState::break_glass_reads`).
+pub type BreakGlassLimiter = Mutex<HashMap<String, VecDeque<Instant>>>;
 
 /// The `Connection` resources of the platform namespace: the cluster, or memory in tests.
 pub enum Resources {
@@ -48,6 +62,8 @@ pub enum Resources {
         items: Arc<std::sync::Mutex<BTreeMap<String, Value>>>,
         /// Answer `Unavailable` from `delete`, as an API server that refuses would.
         fail_delete: bool,
+        /// Answer `Unavailable` from `annotate`, as an API server that refuses would.
+        fail_annotate: bool,
     },
 }
 
@@ -111,7 +127,9 @@ impl Resources {
                 Err(e) => Err(ResourceError::Unavailable(e.to_string())),
             },
             #[cfg(test)]
-            Self::Memory { items, fail_delete } => {
+            Self::Memory {
+                items, fail_delete, ..
+            } => {
                 if *fail_delete {
                     return Err(ResourceError::Unavailable("the API server refused".into()));
                 }
@@ -119,6 +137,67 @@ impl Resources {
                     .lock()
                     .expect("memory resources poisoned")
                     .remove(name);
+                Ok(())
+            }
+        }
+    }
+
+    /// Set or remove one annotation on a `Connection`, through a JSON merge patch that touches
+    /// `metadata.annotations` only. `None` removes the key. A failure here matters: a break-glass
+    /// read answers nothing unless the owner group's notice could be written.
+    pub async fn annotate(
+        &self,
+        name: &str,
+        key: &str,
+        value: Option<&str>,
+    ) -> Result<(), ResourceError> {
+        match self {
+            Self::Kube(api) => {
+                let patch = json!({ "metadata": { "annotations": { key: value } } });
+                api.patch(name, &PatchParams::default(), &Patch::Merge(patch))
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| match e {
+                        kube::Error::Api(er) if er.code == 404 => {
+                            ResourceError::Unavailable("no such resource".into())
+                        }
+                        other => ResourceError::Unavailable(other.to_string()),
+                    })
+            }
+            #[cfg(test)]
+            Self::Memory {
+                items,
+                fail_annotate,
+                ..
+            } => {
+                if *fail_annotate {
+                    return Err(ResourceError::Unavailable("the API server refused".into()));
+                }
+                let mut items = items.lock().expect("memory resources poisoned");
+                let Some(resource) = items.get_mut(name) else {
+                    return Err(ResourceError::Unavailable("no such resource".into()));
+                };
+                let annotations = resource
+                    .as_object_mut()
+                    .and_then(|o| o.get_mut("metadata"))
+                    .and_then(Value::as_object_mut)
+                    .map(|m| {
+                        m.entry("annotations")
+                            .or_insert_with(|| Value::Object(Default::default()))
+                    });
+                let Some(Value::Object(annotations)) = annotations else {
+                    return Err(ResourceError::Unavailable(
+                        "the resource has no annotation map".into(),
+                    ));
+                };
+                match value {
+                    Some(value) => {
+                        annotations.insert(key.to_string(), Value::String(value.to_string()));
+                    }
+                    None => {
+                        annotations.remove(key);
+                    }
+                }
                 Ok(())
             }
         }
@@ -371,6 +450,155 @@ fn meta_from_resource(resource: &Value) -> SecretMeta {
     }
 }
 
+/// The civil date of a day count since 1970-01-01 (Howard Hinnant's algorithm, no dependency).
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (y + i64::from(month <= 2), month, day)
+}
+
+/// RFC 3339 in UTC, second precision: `2026-10-20T08:15:00Z`.
+fn rfc3339_utc(time: SystemTime) -> String {
+    let secs = time
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or_default();
+    let (year, month, day) = civil_from_days(secs.div_euclid(86_400));
+    let day_secs = secs.rem_euclid(86_400);
+    let (hour, minute, second) = (day_secs / 3_600, day_secs % 3_600 / 60, day_secs % 60);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
+/// `POST …/break-glass` body. No `Debug`: a reason can be sensitive and nothing here should ever
+/// be printed by accident.
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct BreakGlassRequest {
+    pub reason: String,
+}
+
+/// The values, returned once. No `Debug`: the map holds the secret values and is never formatted,
+/// logged or put in an error.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct BreakGlassResponse {
+    pub fields: BTreeMap<String, String>,
+    #[serde(rename = "readAt")]
+    pub read_at: String,
+}
+
+impl IntoResponse for BreakGlassResponse {
+    fn into_response(self) -> Response {
+        (
+            [
+                (header::CACHE_CONTROL, "no-store"),
+                (header::PRAGMA, "no-cache"),
+            ],
+            Json(self),
+        )
+            .into_response()
+    }
+}
+
+/// `GET /api/connections/break-glass-log`: the last 200 reads and refusals, newest first. It has
+/// no values by construction (see [`audit::BreakGlassRecord`]).
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct BreakGlassLogResponse {
+    pub events: Vec<BreakGlassLogRow>,
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct BreakGlassLogRow {
+    pub at: String,
+    pub admin: String,
+    #[serde(rename = "ownerGroup")]
+    pub owner_group: String,
+    pub connection: String,
+    pub reason: String,
+    pub outcome: String,
+}
+
+/// The result of one break-glass attempt: the answer and the audit record for it. The record is
+/// kept aside so the test can prove what was written; the handler only looks at `answer`.
+struct BreakGlassResult {
+    answer: Result<BreakGlassResponse, Fail>,
+    /// The tests inspect what was recorded; production has already written the line and the row.
+    #[allow(dead_code)]
+    record: BreakGlassRecord,
+}
+
+/// Validate a reason: trimmed, 20 to 500 characters, no control character except newline.
+fn break_glass_reason(reason: &str) -> Option<&str> {
+    let reason = reason.trim();
+    let count = reason.chars().count();
+    if (20..=500).contains(&count) && reason.chars().all(|c| c == '\n' || !c.is_control()) {
+        Some(reason)
+    } else {
+        None
+    }
+}
+
+/// The reason as the audit record keeps it: trimmed and bounded, but even a refused reason is
+/// recorded (it must never become a value-sized column).
+fn audit_reason(reason: &str) -> String {
+    reason.trim().chars().take(500).collect()
+}
+
+/// Take one slot for `sub`, or report that the window is full. Refusals do not reach this; every
+/// attempted read does, whether it succeeds, is refused by the store or fails at the notice.
+fn take_break_glass_slot(limiter: &BreakGlassLimiter, sub: &str) -> bool {
+    let mut map = limiter.lock().expect("break-glass limiter poisoned");
+    let now = Instant::now();
+    let slots = map.entry(sub.to_string()).or_default();
+    while slots
+        .front()
+        .is_some_and(|then| now.duration_since(*then) >= BREAK_GLASS_WINDOW)
+    {
+        slots.pop_front();
+    }
+    if slots.len() >= BREAK_GLASS_LIMIT {
+        false
+    } else {
+        slots.push_back(now);
+        true
+    }
+}
+
+/// Finish one attempt: set the outcome, write the audit line (and the state-store row when one is
+/// configured) and hand the answer back. A failed insert is logged and never changes the answer.
+async fn finish_break_glass(
+    db: Option<&sqlx::PgPool>,
+    mut record: BreakGlassRecord,
+    outcome: &str,
+    answer: Result<BreakGlassResponse, Fail>,
+) -> BreakGlassResult {
+    record.outcome = outcome.to_string();
+    audit::break_glass_event(&record);
+    if let Some(pool) = db
+        && let Err(e) = sqlx::query(
+            "INSERT INTO break_glass_read (admin, admin_sub, owner_group, connection, reason, outcome, request_id) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(&record.admin)
+        .bind(&record.admin_sub)
+        .bind(&record.owner_group)
+        .bind(&record.connection)
+        .bind(&record.reason)
+        .bind(&record.outcome)
+        .bind(record.request_id.as_deref())
+        .execute(pool)
+        .await
+    {
+        tracing::warn!(error = %e, "could not record a break-glass read in the state store");
+    }
+    BreakGlassResult { answer, record }
+}
+
 // ---------------------------------------------------------------------------
 // The route logic. These take their inputs, so the tests call them directly.
 // ---------------------------------------------------------------------------
@@ -494,6 +722,14 @@ async fn rotate_connection(
         .map_err(store_fail)?;
 
     let meta = store.metadata(&token, &path).await.map_err(store_fail)?;
+    // The credential has been replaced, which is the answer to a break-glass notice: clear it.
+    // A cluster that refuses this must not fail a rotation that already happened.
+    if view_scope == Scope::Group
+        && let Some(resources) = resources
+        && let Err(e) = resources.annotate(name, BREAK_GLASS_ANNOTATION, None).await
+    {
+        tracing::warn!(error = ?e, "could not clear the break-glass notice after a rotation");
+    }
     let rows = resource_rows(resources, view_scope).await;
     audit::connection_event("rotate", who, scope_word(view_scope), group, name);
     Ok(connections::view_from_store(
@@ -615,6 +851,210 @@ async fn list_connections(
     Ok(rows)
 }
 
+/// The emergency read of a group connection: administrator, a written reason, a rate limit, the
+/// store's `breakglass` role signed in with the administrator's **own** token, the notice on the
+/// `Connection`, then the values once. Every exit is audited and the record cannot hold a value.
+#[allow(clippy::too_many_arguments)]
+async fn break_glass_group_at(
+    store: &StoreClient,
+    resources: Option<&Resources>,
+    limiter: &BreakGlassLimiter,
+    db: Option<&sqlx::PgPool>,
+    who: &Identity,
+    access: &Secret,
+    group: &str,
+    name: &str,
+    reason: &str,
+    request_id: Option<&str>,
+) -> BreakGlassResult {
+    let mut record = BreakGlassRecord {
+        admin: who.display_name.clone(),
+        admin_sub: who.sub.clone(),
+        owner_group: group.to_string(),
+        connection: name.to_string(),
+        scope: "group".to_string(),
+        reason: audit_reason(reason),
+        outcome: String::new(),
+        request_id: request_id.map(str::to_string),
+    };
+
+    if !who.is_admin {
+        return finish_break_glass(
+            db,
+            record,
+            "refused:not-admin",
+            Err(Fail::new(
+                StatusCode::FORBIDDEN,
+                "only administrators may do this",
+            )),
+        )
+        .await;
+    }
+
+    let Some(reason) = break_glass_reason(reason) else {
+        return finish_break_glass(
+            db,
+            record,
+            "refused:reason",
+            Err(Fail::new(
+                StatusCode::BAD_REQUEST,
+                "give a reason of at least 20 characters",
+            )),
+        )
+        .await;
+    };
+    record.reason = reason.to_string();
+
+    if !take_break_glass_slot(limiter, &who.sub) {
+        return finish_break_glass(
+            db,
+            record,
+            "refused:rate",
+            Err(Fail::new(
+                StatusCode::TOO_MANY_REQUESTS,
+                "too many break-glass reads; wait",
+            )),
+        )
+        .await;
+    }
+
+    let scope = StoreScope::Group {
+        group: group.to_string(),
+    };
+    let path = match secret_store::secret_path(&scope, name) {
+        Ok(path) => path,
+        Err(e) => {
+            return finish_break_glass(db, record, "refused:request", Err(store_fail(e))).await;
+        }
+    };
+
+    let token = match store.login_as(store.breakglass_role(), access).await {
+        Ok(token) => token,
+        Err(StoreError::Refused(_)) => {
+            return finish_break_glass(
+                db,
+                record,
+                "refused:store",
+                Err(Fail::new(
+                    StatusCode::FORBIDDEN,
+                    "the store refused the break-glass sign-in",
+                )),
+            )
+            .await;
+        }
+        Err(e) => {
+            return finish_break_glass(db, record, "refused:store", Err(store_fail(e))).await;
+        }
+    };
+
+    let fields = match store.read(&token, &path).await {
+        Ok(fields) => fields,
+        Err(StoreError::NotFound) => {
+            let _ = store.revoke(&token).await;
+            drop(token);
+            return finish_break_glass(db, record, "not-found", Err(not_found())).await;
+        }
+        Err(e) => {
+            let _ = store.revoke(&token).await;
+            drop(token);
+            return finish_break_glass(db, record, "unavailable", Err(store_fail(e))).await;
+        }
+    };
+    let _ = store.revoke(&token).await;
+    drop(token);
+
+    let at = rfc3339_utc(SystemTime::now());
+    let notice = BreakGlassNotice {
+        by: who.display_name.clone(),
+        at: at.clone(),
+        reason: reason.to_string(),
+    };
+    let value = serde_json::to_string(&notice).expect("the break-glass notice serializes");
+    let Some(resources) = resources else {
+        return finish_break_glass(
+            db,
+            record,
+            "notice-failed",
+            Err(Fail::new(
+                StatusCode::BAD_GATEWAY,
+                "could not record the notice; nothing was returned",
+            )),
+        )
+        .await;
+    };
+    if let Err(e) = resources
+        .annotate(name, BREAK_GLASS_ANNOTATION, Some(&value))
+        .await
+    {
+        tracing::warn!(error = ?e, "could not write the break-glass notice");
+        return finish_break_glass(
+            db,
+            record,
+            "notice-failed",
+            Err(Fail::new(
+                StatusCode::BAD_GATEWAY,
+                "could not record the notice; nothing was returned",
+            )),
+        )
+        .await;
+    }
+
+    finish_break_glass(
+        db,
+        record,
+        "read",
+        Ok(BreakGlassResponse {
+            fields,
+            read_at: at,
+        }),
+    )
+    .await
+}
+
+/// A personal or managed connection is never readable, even by an administrator: the route exists
+/// only to refuse (after the administrator check) and to leave an audit row.
+async fn break_glass_refused_scope(
+    db: Option<&sqlx::PgPool>,
+    who: &Identity,
+    scope: &str,
+    name: &str,
+    reason: &str,
+    request_id: Option<&str>,
+) -> BreakGlassResult {
+    let record = BreakGlassRecord {
+        admin: who.display_name.clone(),
+        admin_sub: who.sub.clone(),
+        owner_group: String::new(),
+        connection: name.to_string(),
+        scope: scope.to_string(),
+        reason: audit_reason(reason),
+        outcome: String::new(),
+        request_id: request_id.map(str::to_string),
+    };
+    if !who.is_admin {
+        return finish_break_glass(
+            db,
+            record,
+            "refused:not-admin",
+            Err(Fail::new(
+                StatusCode::FORBIDDEN,
+                "only administrators may do this",
+            )),
+        )
+        .await;
+    }
+    finish_break_glass(
+        db,
+        record,
+        "refused:scope",
+        Err(Fail::new(
+            StatusCode::FORBIDDEN,
+            "break-glass covers group connections only",
+        )),
+    )
+    .await
+}
+
 /// The rows of one store scope. Values are read for nothing here: the listing is metadata only.
 async fn rows_from_store(
     store: &StoreClient,
@@ -649,14 +1089,21 @@ async fn rows_from_store(
     let mut rows = Vec::new();
     for (name, meta) in fetched {
         match meta {
-            Ok(meta) => rows.push(connections::view_from_store(
-                &name,
-                view,
-                group,
-                Vec::new(),
-                &meta,
-                sync_in(cluster_rows, view, group, &name),
-            )),
+            Ok(meta) => {
+                let mut row = connections::view_from_store(
+                    &name,
+                    view,
+                    group,
+                    Vec::new(),
+                    &meta,
+                    sync_in(cluster_rows, view, group, &name),
+                );
+                if view == Scope::Group {
+                    row.break_glass = resource_row(cluster_rows, Scope::Group, group, &name)
+                        .and_then(connections::break_glass_notice);
+                }
+                rows.push(row);
+            }
             // Gone between the listing and the read: nothing to show.
             Err(StoreError::NotFound) => {}
             Err(e) => return Err(store_fail(e)),
@@ -687,6 +1134,8 @@ pub(crate) struct SignedIn {
     identity: Identity,
     /// The caller's own token, the one the store is signed in with — never a service identity.
     access: Secret,
+    /// The ingress/proxy request id, recorded with a break-glass read when present.
+    request_id: Option<String>,
 }
 
 impl SignedIn {
@@ -715,10 +1164,16 @@ impl FromRequestParts<Arc<AppState>> for SignedIn {
         let Some(access) = principal.access_token else {
             return Err(sign_in_again());
         };
+        let request_id = parts
+            .headers
+            .get("x-request-id")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.chars().take(200).collect());
         Ok(Self {
             state: Arc::clone(state),
             identity: principal.identity,
             access,
+            request_id,
         })
     }
 }
@@ -752,6 +1207,185 @@ pub(crate) async fn list(signed: SignedIn) -> Response {
     {
         Ok(connections) => Json(ConnectionsResponse { connections }).into_response(),
         Err(e) => e.into_response(),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/connections/group/{group}/{name}/break-glass",
+    tag = "public",
+    description = "Emergency read of a group connection by an administrator: a written reason, a notice on the Connection for the owner group, an audit row, and the values returned **once**. The answer is never stored and carries `Cache-Control: no-store` and `Pragma: no-cache`. Personal and managed connections are never readable.",
+    params(
+        ("group" = String, Path, description = "Owner group"),
+        ("name" = String, Path, description = "Connection name"),
+    ),
+    request_body = BreakGlassRequest,
+    responses(
+        (status = 200, description = "The connection's fields, returned once and never stored; the owner group's notice is already written", body = BreakGlassResponse),
+        (status = 400, description = "The reason is shorter than 20 characters; never a value", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "No token to sign in to the secret store with", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "Not an administrator, or the store refused the break-glass sign-in", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such connection", body = crate::openapi::ErrorResponse),
+        (status = 429, description = "More than five break-glass reads by this administrator in ten minutes", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The secret store did not answer, or the notice on the Connection could not be written (nothing is returned then)", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "The secret store is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn break_glass_group(
+    signed: SignedIn,
+    Path((group, name)): Path<(String, String)>,
+    ConnectionJson(req): ConnectionJson<BreakGlassRequest>,
+) -> Response {
+    let resources = resources(&signed.state);
+    let result = break_glass_group_at(
+        signed.store(),
+        resources.as_ref(),
+        &signed.state.break_glass_reads,
+        signed.state.db.as_ref(),
+        &signed.identity,
+        &signed.access,
+        &group,
+        &name,
+        &req.reason,
+        signed.request_id.as_deref(),
+    )
+    .await;
+    match result.answer {
+        Ok(response) => response.into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/connections/personal/{name}/break-glass",
+    tag = "public",
+    description = "Always refused: break-glass covers group connections only. An administrator gets a 403 and an audit row; nothing is read.",
+    params(
+        ("name" = String, Path, description = "Connection name"),
+    ),
+    request_body = BreakGlassRequest,
+    responses(
+        (status = 403, description = "Break-glass covers group connections only, or the caller is not an administrator", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "No token to sign in to the secret store with", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "The secret store is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn break_glass_personal(
+    signed: SignedIn,
+    Path(name): Path<String>,
+    ConnectionJson(req): ConnectionJson<BreakGlassRequest>,
+) -> Response {
+    let result = break_glass_refused_scope(
+        signed.state.db.as_ref(),
+        &signed.identity,
+        "personal",
+        &name,
+        &req.reason,
+        signed.request_id.as_deref(),
+    )
+    .await;
+    match result.answer {
+        Ok(response) => response.into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/connections/managed/{name}/break-glass",
+    tag = "public",
+    description = "Always refused: break-glass covers group connections only. An administrator gets a 403 and an audit row; nothing is read.",
+    params(
+        ("name" = String, Path, description = "Connection name"),
+    ),
+    request_body = BreakGlassRequest,
+    responses(
+        (status = 403, description = "Break-glass covers group connections only, or the caller is not an administrator", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "No token to sign in to the secret store with", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "The secret store is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn break_glass_managed(
+    signed: SignedIn,
+    Path(name): Path<String>,
+    ConnectionJson(req): ConnectionJson<BreakGlassRequest>,
+) -> Response {
+    let result = break_glass_refused_scope(
+        signed.state.db.as_ref(),
+        &signed.identity,
+        "managed",
+        &name,
+        &req.reason,
+        signed.request_id.as_deref(),
+    )
+    .await;
+    match result.answer {
+        Ok(response) => response.into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/connections/break-glass-log",
+    tag = "public",
+    description = "The last 200 break-glass reads and refusals, newest first, for administrators. The rows carry the administrator, group, connection, reason and outcome — never a value. `Cache-Control: no-store`.",
+    responses(
+        (status = 200, description = "The most recent events, newest first", body = BreakGlassLogResponse),
+        (status = 403, description = "Not an administrator", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn break_glass_log(
+    State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<Principal>>,
+) -> Response {
+    // In dev mode there is no principal and one operator, who is the administrator.
+    let is_admin = principal
+        .as_ref()
+        .is_none_or(|axum::Extension(p)| p.identity.is_admin);
+    if !is_admin {
+        return Fail::new(StatusCode::FORBIDDEN, "only administrators may do this").into_response();
+    }
+    let Some(db) = state.db.as_ref() else {
+        return Fail::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the state store is not configured",
+        )
+        .into_response();
+    };
+    let rows = sqlx::query_as::<_, (String, String, String, String, String, String)>(
+        "SELECT to_char(at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), admin, \
+            owner_group, connection, reason, outcome \
+         FROM break_glass_read ORDER BY at DESC LIMIT 200",
+    )
+    .fetch_all(db)
+    .await;
+    match rows {
+        Ok(rows) => (
+            [(header::CACHE_CONTROL, "no-store")],
+            Json(BreakGlassLogResponse {
+                events: rows
+                    .into_iter()
+                    .map(
+                        |(at, admin, owner_group, connection, reason, outcome)| BreakGlassLogRow {
+                            at,
+                            admin,
+                            owner_group,
+                            connection,
+                            reason,
+                            outcome,
+                        },
+                    )
+                    .collect(),
+            }),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::warn!(error = %e, "could not read the break-glass log");
+            Fail::new(StatusCode::BAD_GATEWAY, "the state store did not answer").into_response()
+        }
     }
 }
 
@@ -1006,7 +1640,7 @@ mod tests {
         Router,
         body::Body,
         http::{Request, StatusCode},
-        routing::get,
+        routing::{get, post},
     };
     use serde_json::json;
     use tower::ServiceExt;
@@ -1015,7 +1649,10 @@ mod tests {
     use crate::secret_store::fake;
 
     /// A value that must never appear in an answer.
-    const CANARY: &str = "canary-7f3a";
+    const CANARY: &str = "canary-7f3a-DO-NOT-LEAK";
+
+    /// A reason long enough for every test that only needs a valid one.
+    const REASON: &str = "incident-4711: paged at 03:12, rotate after";
 
     fn who(sub: &str, groups: &[&str], admin: bool) -> Identity {
         Identity {
@@ -1058,6 +1695,7 @@ mod tests {
             Resources::Memory {
                 items: Arc::clone(&items),
                 fail_delete: false,
+                fail_annotate: false,
             },
             items,
         )
@@ -1065,6 +1703,58 @@ mod tests {
 
     fn stored(fake: &fake::Shared, path: &str) -> Option<BTreeMap<String, String>> {
         fake.lock().unwrap().data.get(path).cloned()
+    }
+
+    fn admin() -> Identity {
+        who("sub-admin", &["stardelt-admins"], true)
+    }
+
+    fn limiter() -> BreakGlassLimiter {
+        Mutex::new(HashMap::new())
+    }
+
+    /// The refusal and the audit record of one attempt. (`BreakGlassResponse` has no `Debug` on
+    /// purpose, so the tests cannot use `Result::expect_err`.)
+    fn expect_fail(result: BreakGlassResult) -> (Fail, BreakGlassRecord) {
+        match result.answer {
+            Ok(_) => panic!("expected a refusal"),
+            Err(e) => (e, result.record),
+        }
+    }
+
+    fn seed_group(fake: &fake::Shared) {
+        fake.lock().unwrap().seed(
+            "connections/group/analytics/crm-db",
+            &[("user", "etl"), ("password", CANARY)],
+            &[("type", "sqlserver"), ("keys", "password,user")],
+        );
+    }
+
+    fn group_resource() -> Value {
+        json!({
+            "metadata": { "name": "crm-db" },
+            "spec": { "scope": "group", "ownerGroup": "analytics" },
+        })
+    }
+
+    fn memory_with(items: &[(&str, Value)]) -> (Resources, Arc<Mutex<BTreeMap<String, Value>>>) {
+        let (resources, stored) = memory();
+        for (name, value) in items {
+            stored
+                .lock()
+                .unwrap()
+                .insert((*name).to_string(), value.clone());
+        }
+        (resources, stored)
+    }
+
+    #[test]
+    fn rfc3339_is_utc() {
+        assert_eq!(rfc3339_utc(UNIX_EPOCH), "1970-01-01T00:00:00Z");
+        assert_eq!(
+            rfc3339_utc(UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
+            "2023-11-14T22:13:20Z"
+        );
     }
 
     #[tokio::test]
@@ -1381,6 +2071,7 @@ mod tests {
         let resources = Resources::Memory {
             items: Arc::clone(&items),
             fail_delete: true,
+            fail_annotate: false,
         };
         fake.lock().unwrap().seed(
             "connections/group/analytics/crm-db",
@@ -1500,11 +2191,28 @@ mod tests {
         }
     }
 
-    /// The two routes a body test needs, with `store` configured or not and a caller (`None` =
+    fn admin_principal() -> Principal {
+        Principal {
+            identity: admin(),
+            via: "session",
+            access_token: Some(Secret::new("good")),
+        }
+    }
+
+    /// The routes a body test needs, with `store` configured or not and a caller (`None` =
     /// no principal at all, as in demo mode and `static-dev`).
     fn app(store: Option<StoreClient>, caller: Option<Principal>) -> Router {
         let router = Router::new()
             .route("/connections", get(list).post(create))
+            .route(
+                "/connections/personal/{name}/break-glass",
+                post(break_glass_personal),
+            )
+            .route(
+                "/connections/managed/{name}/break-glass",
+                post(break_glass_managed),
+            )
+            .route("/connections/break-glass-log", get(break_glass_log))
             .with_state(test_state(store));
         match caller {
             Some(principal) => router.layer(axum::Extension(principal)),
@@ -1513,6 +2221,10 @@ mod tests {
     }
 
     fn test_state(store: Option<StoreClient>) -> Arc<AppState> {
+        test_state_db(store, None)
+    }
+
+    fn test_state_db(store: Option<StoreClient>, db: Option<sqlx::PgPool>) -> Arc<AppState> {
         Arc::new(AppState {
             dev_user: "test".into(),
             trino_url: "http://127.0.0.1:1".into(),
@@ -1529,8 +2241,9 @@ mod tests {
             kube: None,
             workloads: crate::cluster::WorkloadCache::default(),
             admin_console_url: None,
-            db: None,
+            db,
             store,
+            break_glass_reads: Mutex::new(HashMap::new()),
         })
     }
 
@@ -1570,6 +2283,7 @@ mod tests {
             secret_store::StoreConfig {
                 url: "http://127.0.0.1:9".into(),
                 role: "platform-users".into(),
+                breakglass_role: "breakglass".into(),
                 mount: "secret".into(),
             },
         );
@@ -1612,5 +2326,719 @@ mod tests {
                 assert_eq!(value["error"], "the secret store is not configured");
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Break-glass: the read, its refusals, the notice and the audit record.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn break_glass_returns_the_fields_once_and_announces() {
+        let (store, fake) = fake::start().await;
+        seed_group(&fake);
+        let (resources, items) = memory_with(&[("crm-db", group_resource())]);
+        let admin = admin();
+        let limiter = limiter();
+
+        let result = break_glass_group_at(
+            &store,
+            Some(&resources),
+            &limiter,
+            None,
+            &admin,
+            &Secret::new("good"),
+            "analytics",
+            "crm-db",
+            REASON,
+            Some("req-1"),
+        )
+        .await;
+
+        let response = result.answer.expect("the read succeeded");
+        assert_eq!(response.fields["password"], CANARY);
+        assert_eq!(response.fields["user"], "etl");
+        assert!(response.read_at.ends_with('Z'), "{}", response.read_at);
+
+        let items = items.lock().unwrap();
+        let annotation = items["crm-db"]["metadata"]["annotations"][BREAK_GLASS_ANNOTATION]
+            .as_str()
+            .expect("the notice is on the resource");
+        let notice: Value = serde_json::from_str(annotation).expect("the notice is JSON");
+        assert_eq!(notice["by"], "sub-admin");
+        assert_eq!(notice["reason"], REASON);
+        assert!(notice["at"].as_str().unwrap().ends_with('Z'));
+        assert!(
+            !annotation.contains(CANARY),
+            "the notice never carries the value: {annotation}"
+        );
+
+        assert_eq!(result.record.outcome, "read");
+        assert_eq!(result.record.admin, "sub-admin");
+        assert_eq!(result.record.admin_sub, "sub-admin");
+        assert_eq!(result.record.owner_group, "analytics");
+        assert_eq!(result.record.connection, "crm-db");
+        assert_eq!(result.record.scope, "group");
+        assert_eq!(result.record.request_id.as_deref(), Some("req-1"));
+        assert!(
+            !format!("{:?}", result.record).contains(CANARY),
+            "the audit record cannot hold a value"
+        );
+        assert!(
+            !serde_json::to_string(&result.record)
+                .unwrap()
+                .contains(CANARY),
+            "the audit record's JSON cannot hold a value"
+        );
+    }
+
+    #[tokio::test]
+    async fn break_glass_needs_an_administrator() {
+        let (store, fake) = fake::start().await;
+        seed_group(&fake);
+        let (resources, _items) = memory_with(&[("crm-db", group_resource())]);
+        let alice = who("sub-alice", &["analytics"], false);
+
+        let result = break_glass_group_at(
+            &store,
+            Some(&resources),
+            &limiter(),
+            None,
+            &alice,
+            &Secret::new("good"),
+            "analytics",
+            "crm-db",
+            REASON,
+            None,
+        )
+        .await;
+
+        let (err, record) = expect_fail(result);
+        assert_eq!(err.status, StatusCode::FORBIDDEN);
+        assert_eq!(err.message, "only administrators may do this");
+        assert_eq!(record.outcome, "refused:not-admin");
+        assert_eq!(
+            fake.lock().unwrap().requests,
+            0,
+            "the store is not called for a refusal"
+        );
+    }
+
+    #[tokio::test]
+    async fn break_glass_needs_a_reason() {
+        let (store, fake) = fake::start().await;
+        seed_group(&fake);
+        let (resources, _items) = memory_with(&[("crm-db", group_resource())]);
+        let admin = admin();
+        let limiter = limiter();
+        let short = "a".repeat(19);
+        let spaces = " ".repeat(30);
+
+        for reason in ["", short.as_str(), spaces.as_str()] {
+            let result = break_glass_group_at(
+                &store,
+                Some(&resources),
+                &limiter,
+                None,
+                &admin,
+                &Secret::new("good"),
+                "analytics",
+                "crm-db",
+                reason,
+                None,
+            )
+            .await;
+            let (err, record) = expect_fail(result);
+            assert_eq!(err.status, StatusCode::BAD_REQUEST, "{reason:?}");
+            assert_eq!(err.message, "give a reason of at least 20 characters");
+            assert_eq!(record.outcome, "refused:reason");
+        }
+        assert_eq!(
+            fake.lock().unwrap().requests,
+            0,
+            "the store is not called for a refused reason"
+        );
+
+        // Twenty characters is enough.
+        let result = break_glass_group_at(
+            &store,
+            Some(&resources),
+            &limiter,
+            None,
+            &admin,
+            &Secret::new("good"),
+            "analytics",
+            "crm-db",
+            &"a".repeat(20),
+            None,
+        )
+        .await;
+        assert!(result.answer.is_ok(), "{:?}", result.record.outcome);
+        assert_eq!(result.record.outcome, "read");
+    }
+
+    #[tokio::test]
+    async fn break_glass_is_refused_for_personal_and_managed() {
+        let (store, fake) = fake::start().await;
+        let app = app(Some(store), Some(admin_principal()));
+        for uri in [
+            "/connections/personal/crm-db/break-glass",
+            "/connections/managed/crm-db/break-glass",
+        ] {
+            let request = Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(Body::from(format!(r#"{{"reason":"{REASON}"}}"#)))
+                .unwrap();
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{uri}");
+            let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            let body: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["error"], "break-glass covers group connections only");
+        }
+        assert_eq!(
+            fake.lock().unwrap().requests,
+            0,
+            "the store is never called for personal or managed"
+        );
+
+        // The record says why, and the scope is named.
+        for (scope, expected) in [("personal", "personal"), ("managed", "managed")] {
+            let result =
+                break_glass_refused_scope(None, &admin(), scope, "crm-db", REASON, None).await;
+            assert_eq!(result.record.outcome, "refused:scope");
+            assert_eq!(result.record.scope, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn break_glass_uses_the_breakglass_role_and_the_admins_token() {
+        let (store, fake) = fake::start().await;
+        seed_group(&fake);
+        let (resources, _items) = memory_with(&[("crm-db", group_resource())]);
+
+        break_glass_group_at(
+            &store,
+            Some(&resources),
+            &limiter(),
+            None,
+            &admin(),
+            &Secret::new("good"),
+            "analytics",
+            "crm-db",
+            REASON,
+            None,
+        )
+        .await
+        .answer
+        .expect("the read succeeded");
+
+        let fake = fake.lock().unwrap();
+        assert_eq!(
+            fake.logins,
+            [("breakglass".to_string(), "good".to_string())],
+            "one sign-in, with the breakglass role and the administrator's own token"
+        );
+        assert_eq!(
+            fake.reads,
+            ["connections/group/analytics/crm-db"],
+            "one read, of exactly the group path"
+        );
+        assert_eq!(fake.revokes, ["tok-alice"], "the store token is revoked");
+    }
+
+    #[tokio::test]
+    async fn break_glass_fails_closed_when_the_notice_cannot_be_written() {
+        let (store, fake) = fake::start().await;
+        seed_group(&fake);
+        let items = Arc::new(Mutex::new(BTreeMap::new()));
+        items
+            .lock()
+            .unwrap()
+            .insert("crm-db".into(), group_resource());
+        let resources = Resources::Memory {
+            items: Arc::clone(&items),
+            fail_delete: false,
+            fail_annotate: true,
+        };
+
+        let result = break_glass_group_at(
+            &store,
+            Some(&resources),
+            &limiter(),
+            None,
+            &admin(),
+            &Secret::new("good"),
+            "analytics",
+            "crm-db",
+            REASON,
+            None,
+        )
+        .await;
+
+        let (err, record) = expect_fail(result);
+        assert_eq!(err.status, StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            err.message,
+            "could not record the notice; nothing was returned"
+        );
+        assert!(!err.message.contains(CANARY), "no value in the error");
+        assert_eq!(record.outcome, "notice-failed");
+        assert!(
+            items.lock().unwrap()["crm-db"]["metadata"]
+                .get("annotations")
+                .is_none(),
+            "nothing was announced, so nothing is written"
+        );
+    }
+
+    #[tokio::test]
+    async fn break_glass_unknown_connection_is_404() {
+        let (store, _fake) = fake::start().await;
+        let (resources, _items) = memory_with(&[("crm-db", group_resource())]);
+
+        let result = break_glass_group_at(
+            &store,
+            Some(&resources),
+            &limiter(),
+            None,
+            &admin(),
+            &Secret::new("good"),
+            "analytics",
+            "crm-db",
+            REASON,
+            None,
+        )
+        .await;
+
+        let (err, record) = expect_fail(result);
+        assert_eq!(err.status, StatusCode::NOT_FOUND);
+        assert_eq!(err.message, "no such connection");
+        assert_eq!(record.outcome, "not-found");
+    }
+
+    #[tokio::test]
+    async fn break_glass_store_refusal_is_403() {
+        let (store, fake) = fake::start().await;
+        seed_group(&fake);
+        let (resources, _items) = memory_with(&[("crm-db", group_resource())]);
+
+        let result = break_glass_group_at(
+            &store,
+            Some(&resources),
+            &limiter(),
+            None,
+            &admin(),
+            &Secret::new("issued-to-another-client"),
+            "analytics",
+            "crm-db",
+            REASON,
+            None,
+        )
+        .await;
+
+        let (err, record) = expect_fail(result);
+        assert_eq!(err.status, StatusCode::FORBIDDEN);
+        assert_eq!(err.message, "the store refused the break-glass sign-in");
+        assert_eq!(record.outcome, "refused:store");
+        assert!(
+            fake.lock().unwrap().reads.is_empty(),
+            "a refused sign-in never reads"
+        );
+    }
+
+    #[tokio::test]
+    async fn break_glass_store_down_is_502_not_500() {
+        let store = StoreClient::new(
+            reqwest::Client::new(),
+            secret_store::StoreConfig {
+                url: "http://127.0.0.1:9".into(),
+                role: "platform-users".into(),
+                breakglass_role: "breakglass".into(),
+                mount: "secret".into(),
+            },
+        );
+        let (resources, _items) = memory_with(&[("crm-db", group_resource())]);
+
+        let result = break_glass_group_at(
+            &store,
+            Some(&resources),
+            &limiter(),
+            None,
+            &admin(),
+            &Secret::new("good"),
+            "analytics",
+            "crm-db",
+            REASON,
+            None,
+        )
+        .await;
+
+        let (err, record) = expect_fail(result);
+        assert_eq!(err.status, StatusCode::BAD_GATEWAY);
+        assert_eq!(record.outcome, "refused:store");
+    }
+
+    #[tokio::test]
+    async fn break_glass_is_rate_limited() {
+        let (store, fake) = fake::start().await;
+        seed_group(&fake);
+        let (resources, _items) = memory_with(&[("crm-db", group_resource())]);
+        let limiter = limiter();
+        let admin = admin();
+
+        for _ in 0..BREAK_GLASS_LIMIT {
+            let result = break_glass_group_at(
+                &store,
+                Some(&resources),
+                &limiter,
+                None,
+                &admin,
+                &Secret::new("good"),
+                "analytics",
+                "crm-db",
+                REASON,
+                None,
+            )
+            .await;
+            assert!(result.answer.is_ok(), "{}", result.record.outcome);
+        }
+
+        let result = break_glass_group_at(
+            &store,
+            Some(&resources),
+            &limiter,
+            None,
+            &admin,
+            &Secret::new("good"),
+            "analytics",
+            "crm-db",
+            REASON,
+            None,
+        )
+        .await;
+        let (err, record) = expect_fail(result);
+        assert_eq!(err.status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(err.message, "too many break-glass reads; wait");
+        assert_eq!(record.outcome, "refused:rate");
+        assert_eq!(
+            fake.lock().unwrap().reads.len(),
+            BREAK_GLASS_LIMIT,
+            "the refused attempt never reached the store"
+        );
+    }
+
+    #[tokio::test]
+    async fn rotate_clears_the_break_glass_notice() {
+        let (store, fake) = fake::start().await;
+        seed_group(&fake);
+        let notice = json!({
+            "by": "sub-admin",
+            "at": "2026-10-20T08:00:00Z",
+            "reason": REASON,
+        })
+        .to_string();
+        let resource = json!({
+            "metadata": {
+                "name": "crm-db",
+                "annotations": { BREAK_GLASS_ANNOTATION: notice },
+            },
+            "spec": { "scope": "group", "ownerGroup": "analytics" },
+        });
+        let (resources, items) = memory_with(&[("crm-db", resource)]);
+        let alice = who("sub-alice", &["analytics"], false);
+        let patch: BTreeMap<String, String> = [("password".to_string(), "p2".to_string())].into();
+
+        rotate_connection(
+            &store,
+            Some(&resources),
+            &alice,
+            &Secret::new("good"),
+            StoreScope::Group {
+                group: "analytics".into(),
+            },
+            "crm-db",
+            patch,
+        )
+        .await
+        .expect("rotated");
+
+        assert!(
+            items.lock().unwrap()["crm-db"]["metadata"]["annotations"]
+                .get(BREAK_GLASS_ANNOTATION)
+                .is_none(),
+            "a rotation answers the notice"
+        );
+
+        // A cluster that refuses the annotation patch does not fail the rotation.
+        let resource = json!({
+            "metadata": {
+                "name": "crm-db",
+                "annotations": { BREAK_GLASS_ANNOTATION: notice },
+            },
+            "spec": { "scope": "group", "ownerGroup": "analytics" },
+        });
+        let items = Arc::new(Mutex::new(BTreeMap::new()));
+        items.lock().unwrap().insert("crm-db".into(), resource);
+        let resources = Resources::Memory {
+            items: Arc::clone(&items),
+            fail_delete: false,
+            fail_annotate: true,
+        };
+        let patch: BTreeMap<String, String> = [("password".to_string(), "p3".to_string())].into();
+        rotate_connection(
+            &store,
+            Some(&resources),
+            &alice,
+            &Secret::new("good"),
+            StoreScope::Group {
+                group: "analytics".into(),
+            },
+            "crm-db",
+            patch,
+        )
+        .await
+        .expect("the rotation still succeeded");
+        assert!(
+            items.lock().unwrap()["crm-db"]["metadata"]["annotations"]
+                .get(BREAK_GLASS_ANNOTATION)
+                .is_some(),
+            "the failed clear left the notice (and only logged it)"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_shows_the_notice_for_group_rows_only() {
+        let (store, fake) = fake::start().await;
+        fake.lock().unwrap().seed(
+            "connections/user/sub-alice/personal-db",
+            &[("token", "t")],
+            &[("type", "generic"), ("keys", "token")],
+        );
+        seed_group(&fake);
+        fake.lock().unwrap().seed(
+            "connections/managed/shared-db",
+            &[("user", "u"), ("password", "p")],
+            &[("type", "sqlserver"), ("keys", "password,user")],
+        );
+        let notice = json!({
+            "by": "sub-admin",
+            "at": "2026-10-20T08:00:00Z",
+            "reason": REASON,
+        })
+        .to_string();
+        let (resources, _items) = memory_with(&[
+            (
+                "crm-db",
+                json!({
+                    "metadata": {
+                        "name": "crm-db",
+                        "annotations": { BREAK_GLASS_ANNOTATION: notice },
+                    },
+                    "spec": { "scope": "group", "ownerGroup": "analytics" },
+                }),
+            ),
+            (
+                "shared-db",
+                json!({
+                    "metadata": {
+                        "name": "shared-db",
+                        "annotations": { BREAK_GLASS_ANNOTATION: notice },
+                    },
+                    "spec": { "scope": "managed" },
+                }),
+            ),
+        ]);
+        let alice = who("sub-alice", &["analytics"], true);
+
+        let rows = list_connections(&store, Some(&resources), &alice, &Secret::new("good"))
+            .await
+            .expect("listed");
+
+        let group = rows.iter().find(|r| r.scope == Scope::Group).unwrap();
+        let notice = group.break_glass.as_ref().expect("the group row shows it");
+        assert_eq!(notice.by, "sub-admin");
+        assert_eq!(notice.reason, REASON);
+        assert!(
+            rows.iter()
+                .filter(|r| r.scope != Scope::Group)
+                .all(|r| r.break_glass.is_none()),
+            "personal and managed rows never carry it"
+        );
+    }
+
+    #[tokio::test]
+    async fn break_glass_response_is_not_cacheable() {
+        let (store, fake) = fake::start().await;
+        seed_group(&fake);
+        let (resources, _items) = memory_with(&[("crm-db", group_resource())]);
+
+        let result = break_glass_group_at(
+            &store,
+            Some(&resources),
+            &limiter(),
+            None,
+            &admin(),
+            &Secret::new("good"),
+            "analytics",
+            "crm-db",
+            REASON,
+            None,
+        )
+        .await;
+        let response = result.answer.expect("the read succeeded").into_response();
+        assert_eq!(response.headers().get("cache-control").unwrap(), "no-store");
+        assert_eq!(response.headers().get("pragma").unwrap(), "no-cache");
+    }
+
+    /// A shared buffer a tracing subscriber can write into.
+    #[derive(Clone, Default)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
+        type Writer = Captured;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn the_log_has_no_value() {
+        let captured = Captured::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(captured.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let (store, fake) = fake::start().await;
+        seed_group(&fake);
+        let (resources, _items) = memory_with(&[("crm-db", group_resource())]);
+
+        break_glass_group_at(
+            &store,
+            Some(&resources),
+            &limiter(),
+            None,
+            &admin(),
+            &Secret::new("good"),
+            "analytics",
+            "crm-db",
+            REASON,
+            None,
+        )
+        .await
+        .answer
+        .expect("the read succeeded");
+
+        let text = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            !text.contains(CANARY),
+            "no log line may carry the value: {text}"
+        );
+        assert!(
+            text.contains("break-glass"),
+            "the audit line was captured, so the check means something: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_log_needs_an_administrator_and_a_state_store() {
+        let sandbox = app(None, Some(principal()));
+        let response = sandbox
+            .oneshot(
+                Request::builder()
+                    .uri("/connections/break-glass-log")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let sandbox = app(None, Some(admin_principal()));
+        let response = sandbox
+            .oneshot(
+                Request::builder()
+                    .uri("/connections/break-glass-log")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"], "the state store is not configured");
+    }
+
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn break_glass_log_round_trips() {
+        let pool = crate::db::test_support::migrated_pool().await;
+        let record = |outcome: &str| BreakGlassRecord {
+            admin: "sub-admin".into(),
+            admin_sub: "sub-admin".into(),
+            owner_group: "analytics".into(),
+            connection: "crm-db".into(),
+            scope: "group".into(),
+            reason: REASON.into(),
+            outcome: outcome.into(),
+            request_id: Some("req-1".into()),
+        };
+
+        finish_break_glass(
+            Some(&pool),
+            record("read"),
+            "read",
+            Ok(BreakGlassResponse {
+                fields: BTreeMap::new(),
+                read_at: "2026-10-20T08:00:00Z".into(),
+            }),
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        finish_break_glass(
+            Some(&pool),
+            record("refused:scope"),
+            "refused:scope",
+            Err(Fail::new(StatusCode::FORBIDDEN, "refused")),
+        )
+        .await;
+
+        let response = break_glass_log(
+            State(test_state_db(None, Some(pool))),
+            Some(axum::Extension(admin_principal())),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers().get("cache-control").unwrap(), "no-store");
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        let events = body["events"].as_array().expect("events");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["outcome"], "refused:scope", "newest first");
+        assert_eq!(events[1]["outcome"], "read");
+        assert_eq!(events[0]["ownerGroup"], "analytics");
+        assert_eq!(events[0]["admin"], "sub-admin");
+        assert!(!body.to_string().contains(CANARY));
     }
 }

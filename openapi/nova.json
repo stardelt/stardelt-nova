@@ -384,6 +384,47 @@
         }
       }
     },
+    "/api/connections/break-glass-log": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "description": "The last 200 break-glass reads and refusals, newest first, for administrators. The rows carry the administrator, group, connection, reason and outcome — never a value. `Cache-Control: no-store`.",
+        "operationId": "break_glass_log",
+        "responses": {
+          "200": {
+            "description": "The most recent events, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BreakGlassLogResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not an administrator",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The state store is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/connections/group/{group}/{name}": {
       "delete": {
         "tags": [
@@ -457,6 +498,127 @@
           },
           "503": {
             "description": "The secret store is not configured, or no cluster connection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/connections/group/{group}/{name}/break-glass": {
+      "post": {
+        "tags": [
+          "public"
+        ],
+        "description": "Emergency read of a group connection by an administrator: a written reason, a notice on the Connection for the owner group, an audit row, and the values returned **once**. The answer is never stored and carries `Cache-Control: no-store` and `Pragma: no-cache`. Personal and managed connections are never readable.",
+        "operationId": "break_glass_group",
+        "parameters": [
+          {
+            "name": "group",
+            "in": "path",
+            "description": "Owner group",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Connection name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BreakGlassRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The connection's fields, returned once and never stored; the owner group's notice is already written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BreakGlassResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The reason is shorter than 20 characters; never a value",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token to sign in to the secret store with",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not an administrator, or the store refused the break-glass sign-in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such connection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "More than five break-glass reads by this administrator in ten minutes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The secret store did not answer, or the notice on the Connection could not be written (nothing is returned then)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The secret store is not configured",
             "content": {
               "application/json": {
                 "schema": {
@@ -654,6 +816,68 @@
         }
       }
     },
+    "/api/connections/managed/{name}/break-glass": {
+      "post": {
+        "tags": [
+          "public"
+        ],
+        "description": "Always refused: break-glass covers group connections only. An administrator gets a 403 and an audit row; nothing is read.",
+        "operationId": "break_glass_managed",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Connection name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BreakGlassRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "401": {
+            "description": "No token to sign in to the secret store with",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Break-glass covers group connections only, or the caller is not an administrator",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The secret store is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/connections/managed/{name}/secret": {
       "put": {
         "tags": [
@@ -821,6 +1045,68 @@
         }
       }
     },
+    "/api/connections/personal/{name}/break-glass": {
+      "post": {
+        "tags": [
+          "public"
+        ],
+        "description": "Always refused: break-glass covers group connections only. An administrator gets a 403 and an audit row; nothing is read.",
+        "operationId": "break_glass_personal",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Connection name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BreakGlassRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "401": {
+            "description": "No token to sign in to the secret store with",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Break-glass covers group connections only, or the caller is not an administrator",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The secret store is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/connections/personal/{name}/secret": {
       "put": {
         "tags": [
@@ -937,6 +1223,108 @@
   },
   "components": {
     "schemas": {
+      "BreakGlassLogResponse": {
+        "type": "object",
+        "description": "`GET /api/connections/break-glass-log`: the last 200 reads and refusals, newest first. It has\nno values by construction (see [`audit::BreakGlassRecord`]).",
+        "required": [
+          "events"
+        ],
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BreakGlassLogRow"
+            }
+          }
+        }
+      },
+      "BreakGlassLogRow": {
+        "type": "object",
+        "required": [
+          "at",
+          "admin",
+          "ownerGroup",
+          "connection",
+          "reason",
+          "outcome"
+        ],
+        "properties": {
+          "admin": {
+            "type": "string"
+          },
+          "at": {
+            "type": "string"
+          },
+          "connection": {
+            "type": "string"
+          },
+          "outcome": {
+            "type": "string"
+          },
+          "ownerGroup": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        }
+      },
+      "BreakGlassNotice": {
+        "type": "object",
+        "description": "The notice an administrator's break-glass read leaves on a group's `Connection` resource and\nthat the listing shows to the group. It never carries a value.",
+        "required": [
+          "by",
+          "at",
+          "reason"
+        ],
+        "properties": {
+          "at": {
+            "type": "string",
+            "description": "RFC 3339 UTC."
+          },
+          "by": {
+            "type": "string",
+            "description": "The administrator's display name."
+          },
+          "reason": {
+            "type": "string"
+          }
+        }
+      },
+      "BreakGlassRequest": {
+        "type": "object",
+        "description": "`POST …/break-glass` body. No `Debug`: a reason can be sensitive and nothing here should ever\nbe printed by accident.",
+        "required": [
+          "reason"
+        ],
+        "properties": {
+          "reason": {
+            "type": "string"
+          }
+        }
+      },
+      "BreakGlassResponse": {
+        "type": "object",
+        "description": "The values, returned once. No `Debug`: the map holds the secret values and is never formatted,\nlogged or put in an error.",
+        "required": [
+          "fields",
+          "readAt"
+        ],
+        "properties": {
+          "fields": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "readAt": {
+            "type": "string"
+          }
+        }
+      },
       "ConnectionView": {
         "type": "object",
         "description": "One row of `GET /api/connections`. Never carries a value.",
@@ -949,6 +1337,17 @@
           "version"
         ],
         "properties": {
+          "breakGlass": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/BreakGlassNotice",
+                "description": "The last break-glass read of a group connection; absent for personal and managed rows."
+              }
+            ]
+          },
           "config": {
             "type": "object",
             "additionalProperties": {
