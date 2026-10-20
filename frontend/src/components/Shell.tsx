@@ -187,6 +187,16 @@ export default function Shell() {
 
   return (
     <div className="h-full grid grid-cols-1 md:grid-cols-[250px_minmax(0,1fr)]">
+      <a
+        href="#main"
+        className="sr-only focus:not-sr-only focus:fixed focus:left-3 focus:top-3 focus:z-50 btn-primary"
+        onClick={e => {
+          e.preventDefault()
+          document.getElementById('main')?.focus()
+        }}
+      >
+        Skip to content
+      </a>
       {navOpen && (
         <button
           type="button"
@@ -343,7 +353,7 @@ export default function Shell() {
           </button>
         </header>
 
-        <main className="flex-1 min-h-0 overflow-auto p-3 sm:p-6">
+        <main id="main" tabIndex={-1} className="flex-1 min-h-0 overflow-auto p-3 sm:p-6 outline-none">
           <ErrorBoundary key={location.pathname}>
             <Outlet />
           </ErrorBoundary>
