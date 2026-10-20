@@ -245,6 +245,22 @@ export type Connection = {
   sync?: { ready: boolean; reason: string; message?: string }
 }
 
+/**
+ * `POST /api/connections` body (stardelt-nova#173). `secret` holds the values; they are
+ * written to the store and never returned. Casing matters: the backend reads
+ * `ownerGroup`, `usableBy` and `refreshInterval`.
+ */
+export type NewConnectionRequest = {
+  name: string
+  type: string
+  scope: Connection['scope']
+  ownerGroup?: string
+  usableBy?: string[]
+  config: Record<string, string>
+  secret: Record<string, string>
+  refreshInterval?: string
+}
+
 /** A non-2xx answer from the backend; `status` lets callers tell 404 from 5xx. */
 export class ApiError extends Error {
   status: number
@@ -319,9 +335,9 @@ async function jget<T>(path: string): Promise<T> {
   return readJson<T>(path, r)
 }
 
-async function jpost<T>(path: string, body: unknown): Promise<T> {
+async function jsend<T>(method: 'POST' | 'PUT', path: string, body: unknown): Promise<T> {
   const r = await send(path, {
-    method: 'POST',
+    method,
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
   })
@@ -331,6 +347,24 @@ async function jpost<T>(path: string, body: unknown): Promise<T> {
     throw new ApiError(errorText(await r.text().catch(() => '')) || statusSentence(r.status), r.status)
   }
   return readJson<T>(path, r)
+}
+
+async function jpost<T>(path: string, body: unknown): Promise<T> {
+  return jsend<T>('POST', path, body)
+}
+
+async function jput<T>(path: string, body: unknown): Promise<T> {
+  return jsend<T>('PUT', path, body)
+}
+
+/** A delete answers 204 with no body; a failure carries the API's sentence like any other. */
+async function jdel(path: string): Promise<void> {
+  const r = await send(path, { method: 'DELETE' })
+  checkAuth(path, r)
+  if (!r.ok) {
+    console.debug('api', path, r.status)
+    throw new ApiError(errorText(await r.text().catch(() => '')) || statusSentence(r.status), r.status)
+  }
 }
 
 const seg = encodeURIComponent
@@ -414,6 +448,9 @@ function queryLogUrl(p: QueryLogParams): string {
 export const api = {
   me:           ()                            => jget<Me>('/api/me'),
   connections:  ()                            => jget<{ connections: Connection[] }>('/api/connections'),
+  createConnection: (req: NewConnectionRequest) => jpost<Connection>('/api/connections', req),
+  rotateConnection: (path: string, secret: Record<string, string>) => jput<Connection>(path, { secret }),
+  deleteConnection: (path: string)           => jdel(path),
   trinoCluster: ()                            => jget<unknown>('/api/trino/cluster'),
   warehouse:    ()                            => jget<Warehouse>('/api/catalog/warehouse'),
   namespaces:   ()                            => jget<NamespaceList>('/api/catalog/namespaces'),

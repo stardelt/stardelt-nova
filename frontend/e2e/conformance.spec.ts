@@ -1,4 +1,4 @@
-import { test, expect, type Route } from '@playwright/test'
+import { test, expect, type Browser, type Page, type Route } from '@playwright/test'
 import { KNOWN, type Known } from './known'
 import { auditPage, focusAudit, type Finding } from './audit'
 
@@ -268,6 +268,251 @@ test.describe('errors', () => {
       await expect.poll(() => hits.get(failing[route]) ?? 0, { message: `${route}: Retry asked again` }).toBeGreaterThan(before)
       await page.context().close()
     }
+  })
+})
+
+test.describe('connections', () => {
+  // The canary is the only secret value in the scenarios. `P1` fails if any of these
+  // scenarios lets it out of the password field and the one request that carries it.
+  const CANARY = 'canary-7f3a-DO-NOT-LEAK'
+  const ADMIN = {
+    user: 'alice', auth_mode: 'oidc', demo: false, warehouse: 'warehouse',
+    is_admin: true, groups: ['analysts', 'data-eng'],
+  }
+
+  type Recorded = { method: string; url: string; body: string | null }
+
+  /** A `/connections` page with every `/api/**` call stubbed; writes are the test's job. */
+  async function open(browser: Browser, {
+    me = ADMIN,
+    rows = [] as unknown[],
+    write,
+  }: {
+    me?: unknown
+    rows?: unknown[]
+    write?: (route: Route, path: string, method: string, body: string | null) => boolean
+  } = {}) {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 800 } })
+    const page = await context.newPage()
+    const requests: Recorded[] = []
+    const messages: string[] = []
+    page.on('request', (request) => requests.push({
+      method: request.method(),
+      url: request.url(),
+      body: request.postData(),
+    }))
+    page.on('console', (message) => messages.push(message.text()))
+    await page.route('**/api/**', (route) => {
+      const request = route.request()
+      const path = new URL(request.url()).pathname
+      const method = request.method()
+      if (path === '/api/me' && method === 'GET') return json(route, me)
+      if (path === '/api/connections' && method === 'GET') return json(route, { connections: rows })
+      if (method !== 'GET' && write?.(route, path, method, request.postData())) return
+      return json(route, [])
+    })
+    await page.goto('/connections')
+    await expect(page.locator('main')).not.toContainText('Loading connections')
+    return { context, page, requests, messages }
+  }
+
+  async function fillNewConnection(page: Page, name = 'warehouse-db') {
+    await page.getByRole('button', { name: 'New connection' }).click()
+    await page.getByRole('radio', { name: 'Group' }).check()
+    await page.getByLabel('Owner group').selectOption('analysts')
+    await page.getByLabel('Type').selectOption('postgresql')
+    await page.getByLabel('Name').fill(name)
+    await page.getByLabel('Host').fill('db.internal')
+    await page.getByLabel('User').fill('svc')
+    await page.getByLabel('Password').fill(CANARY)
+  }
+
+  test('P1 creating a connection never leaves the value anywhere', async ({ browser }) => {
+    const { context, page, requests, messages } = await open(browser, {
+      write: (route, path, method) => {
+        if (path !== '/api/connections' || method !== 'POST') return false
+        json(route, { name: 'warehouse-db', scope: 'group', type: 'postgresql', ownerGroup: 'analysts', config: {}, secretKeys: [], version: 1 }, 201)
+        return true
+      },
+    })
+    await expect(page.getByRole('heading', { name: 'Managed' })).toBeVisible()
+    await fillNewConnection(page)
+    // The field masks the value before anything is sent.
+    await expect(page.getByLabel('Password')).toHaveAttribute('type', 'password')
+    await page.getByRole('button', { name: 'Create connection' }).click()
+    await expect(page.getByRole('status')).toHaveText('Created warehouse-db.')
+
+    const html = await page.evaluate(() => document.documentElement.outerHTML)
+    expect(html).not.toContain(CANARY)
+    const stored = await page.evaluate(() => {
+      const dump = (storage: Storage) => Object.fromEntries(
+        Array.from({ length: storage.length }, (_, index) => {
+          const key = storage.key(index) ?? ''
+          return [key, storage.getItem(key) ?? '']
+        }),
+      )
+      return JSON.stringify({ local: dump(localStorage), session: dump(sessionStorage) })
+    })
+    expect(stored).not.toContain(CANARY)
+    expect(await page.evaluate(() => location.href)).not.toContain(CANARY)
+    expect(messages.filter((message) => message.includes(CANARY))).toEqual([])
+
+    // Exactly one request carries the value: the POST. No URL carries it.
+    const carrying = requests.filter((request) => (request.body ?? '').includes(CANARY))
+    expect(carrying).toHaveLength(1)
+    expect(carrying[0].method).toBe('POST')
+    expect(new URL(carrying[0].url).pathname).toBe('/api/connections')
+    expect(requests.filter((request) => request.url.includes(CANARY))).toEqual([])
+    expect(JSON.parse(carrying[0].body ?? '{}').secret).toEqual({ user: 'svc', password: CANARY })
+    await context.close()
+  })
+
+  test('P1 a failed create keeps the value out of the error text', async ({ browser }) => {
+    const { context, page, messages } = await open(browser, {
+      write: (route, path, method) => {
+        if (path !== '/api/connections' || method !== 'POST') return false
+        json(route, { error: 'host must not be empty' }, 400)
+        return true
+      },
+    })
+    await fillNewConnection(page)
+    await page.getByRole('button', { name: 'Create connection' }).click()
+
+    const alert = page.getByRole('alert')
+    await expect(alert).toContainText('host must not be empty')
+    expect(await alert.innerText()).not.toContain(CANARY)
+    expect(messages.filter((message) => message.includes(CANARY))).toEqual([])
+    // The dialog stays open and keeps what was typed so it can be fixed.
+    await expect(page.getByRole('dialog')).toBeVisible()
+    await expect(page.getByLabel('Password')).toHaveValue(CANARY)
+    await context.close()
+  })
+
+  test('P1 rotate sends only the filled fields for a group connection and every field for a managed one', async ({ browser }) => {
+    const rotate = { name: '', scope: 'personal', type: 'postgresql', config: {}, secretKeys: ['user', 'password'], version: 2 }
+    const { context, page, requests } = await open(browser, {
+      rows: [
+        { name: 'team-db', scope: 'group', type: 'postgresql', ownerGroup: 'analysts', config: { host: 'db' }, secretKeys: ['user', 'password'], version: 1, sync: { ready: true, reason: 'Synced' } },
+        { name: 'platform-s3', scope: 'managed', type: 's3', config: { bucket: 'b' }, secretKeys: ['accessKeyId', 'secretAccessKey'], version: 1, sync: { ready: true, reason: 'Synced' } },
+      ],
+      write: (route, path, method) => {
+        if (method !== 'PUT') return false
+        json(route, { ...rotate, name: path.includes('team-db') ? 'team-db' : 'platform-s3' })
+        return true
+      },
+    })
+
+    await page.getByRole('button', { name: 'Rotate team-db' }).click()
+    await page.getByLabel('password').fill(CANARY)
+    await page.getByRole('button', { name: 'Rotate connection' }).click()
+    await expect(page.getByRole('status')).toHaveText('Rotated team-db.')
+
+    await page.getByRole('button', { name: 'Rotate platform-s3' }).click()
+    await expect(page.getByText('A managed connection cannot be read back, so enter every field.')).toBeVisible()
+    const managedButton = page.getByRole('button', { name: 'Rotate connection' })
+    await expect(managedButton).toBeDisabled()
+    await page.getByLabel('accessKeyId').fill(CANARY)
+    await expect(managedButton).toBeDisabled()
+    await page.getByLabel('secretAccessKey').fill(`${CANARY}-2`)
+    await expect(managedButton).toBeEnabled()
+    await managedButton.click()
+    await expect(page.getByRole('status')).toHaveText('Rotated platform-s3.')
+
+    const puts = requests.filter((request) => request.method === 'PUT')
+    expect(puts).toHaveLength(2)
+    expect(new URL(puts[0].url).pathname).toBe('/api/connections/group/analysts/team-db/secret')
+    expect(Object.keys(JSON.parse(puts[0].body ?? '{}').secret)).toEqual(['password'])
+    expect(new URL(puts[1].url).pathname).toBe('/api/connections/managed/platform-s3/secret')
+    expect(Object.keys(JSON.parse(puts[1].body ?? '{}').secret).sort()).toEqual(['accessKeyId', 'secretAccessKey'])
+    await context.close()
+  })
+
+  test('P4 delete names the object, asks once, and Escape cancels', async ({ browser }) => {
+    const { context, page, requests } = await open(browser, {
+      rows: [
+        { name: 'warehouse-db', scope: 'group', type: 'postgresql', ownerGroup: 'analysts', config: { host: 'db' }, secretKeys: ['user', 'password'], version: 1, sync: { ready: true, reason: 'Synced' } },
+      ],
+      write: (route, _path, method) => {
+        if (method !== 'DELETE') return false
+        void route.fulfill({ status: 204 })
+        return true
+      },
+    })
+    const del = page.getByRole('button', { name: 'Delete warehouse-db' })
+    await del.click()
+    const dialog = page.getByRole('dialog')
+    await expect(dialog).toBeVisible()
+    await expect(dialog).toContainText('Delete warehouse-db?')
+    await expect(dialog).toContainText('Pipelines and catalogs that use it will stop working.')
+
+    await page.keyboard.press('Escape')
+    await expect(dialog).toHaveCount(0)
+    expect(requests.filter((request) => request.method === 'DELETE')).toEqual([])
+    await expect(del).toBeFocused()
+
+    await del.click()
+    await page.getByRole('dialog').getByRole('button', { name: 'Delete connection' }).click()
+    await expect(page.getByRole('status')).toHaveText('Deleted warehouse-db.')
+    const deletes = requests.filter((request) => request.method === 'DELETE')
+    expect(deletes).toHaveLength(1)
+    expect(new URL(deletes[0].url).pathname).toBe('/api/connections/group/analysts/warehouse-db')
+    await context.close()
+  })
+
+  test('a non-admin has no Managed scope', async ({ browser }) => {
+    const { context, page } = await open(browser, {
+      me: {
+        user: 'alice', auth_mode: 'oidc', demo: false, warehouse: 'warehouse',
+        is_admin: false, groups: ['analysts', 'data-eng'],
+      },
+    })
+    await page.getByRole('button', { name: 'New connection' }).click()
+    await expect(page.getByRole('dialog')).toBeVisible()
+    expect(await page.getByRole('radio', { name: 'Managed' }).count()).toBe(0)
+    expect(await page.getByRole('heading', { name: 'Managed' }).count()).toBe(0)
+    await context.close()
+  })
+
+  test('required fields and names are checked before sending', async ({ browser }) => {
+    const { context, page } = await open(browser)
+    await page.getByRole('button', { name: 'New connection' }).click()
+    const create = page.getByRole('button', { name: 'Create connection' })
+    await expect(create).toBeDisabled()
+
+    await page.getByLabel('Name').fill('Bad_Name')
+    await expect(create).toBeDisabled()
+    await page.getByLabel('Name').fill('warehouse-db')
+    await expect(create).toBeDisabled()
+
+    await page.getByLabel('Host').fill('db.internal')
+    await page.getByLabel('User').fill('svc')
+    await expect(create).toBeDisabled()
+    await page.getByLabel('Password').fill(CANARY)
+    await expect(create).toBeEnabled()
+
+    // A type with variants: every field of the chosen variant is required.
+    await page.getByLabel('Type').selectOption('rest-api')
+    await page.getByLabel('Base URL').fill('https://api.example.com')
+    await expect(create).toBeDisabled()
+    // "Token" labels both the variant radio and the field; the field is the password input.
+    await page.locator('input[type="password"]').fill(CANARY)
+    await expect(create).toBeEnabled()
+    await page.getByRole('radio', { name: 'Client credentials' }).check()
+    await expect(create).toBeDisabled()
+    await page.getByLabel('Client ID').fill('client')
+    await expect(create).toBeDisabled()
+    await page.getByLabel('Client secret').fill(CANARY)
+    await expect(create).toBeEnabled()
+    await context.close()
+  })
+
+  test('U5 the New connection dialog has accessible names', async ({ browser }) => {
+    const { context, page } = await open(browser)
+    await page.getByRole('button', { name: 'New connection' }).click()
+    await expect(page.getByRole('dialog', { name: 'New connection' })).toBeVisible()
+    const findings = await auditPage(page)
+    expect(findings.filter((finding) => finding.rule === 'U5')).toEqual([])
+    await context.close()
   })
 })
 

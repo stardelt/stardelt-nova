@@ -1,6 +1,11 @@
-import { useQuery } from '@tanstack/react-query'
-import type { ReactNode } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useState, type ReactNode } from 'react'
 import { ApiError, api, formatTime, type Connection } from '../api'
+import {
+  DeleteConnectionDialog,
+  NewConnectionDialog,
+  RotateConnectionDialog,
+} from '../components/ConnectionDialogs'
 import ErrorBox from '../components/ErrorBox'
 import { Icon } from '../components/Icon'
 import { connectionTypeLabel } from '../connectionTypes'
@@ -8,13 +13,19 @@ import { relativeTime } from '../format'
 import { isAdmin } from '../roles'
 
 /**
- * Connections: the credentials for systems outside the platform, listed by scope.
+ * Connections: the credentials for systems outside the platform, listed by scope, and the
+ * three dialogs that create, rotate and delete them.
  *
  * This page is a ledger, never a vault. The API sends the *names* of the secret fields and
  * no value — by design, the store does not return one — so there is nothing here that could
- * print a credential, and the page has no field to put one in. Creating, rotating and
- * deleting arrive in the next step; the button is disabled until then.
+ * print a credential. A value a person types lives only in the open dialog and the request
+ * that sends it; success unmounts the dialog and takes every input with it.
  */
+
+type OpenDialog =
+  | { kind: 'new' }
+  | { kind: 'rotate'; connection: Connection }
+  | { kind: 'delete'; connection: Connection }
 
 const PERSONAL_NOTE =
   'Only you can use these, from notebooks and the SQL editor. They are never used by pipelines.'
@@ -29,9 +40,19 @@ function byName(a: Connection, b: Connection): number {
 }
 
 export default function Connections() {
+  const queryClient = useQueryClient()
   const me = useQuery({ queryKey: ['me'], queryFn: api.me })
   const admin = isAdmin(me.data)
   const list = useQuery({ queryKey: ['connections'], queryFn: api.connections })
+  const [dialog, setDialog] = useState<OpenDialog | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+
+  /** Close the dialog, say what happened, and read the list again. */
+  function done(message: string) {
+    setDialog(null)
+    setNotice(message)
+    void queryClient.invalidateQueries({ queryKey: ['connections'] })
+  }
 
   const rows = list.data?.connections ?? []
   const personal = rows.filter(c => c.scope === 'personal').sort(byName)
@@ -53,11 +74,13 @@ export default function Connections() {
             Credentials for systems outside the platform. The values are write-only: nobody can read them back here.
           </p>
         </div>
-        <button type="button" className="btn-primary" disabled title="Coming in the next step">
+        <button type="button" className="btn-primary" onClick={() => setDialog({ kind: 'new' })}>
           <Icon name="plus" className="w-4 h-4" />
           New connection
         </button>
       </header>
+
+      {notice && <p role="status" className="text-sm text-ok break-words">{notice}</p>}
 
       <Section title="Personal" note={PERSONAL_NOTE}>
         {list.isLoading && <p className="px-5 pb-5 text-sm text-text-mute">Loading connections…</p>}
@@ -72,7 +95,12 @@ export default function Connections() {
           </div>
         )}
         {list.data !== undefined && (
-          <ConnectionTable caption="Personal connections" rows={personal} />
+          <ConnectionTable
+            caption="Personal connections"
+            rows={personal}
+            onRotate={(connection) => setDialog({ kind: 'rotate', connection })}
+            onDelete={(connection) => setDialog({ kind: 'delete', connection })}
+          />
         )}
       </Section>
 
@@ -81,6 +109,8 @@ export default function Connections() {
           <ConnectionTable
             caption={`Connections of the group ${group}`}
             rows={rows.filter(c => c.scope === 'group' && c.ownerGroup === group).sort(byName)}
+            onRotate={(connection) => setDialog({ kind: 'rotate', connection })}
+            onDelete={(connection) => setDialog({ kind: 'delete', connection })}
           />
         </Section>
       ))}
@@ -89,8 +119,37 @@ export default function Connections() {
           flight); the table needs an answer, so it waits for one. */}
       {admin && (
         <Section title="Managed" note={MANAGED_NOTE}>
-          {list.data !== undefined && <ConnectionTable caption="Managed connections" rows={managed} />}
+          {list.data !== undefined && (
+            <ConnectionTable
+              caption="Managed connections"
+              rows={managed}
+              onRotate={(connection) => setDialog({ kind: 'rotate', connection })}
+              onDelete={(connection) => setDialog({ kind: 'delete', connection })}
+            />
+          )}
         </Section>
+      )}
+
+      {dialog?.kind === 'new' && (
+        <NewConnectionDialog
+          me={me.data}
+          onClose={() => setDialog(null)}
+          onCreated={(name) => done(`Created ${name}.`)}
+        />
+      )}
+      {dialog?.kind === 'rotate' && (
+        <RotateConnectionDialog
+          connection={dialog.connection}
+          onClose={() => setDialog(null)}
+          onRotated={(name) => done(`Rotated ${name}.`)}
+        />
+      )}
+      {dialog?.kind === 'delete' && (
+        <DeleteConnectionDialog
+          connection={dialog.connection}
+          onClose={() => setDialog(null)}
+          onDeleted={(name) => done(`Deleted ${name}.`)}
+        />
       )}
     </div>
   )
@@ -114,7 +173,17 @@ function Section({ title, note, children }: { title: string; note: string; child
 
 const COLUMNS = 7
 
-function ConnectionTable({ caption, rows }: { caption: string; rows: Connection[] }) {
+function ConnectionTable({
+  caption,
+  rows,
+  onRotate,
+  onDelete,
+}: {
+  caption: string
+  rows: Connection[]
+  onRotate: (connection: Connection) => void
+  onDelete: (connection: Connection) => void
+}) {
   return (
     <table className="w-full text-sm">
       <caption className="sr-only">{caption}</caption>
@@ -126,7 +195,6 @@ function ConnectionTable({ caption, rows }: { caption: string; rows: Connection[
           <th scope="col" className="th px-3 py-2.5">Secret fields</th>
           <th scope="col" className="th px-3 py-2.5">Changed</th>
           <th scope="col" className="th px-3 py-2.5">Status</th>
-          {/* Rotate and Delete land here in the next step; the column stays so the rows do not jump. */}
           <th scope="col" className="th px-3 py-2.5"><span className="sr-only">Actions</span></th>
         </tr>
       </thead>
@@ -136,13 +204,19 @@ function ConnectionTable({ caption, rows }: { caption: string; rows: Connection[
             <td className="px-5 py-4 text-text-mute" colSpan={COLUMNS}>Nothing here yet.</td>
           </tr>
         )}
-        {rows.map(row => <Row key={row.name} row={row} />)}
+        {rows.map(row => (
+          <Row key={row.name} row={row} onRotate={() => onRotate(row)} onDelete={() => onDelete(row)} />
+        ))}
       </tbody>
     </table>
   )
 }
 
-function Row({ row }: { row: Connection }) {
+function Row({ row, onRotate, onDelete }: {
+  row: Connection
+  onRotate: () => void
+  onDelete: () => void
+}) {
   const changed = row.lastRotated ? Date.parse(row.lastRotated) : Number.NaN
   const settings = Object.entries(row.config)
   return (
@@ -170,7 +244,26 @@ function Row({ row }: { row: Connection }) {
         {Number.isFinite(changed) ? relativeTime(changed) : '—'}
       </td>
       <td className="td px-3"><Status row={row} /></td>
-      <td className="td px-3" />
+      <td className="td px-3">
+        <div className="flex flex-wrap justify-end gap-2">
+          <button
+            type="button"
+            className="btn-ghost py-1 px-2 text-xs"
+            aria-label={`Rotate ${row.name}`}
+            onClick={onRotate}
+          >
+            Rotate
+          </button>
+          <button
+            type="button"
+            className="btn-ghost py-1 px-2 text-xs text-bad"
+            aria-label={`Delete ${row.name}`}
+            onClick={onDelete}
+          >
+            Delete
+          </button>
+        </div>
+      </td>
     </tr>
   )
 }
