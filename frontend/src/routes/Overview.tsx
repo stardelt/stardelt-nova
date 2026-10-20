@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { api, allTables, formatTime } from '../api'
+import { api, allTables } from '../api'
+import { formatTime } from '../format'
 import ErrorBox from '../components/ErrorBox'
 import { Icon } from '../components/Icon'
 import { isAdmin } from '../roles'

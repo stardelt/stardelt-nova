@@ -4,7 +4,7 @@ import { Link, useSearchParams } from 'react-router-dom'
 import { api, allTables, downloadCsv, errorMessage, formatCell, type QueryResult, type TableRef } from '../api'
 import { Icon } from '../components/Icon'
 import ScheduleDialog from '../components/ScheduleDialog'
-import { sqlTableRef } from '../format'
+import { formatCount, sqlTableRef } from '../format'
 
 const HISTORY_KEY = 'stardelt-nova:history'
 const HISTORY_LIMIT = 50
@@ -153,7 +153,7 @@ export default function Query() {
             </div>
             {result.truncated && (
               <div className="px-4 py-2 text-xs bg-amber-500/10 border-b border-amber-500/40 text-amber-600 dark:text-amber-400">
-                Showing the first {result.row_count.toLocaleString()} rows. Add a LIMIT or aggregate to see the rest.
+                Showing the first {formatCount(result.row_count)} rows. Add a LIMIT or aggregate to see the rest.
               </div>
             )}
             <div className="overflow-auto flex-1">

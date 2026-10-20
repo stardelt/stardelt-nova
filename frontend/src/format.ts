@@ -98,6 +98,87 @@ export function formatBytes(n: number | null | undefined): string {
   return `${v.toFixed(v < 10 ? 1 : 0)} ${units[i]}`
 }
 
+/** Whether full times are shown in this browser's zone or in UTC. */
+export type TimeDisplay = 'local' | 'utc'
+
+const TIME_KEY = 'stardelt-nova:time'
+const TIME_EVENT = 'stardelt-nova:time-change'
+let timeDisplay: TimeDisplay | null = null
+
+/** This browser's storage, or null where there is none (tests, a blocked private window). */
+function browserStorage(): Storage | null {
+  try {
+    return typeof window === 'undefined' ? null : window.localStorage
+  } catch {
+    return null
+  }
+}
+
+function storedTimeDisplay(): TimeDisplay | null {
+  try {
+    const stored = browserStorage()?.getItem(TIME_KEY)
+    if (stored === 'local' || stored === 'utc') return stored
+  } catch {
+    /* Private windows and blocked storage: the default applies. */
+  }
+  return null
+}
+
+/** Whether this browser holds a time-display choice of its own (as opposed to the default). */
+export function hasTimeChoice(): boolean {
+  return storedTimeDisplay() !== null
+}
+
+export function getTimeDisplay(): TimeDisplay {
+  if (timeDisplay) return timeDisplay
+  timeDisplay = storedTimeDisplay() ?? 'local'
+  return timeDisplay
+}
+
+/** Apply a time display everywhere and remember it in this browser. */
+export function setTimeDisplay(value: TimeDisplay) {
+  timeDisplay = value
+  try {
+    browserStorage()?.setItem(TIME_KEY, value)
+  } catch {
+    /* ignore */
+  }
+  if (typeof window !== 'undefined') window.dispatchEvent(new Event(TIME_EVENT))
+}
+
+/** The browser's own abbreviation for its zone, e.g. `GMT+2`; empty when it has none. */
+function zoneAbbreviation(date: Date): string {
+  const parts = new Intl.DateTimeFormat(undefined, { timeZoneName: 'short' }).formatToParts(date)
+  return parts.find((part) => part.type === 'timeZoneName')?.value ?? ''
+}
+
+const pad = (n: number) => String(n).padStart(2, '0')
+
+/**
+ * A full time a person can compare: `2026-10-20 14:05:09 UTC` when UTC is chosen,
+ * otherwise the same instant in the browser's zone with its abbreviation. The value is
+ * an epoch in milliseconds or an RFC 3339 string; anything unreadable is a dash.
+ */
+export function formatTime(value: number | string): string {
+  if (value === 0 || value === '') return '—'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return '—'
+  if (getTimeDisplay() === 'utc') {
+    const day = `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}`
+    const clock = `${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(date.getUTCSeconds())}`
+    return `${day} ${clock} UTC`
+  }
+  const day = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+  const clock = `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+  const zone = zoneAbbreviation(date)
+  return zone ? `${day} ${clock} ${zone}` : `${day} ${clock}`
+}
+
+/** A count as a person reads it: `1,234`. */
+export function formatCount(n: number): string {
+  return n.toLocaleString()
+}
+
 /** `just now`, `5 min ago`, `3 h ago`, `2 d ago`. */
 export function relativeTime(ms: number, now: number = Date.now()): string {
   const s = Math.max(0, Math.round((now - ms) / 1000))

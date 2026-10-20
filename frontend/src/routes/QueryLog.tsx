@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { api, errorMessage, formatTime, type QueryLogItem } from '../api'
-import { formatBytes, formatDurationMs, relativeTime, rowsLabel, sourceLabel } from '../format'
+import { api, errorMessage, type QueryLogItem } from '../api'
+import { formatBytes, formatCount, formatDurationMs, formatTime, relativeTime, rowsLabel, sourceLabel } from '../format'
 import { isAdmin } from '../roles'
 
 /** Query log: the queries a person ran, simple by default, every metric one click away. */
@@ -436,7 +436,7 @@ function Details({ id }: { id: string }) {
 }
 
 function num(n: number | null): string {
-  return n == null ? '—' : n.toLocaleString()
+  return n == null ? '—' : formatCount(n)
 }
 
 function Fact({ label, children }: { label: string; children: React.ReactNode }) {

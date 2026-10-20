@@ -1,11 +1,12 @@
 import { test, expect, type Browser, type Locator, type Page, type Route } from '@playwright/test'
 import { KNOWN, type Known } from './known'
 import { auditPage, focusAudit, type Finding } from './audit'
+import { formatTime, setTimeDisplay } from '../src/format'
 
 // Rules U1–U13 are written down in stardelt-internal/design/ui-conformance.md.
 
 const ROUTES = ['/', '/catalog', '/query', '/data', '/connections', '/jobs', '/pipelines', '/queries',
-  '/apps', '/lineage', '/dashboards', '/notebooks', '/health', '/settings', '/no-such-page']
+  '/apps', '/lineage', '/dashboards', '/notebooks', '/health', '/settings', '/preferences', '/no-such-page']
 const VARIANTS = [
   { name: 'desktop-dark', viewport: { width: 1280, height: 800 }, theme: 'dark', keyboard: true },
   { name: 'desktop-light', viewport: { width: 1280, height: 800 }, theme: 'light', keyboard: false },
@@ -2399,6 +2400,158 @@ test.describe('schedule', () => {
 
     await page.getByRole('button', { name: 'Delete pipeline' }).click()
     await expect(page.getByRole('dialog', { name: 'Delete team-smoke?' })).toBeVisible()
+    expect((await auditPage(page)).filter((finding) => finding.rule === 'U5')).toEqual([])
+    await context.close()
+  })
+})
+
+test.describe('preferences', () => {
+  const ME = {
+    user: 'alice', auth_mode: 'oidc', demo: false, warehouse: 'warehouse',
+    is_admin: false, groups: ['analysts'],
+  }
+  const NO_STORE =
+    'Your preferences are kept in this browser only: this installation has no state store.'
+
+  /** A Preferences page with every `/api/**` call stubbed; writes are recorded for the test. */
+  async function open(browser: Browser, {
+    settings = {} as Record<string, unknown>,
+    settingsStatus,
+    timezoneId,
+    rows = [] as unknown[],
+  }: {
+    settings?: Record<string, unknown>
+    settingsStatus?: number
+    timezoneId?: string
+    rows?: unknown[]
+  } = {}) {
+    const context = await browser.newContext({
+      viewport: { width: 1280, height: 800 },
+      ...(timezoneId ? { timezoneId } : {}),
+    })
+    const page = await context.newPage()
+    const writes: { method: string; path: string; body: string | null }[] = []
+    await page.route('**/api/**', (route) => {
+      const request = route.request()
+      const path = new URL(request.url()).pathname
+      if (path === '/api/me') return json(route, ME)
+      if (path === '/api/settings') {
+        return settingsStatus
+          ? json(route, { error: 'the state store is not configured' }, settingsStatus)
+          : json(route, settings)
+      }
+      if (path.startsWith('/api/settings/')) {
+        writes.push({ method: request.method(), path, body: request.postData() })
+        return json(route, { key: path.split('/').pop(), value: null })
+      }
+      if (path === '/api/apps/links') return json(route, [])
+      if (path === '/api/jobs') return json(route, [])
+      if (path === '/api/query-log') return json(route, { items: rows, nextCursor: null })
+      if (path === '/api/catalog/warehouse') return json(route, { name: 'warehouse', id: 'w' })
+      if (path === '/api/catalog/namespaces') return json(route, { namespaces: [] })
+      return json(route, [])
+    })
+    return { context, page, writes }
+  }
+
+  test('theme applies at once and is saved twice', async ({ browser }) => {
+    const { context, page, writes } = await open(browser)
+    await page.goto('/preferences')
+    await page.getByLabel('Light').check()
+
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'light')
+    expect(await page.evaluate(() => localStorage.getItem('stardelt-nova:theme'))).toBe('light')
+    await expect.poll(() => writes.length).toBe(1)
+    expect(writes[0]).toEqual({ method: 'PUT', path: '/api/settings/theme', body: '"light"' })
+    await context.close()
+  })
+
+  test('a new browser follows the saved setting', async ({ browser }) => {
+    const { context, page } = await open(browser, {
+      settings: { theme: 'light', 'time.display': 'utc' },
+    })
+    // No local choice: the first page of a new browser opens with the person's theme.
+    await page.goto('/')
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'light')
+    expect(await page.evaluate(() => localStorage.getItem('stardelt-nova:time'))).toBe('utc')
+    await page.goto('/preferences')
+    await expect(page.getByLabel('Light')).toBeChecked()
+    await expect(page.getByLabel('UTC', { exact: true })).toBeChecked()
+    expect(await page.evaluate(() => localStorage.getItem('stardelt-nova:theme'))).toBe('light')
+    await context.close()
+  })
+
+  test('time display', async ({ browser }) => {
+    // A fixed instant: 14:05:09 UTC is 16:05:09 in Berlin (summer time, October 2026).
+    const createdAt = Date.UTC(2026, 9, 20, 14, 5, 9)
+    const row = {
+      id: 'q1', state: 'FINISHED', user: 'alice', source: null, warehouse: 'warehouse',
+      queryType: 'SELECT', sql: 'select 1', createdAt, wallMs: 5, outputRows: 0, errorCode: null,
+    }
+    const { context, page, writes } = await open(browser, { timezoneId: 'Europe/Berlin', rows: [row] })
+
+    await page.goto('/queries')
+    const cell = page.locator('td[title]').first()
+    await expect(cell).toHaveAttribute('title', /^2026-10-20 16:05:09 \S+$/)
+
+    await page.goto('/preferences')
+    await page.getByLabel('UTC', { exact: true }).check()
+    await expect.poll(() => writes.length).toBe(1)
+    expect(writes[0]).toEqual({ method: 'PUT', path: '/api/settings/time.display', body: '"utc"' })
+    expect(await page.evaluate(() => localStorage.getItem('stardelt-nova:time'))).toBe('utc')
+
+    await page.goto('/queries')
+    await expect(page.locator('td[title]').first()).toHaveAttribute('title', '2026-10-20 14:05:09 UTC')
+
+    await page.goto('/preferences')
+    await page.getByLabel(/^Local time/).check()
+    await expect.poll(() => writes.length).toBe(2)
+    expect(writes[1]).toEqual({ method: 'PUT', path: '/api/settings/time.display', body: '"local"' })
+    expect(await page.evaluate(() => localStorage.getItem('stardelt-nova:time'))).toBe('local')
+
+    await page.goto('/queries')
+    await expect(page.locator('td[title]').first()).toHaveAttribute('title', /^2026-10-20 16:05:09 \S+$/)
+    await context.close()
+  })
+
+  test('no state store', async ({ browser }) => {
+    const { context, page } = await open(browser, { settingsStatus: 503 })
+    await page.goto('/preferences')
+    await expect(page.getByText(NO_STORE)).toBeVisible()
+    await expect(page.getByRole('alert')).toHaveCount(0)
+
+    // Both controls still work through this browser's storage.
+    await page.getByLabel('Light').check()
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'light')
+    await page.getByLabel('UTC', { exact: true }).check()
+    expect(await page.evaluate(() => localStorage.getItem('stardelt-nova:theme'))).toBe('light')
+    expect(await page.evaluate(() => localStorage.getItem('stardelt-nova:time'))).toBe('utc')
+    await expect(page.getByRole('alert')).toHaveCount(0)
+    await context.close()
+  })
+
+  test('formatTime prints the same instant in both modes', () => {
+    // Plain check, no browser: a fixed zone makes the local text deterministic.
+    const previous = process.env.TZ
+    process.env.TZ = 'Europe/Berlin'
+    try {
+      const epoch = Date.UTC(2026, 9, 20, 14, 5, 9)
+      setTimeDisplay('local')
+      expect(formatTime(epoch)).toMatch(/^2026-10-20 16:05:09 \S+$/)
+      expect(formatTime('2026-10-20T14:05:09Z')).toBe(formatTime(epoch))
+      setTimeDisplay('utc')
+      expect(formatTime(epoch)).toBe('2026-10-20 14:05:09 UTC')
+      expect(formatTime('2026-10-20T14:05:09Z')).toBe('2026-10-20 14:05:09 UTC')
+    } finally {
+      if (previous === undefined) delete process.env.TZ
+      else process.env.TZ = previous
+      setTimeDisplay('local')
+    }
+  })
+
+  test('U5 the page has accessible names', async ({ browser }) => {
+    const { context, page } = await open(browser)
+    await page.goto('/preferences')
     expect((await auditPage(page)).filter((finding) => finding.rule === 'U5')).toEqual([])
     await context.close()
   })

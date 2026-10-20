@@ -3,7 +3,7 @@ import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../api'
 import { Icon, type IconName } from './Icon'
-import { getTheme, applyTheme, type Theme } from '../theme'
+import { applyTheme, useTheme, type Theme } from '../theme'
 import { isAdmin, roleLabel } from '../roles'
 import ErrorBoundary from './ErrorBoundary'
 
@@ -70,6 +70,7 @@ const titles: Record<string, string> = {
   '/notebooks': 'Notebooks',
   '/health': 'Health',
   '/settings': 'Settings',
+  '/preferences': 'Preferences',
 }
 
 /** The app detail route carries its own id, so the header can be specific. */
@@ -183,7 +184,7 @@ export default function Shell() {
   const location = useLocation()
   const navigate = useNavigate()
   const [q, setQ] = useState('')
-  const [theme, setThemeState] = useState<Theme>(getTheme)
+  const theme = useTheme()
   const title = titleFor(location.pathname)
   const admin = isAdmin(me.data)
   const role = roleLabel(me.data)
@@ -196,8 +197,10 @@ export default function Shell() {
 
   function toggleTheme() {
     const next: Theme = theme === 'dark' ? 'light' : 'dark'
-    setThemeState(next)
     applyTheme(next)
+    // The toggle and the Preferences page write the same two places; a missing state
+    // store only means the choice stays in this browser.
+    void api.putSetting('theme', next).catch(() => {})
   }
 
   return (
