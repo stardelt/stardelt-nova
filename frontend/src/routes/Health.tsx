@@ -1,7 +1,8 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { api } from '../api'
+import { api, errorMessage } from '../api'
 import { ClusterNotice } from '../components/ClusterNotice'
+import ErrorBox from '../components/ErrorBox'
 import { Icon } from '../components/Icon'
 import { isBrowsable, safeHttpUrl, shortImage } from '../format'
 
@@ -49,7 +50,7 @@ export default function Health() {
         <div className="label mb-2">Services</div>
         <div className="card divide-y divide-border/70">
           {apps.isLoading && <div className="p-5 text-text-mute text-sm">loading…</div>}
-          {apps.isError && !apps.data && <div className="p-5 text-bad text-sm">{String(apps.error)}</div>}
+          {apps.isError && !apps.data && <div className="p-5"><ErrorBox error={apps.error} onRetry={() => apps.refetch()} /></div>}
           {list.map(a => (
             <div key={a.id} className="flex items-center gap-3 px-5 py-3">
               <span className={['w-2 h-2 rounded-full', a.status === 'up' ? 'bg-success' : 'bg-text-mute'].join(' ')} />
@@ -72,7 +73,7 @@ export default function Health() {
           <ClusterNotice snapshot={snapshot} />
           <div className="card divide-y divide-border/70">
             {workloads.isLoading && <div className="p-5 text-text-mute text-sm">loading…</div>}
-            {workloads.isError && !workloads.data && <div className="p-5 text-bad text-sm">{String(workloads.error)}</div>}
+            {workloads.isError && !workloads.data && <div className="p-5"><ErrorBox error={workloads.error} onRetry={() => workloads.refetch()} /></div>}
             {rows.map(w => (
               <div key={`${w.kind}/${w.name}`} className="flex items-center gap-3 px-5 py-2.5">
                 <span className="w-16 shrink-0 text-[11px] uppercase tracking-wider text-text-mute">
@@ -111,7 +112,7 @@ export default function Health() {
           <Link to="/apps" className="text-xs text-text-dim hover:text-text">All apps →</Link>
         </div>
         <pre className="text-xs font-mono text-text-dim overflow-auto max-h-64">
-{JSON.stringify(cluster.data ?? { error: String(cluster.error ?? 'loading') }, null, 2)}
+{JSON.stringify(cluster.data ?? { error: cluster.error ? errorMessage(cluster.error) : 'loading' }, null, 2)}
         </pre>
       </section>
     </div>

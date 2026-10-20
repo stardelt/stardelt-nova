@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { api, formatTime, type QueryLogItem } from '../api'
+import { api, errorMessage, formatTime, type QueryLogItem } from '../api'
 import { formatBytes, formatDurationMs, relativeTime, rowsLabel, sourceLabel } from '../format'
 import { isAdmin } from '../roles'
 
@@ -246,7 +246,7 @@ export default function QueryLog() {
             {log.isError && !log.data && (
               <tr>
                 <td className="px-4 py-5 text-bad" colSpan={colCount}>
-                  {String(log.error)}{' '}
+                  {errorMessage(log.error)}{' '}
                   <button type="button" className="underline" onClick={() => log.refetch()}>Retry</button>
                 </td>
               </tr>

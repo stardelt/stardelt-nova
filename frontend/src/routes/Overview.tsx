@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { api, allTables, formatTime } from '../api'
+import ErrorBox from '../components/ErrorBox'
 import { Icon } from '../components/Icon'
 import { isAdmin } from '../roles'
 import { rowsLabel, statusLabel } from '../format'
@@ -54,7 +55,7 @@ export default function Overview() {
             <Link to="/jobs" className="text-xs text-text-dim hover:text-text">View all →</Link>
           </div>
           {jobs.isLoading && <div className="text-text-mute text-sm">loading…</div>}
-          {jobs.isError && !jobs.data && <div className="text-bad text-sm">{String(jobs.error)}</div>}
+          {jobs.isError && !jobs.data && <ErrorBox error={jobs.error} onRetry={() => jobs.refetch()} />}
           {jobs.data && recent.length === 0 && (
             <div className="text-text-mute text-sm">No activity yet. Run a query or load a file.</div>
           )}
@@ -78,7 +79,7 @@ export default function Overview() {
           </div>
           <div className="space-y-2 text-sm">
             {apps.isLoading && <div className="text-text-mute text-sm">loading…</div>}
-            {apps.isError && !apps.data && <div className="text-bad text-sm">{String(apps.error)}</div>}
+            {apps.isError && !apps.data && <ErrorBox error={apps.error} onRetry={() => apps.refetch()} />}
             {(apps.data ?? []).map(a => (
               <div key={a.id} className="flex items-center justify-between gap-3">
                 <span className="flex items-center gap-2">

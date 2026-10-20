@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { api } from '../api'
+import { api, errorMessage } from '../api'
 import { isAdmin } from '../roles'
 import { EmbedBadge, EmbedNotice } from '../components/EmbedNotice'
 import { safeHttpUrl, statusLabel } from '../format'
@@ -52,7 +52,7 @@ export default function Dashboards() {
               : apps.isLoading
                 ? <> Checking whether it is deployed…</>
                 : apps.isError
-                  ? <> Could not read the app list ({String(apps.error)}).</>
+                  ? <> Could not read the app list ({errorMessage(apps.error)}).</>
                   : admin
                     ? <> Not deployed yet — run <span className="font-mono">make install</span> (full profile) to add it.</>
                     : <> Dashboards are not available yet. Ask your platform administrator to enable them.</>}

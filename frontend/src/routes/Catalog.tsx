@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
-import { api, formatCell, formatTime, type QueryResult, type TableMetadata } from '../api'
+import { api, errorMessage, formatCell, formatTime, type QueryResult, type TableMetadata } from '../api'
+import ErrorBox from '../components/ErrorBox'
 import { sqlTableRef, rowsLabel } from '../format'
 import { isAdmin } from '../roles'
 
@@ -40,7 +41,7 @@ export default function Catalog() {
         </div>
         <div className="overflow-auto flex-1">
           {namespaces.isLoading && <div className="text-text-mute text-sm p-2">loading…</div>}
-          {namespaces.isError && <div className="text-bad text-sm p-2">{String(namespaces.error)}</div>}
+          {namespaces.isError && <div className="p-2"><ErrorBox error={namespaces.error} onRetry={() => namespaces.refetch()} /></div>}
           <ul className="space-y-1">
             {namespaces.data?.namespaces.map(parts => {
               const ns = parts.join('.')
@@ -94,7 +95,7 @@ function NamespaceItem({ ns, filter, onSelect, selected }: {
       {open && (
         <ul className="ml-3 mt-0.5 space-y-0.5">
           {tables.isLoading && <li className="text-text-mute text-xs px-2 py-1">loading…</li>}
-          {tables.isError && !tables.data && <li className="text-bad text-xs px-2 py-1 break-words">{String(tables.error)}</li>}
+          {tables.isError && !tables.data && <li className="px-2 py-1"><ErrorBox error={tables.error} onRetry={() => tables.refetch()} /></li>}
           {visible.map(id => {
             const sel = selected?.ns === ns && selected?.tbl === id.name
             return (
@@ -169,7 +170,7 @@ function TableDetail({ ns, tbl }: Sel) {
         ))}
       </div>
 
-      {meta.isError && <div className="text-bad text-sm">{String(meta.error)}</div>}
+      {meta.isError && <ErrorBox error={meta.error} onRetry={() => meta.refetch()} />}
 
       {tab === 'preview' && <Preview q={preview} />}
 
@@ -206,9 +207,9 @@ function TableDetail({ ns, tbl }: Sel) {
   )
 }
 
-function Preview({ q }: { q: { data?: QueryResult; isLoading: boolean; error: unknown } }) {
+function Preview({ q }: { q: { data?: QueryResult; isLoading: boolean; error: unknown; refetch: () => void } }) {
   if (q.isLoading) return <div className="card p-6 text-text-mute text-sm">loading preview…</div>
-  if (q.error) return <div className="card p-6 text-bad text-sm">{String(q.error)}</div>
+  if (q.error) return <div className="card p-6"><ErrorBox error={q.error} onRetry={() => q.refetch()} /></div>
   if (!q.data) return null
   return (
     <div className="card overflow-hidden">
@@ -274,7 +275,7 @@ function HistoryTab({ ns, tbl }: Sel) {
   const iSummary = idx('summary')
 
   if (history.isLoading) return <div className="card p-6 text-text-mute text-sm">loading history…</div>
-  if (history.isError) return <div className="card p-6 text-bad text-sm">{String(history.error)}</div>
+  if (history.isError) return <div className="card p-6"><ErrorBox error={history.error} onRetry={() => history.refetch()} /></div>
   const rows = history.data?.rows ?? []
   if (rows.length === 0) {
     return (
@@ -377,7 +378,7 @@ function HistoryTab({ ns, tbl }: Sel) {
           </label>
           {rollback.isError && (
             <div className="rounded-[10px] border border-red-500/40 bg-red-500/10 p-3 mt-3 text-sm text-bad font-mono whitespace-pre-wrap break-words">
-              {String(rollback.error)}
+              {errorMessage(rollback.error)}
             </div>
           )}
           <div className="flex gap-2 mt-4">
@@ -397,7 +398,7 @@ function HistoryTab({ ns, tbl }: Sel) {
       {rollbackOk && <div className="rounded-[10px] border border-emerald-400/30 bg-emerald-400/10 p-3 text-sm text-ok">{rollbackOk}</div>}
       {rollback.isError && rollbackTarget === null && (
         <div className="rounded-[10px] border border-red-500/40 bg-red-500/10 p-3 text-sm text-bad font-mono whitespace-pre-wrap break-words">
-          {String(rollback.error)}
+          {errorMessage(rollback.error)}
         </div>
       )}
 
