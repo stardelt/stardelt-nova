@@ -27,6 +27,7 @@ const groups: NavGroup[] = [
       { to: '/connections', label: 'Connections', icon: 'key' },
       { to: '/queries', label: 'Query log', icon: 'table' },
       { to: '/jobs', label: 'Jobs', icon: 'clock' },
+      { to: '/pipelines', label: 'Pipelines', icon: 'play' },
     ],
   },
   {
@@ -62,6 +63,7 @@ const titles: Record<string, string> = {
   '/connections': 'Connections',
   '/queries': 'Query log',
   '/jobs': 'Jobs',
+  '/pipelines': 'Pipelines',
   '/apps': 'Platform apps',
   '/lineage': 'Lineage',
   '/dashboards': 'Dashboards',
@@ -74,6 +76,17 @@ const titles: Record<string, string> = {
 function titleFor(pathname: string): string {
   const app = pathname.match(/^\/apps\/([^/]+)$/)
   if (app) return `${app[1]} — app detail`
+  // A pipeline's page is named after the pipeline, so the tab says which one.
+  const pipeline = pathname.match(/^\/pipelines\/[^/]+\/([^/]+)$/)
+  if (pipeline) {
+    let name = pipeline[1]
+    try {
+      name = decodeURIComponent(name)
+    } catch {
+      // A malformed escape is shown as it arrived; nothing here builds a URL from it.
+    }
+    return `${name} · Pipelines`
+  }
   // Anything else that is not a known route is the catch-all, and says so.
   return titles[pathname] ?? 'Not found'
 }
