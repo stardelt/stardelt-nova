@@ -1,6 +1,8 @@
 //! The Pipelines API: read (list, detail, runs, tasks, logs — stardelt-nova#188), act (run now,
-//! pause, resume, stop a run — stardelt-nova#196) and schedule (create, change, delete a
-//! pipeline — stardelt-nova#210); design note `design/scheduled-jobs.md` §6.1, phase J1.
+//! pause, resume, stop a run — stardelt-nova#196), schedule (create, change, delete a
+//! pipeline — stardelt-nova#210) and the schedule options (parameters, retries, time limit,
+//! concurrency, a statement check, a next-runs preview — stardelt-nova#223); design notes
+//! `design/scheduled-jobs.md` §6.1 and `design/scheduling-and-notebooks.md` §2, phase J1.
 //!
 //! Nova is the enforcement point. Airflow's one credential reads every DAG, so every route here
 //! first finds the `Pipeline` resource, checks that the caller may see it, and only then asks
@@ -40,6 +42,15 @@
 //!   statement is **never** audited, only its length and the cron text. A create needs no
 //!   Airflow (the resource is the source of truth); the read routes keep answering 503 without it.
 //!
+//! - **Options and parameters** (#223): a schedule carries `${params.<name>}` values (at most 16,
+//!   lower-case names, values up to 256 characters) and the advanced options the loader reads
+//!   (`retries`, `timeout`, `concurrency`). An omitted option keeps today's default, so an old body
+//!   writes what it always wrote. Every `${…}` in the statement must be one the loader knows
+//!   (`run.date`, `run.id`, `params.<name>`) — an unknown one would fail the run, so it is a 400 at
+//!   create time. `POST /api/pipelines/check` asks the engine about a statement with `EXPLAIN`
+//!   (never `EXPLAIN ANALYZE`, never the statement itself), and `POST /api/pipelines/preview-schedule`
+//!   lists the next fire times in the schedule's zone.
+//!
 //! The route logic sits in plain `async fn`s that take their inputs, so the tests call them
 //! without a router; each handler is the thin axum wrapper that checks sign-in and the two
 //! clients. The whole surface is uncacheable (`Cache-Control: no-store`).
@@ -54,12 +65,13 @@ use std::sync::Mutex;
 
 use axum::{
     Json, Router,
-    extract::{Path, Query, Request},
-    http::{HeaderValue, StatusCode, header},
+    extract::{FromRequestParts, Path, Query, Request},
+    http::{HeaderValue, StatusCode, header, request::Parts},
     middleware::Next,
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use chrono::{DateTime, Datelike, Days, LocalResult, TimeZone, Utc};
 use chrono_tz::Tz;
 use futures::stream::{self, StreamExt};
 use kube::api::{Api, ApiResource, DynamicObject, GroupVersionKind};
@@ -72,7 +84,7 @@ use crate::airflow::{
 };
 use crate::api_json::ApiJson;
 use crate::audit::{self, PipelineWrite};
-use crate::auth::Identity;
+use crate::auth::{Identity, Principal};
 use crate::connection_routes::{Fail, SignedIn};
 
 /// The `Pipeline` resources of the platform namespace: the cluster, or memory in tests.
@@ -471,6 +483,51 @@ fn retries_of(spec: &Value) -> Option<RetriesView> {
     })
 }
 
+/// A duration the CRD accepts (`30s`, `5m`, `2h`, `1d`, the grammar of the loader's `plan.py`)
+/// as whole minutes. `None` for anything else, so a hand-written resource never breaks the view.
+fn minutes_of(text: &str) -> Option<i64> {
+    let text = text.trim();
+    let (number, seconds) = ["s", "m", "h", "d"].iter().find_map(|unit| {
+        let number = text.strip_suffix(unit)?;
+        let seconds = match *unit {
+            "s" => 1,
+            "m" => 60,
+            "h" => 3600,
+            _ => 86_400,
+        };
+        Some((number, seconds))
+    })?;
+    Some(number.parse::<i64>().ok()? * seconds / 60)
+}
+
+/// The options as the resource carries them, defaults when a field is absent (or written in a
+/// form Nova does not read): the edit dialog prefills from this.
+fn options_of(spec: &Value) -> PipelineOptionsView {
+    let retries = spec.get("retries");
+    let backoff = retries
+        .and_then(|retries| retries.get("backoff"))
+        .and_then(Value::as_str)
+        .and_then(minutes_of)
+        .unwrap_or(DEFAULT_BACKOFF_MINUTES);
+    PipelineOptionsView {
+        retries: retries
+            .and_then(|retries| retries.get("attempts"))
+            .and_then(Value::as_i64)
+            .unwrap_or(DEFAULT_RETRIES),
+        backoff_minutes: backoff,
+        timeout_minutes: spec
+            .get("timeout")
+            .and_then(Value::as_str)
+            .and_then(minutes_of)
+            .unwrap_or(DEFAULT_TIMEOUT_MINUTES),
+        concurrency: spec
+            .get("concurrency")
+            .and_then(Value::as_str)
+            .unwrap_or(DEFAULT_CONCURRENCY)
+            .to_string(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Time: Airflow's RFC 3339 strings and a run's duration (no date dependency)
 // ---------------------------------------------------------------------------
@@ -613,6 +670,12 @@ fn now_seconds() -> f64 {
         .unwrap_or_default()
 }
 
+/// The clock as a UTC date-time, for the statement check's "today" and the preview's "next".
+/// Read through `std` on purpose: Nova never asks the machine for its local zone.
+fn now_utc() -> DateTime<Utc> {
+    DateTime::<Utc>::from(std::time::SystemTime::now())
+}
+
 /// Now, whole seconds, UTC, for Airflow's `logical_date`.
 fn now_rfc3339() -> String {
     format_rfc3339(now_seconds() as i64)
@@ -689,6 +752,143 @@ fn validate_sql(sql: &str) -> Result<String, String> {
         return Err(invalid_sql().into());
     }
     Ok(statement.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Parameters and advanced options (`Schedule`, #223)
+// ---------------------------------------------------------------------------
+
+/// At most this many `${params.<name>}` values per schedule (#223).
+const MAX_PARAMS: usize = 16;
+/// The longest parameter value the resource may carry.
+const MAX_PARAM_VALUE_CHARS: usize = 256;
+
+const PARAM_NAMES: &str = "parameter names are lower-case letters, digits and underscores";
+const TOO_MANY_PARAMS: &str = "at most 16 parameters";
+const PARAM_VALUE_TOO_LONG: &str = "a parameter value is at most 256 characters";
+const PARAM_VALUE_NUL: &str = "a parameter value cannot contain NUL";
+const RETRIES_RANGE: &str = "retries are 0 to 5";
+const BACKOFF_RANGE: &str = "the wait between retries is 1 to 60 minutes";
+const TIMEOUT_RANGE: &str = "the time limit is 1 to 720 minutes";
+const CONCURRENCY_RULE: &str = "runs are Forbid or Allow";
+const COUNT_RANGE: &str = "count is 1 to 10";
+
+/// Today's defaults for a schedule that sends no `options`: one retry after five minutes, a
+/// two-hour time limit, one run at a time (what `pipeline_resource` wrote before #223).
+const DEFAULT_RETRIES: i64 = 1;
+const DEFAULT_BACKOFF_MINUTES: i64 = 5;
+const DEFAULT_TIMEOUT_MINUTES: i64 = 120;
+const DEFAULT_CONCURRENCY: &str = "Forbid";
+
+/// `^[a-z][a-z0-9_]{0,31}$`: the names the loader expands as `${params.<name>}`.
+fn valid_param_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 32
+        && bytes[0].is_ascii_lowercase()
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'_')
+}
+
+/// The parameter table a schedule may carry: at most 16 values, lower-case names, short values
+/// without NUL. `Err` is the sentence the caller sees.
+fn validate_params(params: &BTreeMap<String, String>) -> Result<(), String> {
+    if params.len() > MAX_PARAMS {
+        return Err(TOO_MANY_PARAMS.into());
+    }
+    for (name, value) in params {
+        if !valid_param_name(name) {
+            return Err(PARAM_NAMES.into());
+        }
+        if value.contains('\0') {
+            return Err(PARAM_VALUE_NUL.into());
+        }
+        if value.chars().count() > MAX_PARAM_VALUE_CHARS {
+            return Err(PARAM_VALUE_TOO_LONG.into());
+        }
+    }
+    Ok(())
+}
+
+/// One `${…}` the loader's `expand.py` would replace: the offset of its `${`, the offset just
+/// past its `}`, and the name inside. `from` is where the search starts.
+///
+/// The grammar is deliberately the loader's (`\$\{[A-Za-z_][A-Za-z0-9_.]*\}`): a `${` its regex
+/// does not match is no placeholder, and the loader leaves it in the statement — Nova must not
+/// refuse a statement the loader happily runs.
+fn next_placeholder(statement: &str, from: usize) -> Option<(usize, usize, &str)> {
+    let mut at = from;
+    while let Some(found) = statement.get(at..)?.find("${") {
+        let start = at + found;
+        let body = start + 2;
+        let rest = statement.get(body..)?;
+        let length = rest
+            .bytes()
+            .take_while(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'.')
+            .count();
+        let name = rest.get(..length)?;
+        let first_ok = name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+        let closes = rest.as_bytes().get(length) == Some(&b'}');
+        if first_ok && closes {
+            return Some((start, body + length + 1, name));
+        }
+        at = body;
+    }
+    None
+}
+
+/// Every `${…}` in the statement must be one the loader can fill: `run.date`, `run.id`, or
+/// `params.<name>` for a parameter this schedule defines. An unknown one fails the run
+/// (`expand.py` raises), so Nova refuses the write instead.
+fn check_placeholders(statement: &str, params: &BTreeMap<String, String>) -> Result<(), String> {
+    let mut at = 0;
+    while let Some((_, end, name)) = next_placeholder(statement, at) {
+        let known = name == "run.date"
+            || name == "run.id"
+            || name
+                .strip_prefix("params.")
+                .is_some_and(|key| params.contains_key(key));
+        if !known {
+            return Err(format!("unknown placeholder ${{{name}}}"));
+        }
+        at = end;
+    }
+    Ok(())
+}
+
+/// The statement with every placeholder replaced, in one pass so a value that itself contains
+/// `${…}` is never expanded again. Unknown placeholders are refused before this runs.
+fn fill_placeholders(
+    statement: &str,
+    run_date: &str,
+    run_id: &str,
+    params: &BTreeMap<String, String>,
+) -> String {
+    let mut out = String::with_capacity(statement.len());
+    let mut at = 0;
+    while let Some((start, end, name)) = next_placeholder(statement, at) {
+        out.push_str(statement.get(at..start).unwrap_or_default());
+        let value = match name {
+            "run.date" => Some(run_date),
+            "run.id" => Some(run_id),
+            other => other
+                .strip_prefix("params.")
+                .and_then(|key| params.get(key))
+                .map(String::as_str),
+        };
+        match value {
+            Some(value) => out.push_str(value),
+            // Unreachable after `check_placeholders`; leaving the text alone is the safe answer.
+            None => out.push_str(statement.get(start..end).unwrap_or_default()),
+        }
+        at = end;
+    }
+    out.push_str(statement.get(at..).unwrap_or_default());
+    out
 }
 
 const CRON_FIELDS: &str = "a schedule has five fields: minute hour day month weekday";
@@ -789,19 +989,109 @@ fn fires_too_often(minutes: &BTreeSet<u32>) -> bool {
 /// The schedule rules of the loader: five fields, in range, no `@daily` shortcut, no seconds,
 /// and never more often than every five minutes. `Err` is the sentence the caller sees.
 pub fn validate_cron(cron: &str) -> Result<(), String> {
+    parse_cron(cron).map(|_| ())
+}
+
+/// A parsed cron: the values each field names. The preview walks it (#223); `validate_cron` is
+/// this parser's verdict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CronSchedule {
+    minutes: BTreeSet<u32>,
+    hours: BTreeSet<u32>,
+    days: BTreeSet<u32>,
+    months: BTreeSet<u32>,
+    weekdays: BTreeSet<u32>,
+}
+
+/// Parse and validate in one place, so the preview and the create route cannot drift: the field
+/// sets, the `7` = Sunday spelling, and the same sentences.
+fn parse_cron(cron: &str) -> Result<CronSchedule, String> {
     let fields: Vec<&str> = cron.split_whitespace().collect();
     if fields.len() != 5 {
         return Err(CRON_FIELDS.into());
     }
     let minutes = cron_minutes(fields[0])?;
-    cron_field(fields[1], 0, 23, &[])?;
-    cron_field(fields[2], 1, 31, &[])?;
-    cron_field(fields[3], 1, 12, &MONTH_NAMES)?;
-    cron_field(fields[4], 0, 7, &WEEKDAY_NAMES)?;
+    let hours = cron_field(fields[1], 0, 23, &[])?;
+    let days = cron_field(fields[2], 1, 31, &[])?;
+    let months = cron_field(fields[3], 1, 12, &MONTH_NAMES)?;
+    let mut weekdays = cron_field(fields[4], 0, 7, &WEEKDAY_NAMES)?;
+    if weekdays.remove(&7) {
+        weekdays.insert(0);
+    }
     if fires_too_often(&minutes) {
         return Err(CRON_TOO_OFTEN.into());
     }
-    Ok(())
+    Ok(CronSchedule {
+        minutes,
+        hours,
+        days,
+        months,
+        weekdays,
+    })
+}
+
+/// The next `count` times the schedule fires in `zone`, strictly after `now`.
+///
+/// Walks the local days the cron names (at most 366 of them, so a schedule that can never fire —
+/// `0 0 31 2 *` — answers fewer runs instead of spinning), then their hours and minutes. Like
+/// croniter, a day matches when both day fields are restricted and either matches, and when one
+/// of them is unrestricted and the other matches. A wall-clock time the zone skips at a DST jump
+/// does not exist and is not a run; a wall-clock time that happens twice (the clocks going back)
+/// is answered with its first occurrence.
+fn next_runs(
+    schedule: &CronSchedule,
+    zone: Tz,
+    count: usize,
+    now: DateTime<Utc>,
+) -> Vec<DateTime<Tz>> {
+    let mut runs = Vec::with_capacity(count);
+    // `*` and any expression that selects every day mean the same thing; the dom/dow rule only
+    // cares whether a field actually restricts the day.
+    let day_restricted = schedule.days.len() < 31;
+    let weekday_restricted = schedule.weekdays.len() < 7;
+    let today = now.with_timezone(&zone).date_naive();
+    for offset in 0..=366 {
+        if runs.len() == count {
+            break;
+        }
+        let Some(day) = today.checked_add_days(Days::new(offset)) else {
+            break;
+        };
+        if !schedule.months.contains(&day.month()) {
+            continue;
+        }
+        let day_of_month = schedule.days.contains(&day.day());
+        let day_of_week = schedule
+            .weekdays
+            .contains(&day.weekday().num_days_from_sunday());
+        let matches = if day_restricted && weekday_restricted {
+            day_of_month || day_of_week
+        } else {
+            day_of_month && day_of_week
+        };
+        if !matches {
+            continue;
+        }
+        for hour in &schedule.hours {
+            for minute in &schedule.minutes {
+                let Some(local) = day.and_hms_opt(*hour, *minute, 0) else {
+                    continue;
+                };
+                let fires_at = match zone.from_local_datetime(&local) {
+                    LocalResult::None => continue,
+                    LocalResult::Single(fires_at) => fires_at,
+                    LocalResult::Ambiguous(first, _) => first,
+                };
+                if fires_at.with_timezone(&Utc) > now {
+                    runs.push(fires_at);
+                    if runs.len() == count {
+                        return runs;
+                    }
+                }
+            }
+        }
+    }
+    runs
 }
 
 /// The validated schedule: the cron text and the IANA zone, as they go into the resource.
@@ -896,22 +1186,28 @@ fn nova_managed(resource: &Value) -> bool {
         == Some(MANAGED_BY_NOVA)
 }
 
-/// The `Pipeline` *Schedule* writes: the ticket's shape (#210), nothing else.
+/// The `Pipeline` *Schedule* writes: the ticket's shape (#210), the caller's parameters and
+/// options (#223), nothing else.
 fn pipeline_resource(
     name: &str,
     group: &str,
     sql: &str,
     schedule: Option<&(String, String)>,
+    params: &BTreeMap<String, String>,
+    options: &PipelineOptionsView,
     created_by: &str,
 ) -> Value {
     let mut spec = json!({
         "ownerGroup": group,
         "runAs": format!("pipeline-{group}"),
         "tasks": [{ "name": "run", "kind": "sql", "sql": sql }],
-        "concurrency": "Forbid",
-        "retries": { "attempts": 1, "backoff": "5m" },
-        "timeout": "2h",
+        "concurrency": options.concurrency,
+        "retries": { "attempts": options.retries, "backoff": format!("{}m", options.backoff_minutes) },
+        "timeout": format!("{}m", options.timeout_minutes),
     });
+    if !params.is_empty() {
+        spec["params"] = json!(params);
+    }
     if let Some((cron, timezone)) = schedule {
         spec["schedule"] = json!({ "cron": cron, "timezone": timezone });
     }
@@ -967,6 +1263,69 @@ pub struct ScheduleRequest {
     pub timezone: String,
 }
 
+/// The advanced options of a schedule (#223), all optional: an omitted field keeps today's
+/// default (one retry, five minutes between retries, a two-hour time limit, one run at a time).
+/// `Replace` is deliberately not offered — the loader treats it as `Forbid`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineOptions {
+    /// Extra attempts after a failure, 0 to 5.
+    #[serde(default)]
+    pub retries: Option<i64>,
+    /// The wait between attempts, 1 to 60 minutes.
+    #[serde(default)]
+    pub backoff_minutes: Option<i64>,
+    /// The longest a whole run may take, 1 to 720 minutes.
+    #[serde(default)]
+    pub timeout_minutes: Option<i64>,
+    /// `Forbid` (one run at a time, the default) or `Allow` (runs side by side).
+    #[serde(default)]
+    pub concurrency: Option<String>,
+}
+
+/// The options as the resource carries them, defaults filled in — what the edit dialog prefills.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineOptionsView {
+    pub retries: i64,
+    pub backoff_minutes: i64,
+    pub timeout_minutes: i64,
+    pub concurrency: String,
+}
+
+impl PipelineOptions {
+    /// The options with their defaults, checked. `Err` is the sentence the caller sees; the
+    /// order is the order of the fields (retries, the wait, the time limit, the run mode).
+    fn resolve(&self) -> Result<PipelineOptionsView, String> {
+        let retries = self.retries.unwrap_or(DEFAULT_RETRIES);
+        if !(0..=5).contains(&retries) {
+            return Err(RETRIES_RANGE.into());
+        }
+        let backoff_minutes = self.backoff_minutes.unwrap_or(DEFAULT_BACKOFF_MINUTES);
+        if !(1..=60).contains(&backoff_minutes) {
+            return Err(BACKOFF_RANGE.into());
+        }
+        let timeout_minutes = self.timeout_minutes.unwrap_or(DEFAULT_TIMEOUT_MINUTES);
+        if !(1..=720).contains(&timeout_minutes) {
+            return Err(TIMEOUT_RANGE.into());
+        }
+        let concurrency = self
+            .concurrency
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or(DEFAULT_CONCURRENCY);
+        if concurrency != "Allow" && concurrency != "Forbid" {
+            return Err(CONCURRENCY_RULE.into());
+        }
+        Ok(PipelineOptionsView {
+            retries,
+            backoff_minutes,
+            timeout_minutes,
+            concurrency: concurrency.to_string(),
+        })
+    }
+}
+
 /// `POST /api/pipelines`: schedule a statement for one of the caller's own groups.
 #[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -976,15 +1335,67 @@ pub struct CreatePipelineRequest {
     pub sql: String,
     #[serde(default)]
     pub schedule: Option<ScheduleRequest>,
+    /// Values for `${params.<name>}` in the statement; at most 16.
+    #[serde(default)]
+    pub params: BTreeMap<String, String>,
+    /// Retries, the wait between them, the time limit and the run mode; omitted fields keep the
+    /// defaults.
+    #[serde(default)]
+    pub options: Option<PipelineOptions>,
 }
 
-/// `PUT /api/pipelines/{namespace}/{name}`: change the statement and the schedule; every other
-/// field of the resource stays as it is.
+/// `PUT /api/pipelines/{namespace}/{name}`: change the statement, the schedule, the parameters
+/// and the options. Every other field of the resource stays as it is.
 #[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct UpdatePipelineRequest {
     pub sql: String,
+    /// Omitted means no schedule: the pipeline then runs on demand only.
     #[serde(default)]
     pub schedule: Option<ScheduleRequest>,
+    /// The whole parameter table; omitted means none.
+    #[serde(default)]
+    pub params: BTreeMap<String, String>,
+    /// The whole option set; omitted means the defaults.
+    #[serde(default)]
+    pub options: Option<PipelineOptions>,
+}
+
+/// `POST /api/pipelines/check`: what the engine says about a statement, without running it.
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
+pub struct CheckStatementRequest {
+    pub sql: String,
+    /// The parameters the statement's `${params.<name>}` placeholders are filled with.
+    #[serde(default)]
+    pub params: BTreeMap<String, String>,
+}
+
+/// The engine's verdict. `checked: false` means this kind of statement cannot be checked here;
+/// `ok` is absent then.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+pub struct CheckStatementResponse {
+    pub checked: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ok: Option<bool>,
+    /// The engine's sentence when `ok` is false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// `POST /api/pipelines/preview-schedule`: the next fire times of a cron in its zone.
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
+pub struct PreviewScheduleRequest {
+    pub cron: String,
+    pub timezone: String,
+    /// How many runs to list, 1 to 10; 5 when omitted.
+    #[serde(default)]
+    pub count: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+pub struct PreviewScheduleResponse {
+    /// The next fire times in the schedule's zone, RFC 3339 with that offset.
+    pub runs: Vec<String>,
 }
 
 /// One of the caller's groups and its pipeline principal.
@@ -1107,7 +1518,7 @@ pub struct PipelineListResponse {
 }
 
 /// `GET /api/pipelines/{namespace}/{name}`: the view, the latest runs and the resource's
-/// parameters and retry policy.
+/// parameters, retry policy and options.
 #[derive(Debug, Clone, PartialEq, Serialize, utoipa::ToSchema)]
 pub struct PipelineDetail {
     #[serde(flatten)]
@@ -1115,6 +1526,9 @@ pub struct PipelineDetail {
     pub runs: Vec<RunView>,
     pub params: BTreeMap<String, String>,
     pub retries: Option<RetriesView>,
+    /// Retries, the wait between them, the time limit and the run mode as the resource carries
+    /// them, with the defaults filled in when a field is absent.
+    pub options: PipelineOptionsView,
 }
 
 /// `GET …/runs/{run_id}`: one run and its task instances.
@@ -1617,6 +2031,7 @@ async fn pipeline_detail(
         runs: runs.iter().map(run_view).collect(),
         params: params_of(spec),
         retries: retries_of(spec),
+        options: options_of(spec),
     })
 }
 
@@ -2090,12 +2505,30 @@ async fn create_pipeline_inner(
         ActionError::refused("sql", Fail::new(StatusCode::BAD_REQUEST, message))
     })?;
 
-    // 5. The schedule (or none, for on demand).
+    // 5. The parameters and their placeholders: an unknown one would fail the run.
+    validate_params(&body.params).map_err(|message| {
+        ActionError::refused("params", Fail::new(StatusCode::BAD_REQUEST, message))
+    })?;
+    check_placeholders(&sql, &body.params).map_err(|message| {
+        ActionError::refused("params", Fail::new(StatusCode::BAD_REQUEST, message))
+    })?;
+
+    // 6. The advanced options, defaults filled in.
+    let options = body
+        .options
+        .clone()
+        .unwrap_or_default()
+        .resolve()
+        .map_err(|message| {
+            ActionError::refused("options", Fail::new(StatusCode::BAD_REQUEST, message))
+        })?;
+
+    // 7. The schedule (or none, for on demand).
     let schedule = validate_schedule(body.schedule.as_ref()).map_err(|message| {
         ActionError::refused("schedule", Fail::new(StatusCode::BAD_REQUEST, message))
     })?;
 
-    // 6. The name is free.
+    // 8. The name is free.
     if resources
         .get(&body.name)
         .await
@@ -2105,7 +2538,7 @@ async fn create_pipeline_inner(
         return Err(ActionError::refused("exists", pipeline_exists()));
     }
 
-    // 7. The rate limit comes last: a refusal above never consumes a slot.
+    // 9. The rate limit comes last: a refusal above never consumes a slot.
     if !take_create_slot(limiter, &who.sub) {
         return Err(ActionError::refused("rate-limited", too_many_creates()));
     }
@@ -2115,6 +2548,8 @@ async fn create_pipeline_inner(
         &body.owner_group,
         &sql,
         schedule.as_ref(),
+        &body.params,
+        &options,
         &who.display_name,
     );
     let written = resources.create(resource).await.map_err(|e| match e {
@@ -2221,6 +2656,20 @@ async fn update_pipeline_inner(
     let sql = validate_sql(&body.sql).map_err(|message| {
         ActionError::refused("sql", Fail::new(StatusCode::BAD_REQUEST, message))
     })?;
+    validate_params(&body.params).map_err(|message| {
+        ActionError::refused("params", Fail::new(StatusCode::BAD_REQUEST, message))
+    })?;
+    check_placeholders(&sql, &body.params).map_err(|message| {
+        ActionError::refused("params", Fail::new(StatusCode::BAD_REQUEST, message))
+    })?;
+    let options = body
+        .options
+        .clone()
+        .unwrap_or_default()
+        .resolve()
+        .map_err(|message| {
+            ActionError::refused("options", Fail::new(StatusCode::BAD_REQUEST, message))
+        })?;
     let schedule = validate_schedule(body.schedule.as_ref()).map_err(|message| {
         ActionError::refused("schedule", Fail::new(StatusCode::BAD_REQUEST, message))
     })?;
@@ -2262,6 +2711,20 @@ async fn update_pipeline_inner(
 
     let mut updated = resource.clone();
     updated["spec"]["tasks"][0]["sql"] = json!(sql);
+    // The body describes the whole editable state: the options are written, not merged.
+    updated["spec"]["concurrency"] = json!(options.concurrency);
+    updated["spec"]["retries"] = json!({
+        "attempts": options.retries,
+        "backoff": format!("{}m", options.backoff_minutes),
+    });
+    updated["spec"]["timeout"] = json!(format!("{}m", options.timeout_minutes));
+    if body.params.is_empty() {
+        if let Some(spec) = updated.get_mut("spec").and_then(Value::as_object_mut) {
+            spec.remove("params");
+        }
+    } else {
+        updated["spec"]["params"] = json!(body.params);
+    }
     match &schedule {
         Some((cron, timezone)) => {
             updated["spec"]["schedule"] = json!({ "cron": cron, "timezone": timezone });
@@ -2323,6 +2786,155 @@ async fn delete_pipeline_inner(
 }
 
 // ---------------------------------------------------------------------------
+// The statement check and the next-runs preview (#223): no resource, no store.
+// ---------------------------------------------------------------------------
+
+/// The engine's `source` for the Schedule dialog's statement check. Trino records it in the
+/// query events, so a check reads differently from a real query or a pipeline run.
+const SOURCE_SCHEDULE_CHECK: &str = "nova-schedule-check";
+
+/// A signed-in caller for the two routes that touch no `Pipeline` and no secret store. They
+/// still refuse an anonymous caller: in `oidc` mode `require_auth` refuses first, and a router
+/// mounted without that middleware — as the tests mount one — answers the same 401.
+pub(crate) struct Caller {
+    state: Arc<AppState>,
+    principal: Principal,
+}
+
+impl Caller {
+    fn state(&self) -> &AppState {
+        &self.state
+    }
+
+    fn principal(&self) -> &Principal {
+        &self.principal
+    }
+}
+
+impl FromRequestParts<Arc<AppState>> for Caller {
+    type Rejection = Fail;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        let principal = parts
+            .extensions
+            .get::<Principal>()
+            .cloned()
+            .ok_or_else(|| Fail::new(StatusCode::UNAUTHORIZED, "not signed in"))?;
+        Ok(Self {
+            state: Arc::clone(state),
+            principal,
+        })
+    }
+}
+
+/// The keywords `EXPLAIN` accepts here: what Nova may ask the engine about.
+const CHECKABLE_KEYWORDS: [&str; 8] = [
+    "select", "with", "insert", "merge", "delete", "update", "values", "create",
+];
+
+/// The statement's first word, as written.
+fn first_keyword(statement: &str) -> &str {
+    let start = statement.trim_start();
+    let end = start
+        .find(|c: char| !c.is_ascii_alphabetic())
+        .unwrap_or(start.len());
+    &start[..end]
+}
+
+/// Whether the engine can plan this statement. `create` only when it creates from a query
+/// (`CREATE … AS …`): a bare `CREATE TABLE t (a int)` has no plan, and `EXPLAIN` refuses it.
+fn checkable(statement: &str) -> bool {
+    let keyword = first_keyword(statement);
+    if !CHECKABLE_KEYWORDS
+        .iter()
+        .any(|checkable| keyword.eq_ignore_ascii_case(checkable))
+    {
+        return false;
+    }
+    if keyword.eq_ignore_ascii_case("create") {
+        return statement.to_ascii_lowercase().contains(" as ");
+    }
+    true
+}
+
+/// `POST /api/pipelines/check`: fill the placeholders and ask the engine to *plan* the
+/// statement — `EXPLAIN`, as the caller, under the check's own source. It never sends
+/// `EXPLAIN ANALYZE` and never the statement itself, so nothing runs and nothing is written.
+/// A statement kind that cannot be explained answers `checked: false`.
+async fn check_statement(
+    state: &AppState,
+    caller: &Principal,
+    body: CheckStatementRequest,
+) -> Result<CheckStatementResponse, Fail> {
+    let statement =
+        validate_sql(&body.sql).map_err(|message| Fail::new(StatusCode::BAD_REQUEST, message))?;
+    validate_params(&body.params).map_err(|message| Fail::new(StatusCode::BAD_REQUEST, message))?;
+    check_placeholders(&statement, &body.params)
+        .map_err(|message| Fail::new(StatusCode::BAD_REQUEST, message))?;
+    if !checkable(&statement) {
+        return Ok(CheckStatementResponse {
+            checked: false,
+            ok: None,
+            message: None,
+        });
+    }
+    let today = now_utc().format("%Y-%m-%d").to_string();
+    let sql = format!(
+        "EXPLAIN {}",
+        fill_placeholders(&statement, &today, "check", &body.params)
+    );
+    match crate::trino::execute_from(state, sql, Some(caller), SOURCE_SCHEDULE_CHECK).await {
+        Ok(_) => Ok(CheckStatementResponse {
+            checked: true,
+            ok: Some(true),
+            message: None,
+        }),
+        // The engine did not answer at all: 502, like every other unreachable upstream (U12).
+        Err(message) if message == crate::trino::ENGINE_UNREACHABLE => {
+            Err(Fail::new(StatusCode::BAD_GATEWAY, message))
+        }
+        // A refused statement is the engine's sentence, not a Nova error.
+        Err(message) => Ok(CheckStatementResponse {
+            checked: true,
+            ok: Some(false),
+            message: Some(message),
+        }),
+    }
+}
+
+/// `POST /api/pipelines/preview-schedule`: the next `count` fire times of a cron in its zone,
+/// RFC 3339 with that zone's offset. `now` is a parameter so the tests can pin the clock.
+fn preview_schedule(
+    body: PreviewScheduleRequest,
+    now: DateTime<Utc>,
+) -> Result<PreviewScheduleResponse, Fail> {
+    let schedule = ScheduleRequest {
+        cron: body.cron,
+        timezone: body.timezone,
+    };
+    let (cron, timezone) = validate_schedule(Some(&schedule))
+        .map_err(|message| Fail::new(StatusCode::BAD_REQUEST, message))?
+        .expect("a schedule was given");
+    let count = body.count.unwrap_or(5);
+    if !(1..=10).contains(&count) {
+        return Err(Fail::new(StatusCode::BAD_REQUEST, COUNT_RANGE));
+    }
+    let zone: Tz = timezone
+        .parse()
+        .expect("validate_schedule checked the zone");
+    let parsed = parse_cron(&cron).expect("validate_schedule checked the cron");
+    Ok(PreviewScheduleResponse {
+        runs: next_runs(&parsed, zone, count, now)
+            .into_iter()
+            .map(|run| run.to_rfc3339())
+            .collect(),
+    })
+}
+
+// ---------------------------------------------------------------------------
 // The handlers: sign-in, the two clients, then one of the functions above.
 // ---------------------------------------------------------------------------
 
@@ -2348,6 +2960,10 @@ pub(crate) fn router() -> Router<Arc<AppState>> {
         // The caller's groups and their pipeline principals, before any `{namespace}/{name}`
         // route can see the word "principals" as a name.
         .route("/pipelines/principals", get(principals))
+        // The Schedule dialog's two helpers (#223): no resource and no store, but a signed-in
+        // caller; placed before `{namespace}/{name}` like `principals`.
+        .route("/pipelines/check", post(check))
+        .route("/pipelines/preview-schedule", post(preview))
         .route(
             "/pipelines/{namespace}/{name}",
             get(detail).put(update).delete(remove),
@@ -2419,9 +3035,48 @@ pub(crate) async fn principals(signed: SignedIn) -> Response {
 
 #[utoipa::path(
     post,
+    path = "/api/pipelines/check",
+    tag = "public",
+    description = "What the engine says about a statement, without running it: Nova fills the statement's `${run.date}` (today, UTC), `${run.id}` (`check`) and `${params.<name>}` placeholders and sends `EXPLAIN <statement>` to the engine as the caller, under the source `nova-schedule-check`. It never sends `EXPLAIN ANALYZE` and never the statement itself. `checked: false` means this kind of statement cannot be checked here (only `select`, `with`, `insert`, `merge`, `delete`, `update`, `values` and `create … as …` are). A refused statement answers 200 with `ok: false` and the engine's sentence; an engine that does not answer is 502. Refusals before the engine: an empty, over-20,000-character or NUL-carrying statement 400, a parameter table or a placeholder as on create 400. Answers `Cache-Control: no-store`.",
+    request_body = CheckStatementRequest,
+    responses(
+        (status = 200, description = "The engine's verdict, or that this statement cannot be checked", body = CheckStatementResponse),
+        (status = 400, description = "The statement, a parameter or a placeholder is invalid", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The query engine is not reachable", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn check(
+    caller: Caller,
+    ApiJson(body): ApiJson<CheckStatementRequest>,
+) -> Response {
+    answer(check_statement(caller.state(), caller.principal(), body).await)
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/pipelines/preview-schedule",
+    tag = "public",
+    description = "The next fire times of a cron in its zone, RFC 3339 with that zone's offset (for example `2026-10-21T03:00:00+02:00`), so the Schedule dialog can show what a cadence means before it is saved. A field or a zone as on create (400 with the same sentences); `count` is 1 to 10, 5 when omitted. Like croniter, a day matches when both day fields are restricted and either matches, and when one is unrestricted and the other matches. A wall-clock time the zone skips at a DST jump is not a run; a time that happens twice is answered with its first occurrence. A cron that can never fire answers fewer runs (at most 366 days are searched), not an error. Answers `Cache-Control: no-store`.",
+    request_body = PreviewScheduleRequest,
+    responses(
+        (status = 200, description = "The next runs in the schedule's zone", body = PreviewScheduleResponse),
+        (status = 400, description = "The cron, the timezone or the count is invalid", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn preview(
+    _caller: Caller,
+    ApiJson(body): ApiJson<PreviewScheduleRequest>,
+) -> Response {
+    answer(preview_schedule(body, now_utc()))
+}
+
+#[utoipa::path(
+    post,
     path = "/api/pipelines",
     tag = "public",
-    description = "Schedule a statement: create a `Pipeline` for one of the caller's owner groups (`runAs: pipeline-<group>`), validated so the loader accepts it. Refusals, in this order: a name outside 1 to 40 lower-case letters, digits and dashes starting with a letter 400; a group the caller is not a member of 403 (`you are not a member of the group <g>` — administrators included); a group without a ready `ServicePrincipal` 409 with the `principals` route's message; an empty, over-20,000-character or NUL-carrying statement 400; a cron that is not five in-range fields or fires more often than every five minutes 400; an unknown IANA timezone 400; a name that already exists 409; more than ten creations per user per hour 429. Airflow is not needed: the resource is the source of truth, and the answer is the new pipeline with `loaded: false`, `state: \"loading\"`. The audit line carries the statement's length and the cron, never the statement. Answers `Cache-Control: no-store`.",
+    description = "Schedule a statement: create a `Pipeline` for one of the caller's owner groups (`runAs: pipeline-<group>`), validated so the loader accepts it. Refusals, in this order: a name outside 1 to 40 lower-case letters, digits and dashes starting with a letter 400; a group the caller is not a member of 403 (`you are not a member of the group <g>` — administrators included); a group without a ready `ServicePrincipal` 409 with the `principals` route's message; an empty, over-20,000-character or NUL-carrying statement 400; a parameter name, a parameter count or value, or a `${…}` placeholder the loader cannot fill 400; a retry, wait, time-limit or run-mode option out of range 400; a cron that is not five in-range fields or fires more often than every five minutes 400; an unknown IANA timezone 400; a name that already exists 409; more than ten creations per user per hour 429. `options` and `params` are optional: an omitted option keeps its default (1 retry after 5 minutes, a 120-minute time limit, `Forbid`). Airflow is not needed: the resource is the source of truth, and the answer is the new pipeline with `loaded: false`, `state: \"loading\"`. The audit line carries the statement's length and the cron, never the statement. Answers `Cache-Control: no-store`.",
     request_body = CreatePipelineRequest,
     responses(
         (status = 201, description = "The resource as written", body = PipelineView),
@@ -2454,7 +3109,7 @@ pub(crate) async fn create(
     put,
     path = "/api/pipelines/{namespace}/{name}",
     tag = "public",
-    description = "Change the statement and the schedule of a pipeline Nova created (`app.kubernetes.io/managed-by: stardelt-nova`); every other field stays. Refusals: a pipeline the caller may not act on 404; a pipeline Nova did not write, or one whose task shape is not exactly one `sql` task named `run` 409; the statement, cron or timezone as on create 400; the group's principal no longer ready 409 with the `principals` route's message; a concurrent change to the resource 409 `the pipeline changed while you edited it: reload`. The audit line carries the statement's length and the cron, never the statement. Answers `Cache-Control: no-store`.",
+    description = "Change the statement, the schedule, the parameters and the options of a pipeline Nova created (`app.kubernetes.io/managed-by: stardelt-nova`); every other field stays. The body describes the whole editable state: an omitted `schedule` removes it, an omitted `params` removes the table, an omitted option keeps its default. Refusals: a pipeline the caller may not act on 404; a pipeline Nova did not write, or one whose task shape is not exactly one `sql` task named `run` 409; the statement, a parameter, a placeholder, an option, the cron or the timezone as on create 400; the group's principal no longer ready 409 with the `principals` route's message; a concurrent change to the resource 409 `the pipeline changed while you edited it: reload`. The audit line carries the statement's length and the cron, never the statement. Answers `Cache-Control: no-store`.",
     params(
         ("namespace" = String, Path, description = "The Pipeline's namespace (Nova's own)"),
         ("name" = String, Path, description = "Pipeline name"),
@@ -2527,13 +3182,13 @@ pub(crate) async fn remove(
     get,
     path = "/api/pipelines/{namespace}/{name}",
     tag = "public",
-    description = "One pipeline: the list fields, the latest 20 runs, and the resource's `params` and `retries`. A pipeline whose DAG does not exist yet answers 200 with `loaded: false` and `state: \"loading\"`. A pipeline of another group answers 404. History of a deleted pipeline is not offered in this version: without the resource the answer is 404.",
+    description = "One pipeline: the list fields, the latest 20 runs, and the resource's `params`, `retries` and `options` (defaults filled in when a field is absent, so the edit dialog can prefill). A pipeline whose DAG does not exist yet answers 200 with `loaded: false` and `state: \"loading\"`. A pipeline of another group answers 404. History of a deleted pipeline is not offered in this version: without the resource the answer is 404.",
     params(
         ("namespace" = String, Path, description = "The Pipeline's namespace (Nova's own)"),
         ("name" = String, Path, description = "Pipeline name"),
     ),
     responses(
-        (status = 200, description = "The pipeline, its latest runs, params and retries", body = PipelineDetail),
+        (status = 200, description = "The pipeline, its latest runs, params, retries and options", body = PipelineDetail),
         (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
         (status = 404, description = "No such pipeline for this caller", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The scheduler or the cluster did not answer", body = crate::openapi::ErrorResponse),
@@ -3490,14 +4145,95 @@ mod tests {
         }
     }
 
+    /// A fake Trino coordinator with the one endpoint the statement check uses. It records the
+    /// statement text and the headers, so a test can prove what Nova sent — and what it never sent.
+    mod fake_trino {
+        use std::sync::{Arc, Mutex};
+
+        use axum::{Json, Router, extract::State, http::HeaderMap, routing::post};
+        use serde_json::{Value, json};
+
+        #[derive(Default)]
+        pub struct Fake {
+            /// The body of every `/v1/statement` POST, in order.
+            pub statements: Vec<String>,
+            /// The `X-Trino-Source` of every POST.
+            pub sources: Vec<String>,
+            /// The `X-Trino-User` of every POST: who the check ran as.
+            pub users: Vec<String>,
+            /// Answer this error document instead of a result.
+            pub error: Option<Value>,
+        }
+
+        pub type Shared = Arc<Mutex<Fake>>;
+
+        async fn statement(
+            State(state): State<Shared>,
+            headers: HeaderMap,
+            body: String,
+        ) -> Json<Value> {
+            let mut fake = state.lock().expect("fake trino poisoned");
+            fake.statements.push(body);
+            fake.sources.push(
+                headers
+                    .get("x-trino-source")
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default()
+                    .to_string(),
+            );
+            fake.users.push(
+                headers
+                    .get("x-trino-user")
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or_default()
+                    .to_string(),
+            );
+            match &fake.error {
+                // No `nextUri`: the client stops on the first document.
+                Some(error) => Json(json!({ "id": "q-check", "error": error, "stats": {} })),
+                None => Json(json!({
+                    "id": "q-check",
+                    "columns": [{ "name": "plan", "type": "varchar" }],
+                    "data": [["Output[columnNames = [x]]"]],
+                    "stats": {}
+                })),
+            }
+        }
+
+        pub async fn start(error: Option<Value>) -> (String, Shared) {
+            let shared: Shared = Arc::new(Mutex::new(Fake {
+                error,
+                ..Fake::default()
+            }));
+            let app = Router::new()
+                .route("/v1/statement", post(statement))
+                .with_state(shared.clone());
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            (format!("http://{addr}"), shared)
+        }
+    }
+
     fn test_state(
         kube: Option<kube::Client>,
         airflow: AirflowClient,
         store: StoreClient,
     ) -> Arc<AppState> {
+        test_state_at(kube, airflow, store, "http://127.0.0.1:1")
+    }
+
+    fn test_state_at(
+        kube: Option<kube::Client>,
+        airflow: AirflowClient,
+        store: StoreClient,
+        trino_url: &str,
+    ) -> Arc<AppState> {
         Arc::new(AppState {
             dev_user: "test".into(),
-            trino_url: "http://127.0.0.1:1".into(),
+            trino_url: trino_url.into(),
             lakekeeper_url: "http://127.0.0.1:1".into(),
             // No catalog client in these tests: Lakekeeper is called as before (#222).
             catalog_token: None,
@@ -5150,6 +5886,8 @@ mod tests {
                 cron: "0 3 * * *".into(),
                 timezone: "Europe/Berlin".into(),
             }),
+            params: BTreeMap::new(),
+            options: None,
         }
     }
 
@@ -5157,7 +5895,16 @@ mod tests {
         UpdatePipelineRequest {
             sql: sql.into(),
             schedule: None,
+            params: BTreeMap::new(),
+            options: None,
         }
+    }
+
+    /// The defaults `pipeline_resource` writes when a body sends no options.
+    fn default_options() -> PipelineOptionsView {
+        PipelineOptions::default()
+            .resolve()
+            .expect("the defaults are in range")
     }
 
     fn create_limiter() -> CreateLimiter {
@@ -5171,6 +5918,8 @@ mod tests {
             group,
             "select 1",
             Some(&("0 3 * * *".to_string(), "Europe/Berlin".to_string())),
+            &BTreeMap::new(),
+            &default_options(),
             "sub-ada",
         );
         resource["metadata"]["resourceVersion"] = json!("7");
@@ -5283,7 +6032,8 @@ mod tests {
                     "tasks": [ { "name": "run", "kind": "sql", "sql": "select 1" } ],
                     "concurrency": "Forbid",
                     "retries": { "attempts": 1, "backoff": "5m" },
-                    "timeout": "2h"
+                    // The default 120 minutes in the loader's `<n>m` grammar (#223).
+                    "timeout": "120m"
                 }
             }),
             "the whole resource, exactly as the ticket specifies it"
@@ -5581,7 +6331,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_changes_only_sql_and_schedule() {
+    async fn update_changes_the_editable_fields_only() {
         let mut original = nova_pipeline("smoke", "analytics");
         original["spec"]["params"] = json!({ "days": "1" });
         original["spec"]["engine"] = json!("airflow");
@@ -5595,30 +6345,48 @@ mod tests {
         let ada = who("sub-ada", &["analytics"], false);
         let namespace = crate::cluster::namespace();
 
-        let view = update_pipeline(
-            Some(&resources),
-            None,
-            &ada,
-            &namespace,
-            "smoke",
-            update_body("select 2;"),
-        )
-        .await
-        .expect("the update succeeds");
+        // The body carries the whole editable state: statement, schedule, params, options.
+        let update = UpdatePipelineRequest {
+            sql: "select 2;".into(),
+            schedule: None,
+            params: BTreeMap::from([
+                ("days".to_string(), "7".to_string()),
+                ("region".to_string(), "eu".to_string()),
+            ]),
+            options: Some(PipelineOptions {
+                retries: Some(0),
+                timeout_minutes: Some(30),
+                ..PipelineOptions::default()
+            }),
+        };
+        let view = update_pipeline(Some(&resources), None, &ada, &namespace, "smoke", update)
+            .await
+            .expect("the update succeeds");
         assert_eq!(view.schedule, None);
 
-        let mut expected = original.clone();
-        expected["spec"]["tasks"][0]["sql"] = json!("select 2");
-        expected["spec"].as_object_mut().unwrap().remove("schedule");
         let stored = stored_pipeline(&resources, "smoke").await.expect("written");
-        assert_eq!(
-            stored, expected,
-            "only `spec.tasks[0].sql` and `spec.schedule` move"
+        assert_eq!(stored["spec"]["tasks"][0]["sql"], "select 2");
+        assert!(
+            stored["spec"].get("schedule").is_none(),
+            "an omitted schedule is removed: {stored}"
         );
-        assert_eq!(stored["metadata"]["resourceVersion"], "7");
-        assert_eq!(stored["spec"]["params"]["days"], "1");
-        assert_eq!(stored["spec"]["engine"], "airflow");
+        assert_eq!(
+            stored["spec"]["params"],
+            json!({ "days": "7", "region": "eu" }),
+            "the parameter table is replaced, not merged"
+        );
+        assert_eq!(
+            stored["spec"]["retries"],
+            json!({ "attempts": 0, "backoff": "5m" })
+        );
+        assert_eq!(stored["spec"]["timeout"], json!("30m"));
+        assert_eq!(stored["spec"]["concurrency"], json!("Forbid"));
+        assert_eq!(
+            stored["spec"]["engine"], "airflow",
+            "every field the form does not edit stays"
+        );
         assert_eq!(stored["spec"]["runAs"], "pipeline-analytics");
+        assert_eq!(stored["metadata"]["resourceVersion"], "7");
         assert_eq!(
             stored["metadata"]["annotations"]["stardelt.io/created-by"],
             "sub-ada"
@@ -5637,6 +6405,8 @@ mod tests {
                     cron: "30 6 * * mon-fri".into(),
                     timezone: "UTC".into(),
                 }),
+                params: BTreeMap::new(),
+                options: None,
             },
         )
         .await
@@ -5647,6 +6417,10 @@ mod tests {
         assert_eq!(
             stored["spec"]["schedule"],
             json!({ "cron": "30 6 * * mon-fri", "timezone": "UTC" })
+        );
+        assert!(
+            stored["spec"].get("params").is_none(),
+            "an omitted table is removed: {stored}"
         );
         assert_eq!(stored["spec"]["engine"], "airflow");
     }
@@ -6191,5 +6965,690 @@ mod tests {
             .await
             .unwrap();
         assert!(bytes.is_empty(), "204 carries no body");
+    }
+
+    // -----------------------------------------------------------------------
+    // Schedule options, the statement check and the next-runs preview (#223)
+    // -----------------------------------------------------------------------
+
+    /// A state whose engine is the fake, for the two routes that need no cluster.
+    async fn check_state(trino_url: &str) -> Arc<AppState> {
+        let (store, _store_fake) = crate::secret_store::fake::start().await;
+        let (airflow, _airflow_fake) = fake_airflow::start().await;
+        test_state_at(None, airflow, store, trino_url)
+    }
+
+    fn check_body(sql: &str) -> CheckStatementRequest {
+        CheckStatementRequest {
+            sql: sql.into(),
+            params: BTreeMap::new(),
+        }
+    }
+
+    fn params(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn params_and_options_written_to_the_resource() {
+        let resources = analytics_ready();
+        let mut body = create_body("daily-trips", "analytics", "select '${params.day}'");
+        body.params = params(&[("day", "2026-10-01")]);
+        body.options = Some(PipelineOptions {
+            retries: Some(3),
+            backoff_minutes: Some(10),
+            timeout_minutes: Some(360),
+            concurrency: Some("Allow".into()),
+        });
+
+        create_pipeline(
+            Some(&resources),
+            &create_limiter(),
+            &who("sub-ada", &["analytics"], false),
+            body,
+        )
+        .await
+        .expect("the pipeline is created");
+
+        let stored = stored_pipeline(&resources, "daily-trips")
+            .await
+            .expect("the resource is written");
+        assert_eq!(
+            stored["spec"]["params"],
+            json!({ "day": "2026-10-01" }),
+            "the parameter table is written as given: {stored}"
+        );
+        assert_eq!(
+            stored["spec"]["retries"],
+            json!({ "attempts": 3, "backoff": "10m" }),
+            "the CRD's retries shape: {stored}"
+        );
+        assert_eq!(
+            stored["spec"]["timeout"],
+            json!("360m"),
+            "the loader's duration grammar: {stored}"
+        );
+        assert_eq!(stored["spec"]["concurrency"], json!("Allow"));
+        assert_eq!(
+            stored["spec"]["tasks"][0]["sql"], "select '${params.day}'",
+            "the statement is stored unexpanded: the loader fills it when the run starts"
+        );
+    }
+
+    #[tokio::test]
+    async fn defaults_when_omitted() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+
+        create_pipeline(
+            Some(&resources),
+            &create_limiter(),
+            &ada,
+            create_body("plain", "analytics", "select 1"),
+        )
+        .await
+        .expect("a create without params and options is fine");
+
+        let stored = stored_pipeline(&resources, "plain").await.expect("written");
+        assert_eq!(
+            stored["spec"]["retries"],
+            json!({ "attempts": 1, "backoff": "5m" })
+        );
+        assert_eq!(stored["spec"]["timeout"], json!("120m"));
+        assert_eq!(stored["spec"]["concurrency"], json!("Forbid"));
+        assert!(
+            stored["spec"].get("params").is_none(),
+            "no parameter table is written when none is given: {stored}"
+        );
+
+        // The update body describes the whole editable state: an omitted option is the default,
+        // never "keep whatever was there".
+        let mut update = update_body("select 2");
+        update.options = Some(PipelineOptions {
+            retries: Some(4),
+            ..PipelineOptions::default()
+        });
+        update_pipeline(
+            Some(&resources),
+            None,
+            &ada,
+            &crate::cluster::namespace(),
+            "plain",
+            update,
+        )
+        .await
+        .expect("the update succeeds");
+        let stored = stored_pipeline(&resources, "plain").await.expect("written");
+        assert_eq!(
+            stored["spec"]["retries"],
+            json!({ "attempts": 4, "backoff": "5m" })
+        );
+        assert_eq!(stored["spec"]["timeout"], json!("120m"));
+        assert_eq!(stored["spec"]["concurrency"], json!("Forbid"));
+    }
+
+    #[tokio::test]
+    async fn option_ranges_refused_with_sentences() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        let limiter = create_limiter();
+        let too_many: BTreeMap<String, String> = (0..17)
+            .map(|index| (format!("p{index}"), "1".to_string()))
+            .collect();
+        let long_value = "x".repeat(MAX_PARAM_VALUE_CHARS + 1);
+
+        let cases: Vec<(BTreeMap<String, String>, PipelineOptions, &str)> = vec![
+            (
+                BTreeMap::new(),
+                PipelineOptions {
+                    retries: Some(-1),
+                    ..PipelineOptions::default()
+                },
+                RETRIES_RANGE,
+            ),
+            (
+                BTreeMap::new(),
+                PipelineOptions {
+                    retries: Some(6),
+                    ..PipelineOptions::default()
+                },
+                RETRIES_RANGE,
+            ),
+            (
+                BTreeMap::new(),
+                PipelineOptions {
+                    backoff_minutes: Some(0),
+                    ..PipelineOptions::default()
+                },
+                BACKOFF_RANGE,
+            ),
+            (
+                BTreeMap::new(),
+                PipelineOptions {
+                    backoff_minutes: Some(61),
+                    ..PipelineOptions::default()
+                },
+                BACKOFF_RANGE,
+            ),
+            (
+                BTreeMap::new(),
+                PipelineOptions {
+                    timeout_minutes: Some(0),
+                    ..PipelineOptions::default()
+                },
+                TIMEOUT_RANGE,
+            ),
+            (
+                BTreeMap::new(),
+                PipelineOptions {
+                    timeout_minutes: Some(721),
+                    ..PipelineOptions::default()
+                },
+                TIMEOUT_RANGE,
+            ),
+            (
+                BTreeMap::new(),
+                PipelineOptions {
+                    concurrency: Some("Replace".into()),
+                    ..PipelineOptions::default()
+                },
+                CONCURRENCY_RULE,
+            ),
+            (
+                params(&[("Day", "1")]),
+                PipelineOptions::default(),
+                PARAM_NAMES,
+            ),
+            (
+                params(&[("day", &long_value)]),
+                PipelineOptions::default(),
+                PARAM_VALUE_TOO_LONG,
+            ),
+            (
+                params(&[("day", "a\0b")]),
+                PipelineOptions::default(),
+                PARAM_VALUE_NUL,
+            ),
+            (too_many, PipelineOptions::default(), TOO_MANY_PARAMS),
+        ];
+
+        for (index, (parameters, options, sentence)) in cases.into_iter().enumerate() {
+            let mut body = create_body(&format!("refused-{index}"), "analytics", "select 1");
+            body.params = parameters;
+            body.options = Some(options);
+            let error = create_pipeline(Some(&resources), &limiter, &ada, body)
+                .await
+                .expect_err("the option is out of range");
+            assert_eq!(error.status(), StatusCode::BAD_REQUEST, "{sentence}");
+            assert_eq!(error.message(), sentence);
+        }
+        assert!(
+            resources.list().await.unwrap().is_empty(),
+            "a refused option writes nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_placeholder_refused() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        let limiter = create_limiter();
+
+        for (sql, params, sentence) in [
+            (
+                "select '${params.missing}'",
+                params(&[("day", "1")]),
+                "unknown placeholder ${params.missing}",
+            ),
+            (
+                "select '${run.when}'",
+                BTreeMap::new(),
+                "unknown placeholder ${run.when}",
+            ),
+        ] {
+            let mut body = create_body("typo", "analytics", sql);
+            body.params = params;
+            let error = create_pipeline(Some(&resources), &limiter, &ada, body)
+                .await
+                .expect_err("the loader would fail this run");
+            assert_eq!(error.status(), StatusCode::BAD_REQUEST, "{sql}");
+            assert_eq!(error.message(), sentence, "{sql}");
+        }
+        assert!(resources.list().await.unwrap().is_empty());
+
+        // The three the loader fills pass, and so does a `${…}` its regex does not match (it
+        // leaves such text in the statement, so Nova must not refuse it).
+        let statement = "select '${run.date}', '${run.id}', '${params.day}', '${a-b}'";
+        let mut body = create_body("defined", "analytics", statement);
+        body.params = params(&[("day", "2026-10-01")]);
+        create_pipeline(Some(&resources), &limiter, &ada, body)
+            .await
+            .expect("every placeholder is one the loader fills");
+        let stored = stored_pipeline(&resources, "defined")
+            .await
+            .expect("written");
+        assert_eq!(stored["spec"]["tasks"][0]["sql"], statement);
+    }
+
+    #[tokio::test]
+    async fn detail_returns_params_and_options() {
+        let mut smoke = resource("smoke", Some("analytics"));
+        smoke["spec"]["params"] = json!({ "day": "2026-10-01" });
+        smoke["spec"]["retries"] = json!({ "attempts": 3, "backoff": "30m" });
+        smoke["spec"]["timeout"] = json!("6h");
+        smoke["spec"]["concurrency"] = json!("Allow");
+        let resources = memory(&[("smoke", smoke)]);
+        let (airflow, _fake) = fake_airflow::start().await;
+
+        let detail = pipeline_detail(
+            Some(&resources),
+            Some(&airflow),
+            &admin(),
+            &crate::cluster::namespace(),
+            "smoke",
+        )
+        .await
+        .expect("the detail is readable");
+        assert_eq!(
+            detail.params.get("day").map(String::as_str),
+            Some("2026-10-01")
+        );
+        assert_eq!(
+            detail.options,
+            PipelineOptionsView {
+                retries: 3,
+                backoff_minutes: 30,
+                timeout_minutes: 360,
+                concurrency: "Allow".into(),
+            }
+        );
+
+        // A resource without the fields answers the defaults, so the dialog always has values.
+        let resources = memory(&[("smoke", resource("smoke", Some("analytics")))]);
+        let detail = pipeline_detail(
+            Some(&resources),
+            Some(&airflow),
+            &admin(),
+            &crate::cluster::namespace(),
+            "smoke",
+        )
+        .await
+        .expect("the detail is readable");
+        assert_eq!(
+            detail.options,
+            PipelineOptionsView {
+                retries: 2,
+                backoff_minutes: 5,
+                // `spec.timeout` is absent in the fixture: the default two hours.
+                timeout_minutes: 120,
+                concurrency: "Forbid".into(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn check_sends_explain_never_analyze() {
+        let (trino, fake) = fake_trino::start(None).await;
+        let state = check_state(&trino).await;
+        let ada = principal(who("sub-ada", &["analytics"], false));
+
+        let answer = check_statement(&state, &ada, check_body("select 1"))
+            .await
+            .expect("the engine accepts the statement");
+        assert_eq!(
+            answer,
+            CheckStatementResponse {
+                checked: true,
+                ok: Some(true),
+                message: None,
+            }
+        );
+
+        let fake = fake.lock().expect("fake trino");
+        assert_eq!(fake.statements, vec!["EXPLAIN select 1".to_string()]);
+        assert_eq!(fake.sources, vec![SOURCE_SCHEDULE_CHECK.to_string()]);
+        assert_eq!(
+            fake.users,
+            vec!["sub-ada".to_string()],
+            "the check runs as the caller, so the engine's query log names them"
+        );
+        assert!(
+            !fake.statements[0].to_ascii_uppercase().contains("ANALYZE"),
+            "never EXPLAIN ANALYZE: it would run the statement"
+        );
+    }
+
+    #[tokio::test]
+    async fn check_fills_placeholders() {
+        let (trino, fake) = fake_trino::start(None).await;
+        let state = check_state(&trino).await;
+        let ada = principal(who("sub-ada", &["analytics"], false));
+
+        let statement = "select '${run.date}' as d, '${run.id}' as i, '${params.day}' as p";
+        let mut body = check_body(statement);
+        body.params = params(&[("day", "2026-01-01")]);
+        check_statement(&state, &ada, body)
+            .await
+            .expect("the placeholders are filled");
+
+        let today = now_utc().format("%Y-%m-%d").to_string();
+        let fake = fake.lock().expect("fake trino");
+        assert_eq!(
+            fake.statements,
+            vec![format!(
+                "EXPLAIN select '{today}' as d, 'check' as i, '2026-01-01' as p"
+            )],
+            "run.date is today (UTC), run.id is `check`, params as given"
+        );
+        assert!(
+            !fake.statements[0].contains("${"),
+            "no placeholder reaches the engine: {}",
+            fake.statements[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn check_skips_unsupported_kinds() {
+        let (trino, fake) = fake_trino::start(None).await;
+        let state = check_state(&trino).await;
+        let ada = principal(who("sub-ada", &["analytics"], false));
+
+        for sql in [
+            "drop table x",
+            "selec 1",
+            "show tables",
+            "create table t (a int)",
+            "grant select on t to public",
+        ] {
+            let answer = check_statement(&state, &ada, check_body(sql))
+                .await
+                .unwrap_or_else(|error| panic!("{sql}: {}", error.message()));
+            assert_eq!(
+                answer,
+                CheckStatementResponse {
+                    checked: false,
+                    ok: None,
+                    message: None,
+                },
+                "{sql} cannot be checked here"
+            );
+        }
+        assert!(
+            fake.lock().expect("fake trino").statements.is_empty(),
+            "a kind of statement Nova cannot check never reaches the engine"
+        );
+
+        // `CREATE … AS …` has a plan, so it is checked.
+        let answer = check_statement(&state, &ada, check_body("CREATE TABLE t AS SELECT 1"))
+            .await
+            .expect("a create-from-query is checkable");
+        assert_eq!(answer.ok, Some(true));
+        assert_eq!(
+            fake.lock().expect("fake trino").statements,
+            vec!["EXPLAIN CREATE TABLE t AS SELECT 1".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn check_returns_engine_message_on_error() {
+        let error = json!({
+            "errorName": "SYNTAX_ERROR",
+            "message": "line 1:1: mismatched input 'selec'. Expecting: 'ALTER', 'ANALYZE', ...",
+        });
+        let (trino, _fake) = fake_trino::start(Some(error)).await;
+        let state = check_state(&trino).await;
+        let ada = principal(who("sub-ada", &["analytics"], false));
+
+        let answer = check_statement(&state, &ada, check_body("select 1"))
+            .await
+            .expect("a refused statement is an answer, not a failure");
+        assert!(answer.checked);
+        assert_eq!(answer.ok, Some(false));
+        assert_eq!(
+            answer.message.as_deref(),
+            Some(
+                "SYNTAX_ERROR: line 1:1: mismatched input 'selec'. Expecting: 'ALTER', 'ANALYZE', ..."
+            ),
+            "the engine's own sentence reaches the dialog"
+        );
+        assert!(
+            !answer
+                .message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("failureInfo"),
+            "no stack trace in an answer"
+        );
+
+        // An engine that does not answer is 502 (U12), not "the engine said no".
+        let state = check_state("http://127.0.0.1:1").await;
+        let error = check_statement(&state, &ada, check_body("select 1"))
+            .await
+            .expect_err("the engine is unreachable");
+        assert_eq!(error.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(error.message(), crate::trino::ENGINE_UNREACHABLE);
+    }
+
+    #[test]
+    fn preview_next_runs_table() {
+        let now = "2026-10-20T12:00:00Z"
+            .parse::<DateTime<Utc>>()
+            .expect("a fixed clock");
+        let table: [(&str, [&str; 5]); 4] = [
+            // Europe/Berlin: the clocks go back on 25 October, so the fifth run is CET.
+            (
+                "0 3 * * *",
+                [
+                    "2026-10-21T03:00:00+02:00",
+                    "2026-10-22T03:00:00+02:00",
+                    "2026-10-23T03:00:00+02:00",
+                    "2026-10-24T03:00:00+02:00",
+                    "2026-10-25T03:00:00+01:00",
+                ],
+            ),
+            (
+                "*/15 * * * *",
+                [
+                    "2026-10-20T14:15:00+02:00",
+                    "2026-10-20T14:30:00+02:00",
+                    "2026-10-20T14:45:00+02:00",
+                    "2026-10-20T15:00:00+02:00",
+                    "2026-10-20T15:15:00+02:00",
+                ],
+            ),
+            (
+                "0 9 * * 1-5",
+                [
+                    "2026-10-21T09:00:00+02:00",
+                    "2026-10-22T09:00:00+02:00",
+                    "2026-10-23T09:00:00+02:00",
+                    "2026-10-26T09:00:00+01:00",
+                    "2026-10-27T09:00:00+01:00",
+                ],
+            ),
+            (
+                "30 6 1 * *",
+                [
+                    "2026-11-01T06:30:00+01:00",
+                    "2026-12-01T06:30:00+01:00",
+                    "2027-01-01T06:30:00+01:00",
+                    "2027-02-01T06:30:00+01:00",
+                    "2027-03-01T06:30:00+01:00",
+                ],
+            ),
+        ];
+
+        for (cron, expected) in table {
+            let answer = preview_schedule(
+                PreviewScheduleRequest {
+                    cron: cron.into(),
+                    timezone: "Europe/Berlin".into(),
+                    count: None,
+                },
+                now,
+            )
+            .unwrap_or_else(|error| panic!("{cron}: {}", error.message()));
+            assert_eq!(
+                answer.runs,
+                expected
+                    .iter()
+                    .map(|run| (*run).to_string())
+                    .collect::<Vec<_>>(),
+                "{cron}"
+            );
+        }
+
+        // 02:30 does not exist on 29 March 2026 (the clocks jump 02:00 → 03:00): it is skipped.
+        let before_the_jump = "2026-03-28T12:00:00Z"
+            .parse::<DateTime<Utc>>()
+            .expect("a fixed clock");
+        let answer = preview_schedule(
+            PreviewScheduleRequest {
+                cron: "30 2 * * *".into(),
+                timezone: "Europe/Berlin".into(),
+                count: Some(3),
+            },
+            before_the_jump,
+        )
+        .expect("a valid cron");
+        assert_eq!(
+            answer.runs,
+            vec![
+                "2026-03-30T02:30:00+02:00".to_string(),
+                "2026-03-31T02:30:00+02:00".to_string(),
+                "2026-04-01T02:30:00+02:00".to_string(),
+            ]
+        );
+
+        // Both day fields restricted: a day matches when either does (croniter's rule).
+        let answer = preview_schedule(
+            PreviewScheduleRequest {
+                cron: "0 4 1 * 1".into(),
+                timezone: "Europe/Berlin".into(),
+                count: Some(4),
+            },
+            now,
+        )
+        .expect("a valid cron");
+        assert_eq!(
+            answer.runs,
+            vec![
+                "2026-10-26T04:00:00+01:00".to_string(),
+                "2026-11-01T04:00:00+01:00".to_string(),
+                "2026-11-02T04:00:00+01:00".to_string(),
+                "2026-11-09T04:00:00+01:00".to_string(),
+            ]
+        );
+
+        // A cron that can never fire answers no runs (at most 366 days are searched), not an error.
+        let answer = preview_schedule(
+            PreviewScheduleRequest {
+                cron: "0 0 31 2 *".into(),
+                timezone: "Europe/Berlin".into(),
+                count: Some(5),
+            },
+            now,
+        )
+        .expect("the cron itself is valid");
+        assert!(answer.runs.is_empty(), "31 February never comes");
+    }
+
+    #[test]
+    fn preview_rejects_what_create_rejects() {
+        let now = "2026-10-20T12:00:00Z"
+            .parse::<DateTime<Utc>>()
+            .expect("a fixed clock");
+
+        for (cron, timezone, sentence) in [
+            ("* * * * *", "UTC", CRON_TOO_OFTEN),
+            ("0 3 * *", "UTC", CRON_FIELDS),
+            ("0 25 * * *", "UTC", CRON_RANGE),
+            ("0 3 * * *", "Mars/Olympus", "unknown timezone"),
+        ] {
+            let error = preview_schedule(
+                PreviewScheduleRequest {
+                    cron: cron.into(),
+                    timezone: timezone.into(),
+                    count: None,
+                },
+                now,
+            )
+            .unwrap_err();
+            assert_eq!(error.status(), StatusCode::BAD_REQUEST, "{cron}",);
+            assert_eq!(error.message(), sentence, "{cron}");
+        }
+
+        let error = preview_schedule(
+            PreviewScheduleRequest {
+                cron: "0 3 * * *".into(),
+                timezone: "UTC".into(),
+                count: Some(11),
+            },
+            now,
+        )
+        .unwrap_err();
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(error.message(), COUNT_RANGE);
+
+        let answer = preview_schedule(
+            PreviewScheduleRequest {
+                cron: "0 3 * * *".into(),
+                timezone: "UTC".into(),
+                count: Some(1),
+            },
+            now,
+        )
+        .expect("count 1 is fine");
+        assert_eq!(answer.runs.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn check_and_preview_need_a_signed_in_person() {
+        let (store, _store_fake) = crate::secret_store::fake::start().await;
+        let (airflow, _airflow_fake) = fake_airflow::start().await;
+        let (trino, fake) = fake_trino::start(None).await;
+        let app = router().with_state(test_state_at(None, airflow, store, &trino));
+
+        for (uri, body) in [
+            ("/pipelines/check", json!({ "sql": "select 1" })),
+            (
+                "/pipelines/preview-schedule",
+                json!({ "cron": "0 3 * * *", "timezone": "Europe/Berlin" }),
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{uri}");
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::CACHE_CONTROL)
+                    .and_then(|value| value.to_str().ok()),
+                Some("no-store"),
+                "a refusal is never cached either: {uri}"
+            );
+            let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            let value: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(value["error"], "not signed in", "{uri}");
+        }
+        assert!(
+            fake.lock().expect("fake trino").statements.is_empty(),
+            "an anonymous caller never reaches the engine"
+        );
     }
 }

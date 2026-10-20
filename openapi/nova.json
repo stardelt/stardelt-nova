@@ -1564,7 +1564,7 @@
         "tags": [
           "public"
         ],
-        "description": "Schedule a statement: create a `Pipeline` for one of the caller's owner groups (`runAs: pipeline-<group>`), validated so the loader accepts it. Refusals, in this order: a name outside 1 to 40 lower-case letters, digits and dashes starting with a letter 400; a group the caller is not a member of 403 (`you are not a member of the group <g>` — administrators included); a group without a ready `ServicePrincipal` 409 with the `principals` route's message; an empty, over-20,000-character or NUL-carrying statement 400; a cron that is not five in-range fields or fires more often than every five minutes 400; an unknown IANA timezone 400; a name that already exists 409; more than ten creations per user per hour 429. Airflow is not needed: the resource is the source of truth, and the answer is the new pipeline with `loaded: false`, `state: \"loading\"`. The audit line carries the statement's length and the cron, never the statement. Answers `Cache-Control: no-store`.",
+        "description": "Schedule a statement: create a `Pipeline` for one of the caller's owner groups (`runAs: pipeline-<group>`), validated so the loader accepts it. Refusals, in this order: a name outside 1 to 40 lower-case letters, digits and dashes starting with a letter 400; a group the caller is not a member of 403 (`you are not a member of the group <g>` — administrators included); a group without a ready `ServicePrincipal` 409 with the `principals` route's message; an empty, over-20,000-character or NUL-carrying statement 400; a parameter name, a parameter count or value, or a `${…}` placeholder the loader cannot fill 400; a retry, wait, time-limit or run-mode option out of range 400; a cron that is not five in-range fields or fires more often than every five minutes 400; an unknown IANA timezone 400; a name that already exists 409; more than ten creations per user per hour 429. `options` and `params` are optional: an omitted option keeps its default (1 retry after 5 minutes, a 120-minute time limit, `Forbid`). Airflow is not needed: the resource is the source of truth, and the answer is the new pipeline with `loaded: false`, `state: \"loading\"`. The audit line carries the statement's length and the cron, never the statement. Answers `Cache-Control: no-store`.",
         "operationId": "create",
         "requestBody": {
           "content": {
@@ -1660,6 +1660,118 @@
         }
       }
     },
+    "/api/pipelines/check": {
+      "post": {
+        "tags": [
+          "public"
+        ],
+        "description": "What the engine says about a statement, without running it: Nova fills the statement's `${run.date}` (today, UTC), `${run.id}` (`check`) and `${params.<name>}` placeholders and sends `EXPLAIN <statement>` to the engine as the caller, under the source `nova-schedule-check`. It never sends `EXPLAIN ANALYZE` and never the statement itself. `checked: false` means this kind of statement cannot be checked here (only `select`, `with`, `insert`, `merge`, `delete`, `update`, `values` and `create … as …` are). A refused statement answers 200 with `ok: false` and the engine's sentence; an engine that does not answer is 502. Refusals before the engine: an empty, over-20,000-character or NUL-carrying statement 400, a parameter table or a placeholder as on create 400. Answers `Cache-Control: no-store`.",
+        "operationId": "check",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CheckStatementRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The engine's verdict, or that this statement cannot be checked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckStatementResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The statement, a parameter or a placeholder is invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token to sign in with",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The query engine is not reachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/pipelines/preview-schedule": {
+      "post": {
+        "tags": [
+          "public"
+        ],
+        "description": "The next fire times of a cron in its zone, RFC 3339 with that zone's offset (for example `2026-10-21T03:00:00+02:00`), so the Schedule dialog can show what a cadence means before it is saved. A field or a zone as on create (400 with the same sentences); `count` is 1 to 10, 5 when omitted. Like croniter, a day matches when both day fields are restricted and either matches, and when one is unrestricted and the other matches. A wall-clock time the zone skips at a DST jump is not a run; a time that happens twice is answered with its first occurrence. A cron that can never fire answers fewer runs (at most 366 days are searched), not an error. Answers `Cache-Control: no-store`.",
+        "operationId": "preview",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PreviewScheduleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The next runs in the schedule's zone",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreviewScheduleResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The cron, the timezone or the count is invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token to sign in with",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/pipelines/principals": {
       "get": {
         "tags": [
@@ -1716,7 +1828,7 @@
         "tags": [
           "public"
         ],
-        "description": "One pipeline: the list fields, the latest 20 runs, and the resource's `params` and `retries`. A pipeline whose DAG does not exist yet answers 200 with `loaded: false` and `state: \"loading\"`. A pipeline of another group answers 404. History of a deleted pipeline is not offered in this version: without the resource the answer is 404.",
+        "description": "One pipeline: the list fields, the latest 20 runs, and the resource's `params`, `retries` and `options` (defaults filled in when a field is absent, so the edit dialog can prefill). A pipeline whose DAG does not exist yet answers 200 with `loaded: false` and `state: \"loading\"`. A pipeline of another group answers 404. History of a deleted pipeline is not offered in this version: without the resource the answer is 404.",
         "operationId": "detail",
         "parameters": [
           {
@@ -1740,7 +1852,7 @@
         ],
         "responses": {
           "200": {
-            "description": "The pipeline, its latest runs, params and retries",
+            "description": "The pipeline, its latest runs, params, retries and options",
             "content": {
               "application/json": {
                 "schema": {
@@ -1795,7 +1907,7 @@
         "tags": [
           "public"
         ],
-        "description": "Change the statement and the schedule of a pipeline Nova created (`app.kubernetes.io/managed-by: stardelt-nova`); every other field stays. Refusals: a pipeline the caller may not act on 404; a pipeline Nova did not write, or one whose task shape is not exactly one `sql` task named `run` 409; the statement, cron or timezone as on create 400; the group's principal no longer ready 409 with the `principals` route's message; a concurrent change to the resource 409 `the pipeline changed while you edited it: reload`. The audit line carries the statement's length and the cron, never the statement. Answers `Cache-Control: no-store`.",
+        "description": "Change the statement, the schedule, the parameters and the options of a pipeline Nova created (`app.kubernetes.io/managed-by: stardelt-nova`); every other field stays. The body describes the whole editable state: an omitted `schedule` removes it, an omitted `params` removes the table, an omitted option keeps its default. Refusals: a pipeline the caller may not act on 404; a pipeline Nova did not write, or one whose task shape is not exactly one `sql` task named `run` 409; the statement, a parameter, a placeholder, an option, the cron or the timezone as on create 400; the group's principal no longer ready 409 with the `principals` route's message; a concurrent change to the resource 409 `the pipeline changed while you edited it: reload`. The audit line carries the statement's length and the cron, never the statement. Answers `Cache-Control: no-store`.",
         "operationId": "update",
         "parameters": [
           {
@@ -2690,6 +2802,53 @@
           }
         }
       },
+      "CheckStatementRequest": {
+        "type": "object",
+        "description": "`POST /api/pipelines/check`: what the engine says about a statement, without running it.",
+        "required": [
+          "sql"
+        ],
+        "properties": {
+          "params": {
+            "type": "object",
+            "description": "The parameters the statement's `${params.<name>}` placeholders are filled with.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "sql": {
+            "type": "string"
+          }
+        }
+      },
+      "CheckStatementResponse": {
+        "type": "object",
+        "description": "The engine's verdict. `checked: false` means this kind of statement cannot be checked here;\n`ok` is absent then.",
+        "required": [
+          "checked"
+        ],
+        "properties": {
+          "checked": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The engine's sentence when `ok` is false."
+          },
+          "ok": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        }
+      },
       "ColumnDescriptionUpdate": {
         "type": "object",
         "description": "`PUT /api/catalog/tables/{ns}/{tbl}/columns/{column}/description` body.",
@@ -2868,8 +3027,29 @@
           "name": {
             "type": "string"
           },
+          "options": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PipelineOptions",
+                "description": "Retries, the wait between them, the time limit and the run mode; omitted fields keep the\ndefaults."
+              }
+            ]
+          },
           "ownerGroup": {
             "type": "string"
+          },
+          "params": {
+            "type": "object",
+            "description": "Values for `${params.<name>}` in the statement; at most 16.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
           },
           "schedule": {
             "oneOf": [
@@ -3202,9 +3382,14 @@
             "type": "object",
             "required": [
               "runs",
-              "params"
+              "params",
+              "options"
             ],
             "properties": {
+              "options": {
+                "$ref": "#/components/schemas/PipelineOptionsView",
+                "description": "Retries, the wait between them, the time limit and the run mode as the resource carries\nthem, with the defaults filled in when a field is absent."
+              },
               "params": {
                 "type": "object",
                 "additionalProperties": {
@@ -3233,7 +3418,7 @@
             }
           }
         ],
-        "description": "`GET /api/pipelines/{namespace}/{name}`: the view, the latest runs and the resource's\nparameters and retry policy."
+        "description": "`GET /api/pipelines/{namespace}/{name}`: the view, the latest runs and the resource's\nparameters, retry policy and options."
       },
       "PipelineListResponse": {
         "type": "object",
@@ -3247,6 +3432,70 @@
             "items": {
               "$ref": "#/components/schemas/PipelineView"
             }
+          }
+        }
+      },
+      "PipelineOptions": {
+        "type": "object",
+        "description": "The advanced options of a schedule (#223), all optional: an omitted field keeps today's\ndefault (one retry, five minutes between retries, a two-hour time limit, one run at a time).\n`Replace` is deliberately not offered — the loader treats it as `Forbid`.",
+        "properties": {
+          "backoffMinutes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The wait between attempts, 1 to 60 minutes."
+          },
+          "concurrency": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`Forbid` (one run at a time, the default) or `Allow` (runs side by side)."
+          },
+          "retries": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Extra attempts after a failure, 0 to 5."
+          },
+          "timeoutMinutes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The longest a whole run may take, 1 to 720 minutes."
+          }
+        }
+      },
+      "PipelineOptionsView": {
+        "type": "object",
+        "description": "The options as the resource carries them, defaults filled in — what the edit dialog prefills.",
+        "required": [
+          "retries",
+          "backoffMinutes",
+          "timeoutMinutes",
+          "concurrency"
+        ],
+        "properties": {
+          "backoffMinutes": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "concurrency": {
+            "type": "string"
+          },
+          "retries": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "timeoutMinutes": {
+            "type": "integer",
+            "format": "int64"
           }
         }
       },
@@ -3332,6 +3581,45 @@
             "items": {
               "$ref": "#/components/schemas/TaskSpecView"
             }
+          }
+        }
+      },
+      "PreviewScheduleRequest": {
+        "type": "object",
+        "description": "`POST /api/pipelines/preview-schedule`: the next fire times of a cron in its zone.",
+        "required": [
+          "cron",
+          "timezone"
+        ],
+        "properties": {
+          "count": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "How many runs to list, 1 to 10; 5 when omitted.",
+            "minimum": 0
+          },
+          "cron": {
+            "type": "string"
+          },
+          "timezone": {
+            "type": "string"
+          }
+        }
+      },
+      "PreviewScheduleResponse": {
+        "type": "object",
+        "required": [
+          "runs"
+        ],
+        "properties": {
+          "runs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The next fire times in the schedule's zone, RFC 3339 with that offset."
           }
         }
       },
@@ -3716,18 +4004,40 @@
       },
       "UpdatePipelineRequest": {
         "type": "object",
-        "description": "`PUT /api/pipelines/{namespace}/{name}`: change the statement and the schedule; every other\nfield of the resource stays as it is.",
+        "description": "`PUT /api/pipelines/{namespace}/{name}`: change the statement, the schedule, the parameters\nand the options. Every other field of the resource stays as it is.",
         "required": [
           "sql"
         ],
         "properties": {
+          "options": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PipelineOptions",
+                "description": "The whole option set; omitted means the defaults."
+              }
+            ]
+          },
+          "params": {
+            "type": "object",
+            "description": "The whole parameter table; omitted means none.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
           "schedule": {
             "oneOf": [
               {
                 "type": "null"
               },
               {
-                "$ref": "#/components/schemas/ScheduleRequest"
+                "$ref": "#/components/schemas/ScheduleRequest",
+                "description": "Omitted means no schedule: the pipeline then runs on demand only."
               }
             ]
           },
