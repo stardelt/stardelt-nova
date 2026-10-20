@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { api, formatTime, type QueryLogItem } from '../api'
@@ -77,6 +77,17 @@ export default function QueryLog() {
   const q = useDebounced(search.trim(), 300)
   const [columns, setColumns] = useState<ColumnId[]>(loadColumns)
   const [open, setOpen] = useState<string | null>(null)
+  const columnsMenu = useRef<HTMLDetailsElement>(null)
+
+  // A click elsewhere on the page dismisses the menu, like the header's app switcher.
+  useEffect(() => {
+    const onMouseDown = (e: MouseEvent) => {
+      const menu = columnsMenu.current
+      if (menu?.open && !menu.contains(e.target as Node)) menu.open = false
+    }
+    document.addEventListener('mousedown', onMouseDown)
+    return () => document.removeEventListener('mousedown', onMouseDown)
+  }, [])
 
   // A person who is not an administrator never has the all scope, whatever the state says.
   const effectiveScope = admin ? scope : 'mine'
@@ -176,7 +187,17 @@ export default function QueryLog() {
           onChange={e => setSearch(e.target.value)}
           className="input !w-64 py-1.5"
         />
-        <details className="relative ml-auto">
+        <details
+          ref={columnsMenu}
+          className="relative ml-auto"
+          onKeyDown={e => {
+            const menu = columnsMenu.current
+            if (e.key === 'Escape' && menu?.open) {
+              menu.open = false
+              menu.querySelector('summary')?.focus()
+            }
+          }}
+        >
           <summary className="btn-ghost py-1.5 cursor-pointer list-none">Columns</summary>
           <div className="absolute right-0 z-10 mt-2 w-48 card p-2 space-y-1 shadow-lg bg-bg-elev">
             {OPTIONAL_COLUMNS.map(c => {
