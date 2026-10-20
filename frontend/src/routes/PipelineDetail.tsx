@@ -147,6 +147,7 @@ export default function PipelineDetail() {
         )}
       </section>
 
+      <div className="[container-type:inline-size]">
       <section className="card relative overflow-x-auto">
         <div className="px-5 pt-5 pb-3">
           <h2 className="text-lg font-semibold">Runs</h2>
@@ -156,7 +157,7 @@ export default function PipelineDetail() {
           <caption className="sr-only">The latest runs of {pipeline.name}.</caption>
           <thead className="bg-bg-soft/50">
             <tr>
-              <th scope="col" className="th px-5 py-2.5">Run</th>
+              <th scope="col" className="th min-w-[16rem] px-5 py-2.5">Run</th>
               <th scope="col" className="th px-3 py-2.5">State</th>
               <th scope="col" className="th px-3 py-2.5">Type</th>
               <th scope="col" className="th px-3 py-2.5">Started</th>
@@ -196,6 +197,7 @@ export default function PipelineDetail() {
           </tbody>
         </table>
       </section>
+      </div>
 
       {stopping && (
         <StopRunDialog
@@ -267,7 +269,7 @@ function RunRow({
           {active && (
             <button
               type="button"
-              className="btn-ghost py-1 px-2 text-xs text-bad"
+              className="btn-ghost py-1 px-2 text-xs text-bad whitespace-nowrap"
               aria-label={`Stop run ${run.runId}`}
               onClick={onStop}
             >
@@ -279,7 +281,10 @@ function RunRow({
       {open && (
         <tr id={panelId} className="bg-bg-soft/20">
           <td colSpan={8} className="px-4 py-4">
-            <RunTasks namespace={pipeline.namespace} name={pipeline.name} runId={run.runId} />
+            {/* Sticky and no wider than the card, so the panel stays in view when the runs table scrolls sideways. */}
+            <div className="sticky left-0 max-w-[calc(100cqw-2.5rem)]">
+              <RunTasks namespace={pipeline.namespace} name={pipeline.name} runId={run.runId} />
+            </div>
           </td>
         </tr>
       )}
@@ -316,7 +321,7 @@ function RunTasks({ namespace, name, runId }: { namespace: string; name: string;
             <caption className="sr-only">Task instances of this run.</caption>
             <thead>
               <tr>
-                <th scope="col" className="th px-3 py-2">Task</th>
+                <th scope="col" className="th min-w-[7rem] px-3 py-2">Task</th>
                 <th scope="col" className="th px-3 py-2">State</th>
                 <th scope="col" className="th px-3 py-2">Try</th>
                 <th scope="col" className="th px-3 py-2">Started</th>
@@ -332,7 +337,7 @@ function RunTasks({ namespace, name, runId }: { namespace: string; name: string;
                 const started = formatWhen(task.startedAt)
                 return (
                   <tr key={`${task.taskId}-${task.tryNumber}`} className="border-t border-border/70">
-                    <td className="td px-3"><span className="font-mono text-xs break-all">{task.taskId}</span></td>
+                    <td className="td px-3"><span className="font-mono text-xs whitespace-nowrap">{task.taskId}</span></td>
                     <td className="td px-3"><RunStateBadge state={task.state} /></td>
                     <td className="td px-3 text-text-dim">{task.tryNumber}</td>
                     <td className="td px-3 text-text-dim text-xs whitespace-nowrap">

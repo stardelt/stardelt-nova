@@ -247,13 +247,13 @@ export default function Pipelines() {
             <caption className="sr-only">Pipelines you and your groups own.</caption>
             <thead className="bg-bg-soft/50">
               <tr>
-                <th scope="col" className="th px-5 py-2.5">Name</th>
+                <th scope="col" className="th w-[14rem] px-5 py-2.5">Name</th>
                 <th scope="col" className="th px-3 py-2.5">Owner</th>
                 <th scope="col" className="th px-3 py-2.5">Schedule</th>
                 <th scope="col" className="th px-3 py-2.5">State</th>
                 <th scope="col" className="th px-3 py-2.5">Last run</th>
                 <th scope="col" className="th px-3 py-2.5">Next run</th>
-                <th scope="col" className="th px-3 py-2.5">
+                <th scope="col" className="th w-[11rem] px-3 py-2.5">
                   <span className="sr-only">Actions</span>
                 </th>
               </tr>
@@ -292,13 +292,13 @@ function Row({
       <td className="td px-5">
         <Link
           to={`/pipelines/${encodeURIComponent(pipeline.namespace)}/${encodeURIComponent(pipeline.name)}`}
-          className="underline break-all"
+          className="underline break-words"
         >
           {pipeline.name}
         </Link>
       </td>
       <td className="td px-3 text-text-dim">
-        <span className="break-words">{pipeline.ownerGroup ?? '—'}</span>
+        <span className="whitespace-nowrap">{pipeline.ownerGroup ?? '—'}</span>
       </td>
       <td className="td px-3">
         <span className="font-mono text-xs break-words">{pipeline.schedule ?? 'On demand'}</span>
@@ -313,10 +313,10 @@ function Row({
         {last ? (
           <div className="min-w-0">
             <RunStateBadge state={last.state} />
-            <div className="mt-0.5 text-xs text-text-mute">
-              <span title={lastWhen?.title}>{lastWhen?.text}</span>
+            <div className="mt-0.5 text-xs text-text-mute whitespace-nowrap">
+              <span className="whitespace-nowrap" title={lastWhen?.title}>{lastWhen?.text}</span>
               {' · '}
-              {runDuration(last.durationSeconds)}
+              <span className="whitespace-nowrap">{runDuration(last.durationSeconds)}</span>
             </div>
           </div>
         ) : (
