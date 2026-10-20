@@ -405,8 +405,8 @@ sign-in, never a fallback to `dev`.
 | `NOVA_SESSION_SECRET` | — (required) | ≥ 32 bytes; signs the session cookie (`openssl rand -base64 48`) |
 | `NOVA_OIDC_SCOPES` | `openid profile email` | Must include `openid` |
 | `NOVA_OIDC_GROUP_CLAIM` | `groups` | Claim carrying group names (or Entra group object ids) |
-| `NOVA_OIDC_ADMIN_GROUP` | `stardelt-admins` | Group that makes a Nova admin; Keycloak's full path `/stardelt-admins` also matches |
-| `NOVA_OIDC_ADMIN_ROLE` | = admin group | Value in the `roles` claim (Entra app roles) that makes a Nova admin |
+| `NOVA_OIDC_ADMIN_GROUP` | `stardelt-admins` | Group that makes a Nova admin; Keycloak's full path `/stardelt-admins` also matches. Set it to an empty value to turn the group mechanism off (nobody becomes an admin through a group). |
+| `NOVA_OIDC_ADMIN_ROLE` | = admin group | Value in the `roles` claim (Entra app roles) that makes a Nova admin. Empty turns the role mechanism off. |
 | `NOVA_OIDC_AUDIENCES` | client id | Comma-separated `aud` values accepted on bearer access tokens |
 
 **Claims.** `sub` is the identifier; display uses `preferred_username` → `email` →
@@ -417,6 +417,16 @@ either grants admin. When Entra reports a *group overage* (`_claim_names.groups`
 not call Graph) — use app roles or a group filter on the app registration. `/api/me`
 returns claims, never tokens, and `identity_forwarding: false`: Nova still queries
 Trino and Lakekeeper with its service connection.
+
+**The person behind the request.** In `oidc` mode `/api/me` adds three facts to the
+claim fields, so the Profile page can explain the caller's role and warn before a
+sign-in is needed. `dev` mode keeps exactly its old answer.
+
+| Field | Meaning |
+|---|---|
+| `admin_group` | The configured value behind the caller's administrator decision: the group that matched (`NOVA_OIDC_ADMIN_GROUP`) or the role that was held (`NOVA_OIDC_ADMIN_ROLE`); for a member, the configured precedence (role, then group). `null` when neither is configured (both variables empty). |
+| `admin_by` | `"group"` or `"role"`: which of the two `admin_group` holds. `null` with it. |
+| `session_expires_at` | Unix seconds at which the browser session can no longer be renewed — the session's absolute 8 h lifetime (a refresh never moves it) — so the person signs in again then. `null` for an `Authorization: Bearer` call (no session), and never the access token's own `exp`. |
 
 **Entra ID notes.** Single-tenant issuer only (the `common`/`organizations` endpoints'
 `{tenantid}` issuer template is not supported). For bearer access, set

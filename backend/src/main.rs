@@ -185,6 +185,16 @@ struct OidcMe<'a> {
     identity_forwarding: bool,
     /// Realm admin console derived from the issuer; `None` for non-Keycloak issuers.
     admin_console_url: Option<&'a str>,
+    /// The configured value behind this caller's administrator decision: the group
+    /// matched, or the role held (and the configured precedence for a member). `None`
+    /// when neither is configured (#213).
+    admin_group: Option<&'a str>,
+    /// `"group"` or `"role"`: which of the two `admin_group` is. `None` with it.
+    admin_by: Option<&'static str>,
+    /// Unix seconds at which the browser session can no longer be renewed and the
+    /// person signs in again; `None` for an Authorization-header call, which has no
+    /// session. Never the access token's own `exp`.
+    session_expires_at: Option<u64>,
 }
 
 #[utoipa::path(
@@ -199,6 +209,7 @@ struct OidcMe<'a> {
 pub(crate) async fn me(
     State(s): State<Arc<AppState>>,
     principal: Option<Extension<auth::Principal>>,
+    facts: Option<Extension<auth::MeFacts>>,
 ) -> Response {
     // The auth middleware only runs (and only inserts a principal) in oidc mode;
     // dev mode answers exactly as before.
@@ -213,6 +224,9 @@ pub(crate) async fn me(
         .into_response(),
         Some(Extension(p)) => {
             let id = &p.identity;
+            // `require_auth` inserts the facts next to the principal; a router that
+            // mounts the handler without it answers the claim fields as `null`.
+            let facts = facts.map(|Extension(f)| f).unwrap_or_default();
             Json(OidcMe {
                 user: &id.display_name,
                 auth_mode: "oidc",
@@ -228,6 +242,9 @@ pub(crate) async fn me(
                 via: p.via,
                 identity_forwarding: s.forward_identity,
                 admin_console_url: s.admin_console_url.as_deref(),
+                admin_group: facts.admin_group.as_deref(),
+                admin_by: facts.admin_by,
+                session_expires_at: facts.session_expires_at,
             })
             .into_response()
         }
@@ -791,8 +808,9 @@ mod router_tests {
     use tower::ServiceExt;
 
     /// An `AppState` for the routing and header tests: no cluster, no upstream. Nothing
-    /// here is reached by the paths under test.
-    fn test_state() -> Arc<AppState> {
+    /// here is reached by the paths under test. Shared with `auth.rs`, whose `/api/me`
+    /// tests go through the real handler.
+    pub(crate) fn test_state() -> Arc<AppState> {
         test_state_with_db(None)
     }
 
