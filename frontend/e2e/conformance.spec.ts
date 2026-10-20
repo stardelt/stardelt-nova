@@ -446,7 +446,7 @@ test.describe('connections', () => {
     const dialog = page.getByRole('dialog')
     await expect(dialog).toBeVisible()
     await expect(dialog).toContainText('Delete warehouse-db?')
-    await expect(dialog).toContainText('Pipelines and catalogs that use it will stop working.')
+    await expect(dialog).toContainText('Notebooks that use it will fail.')
 
     await page.keyboard.press('Escape')
     await expect(dialog).toHaveCount(0)

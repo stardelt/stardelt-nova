@@ -795,9 +795,11 @@ export function DeleteConnectionDialog({
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const consequence = connection.scope === 'personal'
-    ? 'Notebooks that use it will fail.'
-    : 'Notebooks that use it will fail. Pipelines and catalogs that use it will stop working.'
+  // Only notebooks consume a connection today (no pipeline, SQL or catalog does — the page copy
+  // says so). A managed connection has no consumer at all yet, so deleting one breaks nothing today.
+  const consequence = connection.scope === 'managed'
+    ? 'No platform service uses connections yet, so nothing breaks today.'
+    : 'Notebooks that use it will fail.'
   // The administrator's incident case (#204): say plainly that this row belongs to someone else.
   const otherGroup = connection.scope === 'group' && connection.member === false
 
