@@ -20,6 +20,18 @@ export type Me = {
   groups_overage?: boolean
   is_admin?: boolean
   via?: 'session' | 'bearer'
+  /**
+   * The configured value behind the administrator decision (#213): the matched admin
+   * group, or the held role. `admin_by` says which one; both are absent when the
+   * installation configures neither.
+   */
+  admin_group?: string | null
+  admin_by?: 'group' | 'role' | string | null
+  /**
+   * Unix seconds at which the browser session can no longer be renewed (#213). Absent
+   * for a bearer call, which has no browser session; never the access token's `exp`.
+   */
+  session_expires_at?: number | null
   /** False until Nova forwards the user's token to Trino/Lakekeeper (phase 2). */
   identity_forwarding?: boolean
   /**
