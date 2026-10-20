@@ -91,6 +91,32 @@ test.describe('roles', () => {
   })
 })
 
+test.describe('menus', () => {
+  test('U16 the Columns menu closes with Escape and returns focus to its opener', async ({ browser }) => {
+    const page = await (await browser.newContext({ viewport: { width: 1280, height: 800 } })).newPage()
+    await page.route('**/api/**', (r) => {
+      const path = new URL(r.request().url()).pathname
+      if (path === '/api/me') return json(r, { user: 'alice', auth_mode: 'oidc', demo: false, warehouse: 'warehouse', is_admin: true, groups: ['admins'] })
+      if (path === '/api/query-log') return json(r, { items: [], nextCursor: null })
+      return json(r, [])
+    })
+    await page.goto('/queries')
+    const summary = page.locator('summary', { hasText: 'Columns' })
+    const details = summary.locator('..')
+    await summary.focus()
+    await page.keyboard.press('Enter')
+    await expect(details).toHaveJSProperty('open', true)
+    await page.keyboard.press('Escape')
+    await expect(details).toHaveJSProperty('open', false)
+    await expect(summary).toBeFocused()
+    // A click on the page outside the menu dismisses it as well.
+    await summary.click()
+    await expect(details).toHaveJSProperty('open', true)
+    await page.locator('table').click({ position: { x: 10, y: 10 } })
+    await expect(details).toHaveJSProperty('open', false)
+  })
+})
+
 test.describe('hostile data', () => {
   test('U14 markup and 400-character names render as text and do not widen the page', async ({ browser }) => {
     const page = await (await browser.newContext({ viewport: { width: 1280, height: 800 } })).newPage()
