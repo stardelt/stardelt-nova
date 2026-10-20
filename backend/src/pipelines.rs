@@ -421,21 +421,24 @@ fn schedule_of(spec: &Value) -> Option<String> {
     }
 }
 
-/// The task names and kinds the resource declares, in declaration order.
-fn task_specs(spec: &Value) -> Vec<TaskSpecView> {
+/// The task names and kinds the resource declares, in declaration order. `with_sql` adds each
+/// `sql` task's statement: only the detail route asks for it, so the list stays small.
+fn task_specs(spec: &Value, with_sql: bool) -> Vec<TaskSpecView> {
     spec.get("tasks")
         .and_then(Value::as_array)
         .map(|tasks| {
             tasks
                 .iter()
                 .filter_map(|task| {
+                    let kind = task.get("kind").and_then(Value::as_str).unwrap_or_default();
                     Some(TaskSpecView {
                         name: task.get("name")?.as_str()?.to_string(),
-                        kind: task
-                            .get("kind")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_string(),
+                        kind: kind.to_string(),
+                        sql: if with_sql && kind == "sql" {
+                            task.get("sql").and_then(Value::as_str).map(str::to_string)
+                        } else {
+                            None
+                        },
                     })
                 })
                 .collect()
@@ -1007,11 +1010,14 @@ pub struct PrincipalsResponse {
 // Views (serde camelCase; no raw Airflow field names and no `sources`)
 // ---------------------------------------------------------------------------
 
-/// One task as the resource declares it.
+/// One task as the resource declares it. `sql` is the statement of a `kind: "sql"` task, and
+/// only the detail route carries it (Schedule's edit dialog prefills from it).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 pub struct TaskSpecView {
     pub name: String,
     pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sql: Option<String>,
 }
 
 /// One pipeline in the list: the resource plus what Airflow says about it.
@@ -1173,7 +1179,7 @@ fn view_of(
         next_run: dag.and_then(|d| d.next_dagrun_run_after.clone()),
         state: state.to_string(),
         last_run: last_run.map(run_view),
-        tasks: task_specs(spec),
+        tasks: task_specs(spec, false),
         run_as: spec
             .get("runAs")
             .and_then(Value::as_str)
@@ -1601,8 +1607,11 @@ async fn pipeline_detail(
         },
         None => Vec::new(),
     };
-    let view = view_of(namespace, name, &resource, dag.as_ref(), runs.first());
+    let mut view = view_of(namespace, name, &resource, dag.as_ref(), runs.first());
     let spec = spec_of(&resource);
+    // The statement goes only on the detail route: the list stays small, and the caller has
+    // already passed the same visibility rule that `load_visible` applies to an edit.
+    view.tasks = task_specs(spec, true);
     Ok(PipelineDetail {
         pipeline: view,
         runs: runs.iter().map(run_view).collect(),
@@ -4295,6 +4304,72 @@ mod tests {
         assert_eq!(retries.backoff.as_deref(), Some("5m"));
         assert_eq!(detail.runs.len(), 1);
         assert_eq!(detail.pipeline.last_run.as_ref().unwrap().run_id, SMOKE_RUN);
+    }
+
+    #[tokio::test]
+    async fn detail_carries_the_statement() {
+        let mut smoke = resource("smoke", Some("analytics"));
+        smoke["spec"]["tasks"] = json!([{ "name": "run", "kind": "sql", "sql": "select 1" }]);
+        let resources = memory(&[("smoke", smoke)]);
+        let (airflow, _fake) = fake_airflow::start().await;
+
+        let detail = pipeline_detail(
+            Some(&resources),
+            Some(&airflow),
+            &admin(),
+            &crate::cluster::namespace(),
+            "smoke",
+        )
+        .await
+        .expect("the detail is readable");
+
+        assert_eq!(detail.pipeline.tasks.len(), 1);
+        assert_eq!(detail.pipeline.tasks[0].sql.as_deref(), Some("select 1"));
+    }
+
+    #[tokio::test]
+    async fn list_does_not_carry_the_statement() {
+        let mut smoke = resource("smoke", Some("analytics"));
+        smoke["spec"]["tasks"] = json!([{ "name": "run", "kind": "sql", "sql": "select 1" }]);
+        let resources = memory(&[("smoke", smoke)]);
+        let (airflow, _fake) = fake_airflow::start().await;
+
+        let answer = list_pipelines(Some(&resources), Some(&airflow), &admin())
+            .await
+            .expect("the list succeeds");
+
+        let tasks = &answer.pipelines[0].tasks;
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].sql, None);
+        let value = serde_json::to_value(&tasks[0]).expect("serialises");
+        assert!(
+            value.get("sql").is_none(),
+            "the list does not carry the statement: {value}"
+        );
+    }
+
+    #[tokio::test]
+    async fn detail_task_without_statement_has_none() {
+        let resources = memory(&[("smoke", resource("smoke", Some("analytics")))]);
+        let (airflow, _fake) = fake_airflow::start().await;
+
+        let detail = pipeline_detail(
+            Some(&resources),
+            Some(&airflow),
+            &admin(),
+            &crate::cluster::namespace(),
+            "smoke",
+        )
+        .await
+        .expect("the detail is readable");
+
+        assert!(
+            !detail.pipeline.tasks.is_empty(),
+            "the fixture declares tasks"
+        );
+        for task in &detail.pipeline.tasks {
+            assert_eq!(task.sql, None, "{} has no statement", task.name);
+        }
     }
 
     #[test]
