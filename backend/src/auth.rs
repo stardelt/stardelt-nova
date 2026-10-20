@@ -1436,7 +1436,9 @@ fn login_failed(reason: &str) -> Response {
     ))
 }
 
-fn sanitize_code(s: &str) -> String {
+/// The RFC 6749 `error` code, cut to a safe alphabet (`invalid_client`,
+/// `invalid_grant`): never the endpoint's message, which can echo anything.
+pub(crate) fn sanitize_code(s: &str) -> String {
     s.chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
         .take(64)

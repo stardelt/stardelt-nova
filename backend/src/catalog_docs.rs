@@ -68,7 +68,7 @@ use serde_json::{Value, json};
 use tracing::warn;
 
 use crate::api_json::ApiJson;
-use crate::auth::{Identity, Principal, upstream_authorization};
+use crate::auth::{Identity, Principal};
 use crate::data::quote_ident;
 use crate::{AppState, audit, catalog};
 
@@ -860,15 +860,26 @@ fn demo_unavailable() -> Response {
 }
 
 /// Resolve the warehouse id and build the catalog client for one request.
-async fn catalog_or_error(
-    state: &AppState,
-    caller: Option<&Principal>,
-) -> Result<(String, Option<String>), Box<Response>> {
+///
+/// The catalog is called with Nova's own service token (`catalog_token.rs`), never the
+/// caller's: per-user catalog rights do not exist yet, so one identity reaches Lakekeeper.
+async fn catalog_or_error(state: &AppState) -> Result<(String, Option<String>), Box<Response>> {
     let id = match catalog::warehouse_id_or_error(state).await {
         Ok(id) => id,
         Err(response) => return Err(response),
     };
-    let authorization = upstream_authorization(state.forward_identity, caller);
+    let authorization = match catalog::lakekeeper_authorization(state).await {
+        Ok(authorization) => authorization,
+        Err(e) => {
+            return Err(Box::new(
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({ "error": e.to_string() })),
+                )
+                    .into_response(),
+            ));
+        }
+    };
     Ok((
         format!("{}/catalog/v1/{id}", state.lakekeeper_url),
         authorization,
@@ -902,7 +913,7 @@ pub async fn read(
     }
     let caller = caller.as_ref().map(|c| &c.0);
     let who = caller_identity(&s, caller);
-    let (base, authorization) = match catalog_or_error(&s, caller).await {
+    let (base, authorization) = match catalog_or_error(&s).await {
         Ok(v) => v,
         Err(response) => return *response,
     };
@@ -947,7 +958,7 @@ pub async fn update(
     }
     let caller = caller.as_ref().map(|c| &c.0);
     let who = caller_identity(&s, caller);
-    let (base, authorization) = match catalog_or_error(&s, caller).await {
+    let (base, authorization) = match catalog_or_error(&s).await {
         Ok(v) => v,
         Err(response) => return *response,
     };
@@ -993,7 +1004,7 @@ pub async fn update_column(
     }
     let caller = caller.as_ref().map(|c| &c.0);
     let who = caller_identity(&s, caller);
-    let (base, authorization) = match catalog_or_error(&s, caller).await {
+    let (base, authorization) = match catalog_or_error(&s).await {
         Ok(v) => v,
         Err(response) => return *response,
     };
@@ -1244,6 +1255,8 @@ mod tests {
             dev_user: "test".into(),
             trino_url: "http://127.0.0.1:1".into(),
             lakekeeper_url: "http://127.0.0.1:1".into(),
+            // No catalog client in these tests: Lakekeeper is called as before (#222).
+            catalog_token: None,
             superset_url: "http://127.0.0.1:1".into(),
             jupyterhub_url: "http://127.0.0.1:1".into(),
             warehouse_name: "warehouse".into(),
