@@ -476,6 +476,141 @@ test.describe('connections', () => {
     await context.close()
   })
 
+  // stardelt-nova#204: an administrator sees every group's connections (backend #203). A row of
+  // a group they are not in is visible and deletable, readable through break-glass, and never
+  // rotatable here.
+  const ADMIN_OF_ANALYTICS = {
+    user: 'alice', auth_mode: 'oidc', demo: false, warehouse: 'warehouse',
+    is_admin: true, groups: ['analytics'],
+  }
+  const ANALYTICS_ROW = {
+    name: 'analytics-db', scope: 'group', type: 'postgresql', ownerGroup: 'analytics',
+    config: { host: 'db.analytics' }, secretKeys: ['user', 'password'], version: 1,
+    member: true, sync: { ready: true, reason: 'Synced' },
+  }
+  const FINANCE_ROW = {
+    name: 'finance-db', scope: 'group', type: 'postgresql', ownerGroup: 'finance',
+    config: { host: 'db.finance' }, secretKeys: ['password'], version: 1,
+    member: false, sync: { ready: true, reason: 'Synced' },
+  }
+  /** The section around a `Group: <name>` heading. */
+  const groupSection = (page: Page, name: string) =>
+    page.locator('section').filter({ has: page.getByRole('heading', { name: new RegExp(`^Group: ${name}`) }) })
+
+  test("an administrator sees other groups' rows without Rotate", async ({ browser }) => {
+    const { context, page } = await open(browser, {
+      me: ADMIN_OF_ANALYTICS,
+      rows: [ANALYTICS_ROW, FINANCE_ROW],
+    })
+
+    const finance = groupSection(page, 'finance')
+    await expect(finance.getByRole('heading', { name: /^Group: finance/ })).toBeVisible()
+    await expect(finance.getByText('Not your group', { exact: true })).toBeVisible()
+    await expect(finance).toContainText(
+      'You see this because you are an administrator. You cannot create or rotate here; you can delete it in an incident or read it with a break-glass read, which tells the group.',
+    )
+    await expect(finance.getByRole('button', { name: 'Delete finance-db' })).toBeVisible()
+    await expect(finance.getByRole('button', { name: 'Break-glass read finance-db' })).toBeVisible()
+    expect(await finance.getByRole('button', { name: 'Rotate finance-db' }).count()).toBe(0)
+    // The person cannot use the credential either, so the notebook snippet is absent too.
+    expect(await finance.getByText('Use in a notebook').count()).toBe(0)
+
+    const analytics = groupSection(page, 'analytics')
+    await expect(analytics.getByText('Not your group')).toHaveCount(0)
+    await expect(analytics.getByRole('button', { name: 'Rotate analytics-db' })).toBeVisible()
+    await expect(analytics.getByRole('button', { name: 'Delete analytics-db' })).toBeVisible()
+    await expect(analytics.getByRole('button', { name: 'Break-glass read analytics-db' })).toBeVisible()
+    await expect(analytics.getByText('Use in a notebook')).toBeVisible()
+
+    // The page, its badge and its extra buttons keep an accessible name (rule U5).
+    expect((await auditPage(page)).filter((finding) => finding.rule === 'U5')).toEqual([])
+    await context.close()
+  })
+
+  test('the banner has no Rotate now for a non-member', async ({ browser }) => {
+    const { context, page } = await open(browser, {
+      me: ADMIN_OF_ANALYTICS,
+      rows: [{
+        ...FINANCE_ROW,
+        breakGlass: { by: 'alice', at: '2026-10-20T12:00:00Z', reason: 'incident 4711: the pipeline is blocked' },
+      }],
+    })
+    const banner = page.getByRole('status')
+    await expect(banner).toContainText('Read by')
+    await expect(banner).toContainText('incident 4711: the pipeline is blocked.')
+    await expect(banner).toContainText('Consider rotating the credential.')
+    expect(await banner.getByRole('button', { name: 'Rotate now' }).count()).toBe(0)
+    // The group's own members still get the action (the same banner is only informational for us).
+    await context.close()
+  })
+
+  test('an administrator may delete another group connection from its row', async ({ browser }) => {
+    const { context, page, requests } = await open(browser, {
+      me: ADMIN_OF_ANALYTICS,
+      rows: [FINANCE_ROW],
+      write: (route, _path, method) => {
+        if (method !== 'DELETE') return false
+        void route.fulfill({ status: 204 })
+        return true
+      },
+    })
+    await page.getByRole('button', { name: 'Delete finance-db' }).click()
+    const dialog = page.getByRole('dialog')
+    await expect(dialog).toContainText('Delete finance-db?')
+    await expect(dialog).toContainText('You are deleting a connection of a group you are not in.')
+    await dialog.getByRole('button', { name: 'Delete connection' }).click()
+    await expect(page.getByRole('status')).toHaveText('Deleted finance-db.')
+
+    const deletes = requests.filter((request) => request.method === 'DELETE')
+    expect(deletes).toHaveLength(1)
+    expect(new URL(deletes[0].url).pathname).toBe('/api/connections/group/finance/finance-db')
+    await context.close()
+  })
+
+  test("an administrator may break-glass read another group's connection", async ({ browser }) => {
+    const { context, page, requests } = await open(browser, {
+      me: ADMIN_OF_ANALYTICS,
+      rows: [FINANCE_ROW],
+      write: (route, path, method) => {
+        if (method !== 'POST' || !path.endsWith('/break-glass')) return false
+        json(route, { fields: { password: CANARY }, readAt: '2026-10-20T12:00:00Z' })
+        return true
+      },
+    })
+    await page.getByRole('button', { name: 'Break-glass read finance-db' }).click()
+    const dialog = page.getByRole('dialog', { name: 'Break-glass read of finance-db' })
+    await dialog.getByLabel('Reason').fill('incident 4711: the pipeline is blocked')
+    await dialog.getByRole('button', { name: 'Read the credential' }).click()
+    const answer = page.getByRole('dialog', { name: 'Credential finance-db' })
+    await expect(answer).toContainText('••••••••')
+    // The value is masked until Show; the list request carries no value.
+    expect(await page.evaluate(() => document.documentElement.outerHTML)).not.toContain(CANARY)
+
+    const posts = requests.filter((request) => request.method === 'POST')
+    expect(posts).toHaveLength(1)
+    expect(new URL(posts[0].url).pathname).toBe('/api/connections/group/finance/finance-db/break-glass')
+    await context.close()
+  })
+
+  test('the new connection dialog lists only my groups', async ({ browser }) => {
+    const { context, page } = await open(browser, { me: ADMIN_OF_ANALYTICS })
+    await page.getByRole('button', { name: 'New connection' }).click()
+    await page.getByRole('radio', { name: 'Group' }).check()
+    const options = page.getByLabel('Owner group').locator('option')
+    expect(await options.allTextContents()).toEqual(['analytics'])
+    await context.close()
+  })
+
+  test('a normal person sees no Not your group badge', async ({ browser }) => {
+    const { context, page } = await open(browser, {
+      me: { ...ADMIN_OF_ANALYTICS, user: 'bob', is_admin: false },
+      rows: [ANALYTICS_ROW],
+    })
+    await expect(page.getByText('Not your group')).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Rotate analytics-db' })).toBeVisible()
+    await context.close()
+  })
+
   test('required fields and names are checked before sending', async ({ browser }) => {
     const { context, page } = await open(browser)
     await page.getByRole('button', { name: 'New connection' }).click()

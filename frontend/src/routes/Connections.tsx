@@ -41,6 +41,8 @@ const PERSONAL_NOTE =
   'Only you can see and use these, from a Python notebook. They are never used by pipelines or SQL.'
 const GROUP_NOTE =
   'Every member of the group can use and rotate these from a Python notebook.'
+const ADMIN_GROUP_NOTE =
+  'You see this because you are an administrator. You cannot create or rotate here; you can delete it in an incident or read it with a break-glass read, which tells the group.'
 const MANAGED_NOTE =
   'For platform services only. Nobody can read the values.'
 
@@ -130,18 +132,31 @@ export default function Connections() {
         )}
       </Section>
 
-      {list.data !== undefined && groupNames.map(group => (
-        <Section key={group} title={`Group: ${group}`} note={GROUP_NOTE}>
-          <ConnectionTable
-            caption={`Connections of the group ${group}`}
-            rows={rows.filter(c => c.scope === 'group' && c.ownerGroup === group).sort(byName)}
-            admin={admin}
-            onRotate={(connection) => setDialog({ kind: 'rotate', connection })}
-            onDelete={(connection) => setDialog({ kind: 'delete', connection })}
-            onBreakGlass={openBreakGlass}
-          />
-        </Section>
-      ))}
+      {list.data !== undefined && groupNames.map(group => {
+        const groupRows = rows
+          .filter(c => c.scope === 'group' && c.ownerGroup === group)
+          .sort(byName)
+        // `member: false` means the caller sees this group only as an administrator (#203):
+        // visible and deletable, readable through break-glass, never rotatable here.
+        const otherGroup = groupRows.some(row => row.member === false)
+        return (
+          <Section
+            key={group}
+            title={`Group: ${group}`}
+            note={otherGroup ? ADMIN_GROUP_NOTE : GROUP_NOTE}
+            badge={otherGroup ? 'Not your group' : undefined}
+          >
+            <ConnectionTable
+              caption={`Connections of the group ${group}`}
+              rows={groupRows}
+              admin={admin}
+              onRotate={(connection) => setDialog({ kind: 'rotate', connection })}
+              onDelete={(connection) => setDialog({ kind: 'delete', connection })}
+              onBreakGlass={openBreakGlass}
+            />
+          </Section>
+        )
+      })}
 
       {/* Administrators always get the card (the scope exists even while the list is in
           flight); the table needs an answer, so it waits for one. */}
@@ -192,11 +207,27 @@ export default function Connections() {
   )
 }
 
-function Section({ title, note, children }: { title: string; note: string; children: ReactNode }) {
+function Section({
+  title,
+  note,
+  badge,
+  children,
+}: {
+  title: string
+  note: string
+  /** A short word badge beside the heading; it repeats in text what the colour cannot say alone. */
+  badge?: string
+  children: ReactNode
+}) {
   return (
     <section className="card overflow-hidden">
       <div className="px-5 pt-5 pb-3">
-        <h2 className="text-lg font-semibold">{title}</h2>
+        <div className="flex flex-wrap items-center gap-2">
+          <h2 className="text-lg font-semibold">{title}</h2>
+          {badge && (
+            <span className="badge border-amber-400/40 bg-amber-400/10 text-text-dim">{badge}</span>
+          )}
+        </div>
         <p className="text-text-mute text-sm mt-1">{note}</p>
       </div>
       {/* The table scrolls inside the card, so a long name never widens the page (rule U4).
@@ -243,9 +274,17 @@ function ConnectionTable({
 }) {
   return (
     <>
-      {/* A break-glass notice belongs to the owning group and sits above its table. */}
+      {/* A break-glass notice belongs to the owning group and sits above its table. Only a
+          member gets the Rotate now action: the group's members rotate, an administrator who
+          is not one reads the banner as information (#204). */}
       {rows.map(row => row.scope === 'group' && row.breakGlass
-        ? <BreakGlassBanner key={`notice-${row.name}`} notice={row.breakGlass} onRotate={() => onRotate(row)} />
+        ? (
+          <BreakGlassBanner
+            key={`notice-${row.name}`}
+            notice={row.breakGlass}
+            onRotate={row.member === false ? undefined : () => onRotate(row)}
+          />
+        )
         : null)}
       <table className="w-full text-sm">
         <caption className="sr-only">{caption}</caption>
@@ -288,7 +327,8 @@ function BreakGlassBanner({
   onRotate,
 }: {
   notice: NonNullable<Connection['breakGlass']>
-  onRotate: () => void
+  /** Absent on a group the reader sees only as an administrator: reading is information, rotating is the group's. */
+  onRotate?: () => void
 }) {
   const by = clipped(notice.by)
   const reason = clipped(notice.reason)
@@ -304,13 +344,15 @@ function BreakGlassBanner({
             Read by <span title={by.full}>{by.shown}</span> on {noticeDate(notice.at)}:{' '}
             <span title={reason.full}>{reason.shown}</span>. Consider rotating the credential.
           </p>
-          <button
-            type="button"
-            className="btn-ghost py-1 px-2 text-xs"
-            onClick={onRotate}
-          >
-            Rotate now
-          </button>
+          {onRotate && (
+            <button
+              type="button"
+              className="btn-ghost py-1 px-2 text-xs"
+              onClick={onRotate}
+            >
+              Rotate now
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -382,11 +424,16 @@ function Row({ row, admin, onRotate, onDelete, onBreakGlass }: {
 }) {
   const changed = row.lastRotated ? Date.parse(row.lastRotated) : Number.NaN
   const settings = Object.entries(row.config)
+  // An administrator who is not a member of a group may delete its connection and read it
+  // through break-glass, but not rotate it: rotation belongs to the group's members (#204).
+  const rotatable = row.scope !== 'group' || row.member !== false
   return (
     <tr className="border-t border-border/70 hover:bg-bg-soft/30">
       <td className="td px-5">
         <div className="font-mono text-xs break-all">{row.name}</div>
-        {row.scope !== 'managed' && <UseDisclosure row={row} />}
+        {/* A non-member administrator may not use the credential: the snippet would fail, so
+            only Delete and Break-glass read are offered on that row (#204). */}
+        {row.scope !== 'managed' && row.member !== false && <UseDisclosure row={row} />}
       </td>
       <td className="td px-3 whitespace-nowrap">{connectionTypeLabel(row.type)}</td>
       <td className="td px-3">
@@ -412,14 +459,16 @@ function Row({ row, admin, onRotate, onDelete, onBreakGlass }: {
       <td className="td px-3"><Status row={row} /></td>
       <td className="td px-3">
         <div className="flex flex-wrap items-center justify-end gap-2">
-          <button
-            type="button"
-            className="btn-ghost py-1 px-2 text-xs"
-            aria-label={`Rotate ${row.name}`}
-            onClick={onRotate}
-          >
-            Rotate
-          </button>
+          {rotatable && (
+            <button
+              type="button"
+              className="btn-ghost py-1 px-2 text-xs"
+              aria-label={`Rotate ${row.name}`}
+              onClick={onRotate}
+            >
+              Rotate
+            </button>
+          )}
           <button
             type="button"
             className="btn-ghost py-1 px-2 text-xs text-bad"
