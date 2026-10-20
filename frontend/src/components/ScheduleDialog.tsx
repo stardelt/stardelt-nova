@@ -3,17 +3,36 @@ import { useQuery } from '@tanstack/react-query'
 import {
   api,
   errorMessage,
+  type CheckStatementView,
   type PipelineDetail,
+  type PipelineOptions,
+  type PipelineOptionsView,
   type PipelineView,
 } from '../api'
+import { formatTime } from '../format'
 import {
+  BACKOFF_CHOICES,
+  DEFAULT_OPTIONS,
+  MAX_PARAMS,
+  PARAM_NAME_RE,
+  RETRY_CHOICES,
+  TIMEOUT_CHOICES,
   browserTimezone,
   cronFor,
+  namedParameters,
+  parameterProblems,
+  parameterTable,
   parseSchedule,
+  placeholderChips,
+  placeholderText,
   presetForCron,
   suggestName,
+  timeoutLabel,
   timezoneChoices,
+  unknownPlaceholders,
   validateCron,
+  withCurrent,
+  type ParameterRow,
   type WhenPreset,
   type WhenState,
 } from '../schedule'
@@ -31,6 +50,12 @@ import {
  * The sentences shown for a refusal are the API's own (`{"error": "…"}`); the cron check is
  * the same function the API applies (`schedule.ts`), so the preview, the inline message and
  * the request cannot disagree.
+ *
+ * The schedule options (stardelt-nova#223, #224) live in the same dialog: a parameter table,
+ * the placeholder chips over the statement, a check that asks the engine to plan it, the next
+ * five fire times of the chosen cadence, and the advanced options under a closed `<details>`.
+ * The check and the preview never make Create wait: a refusal is the engine's sentence, a
+ * preview that fails says so and the person may still schedule.
  */
 
 /** The name rule of the `Pipeline` CRD: 1–40, a leading letter, no trailing dash. */
@@ -42,6 +67,16 @@ const NOT_IN_A_GROUP = 'You are not a member of any group, so you cannot schedul
 const CUSTOM_HINT = 'minute hour day month weekday, for example 0 3 * * *'
 const NO_STATEMENT_SENT =
   "This pipeline's statement did not arrive with the pipeline, so it is empty here. Type it to change the schedule."
+/** Under the parameter table: the loader's rule in the person's words. */
+const PARAMS_HINT = `At most ${MAX_PARAMS}. Names: lower-case letters, digits and underscores.`
+/** Over the statement: where the placeholders come from. */
+const PLACEHOLDER_HINT = 'Filled in when the run starts.'
+const NO_SCHEDULED_RUNS = 'On demand: no scheduled runs'
+const CHECK_ACCEPTED = 'Checked: the engine accepts it'
+const CHECK_UNCHECKED = 'This kind of statement cannot be checked here'
+/** How long the dialog waits after a change before asking for the next runs (ms). */
+const PREVIEW_DEBOUNCE = 400
+const PREVIEW_COUNT = 5
 
 const PRESETS: ReadonlyArray<{ id: WhenPreset; label: string }> = [
   { id: 'ondemand', label: 'On demand only' },
@@ -141,6 +176,46 @@ function statementFrom(pipeline: PipelineDetail | undefined): { sql: string; sen
   return { sql: typeof task?.sql === 'string' ? task.sql : '', sent: typeof task?.sql === 'string' }
 }
 
+/** The advanced options the dialog edits; `Forbid` is one run at a time. */
+type OptionState = {
+  retries: number
+  backoffMinutes: number
+  timeoutMinutes: number
+  concurrency: 'Allow' | 'Forbid'
+}
+
+/**
+ * Edit mode starts from the resource's options, defaults filled in; create mode and a
+ * backend that predates the field start from the defaults.
+ */
+function optionsFrom(pipeline: PipelineDetail | undefined): OptionState {
+  const view: PipelineOptionsView | null | undefined = pipeline?.options
+  return {
+    retries: view?.retries ?? DEFAULT_OPTIONS.retries,
+    backoffMinutes: view?.backoffMinutes ?? DEFAULT_OPTIONS.backoffMinutes,
+    timeoutMinutes: view?.timeoutMinutes ?? DEFAULT_OPTIONS.timeoutMinutes,
+    concurrency: view?.concurrency === 'Allow' ? 'Allow' : 'Forbid',
+  }
+}
+
+/** The parameter table as rows, by name, so edit mode shows it as the resource holds it. */
+function parameterRows(pipeline: PipelineDetail | undefined): ParameterRow[] {
+  const params = pipeline?.params ?? {}
+  return Object.keys(params).sort().map((name) => ({ name, value: params[name] }))
+}
+
+/** One row of the dialog, with a key that survives edits and removals. */
+type ParamRow = ParameterRow & { key: number }
+
+/** What the engine said about the statement; a change to either input drops it. */
+type CheckOutcome =
+  | { kind: 'idle' }
+  | { kind: 'checking' }
+  | { kind: 'accepted' }
+  | { kind: 'refused'; message: string }
+  | { kind: 'unchecked' }
+  | { kind: 'failed'; message: string }
+
 export default function ScheduleDialog({
   mode,
   sql,
@@ -171,13 +246,24 @@ export default function ScheduleDialog({
   const statementId = `${prefix}-statement`
   const counterId = `${prefix}-counter`
   const nameHintId = `${prefix}-name-hint`
+  const placeholderHintId = `${prefix}-placeholder-hint`
+  const paramsHintId = `${prefix}-params-hint`
+  const nextRunsId = `${prefix}-next-runs`
+  const runsName = `${prefix}-runs`
+  const retriesId = `${prefix}-retries`
+  const backoffId = `${prefix}-backoff`
+  const timeoutId = `${prefix}-timeout`
   const inFlight = useRef(false)
+  const nextKey = useRef(1)
+  const statementRef = useRef<HTMLTextAreaElement | null>(null)
 
   const seed = useMemo(() => whenFrom(pipeline), [pipeline])
   const initialStatement = useMemo(
     () => (editing ? statementFrom(pipeline) : { sql: sql ?? '', sent: true }),
     [editing, pipeline, sql],
   )
+  /** The caret the last edit left in the statement; a chip inserts there. */
+  const caret = useRef({ start: initialStatement.sql.length, end: initialStatement.sql.length })
 
   const [name, setName] = useState(() => (editing ? pipeline?.name ?? '' : suggestName(sql ?? '')))
   const [nameTouched, setNameTouched] = useState(editing)
@@ -192,6 +278,11 @@ export default function ScheduleDialog({
     return parsed.timezone ?? browserTimezone()
   })
   const [statement, setStatement] = useState(initialStatement.sql)
+  const [params, setParams] = useState<ParamRow[]>(() =>
+    parameterRows(pipeline).map((row) => ({ ...row, key: nextKey.current++ })),
+  )
+  const [options, setOptions] = useState<OptionState>(() => optionsFrom(pipeline))
+  const [check, setCheck] = useState<CheckOutcome>({ kind: 'idle' })
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -246,6 +337,102 @@ export default function ScheduleDialog({
   const groupReady = editing || (selected?.ready ?? false)
   const scheduleOk = !wantsSchedule || (cron !== null && cronError === null && timezone !== '')
 
+  // The parameter table and the placeholders: the same rules the API applies (#223). Names in
+  // the table that are outside the loader's rule are not offered as chips and do not count as
+  // defined, so a statement cannot look valid while the API would refuse the write.
+  const written = namedParameters(params)
+  const definedNames = written
+    .map((row) => row.name)
+    .filter((paramName) => PARAM_NAME_RE.test(paramName))
+  const chips = placeholderChips(definedNames)
+  const problems = parameterProblems(params)
+  const parametersOk = problems.length === 0
+  const table = parameterTable(params)
+  const unknown = unknownPlaceholders(statement, definedNames)
+
+  // A verdict is about one statement with one parameter table; changing either drops it.
+  const checkSignature = JSON.stringify([statementText, table])
+  useEffect(() => {
+    setCheck((current) => (current.kind === 'idle' ? current : { kind: 'idle' }))
+  }, [checkSignature])
+
+  // The next runs follow the fields after a pause, not on every keystroke: one preview request
+  // per settled cadence. On demand has no runs to ask about.
+  const [previewInput, setPreviewInput] = useState<{ cron: string; timezone: string } | null>(null)
+  useEffect(() => {
+    if (!wantsSchedule || cron === null || cronError !== null || timezone === '') {
+      setPreviewInput(null)
+      return
+    }
+    const timer = window.setTimeout(() => setPreviewInput({ cron, timezone }), PREVIEW_DEBOUNCE)
+    return () => window.clearTimeout(timer)
+  }, [wantsSchedule, cron, cronError, timezone])
+
+  const preview = useQuery({
+    queryKey: ['schedule-preview', previewInput?.cron ?? '', previewInput?.timezone ?? ''],
+    queryFn: () =>
+      previewInput
+        ? api.previewSchedule({ cron: previewInput.cron, timezone: previewInput.timezone, count: PREVIEW_COUNT })
+        : Promise.resolve({ runs: [] }),
+    enabled: previewInput !== null,
+    staleTime: 60_000,
+    retry: false,
+  })
+  const previewRuns = Array.isArray(preview.data?.runs) ? preview.data.runs : []
+
+  function updateParameter(key: number, field: 'name' | 'value', value: string) {
+    setParams((rows) => rows.map((row) => (row.key === key ? { ...row, [field]: value } : row)))
+  }
+
+  function addParameter() {
+    setParams((rows) =>
+      rows.length >= MAX_PARAMS ? rows : [...rows, { key: nextKey.current++, name: '', value: '' }],
+    )
+  }
+
+  function removeParameter(key: number) {
+    setParams((rows) => rows.filter((row) => row.key !== key))
+  }
+
+  /** Remember where the caret is, so a chip inserts there rather than at the end. */
+  function rememberCaret() {
+    const field = statementRef.current
+    if (!field) return
+    caret.current = { start: field.selectionStart ?? 0, end: field.selectionEnd ?? 0 }
+  }
+
+  /** Insert a placeholder's text at the caret and put the caret after it (text only). */
+  function insertPlaceholder(text: string) {
+    const field = statementRef.current
+    const length = statement.length
+    const start = Math.min(Math.max(caret.current.start, 0), length)
+    const end = Math.min(Math.max(caret.current.end, start), length)
+    const next = (statement.slice(0, start) + text + statement.slice(end)).slice(0, MAX_STATEMENT)
+    const at = Math.min(start + text.length, next.length)
+    setStatement(next)
+    caret.current = { start: at, end: at }
+    requestAnimationFrame(() => {
+      field?.focus()
+      field?.setSelectionRange(at, at)
+      caret.current = { start: at, end: at }
+    })
+  }
+
+  async function checkStatement() {
+    if (check.kind === 'checking' || statementText === '' || !parametersOk || unknown.length > 0) return
+    setCheck({ kind: 'checking' })
+    try {
+      const answer: CheckStatementView = await api.checkStatement({ sql: statementText, params: table })
+      if (!answer.checked) setCheck({ kind: 'unchecked' })
+      else if (answer.ok) setCheck({ kind: 'accepted' })
+      else setCheck({ kind: 'refused', message: answer.message ?? 'the statement was refused' })
+    } catch (e: unknown) {
+      // The check is advice, never a gate: the sentence stays beside the statement, Create is
+      // unaffected.
+      setCheck({ kind: 'failed', message: errorMessage(e) })
+    }
+  }
+
   const disabled =
     submitting ||
     !nameOk ||
@@ -253,7 +440,9 @@ export default function ScheduleDialog({
     !groupReady ||
     statementText === '' ||
     (editing && !group) ||
-    !scheduleOk
+    !scheduleOk ||
+    !parametersOk ||
+    unknown.length > 0
 
   async function submit(event: FormEvent) {
     event.preventDefault()
@@ -264,10 +453,30 @@ export default function ScheduleDialog({
     const schedule = wantsSchedule && cron !== null
       ? { cron, timezone }
       : null
+    // `PUT` describes the whole editable state: an omitted `params` would remove the table and
+    // an omitted option would reset it. The dialog always sends all four fields.
+    const optionsBody: PipelineOptions = {
+      retries: options.retries,
+      backoffMinutes: options.backoffMinutes,
+      timeoutMinutes: options.timeoutMinutes,
+      concurrency: options.concurrency,
+    }
     try {
       const view = editing && pipeline
-        ? await api.updatePipeline(pipeline.namespace, pipeline.name, { sql: statementText, schedule })
-        : await api.createPipeline({ name, ownerGroup: group, sql: statementText, schedule })
+        ? await api.updatePipeline(pipeline.namespace, pipeline.name, {
+            sql: statementText,
+            schedule,
+            params: table,
+            options: optionsBody,
+          })
+        : await api.createPipeline({
+            name,
+            ownerGroup: group,
+            sql: statementText,
+            schedule,
+            params: table,
+            options: optionsBody,
+          })
       onScheduled(view)
     } catch (e: unknown) {
       // The API's own sentence, kept beside the fields it is about.
@@ -469,21 +678,102 @@ export default function ScheduleDialog({
           </select>
         </label>
 
+        <section aria-labelledby={nextRunsId}>
+          <h3 id={nextRunsId} className="label mb-1.5">Next runs</h3>
+          {!wantsSchedule ? (
+            <p className="text-sm text-text-mute">{NO_SCHEDULED_RUNS}</p>
+          ) : cron === null || cronError !== null || timezone === '' ? (
+            <p className="text-sm text-text-mute">The next runs appear once the schedule is valid.</p>
+          ) : preview.isError ? (
+            <p role="alert" className="text-sm text-bad break-words">{errorMessage(preview.error)}</p>
+          ) : preview.isLoading ? (
+            <p className="text-sm text-text-mute">Reading the next runs…</p>
+          ) : previewRuns.length === 0 ? (
+            <p className="text-sm text-text-mute">{NO_SCHEDULED_RUNS}</p>
+          ) : (
+            <ol className="space-y-0.5">
+              {previewRuns.map((run) => (
+                <li key={run} className="font-mono text-xs text-text-dim break-all">{formatTime(run, timezone)}</li>
+              ))}
+            </ol>
+          )}
+        </section>
+
         <div>
-          <label htmlFor={statementId} className="block">
-            <span className="label block mb-1.5">Statement</span>
-            <textarea
-              id={statementId}
-              className="input font-mono"
-              rows={5}
-              maxLength={MAX_STATEMENT}
-              value={statement}
-              spellCheck={false}
-              aria-describedby={counterId}
-              data-autofocus={editing ? '' : undefined}
-              onChange={(event) => setStatement(event.target.value)}
-            />
-          </label>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <label htmlFor={statementId} className="label">Statement</label>
+            <button
+              type="button"
+              className="btn-ghost py-1 px-2 text-xs"
+              disabled={statementText === '' || !parametersOk || unknown.length > 0 || check.kind === 'checking'}
+              onClick={() => void checkStatement()}
+            >
+              Check statement
+            </button>
+          </div>
+          <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+            {chips.map((chip) => (
+              <button
+                key={chip}
+                type="button"
+                className="badge border-border bg-bg-soft font-mono text-xs text-text-dim hover:text-text"
+                title={`Insert ${placeholderText(chip)}`}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => insertPlaceholder(placeholderText(chip))}
+              >
+                {placeholderText(chip)}
+              </button>
+            ))}
+          </div>
+          <p id={placeholderHintId} className="mt-1 text-xs text-text-mute">{PLACEHOLDER_HINT}</p>
+          <textarea
+            ref={statementRef}
+            id={statementId}
+            className="input font-mono mt-2"
+            rows={5}
+            maxLength={MAX_STATEMENT}
+            value={statement}
+            spellCheck={false}
+            aria-describedby={`${placeholderHintId} ${counterId}`}
+            data-autofocus={editing ? '' : undefined}
+            onSelect={rememberCaret}
+            onClick={rememberCaret}
+            onKeyUp={rememberCaret}
+            onFocus={rememberCaret}
+            onChange={(event) => {
+              setStatement(event.target.value)
+              caret.current = {
+                start: event.target.selectionStart ?? 0,
+                end: event.target.selectionEnd ?? 0,
+              }
+            }}
+          />
+          {unknown.length > 0 && (
+            <div role="alert" className="mt-1 text-xs text-bad">
+              <ul className="space-y-0.5">
+                {unknown.map((placeholder) => (
+                  <li key={placeholder} className="break-words">
+                    unknown placeholder <span className="font-mono">{placeholderText(placeholder)}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {check.kind === 'checking' && (
+            <p className="mt-1 text-xs text-text-mute">Checking the statement…</p>
+          )}
+          {check.kind === 'accepted' && (
+            <p role="status" className="mt-1 text-xs text-ok break-words">{CHECK_ACCEPTED}</p>
+          )}
+          {check.kind === 'unchecked' && (
+            <p role="status" className="mt-1 text-xs text-text-mute break-words">{CHECK_UNCHECKED}</p>
+          )}
+          {check.kind === 'refused' && (
+            <p role="alert" className="mt-1 text-xs text-bad break-words">The engine says: {check.message}</p>
+          )}
+          {check.kind === 'failed' && (
+            <p role="alert" className="mt-1 text-xs text-bad break-words">{check.message}</p>
+          )}
           <div className="mt-1 flex flex-wrap items-start justify-between gap-2">
             {editing && !initialStatement.sent ? (
               <p className="text-xs text-text-mute break-words">{NO_STATEMENT_SENT}</p>
@@ -495,6 +785,154 @@ export default function ScheduleDialog({
             </p>
           </div>
         </div>
+
+        <fieldset className="min-w-0">
+          <legend className="label mb-2">Parameters</legend>
+          {written.length === 0 && (
+            <p className="text-sm text-text-mute">
+              No parameters. Add one and use it as a placeholder in the statement.
+            </p>
+          )}
+          {params.length > 0 && (
+            <div className="space-y-2">
+              {params.map((row, index) => {
+                const nameInvalid = row.name === ''
+                  ? row.value !== ''
+                  : !PARAM_NAME_RE.test(row.name)
+                return (
+                  <div
+                    key={row.key}
+                    className="grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,10rem)_minmax(0,1fr)_auto] sm:items-center"
+                  >
+                    <input
+                      className="input font-mono"
+                      aria-label={`Parameter ${index + 1} name`}
+                      aria-invalid={nameInvalid ? true : undefined}
+                      aria-describedby={paramsHintId}
+                      value={row.name}
+                      maxLength={32}
+                      placeholder="name"
+                      autoComplete="off"
+                      spellCheck={false}
+                      onChange={(event) => updateParameter(row.key, 'name', event.target.value)}
+                    />
+                    <input
+                      className="input font-mono"
+                      aria-label={`Parameter ${index + 1} value`}
+                      value={row.value}
+                      maxLength={256}
+                      placeholder="value"
+                      autoComplete="off"
+                      spellCheck={false}
+                      onChange={(event) => updateParameter(row.key, 'value', event.target.value)}
+                    />
+                    <button
+                      type="button"
+                      className="btn-ghost py-1.5 px-2 text-xs justify-self-start sm:justify-self-auto"
+                      aria-label={`Remove parameter ${index + 1}`}
+                      onClick={() => removeParameter(row.key)}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+          <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1">
+            <button
+              type="button"
+              className="btn-ghost py-1 px-2 text-xs"
+              disabled={params.length >= MAX_PARAMS}
+              onClick={addParameter}
+            >
+              Add parameter
+            </button>
+            <p id={paramsHintId} className="text-xs text-text-mute">{PARAMS_HINT}</p>
+          </div>
+          {problems.length > 0 && (
+            <ul className="mt-1 space-y-0.5 text-xs text-bad">
+              {problems.map((problem) => <li key={problem} className="break-words">{problem}</li>)}
+            </ul>
+          )}
+        </fieldset>
+
+        <details className="rounded-[10px] border border-border bg-bg-soft/30">
+          <summary className="cursor-pointer select-none px-3 py-2 text-sm font-medium">Advanced</summary>
+          <div className="space-y-4 border-t border-border/70 px-3 py-3">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <label htmlFor={retriesId} className="block">
+                <span className="label block mb-1.5">Retries</span>
+                <select
+                  id={retriesId}
+                  className="input"
+                  value={options.retries}
+                  onChange={(event) => setOptions((current) => ({ ...current, retries: Number(event.target.value) }))}
+                >
+                  {withCurrent(RETRY_CHOICES, options.retries).map((value) => (
+                    <option key={value} value={value}>
+                      {value === 0 ? 'No retries' : `${value} ${value === 1 ? 'retry' : 'retries'}`}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label htmlFor={backoffId} className="block">
+                <span className="label block mb-1.5">Wait between retries</span>
+                <select
+                  id={backoffId}
+                  className="input"
+                  value={options.backoffMinutes}
+                  onChange={(event) => setOptions((current) => ({ ...current, backoffMinutes: Number(event.target.value) }))}
+                >
+                  {withCurrent(BACKOFF_CHOICES, options.backoffMinutes).map((value) => (
+                    <option key={value} value={value}>{value === 1 ? '1 minute' : `${value} minutes`}</option>
+                  ))}
+                </select>
+              </label>
+              <label htmlFor={timeoutId} className="block">
+                <span className="label block mb-1.5">Time limit</span>
+                <select
+                  id={timeoutId}
+                  className="input"
+                  value={options.timeoutMinutes}
+                  onChange={(event) => setOptions((current) => ({ ...current, timeoutMinutes: Number(event.target.value) }))}
+                >
+                  {withCurrent(TIMEOUT_CHOICES.map((choice) => choice.value), options.timeoutMinutes).map((value) => (
+                    <option key={value} value={value}>{timeoutLabel(value)}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <fieldset>
+              <legend className="label mb-1.5">Runs</legend>
+              <div className="grid gap-2 sm:grid-cols-2">
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="radio"
+                    name={runsName}
+                    value="Forbid"
+                    checked={options.concurrency === 'Forbid'}
+                    onChange={() => setOptions((current) => ({ ...current, concurrency: 'Forbid' }))}
+                  />
+                  <span>One run at a time</span>
+                </label>
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="radio"
+                    name={runsName}
+                    value="Allow"
+                    checked={options.concurrency === 'Allow'}
+                    onChange={() => setOptions((current) => ({ ...current, concurrency: 'Allow' }))}
+                  />
+                  <span>Allow runs in parallel</span>
+                </label>
+              </div>
+            </fieldset>
+            <p className="text-xs text-text-mute">
+              A failed attempt is tried again after the wait. The time limit stops a run that takes too long.
+            </p>
+          </div>
+        </details>
 
         {group !== '' && (
           <p className="text-sm text-text-dim break-words">

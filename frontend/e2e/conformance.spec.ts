@@ -2023,6 +2023,20 @@ test.describe('schedule', () => {
       if (path === '/api/pipelines/principals' && method === 'GET') return json(route, { groups })
       if (path === '/api/pipelines' && method === 'GET') return json(route, { pipelines: rows })
       if (method !== 'GET' && write?.(route, path, method, request.postData())) return
+      // The options of stardelt-nova#224 ask two more routes without changing the write:
+      // a settled cadence previews its next runs and a statement can be checked.
+      if (path === '/api/pipelines/preview-schedule' && method === 'POST') {
+        return json(route, {
+          runs: [
+            '2026-10-21T03:00:00+02:00',
+            '2026-10-22T03:00:00+02:00',
+            '2026-10-23T03:00:00+02:00',
+            '2026-10-24T03:00:00+02:00',
+            '2026-10-25T03:00:00+02:00',
+          ],
+        })
+      }
+      if (path === '/api/pipelines/check' && method === 'POST') return json(route, { checked: true, ok: true })
       if (method === 'GET' && detail
         && path === `/api/pipelines/${NS}/${encodeURIComponent(String(detail.name))}`) {
         return json(route, detail)
@@ -2219,6 +2233,8 @@ test.describe('schedule', () => {
       ownerGroup: 'analytics',
       sql: 'select 1',
       schedule: { cron: '0 3 * * *', timezone: 'Europe/Berlin' },
+      params: {},
+      options: { retries: 1, backoffMinutes: 5, timeoutMinutes: 120, concurrency: 'Forbid' },
     })
     expect(await first.page.getByRole('dialog').count()).toBe(0)
     await first.context.close()
@@ -2246,7 +2262,7 @@ test.describe('schedule', () => {
     await context.close()
   })
 
-  test('edit changes only sql and schedule, and delete asks once', async ({ browser }) => {
+  test('edit sends the complete editable state, and delete asks once', async ({ browser }) => {
     const detail = { ...pipeline(), runs: [], params: {}, retries: null }
     const { context, page, requests } = await open(browser, {
       start: `/pipelines/${NS}/team-smoke`,
@@ -2278,8 +2294,13 @@ test.describe('schedule', () => {
     const puts = requests.filter((request) => request.method === 'PUT')
     expect(puts.map((request) => new URL(request.url).pathname)).toEqual([`/api/pipelines/${NS}/team-smoke`])
     const putBody = JSON.parse(puts[0].body ?? '{}') as Record<string, unknown>
-    expect(Object.keys(putBody).sort()).toEqual(['schedule', 'sql'])
-    expect(putBody).toEqual({ sql: 'select 1', schedule: { cron: '0 4 * * *', timezone: 'Europe/Berlin' } })
+    expect(Object.keys(putBody).sort()).toEqual(['options', 'params', 'schedule', 'sql'])
+    expect(putBody).toEqual({
+      sql: 'select 1',
+      schedule: { cron: '0 4 * * *', timezone: 'Europe/Berlin' },
+      params: {},
+      options: { retries: 1, backoffMinutes: 5, timeoutMinutes: 120, concurrency: 'Forbid' },
+    })
 
     const opener = page.getByRole('button', { name: 'Delete pipeline' })
     await opener.click()
@@ -2402,6 +2423,458 @@ test.describe('schedule', () => {
     await page.getByRole('button', { name: 'Delete pipeline' }).click()
     await expect(page.getByRole('dialog', { name: 'Delete team-smoke?' })).toBeVisible()
     expect((await auditPage(page)).filter((finding) => finding.rule === 'U5')).toEqual([])
+    await context.close()
+  })
+})
+
+test.describe('schedule options', () => {
+  // The dialog's parameters, placeholder chips, statement check, next runs and advanced
+  // options (stardelt-nova#223 API, #224 dialog). Every `/api/**` call is stubbed; the
+  // preview and check routes may be replaced per test.
+  const NS = 'stardelt'
+  const ME = {
+    user: 'alice', auth_mode: 'oidc', demo: false, warehouse: 'warehouse',
+    is_admin: true, groups: ['analytics', 'finance'],
+  }
+  const READY = { group: 'analytics', principal: 'pipeline-analytics', ready: true, message: null }
+  const READY_2 = { group: 'finance', principal: 'pipeline-finance', ready: true, message: null }
+  const EVIL = '<img src=x onerror="window.__xss=1">'
+  /** Five fire times in Europe/Berlin; the last is after the October change, so no DST edge. */
+  const RUNS = [
+    '2026-10-21T03:00:00+02:00',
+    '2026-10-22T03:00:00+02:00',
+    '2026-10-23T03:00:00+02:00',
+    '2026-10-24T03:00:00+02:00',
+    '2026-10-26T03:00:00+01:00',
+  ]
+
+  type Recorded = { method: string; url: string; body: string | null }
+  type CheckBody = { sql?: string; params?: Record<string, string> }
+  type PreviewBody = { cron?: string; timezone?: string; count?: number }
+
+  function pipeline(overrides: Record<string, unknown> = {}) {
+    return {
+      name: 'team-smoke',
+      namespace: NS,
+      ownerGroup: 'analytics',
+      schedule: '0 3 * * * (Europe/Berlin)',
+      paused: false,
+      loaded: true,
+      nextRun: null,
+      state: 'idle',
+      lastRun: null,
+      tasks: [{ name: 'run', kind: 'sql', sql: 'select 1' }],
+      runAs: 'pipeline-analytics',
+      concurrency: 'Forbid',
+      createdAt: '2026-10-19T10:00:00Z',
+      runs: [],
+      params: {},
+      retries: null,
+      options: { retries: 1, backoffMinutes: 5, timeoutMinutes: 120, concurrency: 'Forbid' },
+      ...overrides,
+    }
+  }
+
+  /** The editor or a pipeline page with every `/api/**` call stubbed. */
+  async function open(browser: Browser, {
+    start = '/query',
+    detail,
+    write,
+    check,
+    preview,
+    timezoneId = 'Europe/Berlin',
+    init,
+  }: {
+    start?: string
+    detail?: Record<string, unknown>
+    write?: (route: Route, path: string, method: string, body: string | null) => boolean
+    check?: (body: CheckBody) => unknown
+    preview?: (route: Route, body: PreviewBody) => void
+    timezoneId?: string
+    init?: () => void
+  } = {}) {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, timezoneId })
+    const page = await context.newPage()
+    if (init) await page.addInitScript(init)
+    const requests: Recorded[] = []
+    page.on('request', (request) => requests.push({
+      method: request.method(),
+      url: request.url(),
+      body: request.postData(),
+    }))
+    await page.route('**/api/**', (route) => {
+      const request = route.request()
+      const path = new URL(request.url()).pathname
+      const method = request.method()
+      const parsed = (): unknown => {
+        try {
+          return JSON.parse(request.postData() ?? '{}')
+        } catch {
+          return {}
+        }
+      }
+      if (path === '/api/me' && method === 'GET') return json(route, ME)
+      if (path === '/api/catalog/namespaces' && method === 'GET') return json(route, { namespaces: [] })
+      if (path === '/api/pipelines/principals' && method === 'GET') return json(route, { groups: [READY, READY_2] })
+      if (path === '/api/pipelines' && method === 'GET') return json(route, { pipelines: [] })
+      if (method !== 'GET' && write?.(route, path, method, request.postData())) return
+      if (path === '/api/pipelines/check' && method === 'POST') {
+        return json(route, check ? check(parsed() as CheckBody) : { checked: true, ok: true })
+      }
+      if (path === '/api/pipelines/preview-schedule' && method === 'POST') {
+        if (preview) return preview(route, parsed() as PreviewBody)
+        return json(route, { runs: RUNS })
+      }
+      if (method === 'GET' && detail
+        && path === `/api/pipelines/${NS}/${encodeURIComponent(String(detail.name))}`) {
+        return json(route, detail)
+      }
+      return json(route, [])
+    })
+    await page.goto(start)
+    return { context, page, requests }
+  }
+
+  async function openDialog(page: Page): Promise<Locator> {
+    await page.getByRole('button', { name: 'Schedule this statement' }).click()
+    const dialog = page.getByRole('dialog', { name: 'Schedule this statement' })
+    await expect(dialog).toBeVisible()
+    return dialog
+  }
+
+  /** The JSON bodies of one route's requests, oldest first. */
+  function bodies(requests: Recorded[], path: string, method = 'POST'): Array<Record<string, unknown>> {
+    return requests
+      .filter((request) => request.method === method && new URL(request.url).pathname === path)
+      .map((request) => JSON.parse(request.body ?? '{}') as Record<string, unknown>)
+  }
+
+  test('param_rows_validate_and_are_sent', async ({ browser }) => {
+    let posted: Record<string, unknown> | null = null
+    const { context, page } = await open(browser, {
+      write: (route, path, method, requestBody) => {
+        if (path !== '/api/pipelines' || method !== 'POST') return false
+        posted = JSON.parse(requestBody ?? '{}') as Record<string, unknown>
+        json(route, { ...pipeline({ name: 'param-run' }), params: { days: '2026-10-20' } }, 201)
+        return true
+      },
+    })
+    await page.getByLabel('SQL query').fill("select * from t where ds = '${params.days}'")
+    const dialog = await openDialog(page)
+    const create = dialog.getByRole('button', { name: 'Create schedule' })
+    await expect(dialog.getByText('No parameters.', { exact: false })).toBeVisible()
+    // The statement names a parameter the table does not define, so Create waits.
+    await expect(dialog.getByText('unknown placeholder ${params.days}', { exact: true })).toBeVisible()
+    await expect(create).toBeDisabled()
+
+    await dialog.getByRole('button', { name: 'Add parameter' }).click()
+    const name = dialog.getByRole('textbox', { name: 'Parameter 1 name' })
+    const value = dialog.getByRole('textbox', { name: 'Parameter 1 value' })
+    await name.fill('Days')
+    await expect(dialog.getByText('parameter names are lower-case letters, digits and underscores', { exact: true })).toBeVisible()
+    await expect(create).toBeDisabled()
+    await name.fill('days')
+    await expect(dialog.getByText('parameter names are lower-case letters, digits and underscores', { exact: true })).toHaveCount(0)
+
+    // Two rows with one name would collapse silently in the resource's map: refused here.
+    await dialog.getByRole('button', { name: 'Add parameter' }).click()
+    await dialog.getByRole('textbox', { name: 'Parameter 2 name' }).fill('days')
+    await expect(dialog.getByText('two parameters have the same name', { exact: true })).toBeVisible()
+    await expect(create).toBeDisabled()
+    await dialog.getByRole('button', { name: 'Remove parameter 2' }).click()
+
+    await value.fill('2026-10-20')
+    await expect(dialog.getByText('unknown placeholder ${params.days}', { exact: true })).toHaveCount(0)
+    await expect(dialog.getByText('parameter names are lower-case letters, digits and underscores', { exact: true })).toHaveCount(0)
+    await expect(create).toBeEnabled()
+
+    // At most 16 rows; an empty row is not a parameter and does not block Create.
+    for (let i = 0; i < 15; i += 1) await dialog.getByRole('button', { name: 'Add parameter' }).click()
+    await expect(dialog.getByRole('button', { name: 'Add parameter' })).toBeDisabled()
+    await expect(create).toBeEnabled()
+    await dialog.getByRole('button', { name: 'Remove parameter 16' }).click()
+    await expect(dialog.getByRole('button', { name: 'Add parameter' })).toBeEnabled()
+
+    await dialog.getByRole('textbox', { name: 'Name', exact: true }).fill('param-run')
+    await create.click()
+    expect(posted).toEqual({
+      name: 'param-run',
+      ownerGroup: 'analytics',
+      sql: "select * from t where ds = '${params.days}'",
+      schedule: { cron: '0 3 * * *', timezone: 'Europe/Berlin' },
+      params: { days: '2026-10-20' },
+      options: { retries: 1, backoffMinutes: 5, timeoutMinutes: 120, concurrency: 'Forbid' },
+    })
+    await context.close()
+  })
+
+  test('chips_insert_at_the_caret', async ({ browser }) => {
+    const { context, page } = await open(browser)
+    await page.getByLabel('SQL query').fill("select * from t where ds = ''")
+    const dialog = await openDialog(page)
+    await dialog.getByRole('button', { name: 'Add parameter' }).click()
+    await dialog.getByRole('textbox', { name: 'Parameter 1 name' }).fill('days')
+    const statement = dialog.getByRole('textbox', { name: 'Statement', exact: true })
+
+    // Put the caret between the two quotes; the chip must not append at the end.
+    await statement.evaluate((element) => {
+      const field = element as HTMLTextAreaElement
+      field.focus()
+      const at = field.value.indexOf("''") + 1
+      field.setSelectionRange(at, at)
+    })
+    await dialog.getByRole('button', { name: '${run.date}', exact: true }).click()
+    await expect(statement).toHaveValue("select * from t where ds = '${run.date}'")
+    await expect.poll(() => statement.evaluate((element) => (element as HTMLTextAreaElement).selectionStart))
+      .toBe("select * from t where ds = '${run.date}".length)
+
+    await dialog.getByRole('button', { name: '${params.days}', exact: true }).click()
+    await expect(statement).toHaveValue("select * from t where ds = '${run.date}${params.days}'")
+    await expect(dialog.getByText('Filled in when the run starts.', { exact: true })).toBeVisible()
+    // Every chip is offered: the run's two values and one per named parameter.
+    for (const name of ['${run.date}', '${run.id}', '${params.days}']) {
+      await expect(dialog.getByRole('button', { name, exact: true })).toBeVisible()
+    }
+    await context.close()
+  })
+
+  test('unknown_placeholder_blocks_create', async ({ browser }) => {
+    const { context, page } = await open(browser)
+    await page.getByLabel('SQL query').fill("select * from t where ds = '${params.nope}' and id = '${run.id}'")
+    const dialog = await openDialog(page)
+    const create = dialog.getByRole('button', { name: 'Create schedule' })
+    await expect(dialog.getByText('unknown placeholder ${params.nope}', { exact: true })).toBeVisible()
+    await expect(create).toBeDisabled()
+
+    await dialog.getByRole('button', { name: 'Add parameter' }).click()
+    await dialog.getByRole('textbox', { name: 'Parameter 1 name' }).fill('nope')
+    await expect(dialog.getByText('unknown placeholder ${params.nope}', { exact: true })).toHaveCount(0)
+    await expect(create).toBeEnabled()
+
+    // A `params.x` without a row is the same refusal, named the same way.
+    await dialog.getByRole('textbox', { name: 'Statement', exact: true })
+      .fill("select * from t where ds = '${params.days}'")
+    await expect(dialog.getByText('unknown placeholder ${params.days}', { exact: true })).toBeVisible()
+    await expect(create).toBeDisabled()
+    await context.close()
+  })
+
+  test('advanced_defaults_and_values_sent', async ({ browser }) => {
+    let posted: Record<string, unknown> | null = null
+    const { context, page } = await open(browser, {
+      write: (route, path, method, requestBody) => {
+        if (path !== '/api/pipelines' || method !== 'POST') return false
+        posted = JSON.parse(requestBody ?? '{}') as Record<string, unknown>
+        json(route, pipeline({ name: 'advanced-run' }), 201)
+        return true
+      },
+    })
+    await page.getByLabel('SQL query').fill('select 1')
+    const dialog = await openDialog(page)
+    // Native `<details>`, closed by default: the fields are not on screen yet.
+    await expect(dialog.getByRole('combobox', { name: 'Retries', exact: true })).toHaveCount(0)
+    await dialog.getByText('Advanced', { exact: true }).click()
+
+    const retries = dialog.getByRole('combobox', { name: 'Retries', exact: true })
+    const backoff = dialog.getByRole('combobox', { name: 'Wait between retries', exact: true })
+    const limit = dialog.getByRole('combobox', { name: 'Time limit', exact: true })
+    await expect(retries).toHaveValue('1')
+    await expect(backoff).toHaveValue('5')
+    await expect(limit).toHaveValue('120')
+    await expect(dialog.getByRole('radio', { name: 'One run at a time' })).toBeChecked()
+
+    await retries.selectOption('3')
+    await backoff.selectOption('10')
+    await limit.selectOption('360')
+    await dialog.getByRole('radio', { name: 'Allow runs in parallel' }).check()
+    await dialog.getByRole('textbox', { name: 'Name', exact: true }).fill('advanced-run')
+    await dialog.getByRole('button', { name: 'Create schedule' }).click()
+
+    expect(posted).not.toBeNull()
+    expect((posted as Record<string, unknown>).options).toEqual({
+      retries: 3,
+      backoffMinutes: 10,
+      timeoutMinutes: 360,
+      concurrency: 'Allow',
+    })
+    await context.close()
+  })
+
+  test('check_shows_the_three_outcomes', async ({ browser }) => {
+    const checks: Array<Record<string, unknown>> = []
+    const { context, page, requests } = await open(browser, {
+      check: (body) => {
+        checks.push(body as Record<string, unknown>)
+        const sql = body.sql ?? ''
+        if (sql.startsWith('drop')) return { checked: false }
+        if (sql.includes('missing')) {
+          return { checked: true, ok: false, message: 'Table warehouse.default.missing does not exist' }
+        }
+        return { checked: true, ok: true }
+      },
+    })
+    await page.getByLabel('SQL query').fill('select 1')
+    const dialog = await openDialog(page)
+    const check = dialog.getByRole('button', { name: 'Check statement' })
+    const create = dialog.getByRole('button', { name: 'Create schedule' })
+
+    await check.click()
+    await expect(dialog.getByRole('status').filter({ hasText: 'Checked: the engine accepts it' })).toBeVisible()
+
+    await dialog.getByRole('textbox', { name: 'Statement', exact: true }).fill('drop table x')
+    await expect(dialog.getByText('Checked: the engine accepts it', { exact: true })).toHaveCount(0)
+    await check.click()
+    await expect(dialog.getByRole('status')).toHaveText('This kind of statement cannot be checked here')
+    await expect(create).toBeEnabled()
+
+    await dialog.getByRole('textbox', { name: 'Statement', exact: true }).fill('select * from missing')
+    await check.click()
+    await expect(dialog.getByRole('alert')).toHaveText(
+      'The engine says: Table warehouse.default.missing does not exist',
+    )
+    await expect(create).toBeEnabled()
+
+    // The check carries the parameter table: the engine sees the statement it would plan.
+    await dialog.getByRole('textbox', { name: 'Statement', exact: true })
+      .fill("select * from t where ds = '${params.days}'")
+    await dialog.getByRole('button', { name: 'Add parameter' }).click()
+    await dialog.getByRole('textbox', { name: 'Parameter 1 name' }).fill('days')
+    await dialog.getByRole('textbox', { name: 'Parameter 1 value' }).fill('2026-10-20')
+    await check.click()
+    await expect.poll(() => checks.length).toBe(4)
+    expect(checks[3]).toEqual({
+      sql: "select * from t where ds = '${params.days}'",
+      params: { days: '2026-10-20' },
+    })
+    expect(bodies(requests, '/api/pipelines/check')).toHaveLength(4)
+    await context.close()
+  })
+
+  test('next_runs_listed_and_debounced', async ({ browser }) => {
+    const previews: Array<Record<string, unknown>> = []
+    const { context, page } = await open(browser, {
+      preview: (route, requestBody) => {
+        previews.push(requestBody as Record<string, unknown>)
+        json(route, { runs: RUNS })
+      },
+    })
+    const dialog = await openDialog(page)
+    // The default cadence asks once, after the pause.
+    await expect.poll(() => previews.length).toBe(1)
+    expect(previews[0]).toEqual({ cron: '0 3 * * *', timezone: 'Europe/Berlin', count: 5 })
+    for (const run of RUNS) {
+      await expect(dialog.getByText(formatTime(run, 'Europe/Berlin'), { exact: true })).toBeVisible()
+    }
+
+    // Three quick changes settle into one request for the last cadence.
+    const before = previews.length
+    const time = dialog.getByRole('textbox', { name: 'Time of day', exact: true })
+    await time.fill('04:00')
+    await time.fill('04:30')
+    await time.fill('05:00')
+    await expect.poll(() => previews.length).toBe(before + 1)
+    expect(previews[previews.length - 1]).toEqual({
+      cron: '0 5 * * *', timezone: 'Europe/Berlin', count: 5,
+    })
+
+    // On demand asks nothing and says so.
+    const settled = previews.length
+    await dialog.getByRole('radio', { name: 'On demand only' }).check()
+    await expect(dialog.getByText('On demand: no scheduled runs', { exact: true })).toBeVisible()
+    await page.waitForTimeout(700)
+    expect(previews.length).toBe(settled)
+    await context.close()
+  })
+
+  test('next_runs_show_the_api_sentence', async ({ browser }) => {
+    const { context, page } = await open(browser, {
+      preview: (route) => json(route, { error: 'the scheduler cannot read its clock' }, 503),
+    })
+    const dialog = await openDialog(page)
+    await expect(dialog.getByRole('alert')).toHaveText('the scheduler cannot read its clock')
+    // The preview is advice: Create stays available.
+    await expect(dialog.getByRole('button', { name: 'Create schedule' })).toBeEnabled()
+    await context.close()
+  })
+
+  test('edit_mode_prefills', async ({ browser }) => {
+    const stored = pipeline({
+      params: { days: '1', region: 'eu' },
+      options: { retries: 2, backoffMinutes: 10, timeoutMinutes: 360, concurrency: 'Allow' },
+    })
+    const { context, page, requests } = await open(browser, {
+      start: `/pipelines/${NS}/team-smoke`,
+      detail: stored,
+      write: (route, path, method) => {
+        if (path !== `/api/pipelines/${NS}/team-smoke` || method !== 'PUT') return false
+        json(route, stored)
+        return true
+      },
+    })
+    await page.getByRole('button', { name: 'Edit schedule' }).click()
+    const dialog = page.getByRole('dialog', { name: 'Edit the schedule' })
+    await expect(dialog.getByRole('textbox', { name: 'Parameter 1 name' })).toHaveValue('days')
+    await expect(dialog.getByRole('textbox', { name: 'Parameter 1 value' })).toHaveValue('1')
+    await expect(dialog.getByRole('textbox', { name: 'Parameter 2 name' })).toHaveValue('region')
+    await expect(dialog.getByRole('textbox', { name: 'Parameter 2 value' })).toHaveValue('eu')
+
+    await dialog.getByText('Advanced', { exact: true }).click()
+    await expect(dialog.getByRole('combobox', { name: 'Retries', exact: true })).toHaveValue('2')
+    await expect(dialog.getByRole('combobox', { name: 'Wait between retries', exact: true })).toHaveValue('10')
+    await expect(dialog.getByRole('combobox', { name: 'Time limit', exact: true })).toHaveValue('360')
+    await expect(dialog.getByRole('radio', { name: 'Allow runs in parallel' })).toBeChecked()
+
+    await dialog.getByRole('textbox', { name: 'Parameter 2 value' }).fill('us')
+    await dialog.getByRole('button', { name: 'Save schedule' }).click()
+    const puts = bodies(requests, `/api/pipelines/${NS}/team-smoke`, 'PUT')
+    expect(puts).toEqual([{
+      sql: 'select 1',
+      schedule: { cron: '0 3 * * *', timezone: 'Europe/Berlin' },
+      params: { days: '1', region: 'us' },
+      options: { retries: 2, backoffMinutes: 10, timeoutMinutes: 360, concurrency: 'Allow' },
+    }])
+    await context.close()
+  })
+
+  test('hostile_text_in_params_and_messages_is_text', async ({ browser }) => {
+    const { context, page } = await open(browser, {
+      init: () => { (window as unknown as { __xss: number }).__xss = 0 },
+      check: () => ({ checked: true, ok: false, message: EVIL }),
+    })
+    await page.getByLabel('SQL query').fill('select 1')
+    const dialog = await openDialog(page)
+    await dialog.getByRole('button', { name: 'Add parameter' }).click()
+    const value = dialog.getByRole('textbox', { name: 'Parameter 1 value' })
+    await dialog.getByRole('textbox', { name: 'Parameter 1 name' }).fill('note')
+    await value.fill(EVIL)
+    await expect(value).toHaveValue(EVIL)
+    expect(await page.evaluate(() => ({
+      xss: (window as unknown as { __xss?: number }).__xss ?? 0,
+      imgs: document.querySelectorAll('img[src="x"]').length,
+    }))).toEqual({ xss: 0, imgs: 0 })
+
+    await dialog.getByRole('button', { name: 'Check statement' }).click()
+    await expect(dialog.getByRole('alert')).toHaveText(`The engine says: ${EVIL}`)
+    expect(await page.evaluate(() => ({
+      xss: (window as unknown as { __xss?: number }).__xss ?? 0,
+      imgs: document.querySelectorAll('img[src="x"]').length,
+    }))).toEqual({ xss: 0, imgs: 0 })
+    await context.close()
+  })
+
+  test('U5 audit over the open dialog and Advanced open', async ({ browser }) => {
+    const { context, page } = await open(browser, { detail: pipeline() })
+    await page.getByLabel('SQL query').fill('select 1')
+    await page.setViewportSize({ width: 360, height: 740 })
+    const dialog = await openDialog(page)
+    await dialog.getByText('Advanced', { exact: true }).click()
+    expect((await auditPage(page)).filter((finding) => finding.rule === 'U5')).toEqual([])
+    expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth))
+      .toBeLessThanOrEqual(1)
+    const box = await dialog.boundingBox()
+    expect(box).not.toBeNull()
+    expect(box!.x).toBeGreaterThanOrEqual(0)
+    expect(box!.x + box!.width).toBeLessThanOrEqual(361)
     await context.close()
   })
 })

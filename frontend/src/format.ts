@@ -158,11 +158,19 @@ const pad = (n: number) => String(n).padStart(2, '0')
  * A full time a person can compare: `2026-10-20 14:05:09 UTC` when UTC is chosen,
  * otherwise the same instant in the browser's zone with its abbreviation. The value is
  * an epoch in milliseconds or an RFC 3339 string; anything unreadable is a dash.
+ *
+ * With `timeZone`, the instant is printed in that zone instead — the Schedule dialog shows
+ * the next runs in the schedule's own zone, so "every day at 03:00" and its preview agree.
+ * An unknown zone falls back to the person's choice.
  */
-export function formatTime(value: number | string): string {
+export function formatTime(value: number | string, timeZone?: string): string {
   if (value === 0 || value === '') return '—'
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return '—'
+  if (timeZone) {
+    const inZone = formatInZone(date, timeZone)
+    if (inZone) return inZone
+  }
   if (getTimeDisplay() === 'utc') {
     const day = `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}`
     const clock = `${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(date.getUTCSeconds())}`
@@ -172,6 +180,30 @@ export function formatTime(value: number | string): string {
   const clock = `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
   const zone = zoneAbbreviation(date)
   return zone ? `${day} ${clock} ${zone}` : `${day} ${clock}`
+}
+
+/** The same instant in one named zone, with that zone's abbreviation; null for an unknown zone. */
+function formatInZone(date: Date, timeZone: string): string | null {
+  try {
+    const parts = new Intl.DateTimeFormat('en-GB', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hourCycle: 'h23',
+      timeZoneName: 'short',
+    }).formatToParts(date)
+    const part = (type: string) => parts.find((piece) => piece.type === type)?.value ?? ''
+    const day = `${part('year')}-${part('month')}-${part('day')}`
+    const clock = `${part('hour')}:${part('minute')}:${part('second')}`
+    const zone = part('timeZoneName')
+    return zone ? `${day} ${clock} ${zone}` : `${day} ${clock}`
+  } catch {
+    return null
+  }
 }
 
 /** A count as a person reads it: `1,234`. */
