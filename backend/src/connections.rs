@@ -275,15 +275,17 @@ fn type_rules(
 /// Who may do what to which scope, and which part of the store that is (decision D27).
 ///
 /// - `personal`: always the caller's own prefix, for every action.
-/// - `group`: the caller must be a **member** of the group. Being an administrator does not help:
-///   administrators cannot write into a group's connections (the store refuses it as well; this
-///   answers earlier and with a sentence).
+/// - `group`: a **member** of the group for every action. An administrator who is not a member may
+///   only **delete** — destroying a credential is the incident action D27 gives them (the store's
+///   `connections-admin` policy allows `delete` on `metadata/connections/*`) — and may not create or
+///   rotate one: no planting a value in another group's connections (the store refuses that too;
+///   this answers earlier and with a sentence).
 /// - `managed`: administrators only.
 pub fn authorize(
     who: &Identity,
     scope: Scope,
     owner_group: Option<&str>,
-    _action: Action,
+    action: Action,
 ) -> Result<StoreScope, Denied> {
     match scope {
         Scope::Personal => Ok(StoreScope::Personal {
@@ -292,10 +294,15 @@ pub fn authorize(
         Scope::Group => {
             let group = owner_group
                 .ok_or_else(|| Denied("a group connection needs an ownerGroup".into()))?;
-            if who.groups.iter().any(|g| g == group) {
+            let member = who.groups.iter().any(|g| g == group);
+            if member || (who.is_admin && action == Action::Delete) {
                 Ok(StoreScope::Group {
                     group: group.to_string(),
                 })
+            } else if who.is_admin {
+                Err(Denied(format!(
+                    "an administrator may delete a connection of the group `{group}` but not create or rotate one"
+                )))
             } else {
                 Err(Denied(format!(
                     "you are not a member of the group `{group}`"
@@ -439,6 +446,12 @@ pub struct ConnectionView {
     /// The last break-glass read of a group connection; absent for personal and managed rows.
     #[serde(rename = "breakGlass", skip_serializing_if = "Option::is_none")]
     pub break_glass: Option<BreakGlassNotice>,
+    /// Whether the caller belongs to the scope that owns this row: `true` for a personal or managed
+    /// connection and for a group connection of one of the caller's groups; `false` for a group
+    /// connection an administrator sees only because they are an administrator. `false` means
+    /// read-only for this person — no create, no rotation — except delete and break-glass.
+    #[serde(rename = "member")]
+    pub member: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
@@ -449,7 +462,8 @@ pub struct SyncView {
     pub message: Option<String>,
 }
 
-/// Build a view from what the store keeps beside a secret.
+/// Build a view from what the store keeps beside a secret. `member` says whether the caller belongs
+/// to the scope (a group row an administrator sees only as an administrator is `false`).
 pub fn view_from_store(
     name: &str,
     scope: Scope,
@@ -457,6 +471,7 @@ pub fn view_from_store(
     usable_by: Vec<String>,
     meta: &SecretMeta,
     sync: Option<SyncView>,
+    member: bool,
 ) -> ConnectionView {
     let custom = &meta.custom_metadata;
     let config = custom
@@ -487,6 +502,7 @@ pub fn view_from_store(
         version: meta.version,
         sync,
         break_glass: None,
+        member,
     }
 }
 
@@ -693,7 +709,7 @@ mod tests {
                 sub: "sub-alice".into()
             })
         );
-        // group: members only; an administrator who is not a member is refused
+        // group: members may do everything; an administrator who is not a member only destroys
         assert_eq!(
             authorize(&alice, Scope::Group, Some("analytics"), Action::Rotate),
             Ok(StoreScope::Group {
@@ -701,9 +717,20 @@ mod tests {
             })
         );
         assert!(authorize(&alice, Scope::Group, Some("finance"), Action::Create).is_err());
-        let denied =
-            authorize(&admin, Scope::Group, Some("analytics"), Action::Create).unwrap_err();
-        assert!(denied.0.contains("not a member"));
+        assert_eq!(
+            authorize(&admin, Scope::Group, Some("analytics"), Action::Delete),
+            Ok(StoreScope::Group {
+                group: "analytics".into()
+            })
+        );
+        for action in [Action::Create, Action::Rotate] {
+            let denied = authorize(&admin, Scope::Group, Some("analytics"), action).unwrap_err();
+            assert!(
+                denied.0.contains("not create or rotate"),
+                "{action:?}: {}",
+                denied.0
+            );
+        }
         assert!(authorize(&alice, Scope::Group, None, Action::Create).is_err());
         // managed: administrators only
         assert_eq!(
@@ -814,6 +841,7 @@ mod tests {
             vec![],
             &meta,
             sync,
+            true,
         );
         assert_eq!(view.kind, "sqlserver");
         assert_eq!(view.secret_keys, ["password", "user"]);
@@ -824,5 +852,40 @@ mod tests {
         assert!(!json.contains("p1") && !json.contains("etl"));
         assert!(json.contains("\"lastRotated\":\"2026-10-19T11:00:00Z\""));
         assert!(sync_from_resource(&json!({ "status": {} })).is_none());
+    }
+
+    #[test]
+    fn member_is_true_for_personal_and_managed_rows() {
+        let meta = SecretMeta {
+            version: 1,
+            created_time: None,
+            updated_time: None,
+            custom_metadata: BTreeMap::new(),
+        };
+        for (scope, group) in [
+            (Scope::Personal, None),
+            (Scope::Group, Some("analytics")),
+            (Scope::Managed, None),
+        ] {
+            let view = view_from_store("crm-db", scope, group, vec![], &meta, None, true);
+            assert!(view.member, "{scope:?}");
+            let json = serde_json::to_value(&view).unwrap();
+            assert_eq!(
+                json["member"], true,
+                "every row carries the field, named `member`: {json}"
+            );
+        }
+        // a group row an administrator sees only as an administrator is not theirs
+        let view = view_from_store(
+            "crm-db",
+            Scope::Group,
+            Some("finance"),
+            vec![],
+            &meta,
+            None,
+            false,
+        );
+        assert!(!view.member);
+        assert_eq!(serde_json::to_value(view).unwrap()["member"], false);
     }
 }

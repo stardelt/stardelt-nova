@@ -306,8 +306,15 @@ no answer, error sentence or log line carries one, only the field *names* (`secr
 | Scope | Who may create, rotate, delete | Where the value lives | A `Connection` resource too |
 |---|---|---|---|
 | `personal` | the person, only their own | `connections/user/<sub>/<name>` | no |
-| `group` | a **member** of the owner group; being an administrator is not enough | `connections/group/<group>/<name>` | yes, the operator syncs it |
+| `group` | a **member** of the owner group; an administrator who is not one may **delete** (incident) but never create or rotate | `connections/group/<group>/<name>` | yes, the operator syncs it |
 | `managed` | administrators only; nobody can read it | `connections/managed/<name>` | yes |
+
+`GET /api/connections` lists the caller's own connections, their groups', and — for an
+administrator — every other group's (the store names the groups; an administrator's policy lists
+every scope's metadata) and the managed ones. Every row carries `member`: `true` for a personal or
+managed connection and for a group connection of one of the caller's groups, `false` for a group
+row an administrator sees only because they are an administrator. `false` means read-only for that
+person — no create, no rotation — except delete and break-glass.
 
 Every route signs in to the store with the caller's own token (never a service identity), so the
 store's policies decide what is possible and its audit log names the person. Without
@@ -319,7 +326,8 @@ A rotation sends only the fields to change; a managed connection cannot be read,
 field. Deleting removes the value first and the resource second — if the second step fails the value is
 gone and the entry stays visible as not-ready, which is retryable. Each create, rotation and delete
 also writes a `connection` line on the `audit` target with the scope, the group, the name and the
-person — never a value.
+person — never a value; a delete by an administrator who is not a member of the group also says
+`via=administrator`.
 
 **Break-glass.** In an emergency an administrator may read a **group** connection through
 `POST /api/connections/group/<group>/<name>/break-glass` with `{"reason": "…"}` (20 to 500 characters).

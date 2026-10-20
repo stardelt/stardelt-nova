@@ -2,8 +2,9 @@
 //!
 //! Nova signs in to the store with **the caller's own token** and reads or writes only the paths
 //! the store's policies give that person (their personal prefix, the prefix of each of their
-//! groups; administrators write managed values and never read any). A Nova bug can therefore not
-//! widen a right, and the store's audit log names the person, not Nova.
+//! groups; administrators also list the names of every group that has a connection and write
+//! managed values, and never read a value). A Nova bug can therefore not widen a right, and the
+//! store's audit log names the person, not Nova.
 //!
 //! Values are never logged and never part of an error: an error carries the store's own first
 //! message (which does not echo values) or a fixed text. [`StoreToken`] redacts its `Debug`.
@@ -15,6 +16,7 @@ use std::collections::BTreeMap;
 use serde_json::{Value, json};
 
 use crate::auth::Secret;
+use crate::connections::group_ok;
 
 /// Where the store is and how Nova signs in. Absent (`None`) when `NOVA_SECRET_STORE_URL` is unset:
 /// every feature that needs the store must then answer 503, never panic.
@@ -131,6 +133,10 @@ pub fn valid_connection_name(s: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
 }
 
+/// The folder (below the mount) that holds every owner group's connections; its `LIST` names the
+/// groups, which only an administrator's policy allows.
+const GROUP_FOLDER: &str = "connections/group";
+
 /// The folder (below the mount) that holds all connections of a scope.
 pub fn scope_prefix(scope: &StoreScope) -> Result<String, StoreError> {
     match scope {
@@ -138,9 +144,7 @@ pub fn scope_prefix(scope: &StoreScope) -> Result<String, StoreError> {
         StoreScope::Personal { .. } => Err(StoreError::Invalid(
             "the user id cannot be used in a store path".into(),
         )),
-        StoreScope::Group { group } if valid_group(group) => {
-            Ok(format!("connections/group/{group}"))
-        }
+        StoreScope::Group { group } if valid_group(group) => Ok(format!("{GROUP_FOLDER}/{group}")),
         StoreScope::Group { .. } => Err(StoreError::Invalid(
             "the group name cannot be used in a store path".into(),
         )),
@@ -394,12 +398,47 @@ impl StoreClient {
             .await?;
         Self::check(status, &body)
     }
+
+    /// The owner groups that have at least one connection: the folders below
+    /// `connections/group/`, without the slash, sorted (ticket #203).
+    ///
+    /// The caller's policies decide who may ask: an administrator's grants `list` on
+    /// `secret/metadata/connections/*`, a member's lists only their own group's prefix. A name that
+    /// cannot be a store path is dropped (the same rule `scope_prefix` applies), and `NotFound` —
+    /// no group has a connection yet — is an empty list.
+    pub async fn list_group_names(&self, token: &StoreToken) -> Result<Vec<String>, StoreError> {
+        let request = self
+            .http
+            .get(self.url("metadata", GROUP_FOLDER))
+            .query(&[("list", "true")]);
+        let (status, body) = self.send(request, Some(token)).await?;
+        match Self::check(status, &body) {
+            Ok(()) => {}
+            Err(StoreError::NotFound) => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        }
+        let mut groups: Vec<String> = body["data"]["keys"]
+            .as_array()
+            .map(|keys| {
+                keys.iter()
+                    .filter_map(Value::as_str)
+                    .filter_map(|key| key.strip_suffix('/'))
+                    .filter(|group| group_ok(group))
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        groups.sort();
+        groups.dedup();
+        Ok(groups)
+    }
 }
 
 /// An in-memory store for tests, shared by this module's tests and `connection_routes`':
-/// only the routes the client uses, with the answers the real OpenBao gives. It refuses
-/// another group's paths (`finance`) as the store's policies would, and its token is
-/// `tok-alice`, handed out for the JWT `good`.
+/// only the routes the client uses, with the answers the real OpenBao gives. It refuses another
+/// group's paths (`finance`) and the group folder's `LIST` as the store's member policies would;
+/// `tok-alice` is handed out for the JWT `good` and `tok-admin` (which `connections-admin` gives
+/// `list` and `read` on metadata below `connections/`) for the JWT `admin`.
 #[cfg(test)]
 pub(crate) mod fake {
     use std::collections::BTreeMap;
@@ -431,6 +470,8 @@ pub(crate) mod fake {
         pub(crate) logins: Vec<(String, String)>,
         /// The paths that were read.
         pub(crate) reads: Vec<String>,
+        /// The prefixes that were listed, as the path the store received.
+        pub(crate) lists: Vec<String>,
         /// The tokens that were revoked.
         pub(crate) revokes: Vec<String>,
     }
@@ -459,8 +500,16 @@ pub(crate) mod fake {
     }
 
     fn allowed(headers: &HeaderMap, path: &str) -> Result<(), (StatusCode, Json<Value>)> {
-        let ok = headers.get("x-vault-token").and_then(|v| v.to_str().ok()) == Some("tok-alice")
-            && !path.starts_with("connections/group/finance");
+        let token = headers.get("x-vault-token").and_then(|v| v.to_str().ok());
+        let ok = match token {
+            // `connections-admin`: metadata list and read on every scope, no value read.
+            Some("tok-admin") => true,
+            // A member: their own group's prefix, and not the folder that names every group.
+            Some("tok-alice") => {
+                !path.starts_with("connections/group/finance") && path != "connections/group"
+            }
+            _ => false,
+        };
         if ok {
             Ok(())
         } else {
@@ -484,6 +533,10 @@ pub(crate) mod fake {
             Some("good") => (
                 StatusCode::OK,
                 Json(json!({ "auth": { "client_token": "tok-alice", "lease_duration": 900 } })),
+            ),
+            Some("admin") => (
+                StatusCode::OK,
+                Json(json!({ "auth": { "client_token": "tok-admin", "lease_duration": 900 } })),
             ),
             _ => (
                 StatusCode::BAD_REQUEST,
@@ -550,10 +603,17 @@ pub(crate) mod fake {
         Query(q): Query<BTreeMap<String, String>>,
         headers: HeaderMap,
     ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-        s.lock().unwrap().requests += 1;
+        let listing = q.contains_key("list");
+        {
+            let mut s = s.lock().unwrap();
+            s.requests += 1;
+            if listing {
+                s.lists.push(path.clone());
+            }
+        }
         allowed(&headers, &path)?;
         let s = s.lock().unwrap();
-        if q.contains_key("list") {
+        if listing {
             let prefix = format!("{}/", path.trim_end_matches('/'));
             let mut keys: Vec<String> = s
                 .data
@@ -866,6 +926,42 @@ mod tests {
         assert_eq!(
             store.metadata(&token, &path).await,
             Err(StoreError::NotFound)
+        );
+    }
+
+    #[tokio::test]
+    async fn list_group_names_keeps_only_valid_groups() {
+        let (store, fake) = fake::start().await;
+        {
+            let mut fake = fake.lock().unwrap();
+            fake.seed(
+                "connections/group/analytics/crm-db",
+                &[("user", "u")],
+                &[("type", "sqlserver")],
+            );
+            fake.seed(
+                "connections/group/fin ance/ledger",
+                &[("user", "u")],
+                &[("type", "sqlserver")],
+            );
+            fake.seed("connections/group/x", &[("user", "u")], &[]);
+            fake.seed("connections/group/../y/z", &[("user", "u")], &[]);
+        }
+        // Only an administrator's policy grants `list` on the group folder.
+        let token = store.login(&Secret::new("admin")).await.unwrap();
+
+        assert_eq!(store.list_group_names(&token).await.unwrap(), ["analytics"]);
+    }
+
+    #[tokio::test]
+    async fn no_groups_yet_is_an_empty_list() {
+        let (store, fake) = fake::start().await;
+        let token = store.login(&Secret::new("admin")).await.unwrap();
+
+        assert!(
+            store.list_group_names(&token).await.unwrap().is_empty(),
+            "no group has a connection yet: {:#?}",
+            fake.lock().unwrap().lists
         );
     }
 
