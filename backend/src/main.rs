@@ -49,6 +49,9 @@
 //! `400 {"error":"query exceeded the Ns limit and was cancelled"}`.
 //! `NOVA_AIRFLOW_URL`, `NOVA_AIRFLOW_USER` and `NOVA_AIRFLOW_PASSWORD` (all three or
 //! none) switch on the Airflow client (`airflow.rs`) that the pipeline views use.
+//! `NOVA_CATALOG_TOKEN_URL`, `NOVA_CATALOG_CLIENT_ID` and `NOVA_CATALOG_CLIENT_SECRET`
+//! (all three or none) make Nova send its own service token on every Lakekeeper call
+//! (`catalog_token.rs`); unset, the catalog is called without one.
 
 mod airflow;
 mod api_json;
@@ -57,6 +60,7 @@ mod audit;
 mod auth;
 mod catalog;
 mod catalog_docs;
+mod catalog_token;
 mod cluster;
 mod connection_routes;
 mod connections;
@@ -102,6 +106,10 @@ pub struct AppState {
     pub dev_user: String,
     pub trino_url: String,
     pub lakekeeper_url: String,
+    /// Nova's own catalog sign-in (`catalog_token.rs`, stardelt-nova#222). `None` unless
+    /// `NOVA_CATALOG_TOKEN_URL`, `NOVA_CATALOG_CLIENT_ID` and `NOVA_CATALOG_CLIENT_SECRET`
+    /// are all set: Lakekeeper is then called exactly as before, without a token.
+    pub catalog_token: Option<catalog_token::CatalogToken>,
     /// Superset and JupyterHub are embedded in Nova's own UI; Nova reads their
     /// headers (and probes them) where they actually run.
     pub superset_url: String,
@@ -110,10 +118,11 @@ pub struct AppState {
     pub warehouse_id: OnceCell<String>,
     pub http: reqwest::Client,
     pub demo: bool,
-    /// Forward the caller's own token to Trino and the catalog, when the platform has
-    /// configured them to accept it (`NOVA_FORWARD_IDENTITY=1`). Off by default: sending a
-    /// bearer to a catalog that does not validate it buys nothing, and turning it on is a
-    /// platform decision rather than a UI one.
+    /// Forward the caller's own token to Trino, when the platform has configured it to
+    /// accept it (`NOVA_FORWARD_IDENTITY=1`). Off by default: sending a bearer to an engine
+    /// that does not validate it buys nothing, and turning it on is a platform decision
+    /// rather than a UI one. The catalog is not in this: Lakekeeper always sees Nova's own
+    /// service token (`catalog_token.rs`), because per-user catalog rights do not exist yet.
     pub forward_identity: bool,
     pub jobs: Mutex<Vec<jobs::Job>>,
     pub demo_state: RwLock<demo::DemoState>,
@@ -678,12 +687,32 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    // Nova's own sign-in at the catalog (stardelt-nova#222). All three variables or none;
+    // a partial one refuses to start rather than calling Lakekeeper unauthenticated. The
+    // client secret and every token stay in `Secret` — nothing here logs either.
+    let catalog_token = match catalog_token::CatalogTokenConfig::from_env() {
+        Ok(None) => {
+            info!("NOVA_CATALOG_TOKEN_URL is not set — catalog calls carry no service token");
+            None
+        }
+        Ok(Some(cfg)) => {
+            info!(
+                token_url = %cfg.token_url,
+                client_id = %cfg.client_id,
+                "catalog service token configured"
+            );
+            Some(catalog_token::CatalogToken::new(http.clone(), cfg))
+        }
+        Err(e) => anyhow::bail!("refusing to start: catalog token configuration: {e}"),
+    };
+
     let state = Arc::new(AppState {
         dev_user: std::env::var("NOVA_DEV_USER").unwrap_or_else(|_| "stardelt-dev".into()),
         trino_url: std::env::var("NOVA_TRINO_URL")
             .unwrap_or_else(|_| "http://trino.stardelt.svc.cluster.local:8080".into()),
         lakekeeper_url: std::env::var("NOVA_LAKEKEEPER_URL")
             .unwrap_or_else(|_| "http://lakekeeper.stardelt.svc.cluster.local:8181".into()),
+        catalog_token,
         superset_url: std::env::var("NOVA_SUPERSET_URL")
             .unwrap_or_else(|_| "http://superset:8088".into()),
         jupyterhub_url: std::env::var("NOVA_JUPYTERHUB_URL")
@@ -787,6 +816,7 @@ async fn main() -> anyhow::Result<()> {
         demo = state.demo,
         auth = if auth.is_some() { "oidc" } else { "dev" },
         store = state.store.is_some(),
+        catalog_token = state.catalog_token.is_some(),
         "nova backend starting"
     );
     // Second listener for the engine's event feed; off unless NOVA_INTERNAL_ADDR is set.
@@ -815,16 +845,36 @@ mod router_tests {
     }
 
     fn test_state_with_db(db: Option<sqlx::PgPool>) -> Arc<AppState> {
+        build_test_state(db, "http://127.0.0.1:1", true, None)
+    }
+
+    /// An `AppState` for the catalog-token tests (`catalog_token.rs`): not demo, so the
+    /// handlers really call Lakekeeper, with the fakes' URLs and the service-token client
+    /// under test (or `None` for today's unauthenticated behaviour).
+    pub(crate) fn catalog_test_state(
+        lakekeeper_url: &str,
+        catalog_token: Option<catalog_token::CatalogToken>,
+    ) -> Arc<AppState> {
+        build_test_state(None, lakekeeper_url, false, catalog_token)
+    }
+
+    fn build_test_state(
+        db: Option<sqlx::PgPool>,
+        lakekeeper_url: &str,
+        demo_mode: bool,
+        catalog_token: Option<catalog_token::CatalogToken>,
+    ) -> Arc<AppState> {
         Arc::new(AppState {
             dev_user: "test".into(),
             trino_url: "http://127.0.0.1:1".into(),
-            lakekeeper_url: "http://127.0.0.1:1".into(),
+            lakekeeper_url: lakekeeper_url.into(),
+            catalog_token,
             superset_url: "http://127.0.0.1:1".into(),
             jupyterhub_url: "http://127.0.0.1:1".into(),
             warehouse_name: "warehouse".into(),
             warehouse_id: OnceCell::new(),
             http: reqwest::Client::new(),
-            demo: true,
+            demo: demo_mode,
             forward_identity: false,
             jobs: Mutex::new(Vec::new()),
             demo_state: RwLock::new(demo::DemoState::default()),

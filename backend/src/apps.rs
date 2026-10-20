@@ -531,9 +531,16 @@ async fn facts(state: &AppState, spec: &Spec) -> Vec<Fact> {
                 }
                 Err(e) => facts.push(Fact::new("Warehouse", e.to_string()).with_tone("bad")),
             }
-            if let Some(info) = fetch_json(
+            // The management API takes Nova's service token like every other Lakekeeper
+            // call (stardelt-nova#222); the public `/health` below needs none.
+            let authorization = crate::catalog::lakekeeper_authorization(state)
+                .await
+                .ok()
+                .flatten();
+            if let Some(info) = fetch_json_authorized(
                 state,
                 &format!("{}/management/v1/info", state.lakekeeper_url),
+                authorization.as_deref(),
             )
             .await
             {
@@ -745,7 +752,21 @@ fn deep_links(spec: &Spec, base: &str) -> Vec<Link> {
 /// GET a JSON document with a deadline. `None` covers every failure — refused,
 /// timed out, non-2xx, not JSON — because the caller's answer is the same: no fact.
 async fn fetch_json(state: &AppState, url: &str) -> Option<Value> {
-    let response = http_client(state).get(url).send().await.ok()?;
+    fetch_json_authorized(state, url, None).await
+}
+
+/// [`fetch_json`] with one `Authorization` header — Lakekeeper's management API wants
+/// Nova's service token, the other probes want nothing.
+async fn fetch_json_authorized(
+    state: &AppState,
+    url: &str,
+    authorization: Option<&str>,
+) -> Option<Value> {
+    let mut request = http_client(state).get(url);
+    if let Some(header) = authorization {
+        request = request.header(reqwest::header::AUTHORIZATION, header);
+    }
+    let response = request.send().await.ok()?;
     if !response.status().is_success() {
         return None;
     }

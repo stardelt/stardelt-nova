@@ -2477,6 +2477,8 @@ mod tests {
             dev_user: "test".into(),
             trino_url: "http://127.0.0.1:1".into(),
             lakekeeper_url: "http://127.0.0.1:1".into(),
+            // No catalog client in these tests: Lakekeeper is called as before (#222).
+            catalog_token: None,
             superset_url: "http://127.0.0.1:1".into(),
             jupyterhub_url: "http://127.0.0.1:1".into(),
             warehouse_name: "warehouse".into(),

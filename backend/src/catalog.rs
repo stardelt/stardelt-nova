@@ -2,6 +2,11 @@
 //!
 //! Lakekeeper's Iceberg REST routes are prefixed by the warehouse UUID, not
 //! the warehouse name. We look up the UUID at first request and cache it.
+//!
+//! Every request to Lakekeeper carries Nova's own service token
+//! (`catalog_token.rs`, stardelt-nova#222) when the platform configured the catalog
+//! client. The caller's token is **not** forwarded to the catalog: per-user catalog
+//! rights do not exist yet, and until they do the catalog sees one identity, Nova's.
 
 use std::sync::Arc;
 
@@ -85,6 +90,9 @@ pub struct CreateNamespaceRequest {
 /// Why the warehouse id could not be resolved.
 #[derive(Debug)]
 pub(crate) enum WarehouseError {
+    /// Nova's own service token could not be obtained (`catalog_token.rs`): the token
+    /// endpoint is the problem, not the catalog.
+    Token(crate::catalog_token::TokenError),
     Unreachable,
     Malformed,
     NotFound(String),
@@ -94,7 +102,7 @@ impl WarehouseError {
     /// 502 when the catalog did not answer or answered nonsense; 503 when Nova is pointed at a warehouse that does not exist.
     pub(crate) fn status(&self) -> StatusCode {
         match self {
-            Self::Unreachable | Self::Malformed => StatusCode::BAD_GATEWAY,
+            Self::Token(_) | Self::Unreachable | Self::Malformed => StatusCode::BAD_GATEWAY,
             Self::NotFound(_) => StatusCode::SERVICE_UNAVAILABLE,
         }
     }
@@ -103,10 +111,23 @@ impl WarehouseError {
 impl std::fmt::Display for WarehouseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Token(e) => e.fmt(f),
             Self::Unreachable => f.write_str("the catalog is not reachable"),
             Self::Malformed => f.write_str("the catalog returned an unexpected response"),
             Self::NotFound(name) => write!(f, "warehouse '{name}' not found"),
         }
+    }
+}
+
+/// The `Authorization` value a Lakekeeper request carries: Nova's service token when the
+/// platform configured the catalog client (`NOVA_CATALOG_*`), nothing otherwise — an
+/// unconfigured install keeps calling the `allowall` catalog exactly as before.
+pub(crate) async fn lakekeeper_authorization(
+    state: &AppState,
+) -> Result<Option<String>, crate::catalog_token::TokenError> {
+    match &state.catalog_token {
+        Some(token) => token.bearer().await.map(Some),
+        None => Ok(None),
     }
 }
 
@@ -115,9 +136,14 @@ pub(crate) async fn resolve_warehouse_id(state: &AppState) -> Result<String, War
         .warehouse_id
         .get_or_try_init(|| async {
             let url = format!("{}/management/v1/warehouse", state.lakekeeper_url);
-            let resp: WarehouseList = state
-                .http
-                .get(&url)
+            let mut request = state.http.get(&url);
+            if let Some(authorization) = lakekeeper_authorization(state)
+                .await
+                .map_err(WarehouseError::Token)?
+            {
+                request = request.header(reqwest::header::AUTHORIZATION, authorization);
+            }
+            let resp: WarehouseList = request
                 .send()
                 .await
                 .map_err(|e| {
@@ -140,11 +166,22 @@ pub(crate) async fn resolve_warehouse_id(state: &AppState) -> Result<String, War
         .cloned()
 }
 
-async fn proxy(state: &AppState, path: String, authorization: Option<&str>) -> Response {
+async fn proxy(state: &AppState, path: String) -> Response {
     let url = format!("{}{}", state.lakekeeper_url, path);
     let mut request = state.http.get(&url);
-    if let Some(header) = authorization {
-        request = request.header(reqwest::header::AUTHORIZATION, header);
+    match lakekeeper_authorization(state).await {
+        Ok(Some(header)) => request = request.header(reqwest::header::AUTHORIZATION, header),
+        Ok(None) => {}
+        Err(e) => {
+            // The token endpoint failed, not the catalog: 502 for the same reason a
+            // catalog that does not answer is one. The sentence is fixed text.
+            warn!("catalog service token unavailable: {e}");
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+                .into_response();
+        }
     }
     match request.send().await {
         Ok(r) => {
@@ -220,10 +257,7 @@ pub async fn warehouse_info(State(s): State<Arc<AppState>>) -> Response {
         (status = 502, description = "The catalog is not reachable", body = crate::openapi::ErrorResponse),
     )
 )]
-pub async fn list_namespaces(
-    State(s): State<Arc<AppState>>,
-    caller: Option<axum::Extension<auth::Principal>>,
-) -> Response {
+pub async fn list_namespaces(State(s): State<Arc<AppState>>) -> Response {
     if s.demo {
         let demo = s.demo_state.read().expect("demo state poisoned");
         return Json(demo.namespaces_json()).into_response();
@@ -232,12 +266,7 @@ pub async fn list_namespaces(
         Ok(v) => v,
         Err(r) => return *r,
     };
-    proxy(
-        &s,
-        format!("/catalog/v1/{id}/namespaces"),
-        auth::upstream_authorization(s.forward_identity, caller.as_ref().map(|c| &c.0)).as_deref(),
-    )
-    .await
+    proxy(&s, format!("/catalog/v1/{id}/namespaces")).await
 }
 
 #[utoipa::path(
@@ -299,11 +328,7 @@ pub async fn create_namespace(
         (status = 502, description = "The catalog is not reachable", body = crate::openapi::ErrorResponse),
     )
 )]
-pub async fn list_tables(
-    State(s): State<Arc<AppState>>,
-    Path(ns): Path<String>,
-    caller: Option<axum::Extension<auth::Principal>>,
-) -> Response {
+pub async fn list_tables(State(s): State<Arc<AppState>>, Path(ns): Path<String>) -> Response {
     if s.demo {
         let demo = s.demo_state.read().expect("demo state poisoned");
         return Json(demo.tables_json(&ns)).into_response();
@@ -315,12 +340,7 @@ pub async fn list_tables(
     let Some(ns) = path_segment(&ns) else {
         return bad_segment(&ns);
     };
-    proxy(
-        &s,
-        format!("/catalog/v1/{id}/namespaces/{ns}/tables"),
-        auth::upstream_authorization(s.forward_identity, caller.as_ref().map(|c| &c.0)).as_deref(),
-    )
-    .await
+    proxy(&s, format!("/catalog/v1/{id}/namespaces/{ns}/tables")).await
 }
 
 #[utoipa::path(
@@ -341,7 +361,6 @@ pub async fn list_tables(
 pub async fn table_metadata(
     State(s): State<Arc<AppState>>,
     Path((ns, tbl)): Path<(String, String)>,
-    caller: Option<axum::Extension<auth::Principal>>,
 ) -> Response {
     if s.demo {
         let demo = s.demo_state.read().expect("demo state poisoned");
@@ -361,12 +380,7 @@ pub async fn table_metadata(
     let (Some(ns), Some(tbl)) = (path_segment(&ns), path_segment(&tbl)) else {
         return bad_segment(&format!("{ns}.{tbl}"));
     };
-    proxy(
-        &s,
-        format!("/catalog/v1/{id}/namespaces/{ns}/tables/{tbl}"),
-        auth::upstream_authorization(s.forward_identity, caller.as_ref().map(|c| &c.0)).as_deref(),
-    )
-    .await
+    proxy(&s, format!("/catalog/v1/{id}/namespaces/{ns}/tables/{tbl}")).await
 }
 
 /// The last 100 snapshots of a table, newest first (Trino 480 Iceberg syntax).
@@ -542,6 +556,12 @@ mod tests {
             StatusCode::BAD_GATEWAY
         );
         assert_eq!(WarehouseError::Malformed.status(), StatusCode::BAD_GATEWAY);
+        // A token endpoint that does not answer is the same kind of failure as a catalog
+        // that does not: 502, never 500.
+        assert_eq!(
+            WarehouseError::Token(crate::catalog_token::TokenError::Unreachable).status(),
+            StatusCode::BAD_GATEWAY
+        );
         assert_eq!(
             WarehouseError::NotFound("warehouse".into()).status(),
             StatusCode::SERVICE_UNAVAILABLE
@@ -561,6 +581,10 @@ mod tests {
         assert_eq!(
             WarehouseError::NotFound("warehouse".into()).to_string(),
             "warehouse 'warehouse' not found"
+        );
+        assert_eq!(
+            WarehouseError::Token(crate::catalog_token::TokenError::Malformed).to_string(),
+            "the catalog token endpoint answered with an unexpected body"
         );
     }
 

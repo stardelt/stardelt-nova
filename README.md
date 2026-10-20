@@ -256,6 +256,9 @@ The backend is configured entirely through environment variables:
 | `NOVA_TRINO_URL` | `http://trino.stardelt.svc.cluster.local:8080` | Trino coordinator base URL. The platform's installer points this at the coordinator's in-cluster HTTPS endpoint (`https://trino.<ns>.svc.cluster.local:8443`) once an IdP is installed — see `NOVA_TRINO_CA_PEM` |
 | `NOVA_TRINO_CA_PEM` | — (empty) | PEM of a CA to **add** to the TLS roots the upstream client trusts (the platform's internal CA for the coordinator certificate, from the `trino-ca` Secret). Empty = only the public WebPKI roots; never a replacement, and verification is never disabled |
 | `NOVA_LAKEKEEPER_URL` | `http://lakekeeper.stardelt.svc.cluster.local:8181` | Lakekeeper REST catalog base URL |
+| `NOVA_CATALOG_TOKEN_URL` | — (empty) | The Keycloak token endpoint for Nova's own catalog client, e.g. `https://id.<domain>/realms/stardelt/protocol/openid-connect/token`. With the two below, every Lakekeeper call carries `Authorization: Bearer <token>`; unset, no header is sent (the catalog still answers `allowall`). All three `NOVA_CATALOG_*` variables or none — a partial set refuses to start rather than calling the catalog unauthenticated |
+| `NOVA_CATALOG_CLIENT_ID` | — (required with the URL) | Confidential client id `svc-catalog-nova` (audience `lakekeeper`, stardelt-platform#282) |
+| `NOVA_CATALOG_CLIENT_SECRET` | — (required with the id) | That client's secret, from the `svc-catalog-nova` Secret (key `client-secret`). Never logged, and no error or response ever carries it |
 | `NOVA_WAREHOUSE_NAME` | `warehouse` | Lakekeeper warehouse name to resolve on startup |
 | `NOVA_SUPERSET_URL` | `http://superset:8088` | Superset base URL (probe + embed check) |
 | `NOVA_JUPYTERHUB_URL` | `http://proxy-public:80` | JupyterHub public proxy base URL (probe + embed check) |
@@ -264,7 +267,7 @@ The backend is configured entirely through environment variables:
 | `NOVA_AIRFLOW_PASSWORD` | — (required with the user) | That user's password, from a Kubernetes Secret. Never logged, never part of an error |
 | `POD_NAMESPACE` | `stardelt` | Namespace whose workloads Nova reports (downward API in the manifests); `NOVA_NAMESPACE` overrides it for a local run |
 | `NOVA_BASE_DOMAIN` | — (empty) | Base domain for the app deep-links (`trino.<domain>`, …). Empty = the UI links nothing; the install sets it from a ConfigMap |
-| `NOVA_FORWARD_IDENTITY` | off | Send the caller's own token to Trino and the catalog (`Authorization: Bearer`). Only useful once the platform configures those to validate it — the identity contract's phase 2; until then the catalog sees Nova's service connection and `/api/me` says so |
+| `NOVA_FORWARD_IDENTITY` | off | Send the caller's own token to Trino (`Authorization: Bearer`). Only useful once the platform configures the engine to validate it — the identity contract's phase 2. The catalog is not affected: Lakekeeper always sees Nova's own service token (above), never the caller's, until per-user catalog rights exist. `/api/me` reports whether forwarding is on (`identity_forwarding`) |
 | `NOVA_QUERY_TIMEOUT_SECS` | `300` | How long `POST /api/query` waits for Trino before cancelling the query server-side and answering `400 {"error":"query exceeded the Ns limit and was cancelled"}`. A client disconnect cancels the Trino query too. Results larger than 50,000 rows are cut to exactly that many and answered with `"truncated": true` |
 | `NOVA_DATABASE_URL` | — (empty) | PostgreSQL URL of the state store (`postgres://user:password@host:5432/nova`). Unset = disabled: Nova behaves as before and `/api/health` answers `{"status":"ok","db":"disabled"}`. Set = connect and apply the migrations at start-up, or refuse to start; the platform fills it from the `nova-pg-app` Secret. After start-up an unreachable database only turns `db` into `down` (the probe still answers 200) |
 | `NOVA_QUERY_LOG_RETENTION_DAYS` | `90` | How long query-log rows are kept; the backend purges hourly. `0` disables the purge; an unparsable value warns and uses the default |
@@ -416,7 +419,8 @@ either grants admin. When Entra reports a *group overage* (`_claim_names.groups`
 `hasgroups`), Nova logs a warning and treats the user as having no groups (it does
 not call Graph) — use app roles or a group filter on the app registration. `/api/me`
 returns claims, never tokens, and `identity_forwarding: false`: Nova still queries
-Trino and Lakekeeper with its service connection.
+Trino and Lakekeeper with its own service connection — and Lakekeeper with the
+`svc-catalog-nova` service token, never the caller's.
 
 **The person behind the request.** In `oidc` mode `/api/me` adds three facts to the
 claim fields, so the Profile page can explain the caller's role and warn before a
