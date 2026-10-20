@@ -1,14 +1,16 @@
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react'
-import { api, errorMessage, type Connection, type Me } from '../api'
+import { ApiError, api, errorMessage, type BreakGlassAnswer, type Connection, type Me } from '../api'
 import { CONNECTION_TYPES, type Field } from '../connectionTypes'
 import { isAdmin } from '../roles'
 
 /**
- * The three dialogs of the Connections page: create, rotate and delete.
+ * The four dialogs of the Connections page: create, rotate, delete and break-glass read.
  *
  * A secret value lives only in the state of the open dialog and in the one request that
  * sends it. Nothing here writes a value to storage, the URL, react-query or the console;
- * the dialog is unmounted on success, which takes every password input with it.
+ * the dialog is unmounted on success, which takes every password input with it. The
+ * break-glass answer is the one value the API ever returns, and only the step-2 state
+ * holds it — masked until Show, dropped after its token's 60 seconds.
  *
  * The dialogs are native `<dialog>` elements opened with `showModal()`: focus trapping,
  * Escape and the inert background are the browser's job, not ours. Focus returns to the
@@ -52,6 +54,7 @@ function DialogFrame({
   title,
   titleId,
   initialFocus,
+  open = true,
   onClose,
   children,
   footer,
@@ -60,6 +63,8 @@ function DialogFrame({
   titleId: string
   /** A CSS selector inside the dialog; the first match gets focus on open. */
   initialFocus: string
+  /** False closes the native dialog while keeping the element (and its cleared state) mounted. */
+  open?: boolean
   onClose: () => void
   children: ReactNode
   footer: ReactNode
@@ -70,6 +75,11 @@ function DialogFrame({
   useEffect(() => {
     const dialog = ref.current
     if (!dialog) return
+    if (!open) {
+      if (dialog.open) dialog.close()
+      opener.current?.focus()
+      return
+    }
     opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
     if (!dialog.open) dialog.showModal()
     const target = dialog.querySelector<HTMLElement>(initialFocus)
@@ -78,7 +88,7 @@ function DialogFrame({
       if (dialog.open) dialog.close()
       opener.current?.focus()
     }
-  }, [initialFocus])
+  }, [initialFocus, open])
 
   return (
     <dialog
@@ -813,6 +823,233 @@ export function DeleteConnectionDialog({
         <div role="alert" className="mt-3 rounded-[10px] border border-red-500/40 bg-red-500/10 p-3 text-sm text-bad break-words">
           {error}
         </div>
+      )}
+    </DialogFrame>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Break-glass read
+// ---------------------------------------------------------------------------
+
+/** How long a revealed credential stays on screen; the notice's token lives that long. */
+const BREAK_GLASS_TTL_MS = 60_000
+/** The countdown moves every ten seconds, not every second: a timer does not need to chatter. */
+const BREAK_GLASS_TICK_MS = 10_000
+/** A tab hidden for longer than this has been away: close and forget the answer. */
+const BREAK_GLASS_HIDDEN_MS = 10_000
+const BREAK_GLASS_MIN_REASON = 20
+const BREAK_GLASS_MAX_REASON = 500
+/** Eight dots whatever the value's length: a mask must not leak how long the value is. */
+const MASK = '••••••••'
+const COPY_FAILED = 'Copy failed: select the value and copy it'
+
+/**
+ * The emergency read of a group connection: a reason first, then the fields once, for
+ * sixty seconds.
+ *
+ * The answer lives in this component's `answer` state and nowhere else: not in
+ * react-query (the request is a plain function, not a query or mutation), not in a URL,
+ * storage or the clipboard except when the person presses Copy. Closing, Escape, the
+ * tab being hidden for ten seconds, leaving the page (which unmounts this component)
+ * and the sixty-second expiry all drop that state and read the list again.
+ */
+export function BreakGlassDialog({
+  connection,
+  onClose,
+}: {
+  connection: Connection
+  onClose: () => void
+}) {
+  const prefix = useId()
+  const titleId = `${prefix}-title`
+  const formId = `${prefix}-form`
+  const reasonId = `${prefix}-reason`
+  const hintId = `${prefix}-hint`
+  const countId = `${prefix}-count`
+  const [reason, setReason] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [answer, setAnswer] = useState<BreakGlassAnswer | null>(null)
+  const [shown, setShown] = useState<Record<string, boolean>>({})
+  const [copyError, setCopyError] = useState<string | null>(null)
+  const [remaining, setRemaining] = useState(BREAK_GLASS_TTL_MS / 1000)
+  const [closed, setClosed] = useState(false)
+
+  /** Drop the only copy the page holds, close the dialog and let the page read the list. */
+  function dropAndClose() {
+    setAnswer(null)
+    setShown({})
+    setCopyError(null)
+    setClosed(true)
+    onClose()
+  }
+  // The timers are set up once per answer; a ref keeps them from restarting when the
+  // page re-renders and hands down a new `onClose` identity.
+  const close = useRef(dropAndClose)
+  close.current = dropAndClose
+
+  // The answer's time-to-live: the dialog closes itself after sixty seconds.
+  useEffect(() => {
+    if (!answer) return
+    const closeAt = Date.now() + BREAK_GLASS_TTL_MS
+    const update = () => setRemaining(Math.max(0, Math.ceil((closeAt - Date.now()) / 1000)))
+    update()
+    const tick = window.setInterval(update, BREAK_GLASS_TICK_MS)
+    const expire = window.setTimeout(() => close.current(), BREAK_GLASS_TTL_MS)
+    return () => {
+      window.clearInterval(tick)
+      window.clearTimeout(expire)
+    }
+  }, [answer])
+
+  // A tab that was hidden for more than ten seconds is a person who walked away.
+  useEffect(() => {
+    if (!answer) return
+    let hiddenAt: number | null = null
+    const onVisibility = () => {
+      if (document.hidden) {
+        hiddenAt = Date.now()
+        return
+      }
+      if (hiddenAt !== null && Date.now() - hiddenAt > BREAK_GLASS_HIDDEN_MS) close.current()
+      hiddenAt = null
+    }
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => document.removeEventListener('visibilitychange', onVisibility)
+  }, [answer])
+
+  const trimmed = reason.trim()
+  // Count characters the way the backend does (Unicode scalar values), not UTF-16 code units.
+  const tooShort = Array.from(trimmed).length < BREAK_GLASS_MIN_REASON
+
+  async function submit(event: FormEvent) {
+    event.preventDefault()
+    if (submitting || tooShort) return
+    setSubmitting(true)
+    setError(null)
+    try {
+      const result = await api.breakGlassRead(connection.ownerGroup ?? '', connection.name, trimmed)
+      setShown({})
+      setCopyError(null)
+      setAnswer(result)
+      setSubmitting(false)
+    } catch (e: unknown) {
+      setError(e instanceof ApiError && e.status === 429
+        ? 'Too many break-glass reads. Wait ten minutes.'
+        : errorMessage(e))
+      setSubmitting(false)
+    }
+  }
+
+  async function copy(value: string) {
+    setCopyError(null)
+    try {
+      if (!navigator.clipboard) throw new Error('no clipboard')
+      await navigator.clipboard.writeText(value)
+    } catch {
+      setCopyError(COPY_FAILED)
+    }
+  }
+
+  const fields = answer ? Object.entries(answer.fields) : []
+
+  return (
+    <DialogFrame
+      title={answer ? `Credential ${connection.name}` : `Break-glass read of ${connection.name}`}
+      titleId={titleId}
+      initialFocus="[data-autofocus]"
+      open={!closed}
+      onClose={dropAndClose}
+      footer={answer ? (
+        <button type="button" className="btn-primary" autoFocus onClick={dropAndClose}>Close</button>
+      ) : (
+        <>
+          <button type="submit" form={formId} className="btn-primary" disabled={submitting || tooShort}>
+            {submitting ? 'Reading…' : 'Read the credential'}
+          </button>
+          <button type="button" className="btn-ghost" onClick={dropAndClose}>Cancel</button>
+        </>
+      )}
+    >
+      {answer ? (
+        <div className="space-y-4">
+          <ul className="space-y-3">
+            {fields.map(([key, value]) => (
+              <li key={key} className="rounded-[10px] border border-border/70 p-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-mono text-xs text-text-mute break-all">{key}</span>
+                  <div className="ml-auto flex gap-2">
+                    <button
+                      type="button"
+                      className="btn-ghost py-1 px-2 text-xs"
+                      aria-pressed={!!shown[key]}
+                      onClick={() => setShown((current) => ({ ...current, [key]: !current[key] }))}
+                    >
+                      {shown[key] ? 'Hide' : 'Show'}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-ghost py-1 px-2 text-xs"
+                      onClick={() => void copy(value)}
+                    >
+                      Copy
+                    </button>
+                  </div>
+                </div>
+                <div className="mt-2 font-mono text-sm break-all">
+                  {shown[key]
+                    ? <span>{value}</span>
+                    : <><span aria-hidden="true">{MASK}</span><span className="sr-only">Hidden</span></>}
+                </div>
+              </li>
+            ))}
+          </ul>
+          <p className="text-sm text-text-dim">
+            Shown once. This window closes itself in 60 seconds.{' '}
+            <span role="timer">Closes in {remaining} seconds.</span>
+          </p>
+          {copyError && (
+            <div role="alert" className="rounded-[10px] border border-red-500/40 bg-red-500/10 p-3 text-sm text-bad break-words">
+              {copyError}
+            </div>
+          )}
+        </div>
+      ) : (
+        <form id={formId} className="space-y-4" onSubmit={(event) => void submit(event)}>
+          <ul className="list-disc space-y-1 pl-5 text-sm text-text-dim">
+            <li>
+              The group <span className="font-mono break-all">{connection.ownerGroup ?? ''}</span> is
+              told that you read this credential, with your reason.
+            </li>
+            <li>The read is recorded in the audit log.</li>
+            <li>Rotate the credential afterwards.</li>
+          </ul>
+          <div>
+            <label htmlFor={reasonId} className="block">
+              <span className="label block mb-1.5">Reason</span>
+              <textarea
+                id={reasonId}
+                className="input"
+                rows={3}
+                maxLength={BREAK_GLASS_MAX_REASON}
+                value={reason}
+                data-autofocus
+                aria-describedby={`${hintId} ${countId}`}
+                onChange={(event) => setReason(event.target.value)}
+              />
+            </label>
+            <div className="mt-1 flex flex-wrap items-start justify-between gap-2">
+              <p id={hintId} className="text-xs text-text-mute">At least 20 characters. The group will see this.</p>
+              <p id={countId} className="text-xs text-text-mute">{reason.length} / {BREAK_GLASS_MAX_REASON}</p>
+            </div>
+          </div>
+          {error && (
+            <div role="alert" className="rounded-[10px] border border-red-500/40 bg-red-500/10 p-3 text-sm text-bad break-words">
+              {error}
+            </div>
+          )}
+        </form>
       )}
     </DialogFrame>
   )

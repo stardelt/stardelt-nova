@@ -243,6 +243,20 @@ export type Connection = {
   version: number
   /** Group and managed scope only: whether the operator synced it. */
   sync?: { ready: boolean; reason: string; message?: string }
+  /**
+   * Group scope only: the last break-glass read, until a rotation clears it. The
+   * owning group is told that an administrator read the credential and why.
+   */
+  breakGlass?: { by: string; at: string; reason: string }
+}
+
+/**
+ * The one answer of a break-glass read (stardelt-nova#183): the credential's fields,
+ * and when they were read. Never cached or logged; only the open dialog holds it.
+ */
+export type BreakGlassAnswer = {
+  fields: Record<string, string>
+  readAt: string
 }
 
 /**
@@ -451,6 +465,9 @@ export const api = {
   createConnection: (req: NewConnectionRequest) => jpost<Connection>('/api/connections', req),
   rotateConnection: (path: string, secret: Record<string, string>) => jput<Connection>(path, { secret }),
   deleteConnection: (path: string)           => jdel(path),
+  /** A group connection read once by an administrator, with a reason the group will see. */
+  breakGlassRead: (group: string, name: string, reason: string) =>
+    jpost<BreakGlassAnswer>(`/api/connections/group/${seg(group)}/${seg(name)}/break-glass`, { reason }),
   trinoCluster: ()                            => jget<unknown>('/api/trino/cluster'),
   warehouse:    ()                            => jget<Warehouse>('/api/catalog/warehouse'),
   namespaces:   ()                            => jget<NamespaceList>('/api/catalog/namespaces'),
