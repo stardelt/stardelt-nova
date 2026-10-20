@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { api } from '../api'
+import { api, errorMessage } from '../api'
 import { isAdmin } from '../roles'
 import { EmbedBadge, EmbedNotice, SignInNotice } from '../components/EmbedNotice'
 import { safeHttpUrl, statusLabel } from '../format'
@@ -49,7 +49,7 @@ export default function Notebooks() {
               : apps.isLoading
                 ? <> Checking whether it is deployed…</>
                 : apps.isError
-                  ? <> Could not read the app list ({String(apps.error)}).</>
+                  ? <> Could not read the app list ({errorMessage(apps.error)}).</>
                   : admin
                     ? <> Not deployed yet — add it with <span className="font-mono">make install-notebooks</span>.</>
                     : <> Notebooks are not available yet. Ask your platform administrator to enable them.</>}

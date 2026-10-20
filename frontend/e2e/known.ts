@@ -4,8 +4,4 @@
 // Never add an entry for a new finding: fix the page instead.
 export type Known = { rule: string; route?: string; contains?: string; ticket: string }
 
-export const KNOWN: Known[] = [
-  { rule: 'U11', ticket: '#163' },
-  { rule: 'U8', contains: 'ApiError', ticket: '#163' },
-  { rule: 'U8', contains: 'an /api/ path', ticket: '#163' },
-]
+export const KNOWN: Known[] = []

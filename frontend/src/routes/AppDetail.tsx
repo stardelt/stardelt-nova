@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link, useParams } from 'react-router-dom'
 import { api, ApiError, type AppFact } from '../api'
+import ErrorBox from '../components/ErrorBox'
 import { Icon } from '../components/Icon'
 import { safeHttpUrl, shortImage, statusLabel } from '../format'
 
@@ -49,12 +50,11 @@ export default function AppDetail() {
             <>
               <div className="font-semibold">Could not load “{id}”.</div>
               <p className="text-text-dim text-sm mt-1">
-                The Nova backend did not answer with the app's details.{' '}
-                <button onClick={() => detail.refetch()} className="text-accent hover:underline">Try again</button>
+                The Nova backend did not answer with the app's details.
               </p>
             </>
           )}
-          <div className="text-xs text-text-mute mt-3 font-mono">{String(detail.error)}</div>
+          <div className="mt-3"><ErrorBox error={detail.error} onRetry={() => detail.refetch()} /></div>
         </div>
       </div>
     )

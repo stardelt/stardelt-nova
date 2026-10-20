@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
-import { api, allTables, downloadCsv, formatCell, type QueryResult, type TableRef } from '../api'
+import { api, allTables, downloadCsv, errorMessage, formatCell, type QueryResult, type TableRef } from '../api'
 import { Icon } from '../components/Icon'
 import { sqlTableRef } from '../format'
 
@@ -63,7 +63,7 @@ export default function Query() {
       const next = [sql, ...history.filter(h => h !== sql)].slice(0, HISTORY_LIMIT)
       setHistory(next); saveHistory(next)
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e))
+      setError(errorMessage(e))
       setElapsed(performance.now() - t0)
     } finally {
       setRunning(false)

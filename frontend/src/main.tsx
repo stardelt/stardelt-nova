@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client'
 import { BrowserRouter } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import App from './App'
+import { ApiError } from './api'
 import { initTheme } from './theme'
 import './index.css'
 
@@ -10,7 +11,14 @@ initTheme()
 
 const queryClient = new QueryClient({
   defaultOptions: {
-    queries: { staleTime: 30_000, refetchOnWindowFocus: false },
+    queries: {
+      staleTime: 30_000,
+      refetchOnWindowFocus: false,
+      // A refused request (4xx) will not succeed on a second try; a server failure gets one
+      // more shot, one second later. Either way the page answers in about two seconds, not seven.
+      retry: (count, error) => !(error instanceof ApiError && error.status < 500) && count < 1,
+      retryDelay: 1000,
+    },
   },
 })
 

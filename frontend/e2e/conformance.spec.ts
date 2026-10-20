@@ -201,6 +201,36 @@ test.describe('errors', () => {
     if (/\/api\/|→ \d{3}/.test(text)) found.push({ rule: 'U8', detail: 'visible text contains an /api/ path' })
     judge('/query', found)
   })
+
+  test('U11 a failed load says why and offers Retry', async ({ browser }) => {
+    // The first Retry on each page belongs to this endpoint, in the order the page renders them.
+    const failing: Record<string, string> = {
+      '/catalog': '/api/catalog/namespaces',
+      '/jobs': '/api/jobs',
+      '/queries': '/api/query-log',
+      '/health': '/api/apps',
+      '/apps': '/api/apps',
+    }
+    for (const route of Object.keys(failing)) {
+      const page = await (await browser.newContext({ viewport: { width: 1280, height: 800 } })).newPage()
+      const hits = new Map<string, number>()
+      await page.route('**/api/**', (r) => {
+        const path = new URL(r.request().url()).pathname
+        if (path === '/api/me') return json(r, { user: 'alice', auth_mode: 'oidc', demo: false, warehouse: 'warehouse', is_admin: true, groups: ['admins'] })
+        hits.set(path, (hits.get(path) ?? 0) + 1)
+        return json(r, { error: 'the upstream is not reachable' }, 502)
+      })
+      await page.goto(route)
+      // The sentence the API sent, not a path or a status, and in time to read it (rule U11).
+      await expect(page.getByText('the upstream is not reachable').first(), route).toBeVisible({ timeout: 4000 })
+      const retry = page.getByRole('button', { name: 'Retry' }).first()
+      await expect(retry, route).toBeVisible()
+      const before = hits.get(failing[route]) ?? 0
+      await retry.click()
+      await expect.poll(() => hits.get(failing[route]) ?? 0, { message: `${route}: Retry asked again` }).toBeGreaterThan(before)
+      await page.context().close()
+    }
+  })
 })
 
 // Last: an entry in known.ts that no page produces any more is a stale line (rule: the list only shrinks).

@@ -1,7 +1,8 @@
 import { useState, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { api, allTables, type UploadResult, type TransferResult } from '../api'
+import { api, allTables, errorMessage, type UploadResult, type TransferResult } from '../api'
+import ErrorBox from '../components/ErrorBox'
 import { Icon } from '../components/Icon'
 import { rowsLabel } from '../format'
 
@@ -83,7 +84,7 @@ function LoadForm() {
       qc.invalidateQueries({ queryKey: ['catalog'] })
       qc.invalidateQueries({ queryKey: ['jobs'] })
     },
-    onError: (e: unknown) => setError(e instanceof Error ? e.message : String(e)),
+    onError: (e: unknown) => setError(errorMessage(e)),
   })
 
   return (
@@ -134,7 +135,7 @@ function LoadForm() {
                       setContent(text)
                       setFormat(file.name.toLowerCase().endsWith('.json') ? 'json' : 'csv')
                     },
-                    (err: unknown) => setError(`Could not read ${file.name}: ${err instanceof Error ? err.message : String(err)}`),
+                    (err: unknown) => setError(`Could not read ${file.name}: ${errorMessage(err)}`),
                   )
                 }
               }}
@@ -165,7 +166,7 @@ function LoadForm() {
           </span>
         </div>
 
-        {error && <ErrorBox text={error} />}
+        {error && <FormError text={error} />}
         {result && (
           <div className="rounded-[10px] border border-emerald-400/30 bg-emerald-400/10 p-4 text-sm">
             <div className="font-medium text-ok">
@@ -219,7 +220,7 @@ function TransferForm() {
       qc.invalidateQueries({ queryKey: ['catalog'] })
       qc.invalidateQueries({ queryKey: ['jobs'] })
     },
-    onError: (e: unknown) => setError(e instanceof Error ? e.message : String(e)),
+    onError: (e: unknown) => setError(errorMessage(e)),
   })
 
   const refs = tables.data ?? []
@@ -234,7 +235,7 @@ function TransferForm() {
               <option key={`${r.ns}.${r.name}`} value={`${r.ns}.${r.name}`}>{r.ns}.{r.name}</option>
             ))}
           </select>
-          {tables.isError && <div className="text-bad text-xs mt-1.5">Could not list tables: {String(tables.error)}</div>}
+          {tables.isError && <div className="mt-1.5"><ErrorBox error={tables.error} onRetry={() => tables.refetch()} /></div>}
         </Field>
 
         <div className="grid sm:grid-cols-2 gap-4">
@@ -275,7 +276,7 @@ function TransferForm() {
           {transfer.isPending ? 'Transferring…' : 'Transfer table'}
         </button>
 
-        {error && <ErrorBox text={error} />}
+        {error && <FormError text={error} />}
         {result && (
           <div className="rounded-[10px] border border-emerald-400/30 bg-emerald-400/10 p-4 text-sm">
             <div className="font-medium text-ok">
@@ -310,7 +311,8 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
   )
 }
 
-function ErrorBox({ text }: { text: string }) {
+/** A failed upload or transfer: the sentence from the API, without a retry (the form holds the input). */
+function FormError({ text }: { text: string }) {
   return (
     <div className="rounded-[10px] border border-red-500/40 bg-red-500/10 p-3 text-sm text-bad font-mono whitespace-pre-wrap break-words">
       {text}

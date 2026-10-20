@@ -230,31 +230,20 @@ export class ApiError extends Error {
   }
 }
 
-/** Parse a 2xx body as JSON; a non-JSON body (e.g. an HTML fallback page) gets a readable error. */
-async function readJson<T>(path: string, r: Response): Promise<T> {
-  try {
-    return (await r.json()) as T
-  } catch {
-    throw new Error(`${path} → ${r.status}: response was not JSON`)
-  }
+/** The sentence to show for any failed request: the API's own message, never a path or a status code. */
+export function errorMessage(e: unknown): string {
+  return e instanceof ApiError ? e.message : 'Something went wrong. Try again.'
 }
 
-/** A 401 means the session is missing or expired: go sign in, then come back. */
-function checkAuth(path: string, r: Response) {
-  if (r.status === 401) {
-    redirectToLogin()
-    throw new ApiError(`${path} → 401: signing in…`, 401)
-  }
+/** The sentence for a status when the body carried none (an HTML error page from a proxy, an empty body). */
+function statusSentence(status: number): string {
+  if (status === 401) return 'Signing in…'
+  if (status === 403) return 'You are not allowed to see this.'
+  if (status === 404) return 'Not found.'
+  return status >= 500 ? 'Something went wrong on the server. Try again.' : 'The request was refused.'
 }
 
-async function jget<T>(path: string): Promise<T> {
-  const r = await fetch(path)
-  checkAuth(path, r)
-  if (!r.ok) throw new ApiError(`${path} → ${r.status}`, r.status)
-  return readJson<T>(path, r)
-}
-
-/** The backend answers errors as `{"error": "<message>"}`; show the message, not the JSON. */
+/** The backend answers errors as `{"error": "<message>"}`; any other body (an HTML page, an empty one) carries no sentence. */
 function errorText(body: string): string {
   try {
     const parsed: unknown = JSON.parse(body)
@@ -262,21 +251,59 @@ function errorText(body: string): string {
       return parsed.error
     }
   } catch {
-    /* not JSON: show it as it came */
+    /* not JSON: it carries no sentence */
   }
-  return body
+  return ''
+}
+
+/** One request; a refused connection is Nova being unreachable, not the browser's TypeError text. */
+async function send(path: string, init?: RequestInit): Promise<Response> {
+  try {
+    return await fetch(path, init)
+  } catch {
+    throw new ApiError('Nova is not reachable. Check your connection and try again.', 0)
+  }
+}
+
+/** Parse a 2xx body as JSON; a non-JSON body (e.g. an HTML fallback page) gets a readable error. */
+async function readJson<T>(path: string, r: Response): Promise<T> {
+  try {
+    return (await r.json()) as T
+  } catch {
+    console.debug('api', path, r.status)
+    throw new ApiError('Nova answered with something unexpected. Try again.', r.status)
+  }
+}
+
+/** A 401 means the session is missing or expired: go sign in, then come back. */
+function checkAuth(path: string, r: Response) {
+  if (r.status === 401) {
+    console.debug('api', path, r.status)
+    redirectToLogin()
+    throw new ApiError('Signing in…', 401)
+  }
+}
+
+async function jget<T>(path: string): Promise<T> {
+  const r = await send(path)
+  checkAuth(path, r)
+  if (!r.ok) {
+    console.debug('api', path, r.status)
+    throw new ApiError(errorText(await r.text().catch(() => '')) || statusSentence(r.status), r.status)
+  }
+  return readJson<T>(path, r)
 }
 
 async function jpost<T>(path: string, body: unknown): Promise<T> {
-  const r = await fetch(path, {
+  const r = await send(path, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
   })
   checkAuth(path, r)
   if (!r.ok) {
-    const text = await r.text().catch(() => '')
-    throw new ApiError(`${path} → ${r.status}: ${errorText(text)}`, r.status)
+    console.debug('api', path, r.status)
+    throw new ApiError(errorText(await r.text().catch(() => '')) || statusSentence(r.status), r.status)
   }
   return readJson<T>(path, r)
 }

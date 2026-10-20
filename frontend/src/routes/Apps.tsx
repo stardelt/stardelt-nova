@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { api, type PlatformApp } from '../api'
+import ErrorBox from '../components/ErrorBox'
 import { Icon } from '../components/Icon'
 import { isBrowsable, safeHttpUrl, shortImage, statusLabel } from '../format'
 
@@ -36,7 +37,7 @@ export default function Apps() {
       </header>
 
       {apps.isLoading && <div className="text-text-mute">loading…</div>}
-      {apps.isError && <div className="text-bad text-sm">{String(apps.error)}</div>}
+      {apps.isError && <ErrorBox error={apps.error} onRetry={() => apps.refetch()} />}
 
       {[...groups.entries()].map(([category, list]) => (
         <section key={category}>
