@@ -1,10 +1,10 @@
 import { useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { ApiError, api, errorMessage, formatTime, type PipelineView } from '../api'
+import { ApiError, api, errorMessage, type PipelineView } from '../api'
 import ErrorBox from '../components/ErrorBox'
 import { Icon } from '../components/Icon'
-import { formatDurationMs, relativeTime } from '../format'
+import { formatDurationMs, formatTime, relativeTime } from '../format'
 
 /**
  * Pipelines (J1): the scheduled `Pipeline` resources of the caller's groups, what each

@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
-import { api, errorMessage, formatCell, formatTime, type IcebergField, type QueryResult, type TableDocumentation, type TableMetadata } from '../api'
+import { api, errorMessage, formatCell, type IcebergField, type QueryResult, type TableDocumentation, type TableMetadata } from '../api'
 import ErrorBox from '../components/ErrorBox'
 import TableAbout, { type DocsState } from '../components/TableAbout'
-import { sqlTableRef, rowsLabel } from '../format'
+import { formatTime, sqlTableRef, rowsLabel } from '../format'
 import { isAdmin } from '../roles'
 
 type Sel = { ns: string; tbl: string }

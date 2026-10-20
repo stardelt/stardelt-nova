@@ -613,8 +613,15 @@ function queryLogUrl(p: QueryLogParams): string {
   return `/api/query-log?${qs.toString()}`
 }
 
+/** One answer of `PUT /api/settings/{key}`: the value as the store now holds it. */
+export type SettingAnswer = { key: string; value: unknown }
+
 export const api = {
   me:           ()                            => jget<Me>('/api/me'),
+  /** The caller's personal settings as one JSON object (`{}` when none). */
+  settings:     ()                            => jget<Record<string, unknown>>('/api/settings'),
+  putSetting:   (key: string, value: unknown) => jput<SettingAnswer>(`/api/settings/${seg(key)}`, value),
+  deleteSetting: (key: string)                => jdel(`/api/settings/${seg(key)}`),
   connections:  ()                            => jget<{ connections: Connection[] }>('/api/connections'),
   createConnection: (req: NewConnectionRequest) => jpost<Connection>('/api/connections', req),
   rotateConnection: (path: string, secret: Record<string, string>) => jput<Connection>(path, { secret }),
@@ -677,18 +684,6 @@ export function formatCell(c: unknown): string {
   if (c === null || c === undefined) return '∅'
   if (typeof c === 'string') return c
   return JSON.stringify(c)
-}
-
-export function formatTime(ms: number): string {
-  if (!ms) return '—'
-  const d = new Date(ms)
-  return d.toLocaleString(undefined, {
-    month: 'short',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  })
 }
 
 export function downloadCsv(filename: string, columns: string[], rows: unknown[][]) {

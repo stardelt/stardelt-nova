@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useRef, useState, type ReactNode } from 'react'
-import { ApiError, api, formatTime, type Connection } from '../api'
+import { ApiError, api, type Connection } from '../api'
 import {
   BreakGlassDialog,
   DeleteConnectionDialog,
@@ -10,7 +10,7 @@ import {
 import ErrorBox from '../components/ErrorBox'
 import { Icon } from '../components/Icon'
 import { connectionTypeLabel } from '../connectionTypes'
-import { relativeTime } from '../format'
+import { formatTime, relativeTime } from '../format'
 import { isAdmin } from '../roles'
 
 /**
