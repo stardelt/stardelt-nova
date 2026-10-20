@@ -5,6 +5,7 @@ import Overview from './routes/Overview'
 import Catalog from './routes/Catalog'
 import Query from './routes/Query'
 import Data from './routes/Data'
+import Connections from './routes/Connections'
 import Jobs from './routes/Jobs'
 import QueryLog from './routes/QueryLog'
 import Apps from './routes/Apps'
@@ -24,6 +25,7 @@ export default function App() {
         <Route path="/catalog"    element={<Catalog    />} />
         <Route path="/query"      element={<Query      />} />
         <Route path="/data"       element={<Data       />} />
+        <Route path="/connections" element={<Connections />} />
         <Route path="/jobs"       element={<Jobs       />} />
         <Route path="/queries"    element={<QueryLog   />} />
         <Route path="/apps"       element={<RequireAdmin><Apps      /></RequireAdmin>} />

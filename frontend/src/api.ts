@@ -220,6 +220,31 @@ export type AppDetail = {
   embed?: AppEmbed
 }
 
+/**
+ * One row of `GET /api/connections` (stardelt-nova#171). A connection is a credential
+ * for a system outside the platform; the page lists metadata only. `secretKeys` holds the
+ * *names* of the secret fields — a value is never sent, by the store or by Nova, so the
+ * UI cannot show one even if it tried.
+ */
+export type Connection = {
+  name: string
+  scope: 'personal' | 'group' | 'managed'
+  type: string
+  /** Group scope only: the group whose members may use and rotate it. */
+  ownerGroup?: string
+  /** Managed scope only: the groups allowed to use it. */
+  usableBy?: string[]
+  /** Non-secret settings (host, port, bucket, …) as the store keeps them. */
+  config: Record<string, string>
+  /** Names of the secret fields; the values are never sent. */
+  secretKeys: string[]
+  /** ISO time of the last rotation. */
+  lastRotated?: string
+  version: number
+  /** Group and managed scope only: whether the operator synced it. */
+  sync?: { ready: boolean; reason: string; message?: string }
+}
+
 /** A non-2xx answer from the backend; `status` lets callers tell 404 from 5xx. */
 export class ApiError extends Error {
   status: number
@@ -388,6 +413,7 @@ function queryLogUrl(p: QueryLogParams): string {
 
 export const api = {
   me:           ()                            => jget<Me>('/api/me'),
+  connections:  ()                            => jget<{ connections: Connection[] }>('/api/connections'),
   trinoCluster: ()                            => jget<unknown>('/api/trino/cluster'),
   warehouse:    ()                            => jget<Warehouse>('/api/catalog/warehouse'),
   namespaces:   ()                            => jget<NamespaceList>('/api/catalog/namespaces'),
