@@ -3647,7 +3647,7 @@
       },
       "TaskSpecView": {
         "type": "object",
-        "description": "One task as the resource declares it.",
+        "description": "One task as the resource declares it. `sql` is the statement of a `kind: \"sql\"` task, and\nonly the detail route carries it (Schedule's edit dialog prefills from it).",
         "required": [
           "name",
           "kind"
@@ -3658,6 +3658,12 @@
           },
           "name": {
             "type": "string"
+          },
+          "sql": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
