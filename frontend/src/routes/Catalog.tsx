@@ -28,6 +28,7 @@ export default function Catalog() {
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-[300px_minmax(0,1fr)] gap-5 h-full min-h-0">
+      <h1 className="sr-only">Catalog</h1>
       <aside className="card p-3 flex flex-col min-h-0">
         <div className="px-1 pb-2">
           <div className="label mb-1.5">Catalog</div>
