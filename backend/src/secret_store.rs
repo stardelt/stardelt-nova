@@ -24,6 +24,10 @@ pub struct StoreConfig {
     pub url: String,
     /// The JWT sign-in role (`NOVA_SECRET_STORE_ROLE`, default `platform-users`).
     pub role: String,
+    /// The JWT sign-in role for an administrator's break-glass read of a group connection
+    /// (`NOVA_SECRET_STORE_BREAKGLASS_ROLE`, default `breakglass`). The store grants it read on
+    /// `connections/group/*` only, bound to `azp = nova` and to the administrator group.
+    pub breakglass_role: String,
     /// The KV v2 mount (`NOVA_SECRET_STORE_MOUNT`, default `secret`).
     pub mount: String,
 }
@@ -50,6 +54,7 @@ impl StoreConfig {
         Some(Self {
             url,
             role: word("NOVA_SECRET_STORE_ROLE", "platform-users"),
+            breakglass_role: word("NOVA_SECRET_STORE_BREAKGLASS_ROLE", "breakglass"),
             mount: word("NOVA_SECRET_STORE_MOUNT", "secret"),
         })
     }
@@ -235,20 +240,44 @@ impl StoreClient {
         }
     }
 
+    /// The role an administrator's break-glass read signs in with.
+    pub fn breakglass_role(&self) -> &str {
+        &self.cfg.breakglass_role
+    }
+
     /// Sign in with the person's own platform token; the store applies the policies of that
     /// person's groups to the token it returns.
     pub async fn login(&self, user_token: &Secret) -> Result<StoreToken, StoreError> {
+        self.login_as(&self.cfg.role, user_token).await
+    }
+
+    /// Sign in with the person's own platform token under a named role. The break-glass read
+    /// uses this with the store's `breakglass` role, so the store — not Nova — decides whether
+    /// the token belongs to an administrator and is Nova's.
+    pub async fn login_as(
+        &self,
+        role: &str,
+        user_token: &Secret,
+    ) -> Result<StoreToken, StoreError> {
         let url = format!("{}/v1/auth/jwt/login", self.cfg.url);
         let request = self
             .http
             .post(url)
-            .json(&json!({ "role": self.cfg.role, "jwt": user_token.expose() }));
+            .json(&json!({ "role": role, "jwt": user_token.expose() }));
         let (status, body) = self.send(request, None).await?;
         Self::check(status, &body)?;
         body["auth"]["client_token"]
             .as_str()
             .map(StoreToken::new)
             .ok_or_else(|| StoreError::Unavailable("the sign-in answered without a token".into()))
+    }
+
+    /// Revoke the store token. The caller ignores a failure: the token expires after 15 minutes
+    /// anyway, and a failed revocation must not turn a read that already happened into an error.
+    pub async fn revoke(&self, token: &StoreToken) -> Result<(), StoreError> {
+        let url = format!("{}/v1/auth/token/revoke-self", self.cfg.url);
+        let (status, body) = self.send(self.http.post(url), Some(token)).await?;
+        Self::check(status, &body)
     }
 
     /// Write the secret fields (a new version that replaces the old one) and the non-secret
@@ -396,6 +425,14 @@ pub(crate) mod fake {
         pub(crate) custom: BTreeMap<String, BTreeMap<String, String>>,
         /// The current version, by path.
         pub(crate) versions: BTreeMap<String, u64>,
+        /// Every request the store received, to prove a route did not call it.
+        pub(crate) requests: usize,
+        /// The sign-ins, as `(role, jwt)`.
+        pub(crate) logins: Vec<(String, String)>,
+        /// The paths that were read.
+        pub(crate) reads: Vec<String>,
+        /// The tokens that were revoked.
+        pub(crate) revokes: Vec<String>,
     }
 
     pub(crate) type Shared = Arc<Mutex<Fake>>;
@@ -434,7 +471,15 @@ pub(crate) mod fake {
         }
     }
 
-    async fn fake_login(Json(body): Json<Value>) -> (StatusCode, Json<Value>) {
+    async fn fake_login(
+        State(s): State<Shared>,
+        Json(body): Json<Value>,
+    ) -> (StatusCode, Json<Value>) {
+        s.lock().unwrap().requests += 1;
+        s.lock().unwrap().logins.push((
+            body["role"].as_str().unwrap_or_default().to_string(),
+            body["jwt"].as_str().unwrap_or_default().to_string(),
+        ));
         match body["jwt"].as_str() {
             Some("good") => (
                 StatusCode::OK,
@@ -455,6 +500,7 @@ pub(crate) mod fake {
         headers: HeaderMap,
         Json(body): Json<Value>,
     ) -> Result<StatusCode, (StatusCode, Json<Value>)> {
+        s.lock().unwrap().requests += 1;
         allowed(&headers, &path)?;
         let fields: BTreeMap<String, String> =
             serde_json::from_value(body["data"].clone()).unwrap();
@@ -469,6 +515,11 @@ pub(crate) mod fake {
         Path(path): Path<String>,
         headers: HeaderMap,
     ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+        {
+            let mut s = s.lock().unwrap();
+            s.requests += 1;
+            s.reads.push(path.clone());
+        }
         allowed(&headers, &path)?;
         let s = s.lock().unwrap();
         match s.data.get(&path) {
@@ -485,6 +536,7 @@ pub(crate) mod fake {
         headers: HeaderMap,
         Json(body): Json<Value>,
     ) -> Result<StatusCode, (StatusCode, Json<Value>)> {
+        s.lock().unwrap().requests += 1;
         allowed(&headers, &path)?;
         let custom: BTreeMap<String, String> =
             serde_json::from_value(body["custom_metadata"].clone()).unwrap();
@@ -498,6 +550,7 @@ pub(crate) mod fake {
         Query(q): Query<BTreeMap<String, String>>,
         headers: HeaderMap,
     ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+        s.lock().unwrap().requests += 1;
         allowed(&headers, &path)?;
         let s = s.lock().unwrap();
         if q.contains_key("list") {
@@ -533,6 +586,7 @@ pub(crate) mod fake {
         Path(path): Path<String>,
         headers: HeaderMap,
     ) -> Result<StatusCode, (StatusCode, Json<Value>)> {
+        s.lock().unwrap().requests += 1;
         allowed(&headers, &path)?;
         let mut s = s.lock().unwrap();
         s.data.remove(&path);
@@ -541,10 +595,24 @@ pub(crate) mod fake {
         Ok(StatusCode::NO_CONTENT)
     }
 
+    async fn fake_revoke(State(s): State<Shared>, headers: HeaderMap) -> StatusCode {
+        let mut s = s.lock().unwrap();
+        s.requests += 1;
+        s.revokes.push(
+            headers
+                .get("x-vault-token")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_string(),
+        );
+        StatusCode::NO_CONTENT
+    }
+
     pub(crate) async fn start() -> (StoreClient, Shared) {
         let shared: Shared = Arc::default();
         let app = Router::new()
             .route("/v1/auth/jwt/login", post(fake_login))
+            .route("/v1/auth/token/revoke-self", post(fake_revoke))
             .route("/v1/secret/data/{*path}", post(fake_put).get(fake_read))
             .route(
                 "/v1/secret/metadata/{*path}",
@@ -561,6 +629,7 @@ pub(crate) mod fake {
             StoreConfig {
                 url: format!("http://{addr}"),
                 role: "platform-users".into(),
+                breakglass_role: "breakglass".into(),
                 mount: "secret".into(),
             },
         );
@@ -594,19 +663,34 @@ mod tests {
         .unwrap();
         assert_eq!(cfg.url, "http://openbao.stardelt.svc:8200");
         assert_eq!(
-            (cfg.role.as_str(), cfg.mount.as_str()),
-            ("platform-users", "secret")
+            (
+                cfg.role.as_str(),
+                cfg.breakglass_role.as_str(),
+                cfg.mount.as_str()
+            ),
+            ("platform-users", "breakglass", "secret")
         );
         let cfg = StoreConfig::from_env_with(env(&[
             ("NOVA_SECRET_STORE_URL", "http://x"),
             ("NOVA_SECRET_STORE_ROLE", "other-role"),
+            ("NOVA_SECRET_STORE_BREAKGLASS_ROLE", "other-breakglass"),
             ("NOVA_SECRET_STORE_MOUNT", "bad/mount"),
         ]))
         .unwrap();
         assert_eq!(cfg.role, "other-role");
+        assert_eq!(cfg.breakglass_role, "other-breakglass");
         assert_eq!(
             cfg.mount, "secret",
             "a mount with a slash falls back to the default"
+        );
+        let cfg = StoreConfig::from_env_with(env(&[
+            ("NOVA_SECRET_STORE_URL", "http://x"),
+            ("NOVA_SECRET_STORE_BREAKGLASS_ROLE", "bad/role"),
+        ]))
+        .unwrap();
+        assert_eq!(
+            cfg.breakglass_role, "breakglass",
+            "a role that is not a store role name falls back to the default"
         );
     }
 
@@ -696,6 +780,30 @@ mod tests {
             }
             other => panic!("expected Refused, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn login_as_sends_the_given_role() {
+        let (store, fake) = fake::start().await;
+        let token = store
+            .login_as("breakglass", &Secret::new("good"))
+            .await
+            .unwrap();
+        assert!(!format!("{token:?}").contains("tok-alice"));
+        assert_eq!(
+            fake.lock().unwrap().logins,
+            [("breakglass".to_string(), "good".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn revoke_posts_revoke_self() {
+        let (store, fake) = fake::start().await;
+        let token = store.login(&Secret::new("good")).await.unwrap();
+        store.revoke(&token).await.unwrap();
+        let fake = fake.lock().unwrap();
+        assert_eq!(fake.revokes, ["tok-alice"]);
+        assert_eq!(fake.requests, 2, "one sign-in, one revocation");
     }
 
     #[tokio::test]
@@ -791,6 +899,7 @@ mod tests {
             StoreConfig {
                 url: "http://127.0.0.1:9".into(),
                 role: "r".into(),
+                breakglass_role: "breakglass".into(),
                 mount: "secret".into(),
             },
         );
@@ -819,6 +928,7 @@ mod tests {
             StoreConfig {
                 url,
                 role: "platform-users".into(),
+                breakglass_role: "breakglass".into(),
                 mount: "secret".into(),
             },
         );

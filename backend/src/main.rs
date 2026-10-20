@@ -121,6 +121,9 @@ pub struct AppState {
     /// The state store (`db.rs`). `None` when `NOVA_DATABASE_URL` is unset: every
     /// feature that needs it must answer 503 then, never panic.
     pub db: Option<sqlx::PgPool>,
+    /// In-memory break-glass rate limit: at most five attempted reads per administrator in ten
+    /// minutes. Refusals never reach it; only a restart forgets it.
+    pub break_glass_reads: connection_routes::BreakGlassLimiter,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -493,6 +496,23 @@ fn api_router() -> Router<Arc<AppState>> {
             "/connections/managed/{name}",
             delete(connection_routes::delete_managed),
         )
+        // Break-glass: administrators only, group connections only, every attempt audited.
+        .route(
+            "/connections/group/{group}/{name}/break-glass",
+            post(connection_routes::break_glass_group),
+        )
+        .route(
+            "/connections/personal/{name}/break-glass",
+            post(connection_routes::break_glass_personal),
+        )
+        .route(
+            "/connections/managed/{name}/break-glass",
+            post(connection_routes::break_glass_managed),
+        )
+        .route(
+            "/connections/break-glass-log",
+            get(connection_routes::break_glass_log),
+        )
         .route("/ingest/upload", post(data::upload))
         .route("/transfer", post(data::transfer))
 }
@@ -612,6 +632,7 @@ async fn main() -> anyhow::Result<()> {
         admin_console_url: admin_console,
         db,
         store,
+        break_glass_reads: Mutex::new(std::collections::HashMap::new()),
     });
 
     let auth = match auth_mode {
@@ -739,6 +760,7 @@ mod router_tests {
             admin_console_url: admin_console_url("https://id.example.com/realms/stardelt"),
             db,
             store: None,
+            break_glass_reads: Mutex::new(std::collections::HashMap::new()),
         })
     }
 
