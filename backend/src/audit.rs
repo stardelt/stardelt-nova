@@ -277,6 +277,86 @@ pub(crate) mod test_sink {
     }
 }
 
+/// One published notebook: group, name, immutable version and stored size — and nothing
+/// that could carry content. A notebook's cells, outputs, parameters and sha256 are
+/// deliberately absent: the audit line records the action, not the bytes
+/// (stardelt-nova#225).
+pub fn notebook_publish_event(
+    who: &crate::auth::Identity,
+    group: &str,
+    name: &str,
+    version: &str,
+    size: u64,
+) {
+    tracing::info!(
+        target: "audit",
+        action = "publish",
+        group = %group,
+        name = %name,
+        version = %version,
+        size,
+        actor = %who.display_name,
+        sub = %who.sub,
+        "notebook published"
+    );
+    #[cfg(test)]
+    notebook_test_sink::push(notebook_test_sink::Record {
+        group: group.to_string(),
+        name: name.to_string(),
+        version: version.to_string(),
+        size,
+        actor: who.display_name.clone(),
+        sub: who.sub.clone(),
+    });
+}
+
+/// Test-only capture of [`notebook_publish_event`]'s records, with the same reasoning as
+/// [`test_sink`]: a scoped tracing subscriber is process-global and unreliable under the
+/// parallel test runner. A record has no field that could hold notebook content.
+#[cfg(test)]
+pub(crate) mod notebook_test_sink {
+    use std::sync::{Mutex, OnceLock};
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Record {
+        pub group: String,
+        pub name: String,
+        pub version: String,
+        pub size: u64,
+        pub actor: String,
+        pub sub: String,
+    }
+
+    static RECORDS: OnceLock<Mutex<Vec<Record>>> = OnceLock::new();
+
+    fn records() -> &'static Mutex<Vec<Record>> {
+        RECORDS.get_or_init(|| Mutex::new(Vec::new()))
+    }
+
+    pub fn push(record: Record) {
+        records()
+            .lock()
+            .expect("notebook audit sink poisoned")
+            .push(record);
+    }
+
+    /// Drain one actor's records, leaving everybody else's for their own test.
+    pub fn take_for(sub: &str) -> Vec<Record> {
+        let mut records = records().lock().expect("notebook audit sink poisoned");
+        let mut mine = Vec::new();
+        let mut theirs = Vec::new();
+        for record in records.drain(..) {
+            if record.sub == sub {
+                mine.push(record);
+            } else {
+                theirs.push(record);
+            }
+        }
+        *records = theirs;
+        mine
+    }
+}
+
 /// One break-glass read or refusal: administrator, connection, owner group, reason, outcome and
 /// the request that carried it. **No field can hold a value**, so neither the tracing line nor
 /// the state-store row can leak the thing that was read.

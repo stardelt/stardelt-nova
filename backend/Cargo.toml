@@ -29,6 +29,10 @@ chrono-tz.workspace = true
 utoipa.workspace = true
 sqlx.workspace = true
 futures.workspace = true
+rusty-s3.workspace = true
+instant-xml.workspace = true
+jiff.workspace = true
+percent-encoding.workspace = true
 
 [dev-dependencies]
 tower.workspace = true

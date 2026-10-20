@@ -38,6 +38,9 @@
 //!   GET  /api/pipelines/…/tasks/{task_id}/logs — one task's log (paged)
 //!   POST /api/ingest/upload                 — load CSV/JSON into a table
 //!   POST /api/transfer                      — copy table → table
+//!   PUT  /api/notebooks/{group}/{name}      — publish a notebook (outputs stripped)
+//!   GET  /api/notebooks                     — the caller's groups' notebooks
+//!   GET  /api/notebooks/{group}/{name}/versions — one notebook's versions
 //!
 //! `NOVA_DEMO=1` serves an in-memory lakehouse so the UI runs with no cluster.
 //! `NOVA_AUTH_MODE=oidc` puts every `/api/*` route except `/api/health` and
@@ -52,6 +55,9 @@
 //! `NOVA_CATALOG_TOKEN_URL`, `NOVA_CATALOG_CLIENT_ID` and `NOVA_CATALOG_CLIENT_SECRET`
 //! (all three or none) make Nova send its own service token on every Lakekeeper call
 //! (`catalog_token.rs`); unset, the catalog is called without one.
+//! `NOVA_S3_URL`, `NOVA_S3_ACCESS_KEY`, `NOVA_S3_SECRET_KEY` and
+//! `NOVA_S3_NOTEBOOK_BUCKET` (all four or none) switch on published notebooks
+//! (`notebooks.rs`); unset, the routes answer 503.
 
 mod airflow;
 mod api_json;
@@ -69,6 +75,7 @@ mod db;
 mod demo;
 mod embed;
 mod jobs;
+mod notebooks;
 mod openapi;
 mod pipelines;
 // Wired into the collector and the API by the follow-up query-log tickets (stardelt-nova#116).
@@ -158,6 +165,10 @@ pub struct AppState {
     /// Nova signs in as one service user (built-in role `User`) and decides itself who may
     /// see what: Airflow cannot scope that credential to owner groups.
     pub airflow: Option<airflow::AirflowClient>,
+    /// The versioned bucket published notebooks live in (`notebooks.rs`). `None` unless
+    /// all four `NOVA_S3_*` variables are set: the notebook routes then answer 503 and
+    /// say so, never panic.
+    pub notebooks: Option<notebooks::NotebookStore>,
     /// One edit lock per table (`"{ns}.{tbl}"`) for the documentation writes. In-process,
     /// so it serialises one Nova replica; more than one replica needs a database lock (a
     /// later ticket). Lakekeeper 0.12.2 deadlocks on concurrent commits to one table
@@ -582,6 +593,8 @@ fn api_router() -> Router<Arc<AppState>> {
         // Pipelines: only the caller's groups' pipelines, administrators see all. Nova checks
         // the resource before it asks Airflow; a hidden pipeline is 404. Uncacheable.
         .merge(pipelines::router())
+        // Published notebooks: immutable versions, owner-group scoped (stardelt-nova#225).
+        .merge(notebooks::router())
 }
 
 /// The operator surfaces: the service inventory, the workload list and the engine
@@ -706,6 +719,24 @@ async fn main() -> anyhow::Result<()> {
         Err(e) => anyhow::bail!("refusing to start: catalog token configuration: {e}"),
     };
 
+    // Published notebooks (stardelt-nova#225). All four variables or none; a partial one
+    // refuses to start rather than answering 503 for a bucket the platform meant to wire.
+    // The secret key is a `Secret` and never printed.
+    let notebooks = match notebooks::NotebookConfig::from_env() {
+        Ok(None) => {
+            info!("NOVA_S3_URL is not set — notebook publishing answers 503");
+            None
+        }
+        Ok(Some(cfg)) => {
+            info!(bucket = %cfg.bucket, endpoint = %cfg.endpoint, "notebook storage configured");
+            Some(
+                notebooks::NotebookStore::new(http.clone(), cfg)
+                    .map_err(|e| anyhow::anyhow!("refusing to start: notebook storage: {e}"))?,
+            )
+        }
+        Err(e) => anyhow::bail!("refusing to start: notebook storage configuration: {e}"),
+    };
+
     let state = Arc::new(AppState {
         dev_user: std::env::var("NOVA_DEV_USER").unwrap_or_else(|_| "stardelt-dev".into()),
         trino_url: std::env::var("NOVA_TRINO_URL")
@@ -734,6 +765,7 @@ async fn main() -> anyhow::Result<()> {
         pipeline_creates: Mutex::new(std::collections::HashMap::new()),
         airflow,
         table_locks: Mutex::new(HashMap::new()),
+        notebooks,
     });
 
     let auth = match auth_mode {
@@ -817,6 +849,7 @@ async fn main() -> anyhow::Result<()> {
         auth = if auth.is_some() { "oidc" } else { "dev" },
         store = state.store.is_some(),
         catalog_token = state.catalog_token.is_some(),
+        notebooks = state.notebooks.is_some(),
         "nova backend starting"
     );
     // Second listener for the engine's event feed; off unless NOVA_INTERNAL_ADDR is set.
@@ -888,6 +921,7 @@ mod router_tests {
             pipeline_creates: Mutex::new(std::collections::HashMap::new()),
             airflow: None,
             table_locks: Mutex::new(std::collections::HashMap::new()),
+            notebooks: None,
         })
     }
 
