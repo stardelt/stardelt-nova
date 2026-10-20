@@ -1259,6 +1259,7 @@ mod tests {
             db: None,
             store: None,
             break_glass_reads: Mutex::new(std::collections::HashMap::new()),
+            run_starts: std::sync::Mutex::new(std::collections::HashMap::new()),
             airflow: None,
             table_locks: Mutex::new(std::collections::HashMap::new()),
         })

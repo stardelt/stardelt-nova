@@ -144,6 +144,82 @@ pub fn pipeline_log_event(
     );
 }
 
+/// One pipeline action: run, pause, resume or stop. Who, which pipeline and run, and how it
+/// ended (`ok`, `refused:<why>`, `error`). **No field can hold a note or log text**: the note
+/// Nova sends to Airflow is a fixed sentence, and it is not repeated here either.
+pub fn pipeline_event(
+    action: &str,
+    who: &crate::auth::Identity,
+    namespace: &str,
+    pipeline: &str,
+    run: Option<&str>,
+    outcome: &str,
+) {
+    tracing::info!(
+        target: "audit",
+        action = %action,
+        namespace = %namespace,
+        pipeline = %pipeline,
+        run = run.unwrap_or(""),
+        outcome = %outcome,
+        actor = %who.display_name,
+        sub = %who.sub,
+        "pipeline action"
+    );
+    #[cfg(test)]
+    test_sink::push(test_sink::Record {
+        action: action.to_string(),
+        actor: who.display_name.clone(),
+        sub: who.sub.clone(),
+        namespace: namespace.to_string(),
+        pipeline: pipeline.to_string(),
+        run: run.map(str::to_string),
+        outcome: outcome.to_string(),
+    });
+}
+
+/// Test-only capture of [`pipeline_event`]'s records.
+///
+/// Deliberately not a tracing subscriber: callsite interest in `tracing` is process-global and
+/// decided at the first hit, so a parallel test that emits without a subscriber switches the
+/// callsite off for a scoped one (this made the audit test fail only when the whole suite ran).
+/// The sink records exactly what the line carries, and `every_action_is_audited_including_refusals`
+/// filters by its own `sub` so other tests' records cannot interfere.
+#[cfg(test)]
+pub(crate) mod test_sink {
+    use std::sync::{Mutex, OnceLock};
+
+    /// The fields a pipeline audit line carries. There is no field for a note or log text.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Record {
+        pub action: String,
+        pub actor: String,
+        pub sub: String,
+        pub namespace: String,
+        pub pipeline: String,
+        pub run: Option<String>,
+        pub outcome: String,
+    }
+
+    static RECORDS: OnceLock<Mutex<Vec<Record>>> = OnceLock::new();
+
+    fn records() -> &'static Mutex<Vec<Record>> {
+        RECORDS.get_or_init(|| Mutex::new(Vec::new()))
+    }
+
+    pub fn push(record: Record) {
+        records()
+            .lock()
+            .expect("audit test sink poisoned")
+            .push(record);
+    }
+
+    /// Drain everything recorded so far.
+    pub fn take() -> Vec<Record> {
+        std::mem::take(&mut *records().lock().expect("audit test sink poisoned"))
+    }
+}
+
 /// One break-glass read or refusal: administrator, connection, owner group, reason, outcome and
 /// the request that carried it. **No field can hold a value**, so neither the tracing line nor
 /// the state-store row can leak the thing that was read.
