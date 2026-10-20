@@ -4,8 +4,8 @@ import { auditPage, focusAudit, type Finding } from './audit'
 
 // Rules U1–U13 are written down in stardelt-internal/design/ui-conformance.md.
 
-const ROUTES = ['/', '/catalog', '/query', '/data', '/jobs', '/queries', '/apps', '/lineage',
-  '/dashboards', '/notebooks', '/health', '/settings', '/no-such-page']
+const ROUTES = ['/', '/catalog', '/query', '/data', '/connections', '/jobs', '/queries',
+  '/apps', '/lineage', '/dashboards', '/notebooks', '/health', '/settings', '/no-such-page']
 const VARIANTS = [
   { name: 'desktop-dark', viewport: { width: 1280, height: 800 }, theme: 'dark', keyboard: true },
   { name: 'desktop-light', viewport: { width: 1280, height: 800 }, theme: 'light', keyboard: false },
@@ -178,6 +178,44 @@ test.describe('hostile data', () => {
         // U15: a status is never carried by colour alone.
         for (const word of ['Failed', 'Succeeded', 'In progress']) expect(text).toContain(word)
       }
+    }
+  })
+
+  test('U14 connection names and settings render as text', async ({ browser }) => {
+    const page = await (await browser.newContext({ viewport: { width: 1280, height: 800 } })).newPage()
+    await page.addInitScript(() => { (window as unknown as { __xss: number }).__xss = 0 })
+    const evil = '<img src=x onerror="window.__xss=1">'
+    const long = 'x'.repeat(400)
+    await page.route('**/api/**', (r) => {
+      const path = new URL(r.request().url()).pathname
+      if (path === '/api/me') return json(r, { user: 'alice', auth_mode: 'oidc', demo: false, warehouse: 'warehouse', is_admin: true, groups: ['admins'] })
+      if (path === '/api/connections') {
+        return json(r, { connections: [
+          // One row per scope: the name, the setting values and the owning group are markup.
+          { name: evil, scope: 'personal', type: 'postgresql', config: { host: evil, port: '5432' }, secretKeys: ['password'], version: 1 },
+          { name: 'team-db', scope: 'group', type: 'mysql', ownerGroup: evil, config: { host: 'db.internal' }, secretKeys: ['password'], version: 1, sync: { ready: true, reason: 'Synced' } },
+          // A setting that is one 400-character word must wrap or scroll, never widen the page.
+          { name: 'platform-s3', scope: 'managed', type: 's3', config: { bucket: long }, secretKeys: ['secretAccessKey'], version: 1, sync: { ready: false, reason: 'ReconcileFailed', message: evil } },
+        ] })
+      }
+      return json(r, [])
+    })
+    for (const width of [1280, 360]) {
+      await page.setViewportSize({ width, height: 800 })
+      await page.goto('/connections')
+      await page.waitForTimeout(1000)
+      const s = await page.evaluate(() => ({
+        xss: (window as unknown as { __xss: number }).__xss,
+        imgs: document.querySelectorAll('img[src="x"]').length,
+        overflow: document.documentElement.scrollWidth - window.innerWidth,
+      }))
+      expect(s, `${width}px`).toEqual({ xss: 0, imgs: 0, overflow: expect.any(Number) })
+      expect(s.overflow, `${width}px overflow`).toBeLessThanOrEqual(1)
+      const text = await page.locator('main').innerText()
+      // A status is the word, not only the colour; a failing sync says why on a second line.
+      for (const word of ['Stored', 'Ready', 'Not ready', evil]) expect(text, `${width}px: ${word}`).toContain(word)
+      // The Secret fields column holds the field names, never a value.
+      expect(text).toContain('secretAccessKey')
     }
   })
 })
