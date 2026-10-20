@@ -93,7 +93,7 @@ export default function Settings() {
         <p className="text-sm text-text-dim">
           {me.data?.identity_forwarding
             ? 'Nova forwards your token to Trino and Lakekeeper, so the catalog sees you — not Nova.'
-            : 'Nova talks to Trino and Lakekeeper with its own service connection, so the catalog currently sees Nova rather than you. Query and catalog requests carry no user identity until that lands (identity contract, phase 2).'}
+            : 'Nova talks to Trino and Lakekeeper with its own service connection, so the catalog currently sees Nova rather than you. Query and catalog requests carry no user identity until identity forwarding is switched on.'}
         </p>
       </section>
 

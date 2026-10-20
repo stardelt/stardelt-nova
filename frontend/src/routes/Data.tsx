@@ -193,8 +193,8 @@ function LoadForm() {
           <li>The job appears under Jobs with a row count.</li>
         </ol>
         <div className="mt-4 pt-4 border-t border-border text-xs text-text-mute">
-          CSV and JSON arrays of objects are supported. Keep files small for the MVP; bulk ingestion
-          lands with the pipeline pillar.
+          CSV and JSON arrays of objects are supported. The whole file is sent in one request, so
+          keep it small.
         </div>
       </aside>
     </div>
