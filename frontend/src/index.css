@@ -26,6 +26,7 @@
   --color-text-dim: rgb(var(--c-text-dim));
   --color-text-mute: rgb(var(--c-text-mute));
   --color-accent: rgb(var(--c-accent));
+  --color-accent-solid: rgb(var(--c-accent-solid));
   --color-accent-deep: rgb(var(--c-accent-deep));
   --color-success: rgb(var(--c-success));
   --color-ok: rgb(var(--c-ok));
@@ -47,8 +48,9 @@
     --c-border: 35 42 77;
     --c-text: 231 235 255;
     --c-text-dim: 164 171 208;
-    --c-text-mute: 112 121 163;
-    --c-accent: 91 108 255;
+    --c-text-mute: 128 137 178;
+    --c-accent: 105 121 255;
+    --c-accent-solid: 79 95 240;
     --c-accent-deep: 30 42 120;
     --c-success: 94 230 168;
     --c-ok: 110 231 183;     /* emerald-300 */
@@ -68,8 +70,9 @@
     --c-border: 214 219 232;
     --c-text: 19 22 41;
     --c-text-dim: 74 81 105;
-    --c-text-mute: 123 131 160;
+    --c-text-mute: 96 104 134;
     --c-accent: 74 91 240;
+    --c-accent-solid: 74 91 240;
     --c-accent-deep: 43 58 168;
     --c-success: 26 148 92;
     --c-ok: 4 120 87;        /* emerald-700, 5.5:1 on white */
@@ -120,7 +123,7 @@
   /* The three button variants repeat the base instead of `@apply btn`: Tailwind 4's
      `@apply` is for utilities, and a class defined in `@layer components` is not one. */
   .btn-primary {
-    @apply inline-flex items-center justify-center gap-2 px-3.5 py-2 rounded-[10px] text-sm font-medium transition bg-accent text-white hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed;
+    @apply inline-flex items-center justify-center gap-2 px-3.5 py-2 rounded-[10px] text-sm font-medium transition bg-accent-solid text-white hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed;
   }
   .btn-ghost {
     @apply inline-flex items-center justify-center gap-2 px-3.5 py-2 rounded-[10px] text-sm font-medium transition border border-border bg-bg-elev/60 text-text-dim hover:text-text hover:border-accent/40;

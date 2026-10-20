@@ -138,7 +138,7 @@ export default function QueryLog() {
                 type="button"
                 aria-pressed={scope === s}
                 onClick={() => setScope(s)}
-                className={`px-3 py-1.5 ${scope === s ? 'bg-accent text-white' : 'bg-bg-elev/60 text-text-dim hover:text-text'}`}
+                className={`px-3 py-1.5 ${scope === s ? 'bg-accent-solid text-white' : 'bg-bg-elev/60 text-text-dim hover:text-text'}`}
               >
                 {s === 'mine' ? 'Mine' : 'Everyone'}
               </button>
