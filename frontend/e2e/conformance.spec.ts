@@ -1,0 +1,161 @@
+import { test, expect, type Route } from '@playwright/test'
+import { KNOWN, type Known } from './known'
+import { auditPage, focusAudit, type Finding } from './audit'
+
+// Rules U1–U13 are written down in stardelt-internal/design/ui-conformance.md.
+
+const ROUTES = ['/', '/catalog', '/query', '/data', '/jobs', '/queries', '/apps', '/lineage',
+  '/dashboards', '/notebooks', '/health', '/settings', '/no-such-page']
+const VARIANTS = [
+  { name: 'desktop-dark', viewport: { width: 1280, height: 800 }, theme: 'dark', keyboard: true },
+  { name: 'desktop-light', viewport: { width: 1280, height: 800 }, theme: 'light', keyboard: false },
+  { name: 'phone-dark', viewport: { width: 360, height: 740 }, theme: 'dark', keyboard: false },
+]
+const matched = new Set<Known>()
+
+/** Splits findings into known (reported) and new (fail the test). */
+function judge(route: string, findings: Finding[]) {
+  const fresh: string[] = []
+  for (const f of findings) {
+    const k = KNOWN.find((e) => e.rule === f.rule && (!e.route || e.route === route) && (!e.contains || f.detail.includes(e.contains)))
+    if (k) {
+      matched.add(k)
+      test.info().annotations.push({ type: 'known', description: `${k.ticket} ${route} ${f.rule}: ${f.detail}` })
+    } else fresh.push(`${f.rule} ${route}: ${f.detail}`)
+  }
+  expect(fresh, 'new findings: fix the page, do not add them to e2e/known.ts').toEqual([])
+}
+
+const json = (route: Route, body: unknown, status = 200) =>
+  route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
+
+test.describe('every page, every variant', () => {
+  for (const v of VARIANTS) {
+    for (const route of ROUTES) {
+      test(`${v.name} ${route}`, async ({ browser }) => {
+        const ctx = await browser.newContext({ viewport: v.viewport })
+        await ctx.addInitScript((t) => { try { localStorage.setItem('stardelt-nova:theme', t) } catch { /* ignore */ } }, v.theme)
+        const page = await ctx.newPage()
+        const found: Finding[] = []
+        // U1: no uncaught exception, no console error. The browser's own "Failed to load resource"
+        // lines only mirror a failed request; U12 judges the status code instead.
+        page.on('console', (m) => {
+          if (['error', 'warning'].includes(m.type()) && !m.text().startsWith('Failed to load resource'))
+            found.push({ rule: 'U1', detail: m.text().slice(0, 160) })
+        })
+        page.on('pageerror', (e) => found.push({ rule: 'U1', detail: `uncaught: ${String(e).slice(0, 160)}` }))
+        // U12: an unreachable upstream is a 502/503/504, never a 500 (a 500 means a bug in Nova).
+        page.on('response', (r) => {
+          if (r.status() === 500 && r.url().includes('/api/'))
+            found.push({ rule: 'U12', detail: `500 from ${new URL(r.url()).pathname}` })
+        })
+        await page.goto(route)
+        // U11: the answer (data or an error) is on screen within 6 s; "loading" never stays.
+        await page.waitForFunction(() => !/loading/i.test(document.body.innerText), null, { timeout: 6000 })
+          .catch(() => found.push({ rule: 'U11', detail: 'still "loading" 6 s after the page opened' }))
+        await page.waitForTimeout(500)
+        if (route !== '/' && (await page.title()) === 'stardelt Nova')
+          found.push({ rule: 'U2', detail: 'the title does not name the page' })
+        found.push(...(await auditPage(page)))
+        if (v.keyboard) found.push(...(await focusAudit(page)))
+        await ctx.close()
+        judge(route, found)
+      })
+    }
+  }
+})
+
+test.describe('roles', () => {
+  test('U13 a signed-in non-admin sees no admin surface and calls no admin endpoint', async ({ browser }) => {
+    const page = await (await browser.newContext({ viewport: { width: 1280, height: 800 } })).newPage()
+    const hits: string[] = []
+    await page.route('**/api/**', (r) => {
+      const path = new URL(r.request().url()).pathname
+      hits.push(path)
+      if (path === '/api/me') return json(r, { user: 'alice', auth_mode: 'oidc', demo: false, warehouse: 'warehouse', is_admin: false, groups: ['analysts'] })
+      if (/^\/api\/(workloads|trino\/cluster)/.test(path) || (path.startsWith('/api/apps') && path !== '/api/apps/links'))
+        return json(r, { error: 'the administrator role is required' }, 403)
+      return json(r, path.includes('namespaces') ? { namespaces: [] } : [])
+    })
+    await page.goto('/')
+    await page.waitForTimeout(2000)
+    const nav = await page.evaluate(() => [...document.querySelectorAll('nav a')].map((a) => a.textContent?.trim()))
+    expect(nav.filter((t) => /^(Apps|Health|Settings)$/.test(t ?? ''))).toEqual([])
+    expect(hits.filter((h) => /^\/api\/(workloads|trino\/cluster)/.test(h) || (h.startsWith('/api/apps') && h !== '/api/apps/links'))).toEqual([])
+    const text = await page.evaluate(() => document.body.innerText)
+    expect(text).not.toMatch(/not installed/i)
+    for (const route of ['/apps', '/health', '/settings']) {
+      await page.goto(route)
+      await expect(page.getByText(/for platform administrators/i)).toBeVisible()
+    }
+  })
+})
+
+test.describe('hostile data', () => {
+  test('U14 markup and 400-character names render as text and do not widen the page', async ({ browser }) => {
+    const page = await (await browser.newContext({ viewport: { width: 1280, height: 800 } })).newPage()
+    await page.addInitScript(() => { (window as unknown as { __xss: number }).__xss = 0 })
+    const evil = '<img src=x onerror="window.__xss=1">'
+    const long = 'x'.repeat(400)
+    const now = Date.now()
+    await page.route('**/api/**', (r) => {
+      const path = new URL(r.request().url()).pathname
+      if (path === '/api/me') return json(r, { user: evil, auth_mode: 'oidc', demo: false, warehouse: 'warehouse', is_admin: true })
+      if (path === '/api/catalog/warehouse') return json(r, { name: 'warehouse', id: 'w' })
+      if (path === '/api/catalog/namespaces') return json(r, { namespaces: [[evil], [long]] })
+      if (/\/tables$/.test(path)) return json(r, { identifiers: [{ namespace: [evil], name: evil }, { namespace: [long], name: long }] })
+      if (path === '/api/query-log') {
+        return json(r, { nextCursor: null, items: [
+          { id: 'a1', state: 'FAILED', user: evil, source: evil, warehouse: long, queryType: 'SELECT', sql: `select '${evil}' ${long}`, createdAt: now - 60000, wallMs: 1200, outputRows: 1, errorCode: 'SYNTAX_ERROR' },
+          { id: 'a2', state: 'FINISHED', user: 'alice', source: null, warehouse: 'warehouse', queryType: 'SELECT', sql: 'select 1', createdAt: now - 5000, wallMs: 5, outputRows: 0, errorCode: null },
+          { id: 'a3', state: 'QUEUED', user: 'alice', source: 'trino-python-client', warehouse: 'warehouse', queryType: null, sql: 'select 2', createdAt: now - 2000, wallMs: null, outputRows: null, errorCode: null },
+        ] })
+      }
+      if (path === '/api/jobs') return json(r, [{ id: '1', kind: 'query', title: evil, status: 'failed', started_at: now, detail: evil, rows: 1, user: evil }])
+      return json(r, [])
+    })
+    for (const route of ['/', '/catalog', '/queries', '/jobs']) {
+      await page.goto(route)
+      await page.waitForTimeout(1500)
+      const s = await page.evaluate(() => ({
+        xss: (window as unknown as { __xss: number }).__xss,
+        imgs: document.querySelectorAll('img[src="x"]').length,
+        overflow: document.documentElement.scrollWidth - window.innerWidth,
+      }))
+      expect(s, route).toEqual({ xss: 0, imgs: 0, overflow: expect.any(Number) })
+      expect(s.overflow, `${route} overflow`).toBeLessThanOrEqual(1)
+      if (route === '/queries') {
+        const text = await page.evaluate(() => document.querySelector('main')?.innerText ?? '')
+        // U15: a status is never carried by colour alone.
+        for (const word of ['Failed', 'Succeeded', 'In progress']) expect(text).toContain(word)
+      }
+    }
+  })
+})
+
+test.describe('errors', () => {
+  test('U8 a failed statement shows the engine message and no API path', async ({ browser }) => {
+    const page = await (await browser.newContext({ viewport: { width: 1280, height: 800 } })).newPage()
+    await page.route('**/api/**', (r) => {
+      const path = new URL(r.request().url()).pathname
+      if (path === '/api/me') return json(r, { user: 'qa', auth_mode: 'static-dev', demo: false, warehouse: 'warehouse' })
+      if (path === '/api/query') return json(r, { error: "line 1:8: Column 'x' cannot be resolved" }, 400)
+      return json(r, [])
+    })
+    await page.goto('/query')
+    await page.getByRole('button', { name: /^Run/ }).click()
+    const main = page.locator('main')
+    await expect(main).toContainText('cannot be resolved')
+    const text = await main.innerText()
+    const found: Finding[] = []
+    if (/ApiError/.test(text)) found.push({ rule: 'U8', detail: 'visible text contains ApiError' })
+    if (/\/api\/|→ \d{3}/.test(text)) found.push({ rule: 'U8', detail: 'visible text contains an /api/ path' })
+    judge('/query', found)
+  })
+})
+
+// Last: an entry in known.ts that no page produces any more is a stale line (rule: the list only shrinks).
+test('known.ts has no stale entries', () => {
+  const stale = KNOWN.filter((k) => !matched.has(k)).map((k) => `${k.ticket} ${k.rule} ${k.route ?? ''} ${k.contains ?? ''}`)
+  expect(stale, 'these findings are fixed: delete their lines from e2e/known.ts').toEqual([])
+})
