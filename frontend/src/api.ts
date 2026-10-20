@@ -316,8 +316,39 @@ export type PipelineState =
   | 'succeeded'
   | 'idle'
 
-/** One task as the `Pipeline` resource declares it. */
-export type PipelineTaskSpec = { name: string; kind: string }
+/**
+ * One task as the `Pipeline` resource declares it. `sql` is the statement of a `kind: "sql"`
+ * task; the read API does not send it yet (stardelt-nova#211 says it should), so the editor
+ * treats it as absent and asks the person to type the statement until the API carries it.
+ */
+export type PipelineTaskSpec = { name: string; kind: string; sql?: string | null }
+
+/** A cron and its IANA zone, as `POST`/`PUT /api/pipelines` carries them. */
+export type ScheduleSpec = { cron: string; timezone: string }
+
+/** One of the caller's groups and the pipeline principal that would run its schedules. */
+export type PipelinePrincipal = {
+  group: string
+  /** `pipeline-<group>` when such a principal exists, else null. */
+  principal: string | null
+  ready: boolean
+  /** Why not, when `ready` is false: the sentence the API refuses a schedule with. */
+  message: string | null
+}
+
+/** `POST /api/pipelines` (`Schedule`, stardelt-nova#210). */
+export type CreatePipelineRequest = {
+  name: string
+  ownerGroup: string
+  sql: string
+  schedule: ScheduleSpec | null
+}
+
+/** `PUT /api/pipelines/{namespace}/{name}`: only the statement and the schedule change. */
+export type UpdatePipelineRequest = {
+  sql: string
+  schedule: ScheduleSpec | null
+}
 
 /**
  * One run, as the list and the detail share it. Times are Airflow's RFC 3339 strings;
@@ -639,6 +670,12 @@ export const api = {
   queryLog:     (p: QueryLogParams)           => jget<QueryLogPage>(queryLogUrl(p)),
   queryLogDetail: (id: string)                => jget<QueryLogDetail>(`/api/query-log/${seg(id)}`),
   pipelines:    ()                            => jget<{ pipelines: PipelineView[] }>('/api/pipelines'),
+  /** The caller's own groups and their principals (`Schedule`, #210). */
+  pipelinePrincipals: ()                      => jget<{ groups: PipelinePrincipal[] }>('/api/pipelines/principals'),
+  createPipeline: (req: CreatePipelineRequest) => jpost<PipelineView>('/api/pipelines', req),
+  updatePipeline: (ns: string, name: string, req: UpdatePipelineRequest) =>
+    jput<PipelineView>(`/api/pipelines/${seg(ns)}/${seg(name)}`, req),
+  deletePipeline: (ns: string, name: string)  => jdel(`/api/pipelines/${seg(ns)}/${seg(name)}`),
   pipeline:     (ns: string, name: string)    => jget<PipelineDetail>(`/api/pipelines/${seg(ns)}/${seg(name)}`),
   startPipelineRun: (ns: string, name: string) => jpost<RunView>(`/api/pipelines/${seg(ns)}/${seg(name)}/runs`, {}),
   pausePipeline: (ns: string, name: string)   => jpost<PipelineView>(`/api/pipelines/${seg(ns)}/${seg(name)}/pause`, {}),

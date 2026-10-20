@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { useSearchParams } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { api, allTables, downloadCsv, errorMessage, formatCell, type QueryResult, type TableRef } from '../api'
 import { Icon } from '../components/Icon'
+import ScheduleDialog from '../components/ScheduleDialog'
 import { sqlTableRef } from '../format'
 
 const HISTORY_KEY = 'stardelt-nova:history'
@@ -45,7 +46,10 @@ export default function Query() {
   const [result, setResult] = useState<QueryResult | null>(null)
   const [elapsed, setElapsed] = useState<number | null>(null)
   const [history, setHistory] = useState<string[]>(loadHistory)
+  const [scheduling, setScheduling] = useState(false)
+  const [scheduled, setScheduled] = useState<{ name: string; namespace: string } | null>(null)
   const taRef = useRef<HTMLTextAreaElement>(null)
+  const empty = sql.trim() === ''
 
   useEffect(() => {
     const fromUrl = params.get('sql')
@@ -95,12 +99,36 @@ export default function Query() {
           <div className="flex items-center gap-2 mt-2">
             <div className="text-xs text-text-mute">⌘/Ctrl+Enter to run</div>
             <button onClick={() => setTyped(null)} className="btn-ghost ml-auto py-1.5">Sample</button>
+            <button
+              type="button"
+              onClick={() => setScheduling(true)}
+              disabled={empty}
+              title={empty ? 'Write a statement first' : undefined}
+              aria-label="Schedule this statement"
+              className="btn-ghost py-1.5"
+            >
+              <Icon name="clock" className="w-4 h-4" />
+              Schedule
+            </button>
             <button onClick={run} disabled={running} className="btn-primary py-1.5">
               <Icon name="terminal" className="w-4 h-4" />
               {running ? 'Running…' : 'Run'}
             </button>
           </div>
         </div>
+
+        {scheduled && (
+          <p role="status" className="text-sm text-ok break-words">
+            Scheduled{' '}
+            <Link
+              to={`/pipelines/${encodeURIComponent(scheduled.namespace)}/${encodeURIComponent(scheduled.name)}`}
+              className="underline"
+            >
+              {scheduled.name}
+            </Link>
+            . It appears under Pipelines within a minute.
+          </p>
+        )}
 
         {error && (
           <div className="rounded-[14px] border border-red-500/40 bg-red-500/10 p-4 text-sm text-bad font-mono whitespace-pre-wrap break-words">
@@ -169,6 +197,18 @@ export default function Query() {
           ))}
         </ul>
       </aside>
+
+      {scheduling && (
+        <ScheduleDialog
+          mode="create"
+          sql={sql}
+          onClose={() => setScheduling(false)}
+          onScheduled={(view) => {
+            setScheduling(false)
+            setScheduled({ name: view.name, namespace: view.namespace })
+          }}
+        />
+      )}
     </div>
   )
 }
