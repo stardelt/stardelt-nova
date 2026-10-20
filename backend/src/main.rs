@@ -136,6 +136,10 @@ pub struct AppState {
     /// In-memory break-glass rate limit: at most five attempted reads per administrator in ten
     /// minutes. Refusals never reach it; only a restart forgets it.
     pub break_glass_reads: connection_routes::BreakGlassLimiter,
+    /// In-memory run-start rate limit: at most ten started runs per user in a minute
+    /// (stardelt-nova#196). Refusals before the limiter (unloaded, paused) never reach it;
+    /// only a restart forgets it.
+    pub run_starts: pipelines::RunStartsLimiter,
     /// Airflow's REST API (`airflow.rs`), for the pipeline views. `None` unless
     /// `NOVA_AIRFLOW_URL`, `NOVA_AIRFLOW_USER` and `NOVA_AIRFLOW_PASSWORD` are all set.
     /// Nova signs in as one service user (built-in role `User`) and decides itself who may
@@ -676,6 +680,7 @@ async fn main() -> anyhow::Result<()> {
         db,
         store,
         break_glass_reads: Mutex::new(std::collections::HashMap::new()),
+        run_starts: Mutex::new(std::collections::HashMap::new()),
         airflow,
         table_locks: Mutex::new(HashMap::new()),
     });
@@ -806,6 +811,7 @@ mod router_tests {
             db,
             store: None,
             break_glass_reads: Mutex::new(std::collections::HashMap::new()),
+            run_starts: Mutex::new(std::collections::HashMap::new()),
             airflow: None,
             table_locks: Mutex::new(std::collections::HashMap::new()),
         })

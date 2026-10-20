@@ -1,5 +1,6 @@
-//! The Pipelines read API: list, detail, runs, tasks and logs (stardelt-nova#188; design note
-//! `design/scheduled-jobs.md` §6.1, phase J1).
+//! The Pipelines API: read (list, detail, runs, tasks, logs — stardelt-nova#188) and act (run
+//! now, pause, resume, stop a run — stardelt-nova#196); design note `design/scheduled-jobs.md`
+//! §6.1, phase J1.
 //!
 //! Nova is the enforcement point. Airflow's one credential reads every DAG, so every route here
 //! first finds the `Pipeline` resource, checks that the caller may see it, and only then asks
@@ -8,25 +9,35 @@
 //!
 //! - **Visibility** ([`visible`]): administrators see everything; everybody else sees a pipeline
 //!   whose `spec.ownerGroup` is one of their groups. A pipeline without an `ownerGroup` is
-//!   administrators-only.
+//!   administrators-only. Acting uses the same rule ([`may_act`]): v1 has no read-only role, so
+//!   whoever may see a pipeline may act on it, and everybody else gets the same 404.
 //! - **Airflow's naming**: `Pipeline <namespace>/<name>` has the DAG id `<namespace>__<name>`
 //!   ([`airflow::dag_id_for`]). Every Airflow path is built from that id, never from a browser
 //!   value, so a run id of another pipeline cannot resolve.
 //! - **A new pipeline is loading**: the loader creates the DAG about 25 seconds after the
-//!   resource appears. Until then the view says `loaded: false`, `state: "loading"`.
+//!   resource appears. Until then the view says `loaded: false`, `state: "loading"`; after three
+//!   minutes without a DAG it says `"not-loaded"` instead (the loader refused this resource).
+//! - **Airflow's refusals are Nova's sentences**, not Airflow's silent behaviour:
+//!   triggering a paused pipeline would queue a run that never starts (409 here), `Forbid` is not
+//!   enforced at trigger time (Nova checks the latest runs itself), a `logical_date` in the past
+//!   or future produces a run without tasks (Nova always sends now), and stopping a run marks it
+//!   failed — it is not a cancel: in-flight work can finish and commit (see #255).
 //! - **Logs**: the `::group::` marker carries internal object-store paths in `sources`; it is
 //!   dropped, and no field of an answer can hold a `sources` value. Answers are capped at 2000
 //!   lines and 512 KiB and say `truncated: true` beyond that.
 //! - **Unreachable upstreams are 502, never 500** (rule U12 of `design/ui-conformance.md`):
 //!   without a cluster client or an Airflow client the routes answer 503 and say which one is
 //!   missing; an Airflow that refuses or fails answers 502 `the scheduler did not answer`.
+//! - **Audit**: every action writes one `audit` line, including a refusal that never reaches
+//!   Airflow; no field can hold a note or log text.
 //!
 //! The route logic sits in plain `async fn`s that take their inputs, so the tests call them
 //! without a router; each handler is the thin axum wrapper that checks sign-in and the two
-//! clients. The whole surface is read-only and uncacheable (`Cache-Control: no-store`).
+//! clients. The whole surface is uncacheable (`Cache-Control: no-store`).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
+use std::time::Instant;
 
 #[cfg(test)]
 use std::sync::Mutex;
@@ -37,7 +48,7 @@ use axum::{
     http::{HeaderValue, StatusCode, header},
     middleware::Next,
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
 };
 use futures::stream::{self, StreamExt};
 use kube::api::{Api, ApiResource, DynamicObject, GroupVersionKind};
@@ -162,15 +173,41 @@ pub fn visible(identity: &Identity, spec: &Value) -> bool {
     identity.groups.iter().any(|g| g == group)
 }
 
+/// Who may act on a pipeline: run it now, pause it, resume it, stop one of its runs.
+///
+/// Exactly who may see it — v1 has no read-only role. Written as a call to [`visible`] on
+/// purpose, so the two rules cannot drift; an outsider gets the same 404 as for a read.
+pub fn may_act(identity: &Identity, spec: &Value) -> bool {
+    visible(identity, spec)
+}
+
+/// How long a resource may exist without a DAG before the view calls it `not-loaded`. The loader
+/// creates a DAG about 25 seconds after the resource appears; a resource the loader refuses
+/// never gets one.
+const NOT_LOADED_AFTER_SECONDS: f64 = 3.0 * 60.0;
+
 /// The single pipeline state the UI shows.
 ///
-/// `loading` while Airflow has no DAG for the resource yet. `paused` wins over everything else
-/// (a paused pipeline is not "failed" even if its last run failed). A last run that is
-/// `running` or `queued` makes the pipeline `running`; `failed`/`upstream_failed` is `failed`;
-/// `success` is `succeeded`; anything else (never ran, `skipped`, …) is `idle`.
-pub fn pipeline_state(paused: bool, loaded: bool, last_run_state: Option<&str>) -> &'static str {
+/// Not loaded: `loading` for the first three minutes after the resource was created (the loader
+/// needs about 25 seconds), then `not-loaded` — the loader will not create this DAG, and saying
+/// "loading" forever would be a lie. `created_age_seconds` is `None` when the resource carries
+/// no `metadata.creationTimestamp`; then the view stays `loading`.
+///
+/// `paused` wins over everything else (a paused pipeline is not "failed" even if its last run
+/// failed). A last run that is `running` or `queued` makes the pipeline `running`;
+/// `failed`/`upstream_failed` is `failed`; `success` is `succeeded`; anything else (never ran,
+/// `skipped`, …) is `idle`.
+pub fn pipeline_state(
+    paused: bool,
+    loaded: bool,
+    last_run_state: Option<&str>,
+    created_age_seconds: Option<f64>,
+) -> &'static str {
     if !loaded {
-        return "loading";
+        return match created_age_seconds {
+            Some(age) if age > NOT_LOADED_AFTER_SECONDS => "not-loaded",
+            _ => "loading",
+        };
     }
     if paused {
         return "paused";
@@ -357,6 +394,63 @@ fn duration_seconds(started: Option<&str>, ended: Option<&str>) -> Option<f64> {
     (duration >= 0.0).then(|| (duration * 1_000_000.0).round() / 1_000_000.0)
 }
 
+/// The civil date for a number of days since 1970-01-01 (the inverse of [`days_from_civil`]).
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let days = days + 719_468;
+    let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
+    let day_of_era = (days - era * 146_097) as u64;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era as i64 + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    let day = (day_of_year - (153 * month_index + 2) / 5 + 1) as u32;
+    let month = if month_index < 10 {
+        month_index + 3
+    } else {
+        month_index - 9
+    } as u32;
+    let year = if month <= 2 { year + 1 } else { year };
+    (year, month, day)
+}
+
+/// `YYYY-MM-DDTHH:MM:SSZ` for whole seconds since the epoch, always UTC and always with `Z`.
+/// Airflow 3 wants a `logical_date`; Nova always sends the current second (`now_rfc3339`).
+fn format_rfc3339(seconds: i64) -> String {
+    let days = seconds.div_euclid(86_400);
+    let of_day = seconds.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    let (hour, minute, second) = (of_day / 3_600, (of_day % 3_600) / 60, of_day % 60);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
+/// Whole seconds since the epoch, as a float for the age comparison.
+fn now_seconds() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs_f64())
+        .unwrap_or_default()
+}
+
+/// Now, whole seconds, UTC, for Airflow's `logical_date`.
+fn now_rfc3339() -> String {
+    format_rfc3339(now_seconds() as i64)
+}
+
+/// The resource's `metadata.creationTimestamp`, as the cluster wrote it.
+fn created_at_of(resource: &Value) -> Option<&str> {
+    resource
+        .get("metadata")
+        .and_then(|metadata| metadata.get("creationTimestamp"))
+        .and_then(Value::as_str)
+}
+
+/// How long ago the resource was created; `None` without a readable `creationTimestamp`.
+fn created_age_seconds(resource: &Value) -> Option<f64> {
+    let created = parse_rfc3339(created_at_of(resource)?)?;
+    Some((now_seconds() - created).max(0.0))
+}
+
 // ---------------------------------------------------------------------------
 // Views (serde camelCase; no raw Airflow field names and no `sources`)
 // ---------------------------------------------------------------------------
@@ -382,13 +476,17 @@ pub struct PipelineView {
     /// `false` while Airflow has no DAG for the resource yet; the loader needs about 25 seconds.
     pub loaded: bool,
     pub next_run: Option<String>,
-    /// `loading`, `paused`, `running`, `failed`, `succeeded` or `idle`.
+    /// `loading`, `paused`, `running`, `failed`, `succeeded`, `idle`, or `not-loaded` after three
+    /// minutes without a DAG.
     pub state: String,
     pub last_run: Option<RunView>,
     pub tasks: Vec<TaskSpecView>,
     pub run_as: Option<String>,
     /// `spec.concurrency` as the resource carries it (`Allow`, `Forbid`, `Replace`).
     pub concurrency: String,
+    /// `metadata.creationTimestamp` as the cluster wrote it (RFC 3339); `None` for a malformed
+    /// resource.
+    pub created_at: Option<String>,
 }
 
 /// One DagRun. `type` is Airflow's `run_type` under the name the UI uses.
@@ -497,13 +595,19 @@ fn task_view(task: &TaskInstance) -> TaskView {
 fn view_of(
     namespace: &str,
     name: &str,
-    spec: &Value,
+    resource: &Value,
     dag: Option<&DagSummary>,
     last_run: Option<&DagRun>,
 ) -> PipelineView {
+    let spec = spec_of(resource);
     let loaded = dag.is_some();
     let paused = loaded && dag.and_then(|d| d.is_paused).unwrap_or(false);
-    let state = pipeline_state(paused, loaded, last_run.and_then(|r| r.state.as_deref()));
+    let state = pipeline_state(
+        paused,
+        loaded,
+        last_run.and_then(|r| r.state.as_deref()),
+        created_age_seconds(resource),
+    );
     PipelineView {
         name: name.to_string(),
         namespace: namespace.to_string(),
@@ -527,6 +631,7 @@ fn view_of(
             .and_then(Value::as_str)
             .unwrap_or("Forbid")
             .to_string(),
+        created_at: created_at_of(resource).map(str::to_string),
     }
 }
 
@@ -627,6 +732,44 @@ fn no_such_task() -> Fail {
     Fail::new(StatusCode::NOT_FOUND, "no such task")
 }
 
+/// Airflow has no DAG for the resource yet (or the loader refused it). Acting on a pipeline that
+/// does not exist in Airflow is a 409 with a sentence, not a 404: the resource does exist.
+fn pipeline_not_loaded() -> Fail {
+    Fail::new(
+        StatusCode::CONFLICT,
+        "the scheduler has not loaded this pipeline yet",
+    )
+}
+
+/// Triggering a paused pipeline would succeed in Airflow and the run would sit `queued` until
+/// someone resumes — it looks like it worked and nothing happens (#255). Nova refuses instead.
+fn pipeline_paused() -> Fail {
+    Fail::new(
+        StatusCode::CONFLICT,
+        "the pipeline is paused: resume it first",
+    )
+}
+
+/// `Forbid` is not enforced by Airflow at trigger time: a second run is created and queued.
+fn run_already_active() -> Fail {
+    Fail::new(
+        StatusCode::CONFLICT,
+        "a run is already active: wait for it or stop it",
+    )
+}
+
+/// Marking a finished run failed would rewrite history; only `queued` and `running` can stop.
+fn run_not_active() -> Fail {
+    Fail::new(StatusCode::CONFLICT, "the run is not active")
+}
+
+fn too_many_runs() -> Fail {
+    Fail::new(
+        StatusCode::TOO_MANY_REQUESTS,
+        "too many runs started; wait a minute",
+    )
+}
+
 /// An Airflow that refused or failed is an unreachable upstream: 502, never 500. The detail
 /// goes to the log; the sentence stays one line (and carries no token — the client scrubs).
 fn scheduler_fail(e: AirflowError) -> Fail {
@@ -665,16 +808,48 @@ fn resource_fail(e: ResourceError) -> Fail {
 /// id the browser sent without finding it in this list first.
 const LATEST_RUNS: u32 = 20;
 
+/// The latest runs a "run now" checks for activity: enough to catch a `Forbid`/`Replace` DAG
+/// whose last run is still queued or running.
+const ACTIVE_RUNS: u32 = 5;
+
+/// At most this many runs started per user per minute.
+const RUN_STARTS_PER_MINUTE: usize = 10;
+
+/// The in-memory run-start rate limit (`AppState::run_starts`): per signed-in `sub`, the start
+/// times inside the last minute. Refusals before the limiter (unloaded, paused) never reach it;
+/// only a restart forgets it.
+pub type RunStartsLimiter = std::sync::Mutex<std::collections::HashMap<String, VecDeque<Instant>>>;
+
+/// Take one run-start slot for `sub`, or report that the last minute is full.
+fn take_run_slot(limiter: &RunStartsLimiter, sub: &str) -> bool {
+    let mut map = limiter.lock().expect("run-start limiter poisoned");
+    let now = Instant::now();
+    let slots = map.entry(sub.to_string()).or_default();
+    while slots
+        .front()
+        .is_some_and(|then| now.duration_since(*then) >= std::time::Duration::from_secs(60))
+    {
+        slots.pop_front();
+    }
+    if slots.len() >= RUN_STARTS_PER_MINUTE {
+        false
+    } else {
+        slots.push_back(now);
+        true
+    }
+}
+
 /// The most last-run calls in flight at once.
 const LAST_RUN_CONCURRENCY: usize = 8;
 
 /// Find the resource, check the namespace and the caller in that order, and only then answer
 /// the DAG id. A hidden pipeline is indistinguishable from an absent one.
-async fn load_visible(
+async fn load_allowed(
     resources: &PipelineResources,
     who: &Identity,
     namespace: &str,
     name: &str,
+    allow: fn(&Identity, &Value) -> bool,
 ) -> Result<(String, Value), Fail> {
     if namespace != crate::cluster::namespace() {
         return Err(no_such_pipeline());
@@ -682,10 +857,30 @@ async fn load_visible(
     let Some(resource) = resources.get(name).await.map_err(resource_fail)? else {
         return Err(no_such_pipeline());
     };
-    if !visible(who, spec_of(&resource)) {
+    if !allow(who, spec_of(&resource)) {
         return Err(no_such_pipeline());
     }
     Ok((dag_id_for(namespace, name), resource))
+}
+
+/// A read: who may see the pipeline.
+async fn load_visible(
+    resources: &PipelineResources,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+) -> Result<(String, Value), Fail> {
+    load_allowed(resources, who, namespace, name, visible).await
+}
+
+/// An action: who may act on the pipeline (the same rule as seeing it, via [`may_act`]).
+async fn load_actionable(
+    resources: &PipelineResources,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+) -> Result<(String, Value), Fail> {
+    load_allowed(resources, who, namespace, name, may_act).await
 }
 
 fn scheduler(airflow: Option<&AirflowClient>) -> Result<&AirflowClient, Fail> {
@@ -758,7 +953,7 @@ async fn list_pipelines(
             let name = pipeline_name(resource);
             let dag = dags.get(&dag_id_for(&namespace, name));
             let last_run = last_runs.get(name).and_then(Option::as_ref);
-            view_of(&namespace, name, spec_of(resource), dag, last_run)
+            view_of(&namespace, name, resource, dag, last_run)
         })
         .collect();
     Ok(PipelineListResponse { pipelines })
@@ -792,8 +987,8 @@ async fn pipeline_detail(
         },
         None => Vec::new(),
     };
+    let view = view_of(namespace, name, &resource, dag.as_ref(), runs.first());
     let spec = spec_of(&resource);
-    let view = view_of(namespace, name, spec, dag.as_ref(), runs.first());
     Ok(PipelineDetail {
         pipeline: view,
         runs: runs.iter().map(run_view).collect(),
@@ -891,6 +1086,258 @@ async fn task_logs(
 }
 
 // ---------------------------------------------------------------------------
+// Actions: run now, pause, resume, stop a run. Every action writes one audit line.
+// ---------------------------------------------------------------------------
+
+/// A refused or failed action: the answer and the audit outcome token (`refused:<why>` or
+/// `error`). Keeping the two together is what makes "one audit line per action" true even on the
+/// early returns.
+struct ActionError {
+    fail: Fail,
+    outcome: String,
+}
+
+impl ActionError {
+    fn refused(why: &'static str, fail: Fail) -> Self {
+        Self {
+            fail,
+            outcome: format!("refused:{why}"),
+        }
+    }
+
+    fn error(fail: Fail) -> Self {
+        Self {
+            fail,
+            outcome: "error".into(),
+        }
+    }
+}
+
+/// `spec.concurrency` as the resource carries it; Airflow's and the CRD's default is `Forbid`.
+fn concurrency_of(spec: &Value) -> &str {
+    spec.get("concurrency")
+        .and_then(Value::as_str)
+        .unwrap_or("Forbid")
+}
+
+/// `POST …/runs`: start a run now. Refusals happen before Airflow is asked to trigger:
+/// not loaded (409), paused (409), rate limit (429), an active run under `Forbid`/`Replace`
+/// (409). `Allow` skips the activity check.
+async fn run_now(
+    resources: Option<&PipelineResources>,
+    airflow: Option<&AirflowClient>,
+    limiter: &RunStartsLimiter,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+) -> Result<RunView, Fail> {
+    let result = run_now_inner(resources, airflow, limiter, who, namespace, name).await;
+    match &result {
+        Ok(run) => audit::pipeline_event("run", who, namespace, name, Some(&run.run_id), "ok"),
+        Err(e) => audit::pipeline_event("run", who, namespace, name, None, &e.outcome),
+    }
+    result.map_err(|e| e.fail)
+}
+
+async fn run_now_inner(
+    resources: Option<&PipelineResources>,
+    airflow: Option<&AirflowClient>,
+    limiter: &RunStartsLimiter,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+) -> Result<RunView, ActionError> {
+    let resources = resources
+        .ok_or_else(no_cluster)
+        .map_err(ActionError::error)?;
+    let airflow = scheduler(airflow).map_err(ActionError::error)?;
+    let (dag_id, resource) = load_actionable(resources, who, namespace, name)
+        .await
+        .map_err(|fail| ActionError::refused("not-found", fail))?;
+
+    let dag = match airflow.dag(&dag_id).await {
+        Ok(dag) => dag,
+        Err(AirflowError::NotFound) => {
+            return Err(ActionError::refused("not-loaded", pipeline_not_loaded()));
+        }
+        Err(e) => return Err(ActionError::error(scheduler_fail(e))),
+    };
+    if dag.is_paused == Some(true) {
+        return Err(ActionError::refused("paused", pipeline_paused()));
+    }
+
+    // The rate limit comes after the checks that never touch Airflow's trigger: a refusal here
+    // means a run was actually going to start.
+    if !take_run_slot(limiter, &who.sub) {
+        return Err(ActionError::refused("rate-limited", too_many_runs()));
+    }
+
+    if concurrency_of(spec_of(&resource)) != "Allow" {
+        let runs = match airflow.runs(&dag_id, ACTIVE_RUNS).await {
+            Ok(runs) => runs,
+            Err(AirflowError::NotFound) => {
+                return Err(ActionError::refused("not-loaded", pipeline_not_loaded()));
+            }
+            Err(e) => return Err(ActionError::error(scheduler_fail(e))),
+        };
+        if runs
+            .iter()
+            .any(|run| matches!(run.state.as_deref(), Some("queued") | Some("running")))
+        {
+            return Err(ActionError::refused("already-active", run_already_active()));
+        }
+    }
+
+    // Always now, whole seconds, UTC: Airflow accepts any date and makes a run with no tasks for
+    // one that is not now (#255).
+    let note = format!("Started from Nova by {}", who.display_name);
+    match airflow.trigger(&dag_id, &now_rfc3339(), Some(&note)).await {
+        Ok(run) => Ok(run_view(&run)),
+        Err(e) => Err(ActionError::error(scheduler_fail(e))),
+    }
+}
+
+/// `POST …/pause`: idempotent (pausing a paused pipeline answers 200) and answers the fresh view.
+async fn pause_pipeline(
+    resources: Option<&PipelineResources>,
+    airflow: Option<&AirflowClient>,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+) -> Result<PipelineView, Fail> {
+    set_paused_action("pause", true, resources, airflow, who, namespace, name).await
+}
+
+/// `POST …/resume`: idempotent (resuming a running pipeline answers 200) and answers the fresh
+/// view.
+async fn resume_pipeline(
+    resources: Option<&PipelineResources>,
+    airflow: Option<&AirflowClient>,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+) -> Result<PipelineView, Fail> {
+    set_paused_action("resume", false, resources, airflow, who, namespace, name).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn set_paused_action(
+    action: &'static str,
+    paused: bool,
+    resources: Option<&PipelineResources>,
+    airflow: Option<&AirflowClient>,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+) -> Result<PipelineView, Fail> {
+    let result = set_paused_inner(paused, resources, airflow, who, namespace, name).await;
+    match &result {
+        Ok(_) => audit::pipeline_event(action, who, namespace, name, None, "ok"),
+        Err(e) => audit::pipeline_event(action, who, namespace, name, None, &e.outcome),
+    }
+    result.map_err(|e| e.fail)
+}
+
+async fn set_paused_inner(
+    paused: bool,
+    resources: Option<&PipelineResources>,
+    airflow: Option<&AirflowClient>,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+) -> Result<PipelineView, ActionError> {
+    let resources = resources
+        .ok_or_else(no_cluster)
+        .map_err(ActionError::error)?;
+    let airflow = scheduler(airflow).map_err(ActionError::error)?;
+    let (dag_id, resource) = load_actionable(resources, who, namespace, name)
+        .await
+        .map_err(|fail| ActionError::refused("not-found", fail))?;
+
+    // The patch answers the DAG as Airflow now has it, which is the fresh view the caller gets;
+    // `404` is a pipeline the loader has not created yet.
+    let dag = match airflow.set_paused(&dag_id, paused).await {
+        Ok(dag) => dag,
+        Err(AirflowError::NotFound) => {
+            return Err(ActionError::refused("not-loaded", pipeline_not_loaded()));
+        }
+        Err(e) => return Err(ActionError::error(scheduler_fail(e))),
+    };
+    // A failing last-run read does not fail the pause: the view then has no lastRun, exactly as
+    // the list behaves.
+    let last_run = airflow
+        .runs(&dag_id, 1)
+        .await
+        .ok()
+        .and_then(|runs| runs.into_iter().next());
+    Ok(view_of(
+        namespace,
+        name,
+        &resource,
+        Some(&dag),
+        last_run.as_ref(),
+    ))
+}
+
+/// `POST …/runs/{run_id}/stop`: mark an active run failed. Not a cancel: in-flight work can
+/// finish and commit; the promise is only "the run is marked failed" (#255).
+async fn stop_run(
+    resources: Option<&PipelineResources>,
+    airflow: Option<&AirflowClient>,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+    run_id: &str,
+) -> Result<RunView, Fail> {
+    let result = stop_run_inner(resources, airflow, who, namespace, name, run_id).await;
+    match &result {
+        Ok(run) => audit::pipeline_event("stop", who, namespace, name, Some(&run.run_id), "ok"),
+        Err(e) => audit::pipeline_event("stop", who, namespace, name, Some(run_id), &e.outcome),
+    }
+    result.map_err(|e| e.fail)
+}
+
+async fn stop_run_inner(
+    resources: Option<&PipelineResources>,
+    airflow: Option<&AirflowClient>,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+    run_id: &str,
+) -> Result<RunView, ActionError> {
+    let resources = resources
+        .ok_or_else(no_cluster)
+        .map_err(ActionError::error)?;
+    let airflow = scheduler(airflow).map_err(ActionError::error)?;
+    let (dag_id, _) = load_actionable(resources, who, namespace, name)
+        .await
+        .map_err(|fail| ActionError::refused("not-found", fail))?;
+
+    // Read the run through this pipeline's DAG id first: a run id of another pipeline never
+    // resolves, and the PATCH below only ever sees an id found here.
+    let runs = match airflow.runs(&dag_id, LATEST_RUNS).await {
+        Ok(runs) => runs,
+        Err(AirflowError::NotFound) => {
+            return Err(ActionError::refused("not-found", no_such_run()));
+        }
+        Err(e) => return Err(ActionError::error(scheduler_fail(e))),
+    };
+    let run = runs
+        .iter()
+        .find(|run| run.dag_run_id == run_id)
+        .ok_or_else(|| ActionError::refused("not-found", no_such_run()))?;
+    if !matches!(run.state.as_deref(), Some("queued") | Some("running")) {
+        return Err(ActionError::refused("not-active", run_not_active()));
+    }
+
+    match airflow.mark_run_failed(&dag_id, &run.dag_run_id).await {
+        Ok(run) => Ok(run_view(&run)),
+        Err(AirflowError::NotFound) => Err(ActionError::refused("not-found", no_such_run())),
+        Err(e) => Err(ActionError::error(scheduler_fail(e))),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The handlers: sign-in, the two clients, then one of the functions above.
 // ---------------------------------------------------------------------------
 
@@ -909,12 +1356,19 @@ fn resources(state: &AppState) -> Option<PipelineResources> {
     state.kube.clone().map(PipelineResources::cluster)
 }
 
-/// The four read routes, all uncacheable.
+/// The read and action routes, all uncacheable.
 pub(crate) fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/pipelines", get(list))
         .route("/pipelines/{namespace}/{name}", get(detail))
+        .route("/pipelines/{namespace}/{name}/runs", post(trigger_run))
+        .route("/pipelines/{namespace}/{name}/pause", post(pause))
+        .route("/pipelines/{namespace}/{name}/resume", post(resume))
         .route("/pipelines/{namespace}/{name}/runs/{run_id}", get(run))
+        .route(
+            "/pipelines/{namespace}/{name}/runs/{run_id}/stop",
+            post(stop),
+        )
         .route(
             "/pipelines/{namespace}/{name}/runs/{run_id}/tasks/{task_id}/logs",
             get(logs),
@@ -923,8 +1377,12 @@ pub(crate) fn router() -> Router<Arc<AppState>> {
 }
 
 fn answer<T: Serialize>(result: Result<T, Fail>) -> Response {
+    answer_with(StatusCode::OK, result)
+}
+
+fn answer_with<T: Serialize>(status: StatusCode, result: Result<T, Fail>) -> Response {
     match result {
-        Ok(value) => Json(value).into_response(),
+        Ok(value) => (status, Json(value)).into_response(),
         Err(e) => e.into_response(),
     }
 }
@@ -1071,6 +1529,147 @@ pub(crate) async fn logs(
     )
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/pipelines/{namespace}/{name}/runs",
+    tag = "public",
+    description = "Start a run now. Nova refuses instead of passing Airflow's silent behaviour on: a pipeline the scheduler has not loaded yet answers 409, a paused pipeline 409 (Airflow would create a run that waits `queued` until someone resumes), more than ten starts per user per minute 429, and a `Forbid` or `Replace` pipeline whose latest five runs include a queued or running one 409 (`Allow` skips that check). `logicalDate` is always now, UTC, whole seconds, so the run has tasks; the note is `Started from Nova by <display name>`. Every attempt, including a refusal, writes one audit line without note text. Answers `Cache-Control: no-store`.",
+    params(
+        ("namespace" = String, Path, description = "The Pipeline's namespace (Nova's own)"),
+        ("name" = String, Path, description = "Pipeline name"),
+    ),
+    responses(
+        (status = 201, description = "The new run, queued", body = RunView),
+        (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such pipeline for this caller", body = crate::openapi::ErrorResponse),
+        (status = 409, description = "The pipeline is not loaded, is paused, or already has an active run", body = crate::openapi::ErrorResponse),
+        (status = 429, description = "More than ten runs were started in the last minute", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The scheduler or the cluster did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No cluster connection, or the scheduler is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn trigger_run(
+    signed: SignedIn,
+    Path((namespace, name)): Path<(String, String)>,
+) -> Response {
+    answer_with(
+        StatusCode::CREATED,
+        run_now(
+            resources(signed.state()).as_ref(),
+            signed.state().airflow.as_ref(),
+            &signed.state().run_starts,
+            signed.identity(),
+            &namespace,
+            &name,
+        )
+        .await,
+    )
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/pipelines/{namespace}/{name}/pause",
+    tag = "public",
+    description = "Pause a pipeline. Idempotent: pausing a paused pipeline answers 200. A pipeline the scheduler has not loaded answers 409. Answers the fresh `PipelineView` — the DAG as Airflow returned it after the patch — and `Cache-Control: no-store`. The attempt is audited, including a refusal.",
+    params(
+        ("namespace" = String, Path, description = "The Pipeline's namespace (Nova's own)"),
+        ("name" = String, Path, description = "Pipeline name"),
+    ),
+    responses(
+        (status = 200, description = "The pipeline, now paused", body = PipelineView),
+        (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such pipeline for this caller", body = crate::openapi::ErrorResponse),
+        (status = 409, description = "The scheduler has not loaded this pipeline yet", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The scheduler or the cluster did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No cluster connection, or the scheduler is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn pause(
+    signed: SignedIn,
+    Path((namespace, name)): Path<(String, String)>,
+) -> Response {
+    answer(
+        pause_pipeline(
+            resources(signed.state()).as_ref(),
+            signed.state().airflow.as_ref(),
+            signed.identity(),
+            &namespace,
+            &name,
+        )
+        .await,
+    )
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/pipelines/{namespace}/{name}/resume",
+    tag = "public",
+    description = "Resume a pipeline. Idempotent: resuming a running pipeline answers 200. A pipeline the scheduler has not loaded answers 409. Answers the fresh `PipelineView` — the DAG as Airflow returned it after the patch — and `Cache-Control: no-store`. The attempt is audited, including a refusal.",
+    params(
+        ("namespace" = String, Path, description = "The Pipeline's namespace (Nova's own)"),
+        ("name" = String, Path, description = "Pipeline name"),
+    ),
+    responses(
+        (status = 200, description = "The pipeline, now unpaused", body = PipelineView),
+        (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such pipeline for this caller", body = crate::openapi::ErrorResponse),
+        (status = 409, description = "The scheduler has not loaded this pipeline yet", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The scheduler or the cluster did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No cluster connection, or the scheduler is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn resume(
+    signed: SignedIn,
+    Path((namespace, name)): Path<(String, String)>,
+) -> Response {
+    answer(
+        resume_pipeline(
+            resources(signed.state()).as_ref(),
+            signed.state().airflow.as_ref(),
+            signed.identity(),
+            &namespace,
+            &name,
+        )
+        .await,
+    )
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/pipelines/{namespace}/{name}/runs/{run_id}/stop",
+    tag = "public",
+    description = "Stop a run: mark it failed. This is **not a cancel** — work already in flight can finish and commit its side effects (stardelt-nova#255), so the answer promises only that the run is marked failed. The run id is looked up through this pipeline's DAG id first: a run id of another pipeline answers 404 and is never patched. A run that is not `queued` or `running` answers 409 and is not patched. Answers the fresh `RunView` and `Cache-Control: no-store`. The attempt is audited, including a refusal.",
+    params(
+        ("namespace" = String, Path, description = "The Pipeline's namespace (Nova's own)"),
+        ("name" = String, Path, description = "Pipeline name"),
+        ("run_id" = String, Path, description = "Airflow's run id"),
+    ),
+    responses(
+        (status = 200, description = "The run, now failed", body = RunView),
+        (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such pipeline for this caller, or no such run", body = crate::openapi::ErrorResponse),
+        (status = 409, description = "The run is not active", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The scheduler or the cluster did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No cluster connection, or the scheduler is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn stop(
+    signed: SignedIn,
+    Path((namespace, name, run_id)): Path<(String, String, String)>,
+) -> Response {
+    answer(
+        stop_run(
+            resources(signed.state()).as_ref(),
+            signed.state().airflow.as_ref(),
+            signed.identity(),
+            &namespace,
+            &name,
+            &run_id,
+        )
+        .await,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
@@ -1119,6 +1718,7 @@ mod tests {
             "metadata": {
                 "name": name,
                 "namespace": crate::cluster::namespace(),
+                "creationTimestamp": now_rfc3339(),
             },
             "spec": {
                 "ownerGroup": owner_group,
@@ -1134,6 +1734,23 @@ mod tests {
                 "engine": "airflow"
             }
         })
+    }
+
+    /// The same resource with another `spec.concurrency`.
+    fn with_concurrency(mut resource: Value, concurrency: &str) -> Value {
+        resource["spec"]["concurrency"] = json!(concurrency);
+        resource
+    }
+
+    /// The same resource, created `seconds` ago (for the `loading`/`not-loaded` boundary).
+    fn with_created_ago(mut resource: Value, seconds: i64) -> Value {
+        resource["metadata"]["creationTimestamp"] =
+            json!(format_rfc3339(now_seconds() as i64 - seconds));
+        resource
+    }
+
+    fn limiter() -> RunStartsLimiter {
+        Mutex::new(std::collections::HashMap::new())
     }
 
     fn memory(items: &[(&str, Value)]) -> PipelineResources {
@@ -1218,7 +1835,7 @@ mod tests {
             Json, Router,
             extract::{OriginalUri, Path, Query, State},
             http::{HeaderMap, StatusCode, Uri, header},
-            routing::{get, post},
+            routing::{get, patch, post},
         };
         use serde_json::{Value, json};
 
@@ -1249,6 +1866,9 @@ mod tests {
             pub log_page: Value,
             /// DAG ids whose run listing answers `500`.
             pub fail_runs: BTreeSet<String>,
+            /// Every trigger's JSON body, in order, so a test can read the `logical_date` and
+            /// the note Nova sent.
+            pub trigger_bodies: Vec<Value>,
         }
 
         pub type Shared = Arc<Mutex<Fake>>;
@@ -1435,13 +2055,103 @@ mod tests {
             Ok(Json(state.log_page.clone()))
         }
 
+        async fn trigger(
+            State(state): State<Shared>,
+            OriginalUri(uri): OriginalUri,
+            Path(dag_id): Path<String>,
+            headers: HeaderMap,
+            Json(body): Json<Value>,
+        ) -> Result<(StatusCode, Json<Value>), Refusal> {
+            let mut state = state.lock().unwrap();
+            remember(&mut state, "POST", &uri);
+            authorize(&headers)?;
+            if !state.dags.iter().any(|dag| dag["dag_id"] == dag_id) {
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    Json(json!({ "detail": "DAG not found" })),
+                ));
+            }
+            let logical_date = body["logical_date"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            let run = json!({
+                "dag_run_id": format!("manual__{logical_date}"),
+                "state": "queued",
+                "run_type": "manual",
+                "logical_date": logical_date,
+                "start_date": null,
+                "end_date": null,
+                "note": body.get("note").cloned().unwrap_or(Value::Null),
+                "triggered_by": "rest_api",
+                "triggering_user_name": "nova-api"
+            });
+            state.trigger_bodies.push(body);
+            state.runs.entry(dag_id).or_default().insert(0, run.clone());
+            Ok((StatusCode::CREATED, Json(run)))
+        }
+
+        async fn patch_dag(
+            State(state): State<Shared>,
+            OriginalUri(uri): OriginalUri,
+            Path(dag_id): Path<String>,
+            headers: HeaderMap,
+            Json(body): Json<Value>,
+        ) -> Result<Json<Value>, Refusal> {
+            let mut state = state.lock().unwrap();
+            remember(&mut state, "PATCH", &uri);
+            authorize(&headers)?;
+            let Some(dag) = state.dags.iter_mut().find(|dag| dag["dag_id"] == dag_id) else {
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    Json(json!({ "detail": "DAG not found" })),
+                ));
+            };
+            if let Some(paused) = body.get("is_paused") {
+                dag["is_paused"] = paused.clone();
+            }
+            Ok(Json(dag.clone()))
+        }
+
+        async fn patch_run(
+            State(state): State<Shared>,
+            OriginalUri(uri): OriginalUri,
+            Path((dag_id, run_id)): Path<(String, String)>,
+            headers: HeaderMap,
+            Json(body): Json<Value>,
+        ) -> Result<Json<Value>, Refusal> {
+            let mut state = state.lock().unwrap();
+            remember(&mut state, "PATCH", &uri);
+            authorize(&headers)?;
+            let Some(runs) = state.runs.get_mut(&dag_id) else {
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    Json(json!({ "detail": "DAG not found" })),
+                ));
+            };
+            let Some(run) = runs.iter_mut().find(|run| run["dag_run_id"] == run_id) else {
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    Json(json!({ "detail": "DagRun not found" })),
+                ));
+            };
+            if let Some(value) = body.get("state") {
+                run["state"] = value.clone();
+            }
+            Ok(Json(run.clone()))
+        }
+
         pub async fn start() -> (AirflowClient, Shared) {
             let shared: Shared = Arc::new(Mutex::new(seeded()));
             let app = Router::new()
                 .route("/auth/token", post(login))
                 .route("/api/v2/dags", get(dags))
-                .route("/api/v2/dags/{dag_id}", get(one_dag))
-                .route("/api/v2/dags/{dag_id}/dagRuns", get(runs))
+                .route("/api/v2/dags/{dag_id}", get(one_dag).patch(patch_dag))
+                .route("/api/v2/dags/{dag_id}/dagRuns", get(runs).post(trigger))
+                .route(
+                    "/api/v2/dags/{dag_id}/dagRuns/{run_id}",
+                    patch(patch_run),
+                )
                 .route(
                     "/api/v2/dags/{dag_id}/dagRuns/{run_id}/taskInstances",
                     get(tasks),
@@ -1560,6 +2270,7 @@ mod tests {
             db: None,
             store: Some(store),
             break_glass_reads: Mutex::new(std::collections::HashMap::new()),
+            run_starts: Mutex::new(std::collections::HashMap::new()),
             airflow: Some(airflow),
             table_locks: Mutex::new(std::collections::HashMap::new()),
         })
@@ -1721,7 +2432,7 @@ mod tests {
                     Some("success"),
                     Some("skipped"),
                 ] {
-                    let state = pipeline_state(paused, loaded, last);
+                    let state = pipeline_state(paused, loaded, last, Some(0.0));
                     let expected = if !loaded {
                         "loading"
                     } else if paused {
@@ -1742,17 +2453,17 @@ mod tests {
             }
         }
         assert_eq!(
-            pipeline_state(true, true, Some("failed")),
+            pipeline_state(true, true, Some("failed"), Some(0.0)),
             "paused",
             "paused beats a failed last run"
         );
         assert_eq!(
-            pipeline_state(false, true, Some("queued")),
+            pipeline_state(false, true, Some("queued"), Some(0.0)),
             "running",
             "queued counts as running"
         );
         assert_eq!(
-            pipeline_state(false, true, None),
+            pipeline_state(false, true, None, Some(0.0)),
             "idle",
             "never ran is idle"
         );
@@ -2032,22 +2743,52 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn airflow_down_is_502_and_not_configured_is_503() {
-        let resources = memory(&[("smoke", resource("smoke", Some("analytics")))]);
+    async fn airflow_down_is_502_and_not_configured_is_503_for_every_action() {
+        let resources = memory(&[(
+            "smoke",
+            with_concurrency(resource("smoke", Some("analytics")), "Allow"),
+        )]);
         let namespace = crate::cluster::namespace();
+        let root = admin();
+        let limiter = limiter();
 
-        let error = list_pipelines(Some(&resources), None, &admin())
+        // No scheduler client: every action answers 503 and names the missing client.
+        let error = run_now(Some(&resources), None, &limiter, &root, &namespace, "smoke")
             .await
             .expect_err("no Airflow client");
         assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(error.message(), "the scheduler is not configured");
+        let error = pause_pipeline(Some(&resources), None, &root, &namespace, "smoke")
+            .await
+            .expect_err("no Airflow client");
+        assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.message(), "the scheduler is not configured");
+        let error = resume_pipeline(Some(&resources), None, &root, &namespace, "smoke")
+            .await
+            .expect_err("no Airflow client");
+        assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.message(), "the scheduler is not configured");
+        let error = stop_run(
+            Some(&resources),
+            None,
+            &root,
+            &namespace,
+            "smoke",
+            SMOKE_RUN,
+        )
+        .await
+        .expect_err("no Airflow client");
+        assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.message(), "the scheduler is not configured");
 
-        let error = list_pipelines(None, None, &admin())
+        // No cluster client at all: the read routes still say which one is missing.
+        let error = list_pipelines(None, None, &root)
             .await
             .expect_err("no cluster client");
         assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(error.message(), "no cluster connection");
 
+        // An Airflow that does not answer: 502, never 500, for every action.
         let down = AirflowClient::new(
             reqwest::Client::new(),
             AirflowConfig {
@@ -2056,11 +2797,49 @@ mod tests {
                 password: Secret::new("x"),
             },
         );
-        let error = pipeline_detail(Some(&resources), Some(&down), &admin(), &namespace, "smoke")
-            .await
-            .expect_err("Airflow is down");
-        assert_eq!(error.status(), StatusCode::BAD_GATEWAY);
-        assert_eq!(error.message(), "the scheduler did not answer");
+        for (action, error) in [
+            (
+                "run",
+                run_now(
+                    Some(&resources),
+                    Some(&down),
+                    &limiter,
+                    &root,
+                    &namespace,
+                    "smoke",
+                )
+                .await
+                .expect_err("Airflow is down"),
+            ),
+            (
+                "pause",
+                pause_pipeline(Some(&resources), Some(&down), &root, &namespace, "smoke")
+                    .await
+                    .expect_err("Airflow is down"),
+            ),
+            (
+                "resume",
+                resume_pipeline(Some(&resources), Some(&down), &root, &namespace, "smoke")
+                    .await
+                    .expect_err("Airflow is down"),
+            ),
+            (
+                "stop",
+                stop_run(
+                    Some(&resources),
+                    Some(&down),
+                    &root,
+                    &namespace,
+                    "smoke",
+                    SMOKE_RUN,
+                )
+                .await
+                .expect_err("Airflow is down"),
+            ),
+        ] {
+            assert_eq!(error.status(), StatusCode::BAD_GATEWAY, "{action}");
+            assert_eq!(error.message(), "the scheduler did not answer", "{action}");
+        }
     }
 
     #[tokio::test]
@@ -2098,6 +2877,7 @@ mod tests {
         assert_eq!(body["pipelines"][0]["name"], "smoke");
 
         let response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri(format!(
@@ -2118,12 +2898,52 @@ mod tests {
             Some("no-store"),
             "a refusal is never cached either"
         );
+
+        let namespace = crate::cluster::namespace();
+        for (uri, expected) in [
+            (
+                format!("/pipelines/{namespace}/smoke/runs"),
+                StatusCode::CREATED,
+            ),
+            (
+                format!("/pipelines/{namespace}/smoke/pause"),
+                StatusCode::OK,
+            ),
+            (
+                format!("/pipelines/{namespace}/smoke/resume"),
+                StatusCode::OK,
+            ),
+            (
+                format!("/pipelines/{namespace}/smoke/runs/{SMOKE_RUN}/stop"),
+                StatusCode::CONFLICT,
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(&uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected, "{uri}");
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::CACHE_CONTROL)
+                    .and_then(|value| value.to_str().ok()),
+                Some("no-store"),
+                "every action answer, success or refusal, is uncacheable: {uri}"
+            );
+        }
     }
 
     #[test]
     fn the_view_has_no_raw_airflow_fields() {
-        let spec = resource("smoke", Some("analytics"));
-        let spec = spec_of(&spec);
+        let resource = resource("smoke", Some("analytics"));
         let dag: DagSummary = serde_json::from_value(json!({
             "dag_id": "stardelt__smoke",
             "is_paused": false,
@@ -2133,7 +2953,7 @@ mod tests {
         }))
         .unwrap();
         let run: DagRun = serde_json::from_value(run(SMOKE_RUN, "success")).unwrap();
-        let view = view_of("stardelt", "smoke", spec, Some(&dag), Some(&run));
+        let view = view_of("stardelt", "smoke", &resource, Some(&dag), Some(&run));
 
         let value = serde_json::to_value(&view).expect("serialises");
         let keys: BTreeSet<&str> = value
@@ -2157,6 +2977,7 @@ mod tests {
                 "tasks",
                 "runAs",
                 "concurrency",
+                "createdAt",
             ])
         );
         let serialized = serde_json::to_string(&value).unwrap();
@@ -2274,5 +3095,699 @@ mod tests {
         assert_eq!(strip_ansi("grün \u{1b}[1;31mrot\u{1b}[0m"), "grün rot");
         // The ticket's pattern matches `ESC [ n` as well: the text loses those three bytes.
         assert_eq!(strip_ansi("\u{1b}[not-a-sequence"), "ot-a-sequence");
+    }
+
+    // -----------------------------------------------------------------------
+    // Actions: who may act, run now, pause, resume, stop, audit
+    // -----------------------------------------------------------------------
+
+    /// Set the fake's DAG paused state, as an operator would through Airflow.
+    fn set_dag_paused(fake: &fake_airflow::Shared, dag_id: &str, paused: bool) {
+        for dag in &mut fake.lock().unwrap().dags {
+            if dag["dag_id"] == dag_id {
+                dag["is_paused"] = json!(paused);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn only_the_owner_group_and_admins_may_act_and_others_get_404() {
+        let resources = memory(&[("smoke", resource("smoke", Some("analytics")))]);
+        let (airflow, fake) = fake_airflow::start().await;
+        let outsider = who("sub-bob", &["finance"], false);
+        let namespace = crate::cluster::namespace();
+        let limiter = limiter();
+
+        for (action, error) in [
+            (
+                "run",
+                run_now(
+                    Some(&resources),
+                    Some(&airflow),
+                    &limiter,
+                    &outsider,
+                    &namespace,
+                    "smoke",
+                )
+                .await
+                .expect_err("an outsider may not run"),
+            ),
+            (
+                "pause",
+                pause_pipeline(
+                    Some(&resources),
+                    Some(&airflow),
+                    &outsider,
+                    &namespace,
+                    "smoke",
+                )
+                .await
+                .expect_err("an outsider may not pause"),
+            ),
+            (
+                "resume",
+                resume_pipeline(
+                    Some(&resources),
+                    Some(&airflow),
+                    &outsider,
+                    &namespace,
+                    "smoke",
+                )
+                .await
+                .expect_err("an outsider may not resume"),
+            ),
+            (
+                "stop",
+                stop_run(
+                    Some(&resources),
+                    Some(&airflow),
+                    &outsider,
+                    &namespace,
+                    "smoke",
+                    SMOKE_RUN,
+                )
+                .await
+                .expect_err("an outsider may not stop"),
+            ),
+        ] {
+            assert_eq!(error.status(), StatusCode::NOT_FOUND, "{action}");
+            assert_eq!(error.message(), "no such pipeline", "{action}");
+        }
+        assert!(
+            fake.lock().unwrap().calls.is_empty(),
+            "a hidden pipeline never reaches Airflow: {:?}",
+            fake.lock().unwrap().calls
+        );
+
+        let owned = resource("smoke", Some("analytics"));
+        let spec = spec_of(&owned);
+        assert!(may_act(&who("sub-ada", &["analytics"], false), spec));
+        assert!(may_act(&admin(), spec));
+        assert!(!may_act(&outsider, spec));
+    }
+
+    #[tokio::test]
+    async fn run_now_triggers_with_now_and_a_note() {
+        let resources = memory(&[("smoke", resource("smoke", Some("analytics")))]);
+        let (airflow, fake) = fake_airflow::start().await;
+        let member = who("sub-ada", &["analytics"], false);
+        let namespace = crate::cluster::namespace();
+
+        let started = now_seconds();
+        let run = run_now(
+            Some(&resources),
+            Some(&airflow),
+            &limiter(),
+            &member,
+            &namespace,
+            "smoke",
+        )
+        .await
+        .expect("the run starts");
+        assert_eq!(run.state, "queued");
+        assert_eq!(run.note.as_deref(), Some("Started from Nova by sub-ada"));
+        assert!(run.run_id.starts_with("manual__"));
+
+        let fake = fake.lock().unwrap();
+        assert_eq!(fake.trigger_bodies.len(), 1, "exactly one trigger");
+        let body = &fake.trigger_bodies[0];
+        let logical_date = body["logical_date"].as_str().expect("a logical_date");
+        assert!(
+            logical_date.ends_with('Z'),
+            "always UTC with a Z: {logical_date}"
+        );
+        assert!(
+            !logical_date.contains('.'),
+            "whole seconds only: {logical_date}"
+        );
+        let at = parse_rfc3339(logical_date).expect("RFC 3339");
+        assert!(
+            (at - started).abs() <= 2.0,
+            "logical_date is now, not a guess: {logical_date} vs {started}"
+        );
+        assert_eq!(body["note"], "Started from Nova by sub-ada");
+        assert!(
+            fake.calls
+                .iter()
+                .any(|call| call == "POST /api/v2/dags/stardelt__smoke/dagRuns"),
+            "Airflow was asked to trigger: {:?}",
+            fake.calls
+        );
+    }
+
+    #[tokio::test]
+    async fn run_now_refuses_a_paused_pipeline_and_does_not_trigger() {
+        let resources = memory(&[("smoke", resource("smoke", Some("analytics")))]);
+        let (airflow, fake) = fake_airflow::start().await;
+        set_dag_paused(&fake, "stardelt__smoke", true);
+
+        let error = run_now(
+            Some(&resources),
+            Some(&airflow),
+            &limiter(),
+            &who("sub-ada", &["analytics"], false),
+            &crate::cluster::namespace(),
+            "smoke",
+        )
+        .await
+        .expect_err("a paused pipeline does not start");
+        assert_eq!(error.status(), StatusCode::CONFLICT);
+        assert_eq!(error.message(), "the pipeline is paused: resume it first");
+        let fake = fake.lock().unwrap();
+        assert!(
+            !fake.calls.iter().any(|call| call.starts_with("POST ")),
+            "Airflow was not asked to trigger: {:?}",
+            fake.calls
+        );
+        assert!(fake.trigger_bodies.is_empty());
+    }
+
+    #[tokio::test]
+    async fn run_now_refuses_when_a_run_is_active_under_forbid() {
+        let resources = memory(&[("smoke", resource("smoke", Some("analytics")))]);
+        let (airflow, fake) = fake_airflow::start().await;
+        fake.lock().unwrap().runs.insert(
+            "stardelt__smoke".into(),
+            vec![run("manual__2026-10-20T09:30:00Z", "running")],
+        );
+
+        let error = run_now(
+            Some(&resources),
+            Some(&airflow),
+            &limiter(),
+            &who("sub-ada", &["analytics"], false),
+            &crate::cluster::namespace(),
+            "smoke",
+        )
+        .await
+        .expect_err("Forbid refuses a second run");
+        assert_eq!(error.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            error.message(),
+            "a run is already active: wait for it or stop it"
+        );
+        let fake = fake.lock().unwrap();
+        assert!(fake.trigger_bodies.is_empty(), "nothing was triggered");
+        assert!(!fake.calls.iter().any(|call| call.starts_with("POST ")));
+    }
+
+    #[tokio::test]
+    async fn run_now_allows_a_second_run_under_allow() {
+        let resources = memory(&[(
+            "smoke",
+            with_concurrency(resource("smoke", Some("analytics")), "Allow"),
+        )]);
+        let (airflow, fake) = fake_airflow::start().await;
+        fake.lock().unwrap().runs.insert(
+            "stardelt__smoke".into(),
+            vec![run("manual__2026-10-20T09:30:00Z", "running")],
+        );
+
+        let run = run_now(
+            Some(&resources),
+            Some(&airflow),
+            &limiter(),
+            &who("sub-ada", &["analytics"], false),
+            &crate::cluster::namespace(),
+            "smoke",
+        )
+        .await
+        .expect("Allow skips the activity check");
+        assert_eq!(run.state, "queued");
+        assert_eq!(fake.lock().unwrap().trigger_bodies.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn run_now_refuses_an_unloaded_pipeline() {
+        let resources = memory(&[("brand-new", resource("brand-new", Some("analytics")))]);
+        let (airflow, fake) = fake_airflow::start().await;
+
+        let error = run_now(
+            Some(&resources),
+            Some(&airflow),
+            &limiter(),
+            &who("sub-ada", &["analytics"], false),
+            &crate::cluster::namespace(),
+            "brand-new",
+        )
+        .await
+        .expect_err("no DAG yet");
+        assert_eq!(error.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            error.message(),
+            "the scheduler has not loaded this pipeline yet"
+        );
+        assert!(
+            fake.lock().unwrap().trigger_bodies.is_empty(),
+            "there is nothing to trigger"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_now_is_rate_limited_per_user() {
+        let resources = memory(&[
+            (
+                "smoke",
+                with_concurrency(resource("smoke", Some("analytics")), "Allow"),
+            ),
+            ("other", resource("other", Some("analytics"))),
+        ]);
+        let (airflow, fake) = fake_airflow::start().await;
+        set_dag_paused(&fake, "stardelt__other", true);
+        let namespace = crate::cluster::namespace();
+        let limiter = limiter();
+        let ada = who("sub-ada", &["analytics"], false);
+
+        // Refusals before the limiter do not count: ten paused refusals still leave ten slots.
+        for _ in 0..10 {
+            let error = run_now(
+                Some(&resources),
+                Some(&airflow),
+                &limiter,
+                &ada,
+                &namespace,
+                "other",
+            )
+            .await
+            .expect_err("paused");
+            assert_eq!(error.message(), "the pipeline is paused: resume it first");
+        }
+        for attempt in 0..10 {
+            run_now(
+                Some(&resources),
+                Some(&airflow),
+                &limiter,
+                &ada,
+                &namespace,
+                "smoke",
+            )
+            .await
+            .unwrap_or_else(|error| panic!("start {attempt}: {}", error.message()));
+        }
+        let error = run_now(
+            Some(&resources),
+            Some(&airflow),
+            &limiter,
+            &ada,
+            &namespace,
+            "smoke",
+        )
+        .await
+        .expect_err("the eleventh start in a minute");
+        assert_eq!(error.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(error.message(), "too many runs started; wait a minute");
+
+        // Another user has their own ten.
+        let run = run_now(
+            Some(&resources),
+            Some(&airflow),
+            &limiter,
+            &who("sub-bob", &["analytics"], false),
+            &namespace,
+            "smoke",
+        )
+        .await
+        .expect("another user is unaffected");
+        assert_eq!(run.state, "queued");
+    }
+
+    #[tokio::test]
+    async fn pause_and_resume_are_idempotent_and_return_the_fresh_view() {
+        let resources = memory(&[
+            ("smoke", resource("smoke", Some("analytics"))),
+            ("brand-new", resource("brand-new", Some("analytics"))),
+        ]);
+        let (airflow, fake) = fake_airflow::start().await;
+        let member = who("sub-ada", &["analytics"], false);
+        let namespace = crate::cluster::namespace();
+
+        let paused = pause_pipeline(
+            Some(&resources),
+            Some(&airflow),
+            &member,
+            &namespace,
+            "smoke",
+        )
+        .await
+        .expect("pause");
+        assert!(paused.paused);
+        assert_eq!(paused.state, "paused");
+        let again = pause_pipeline(
+            Some(&resources),
+            Some(&airflow),
+            &member,
+            &namespace,
+            "smoke",
+        )
+        .await
+        .expect("pausing a paused pipeline is fine");
+        assert!(again.paused, "the fresh DAG says paused");
+
+        let resumed = resume_pipeline(
+            Some(&resources),
+            Some(&airflow),
+            &member,
+            &namespace,
+            "smoke",
+        )
+        .await
+        .expect("resume");
+        assert!(!resumed.paused);
+        assert_eq!(
+            resumed.state, "succeeded",
+            "the fresh view carries the last run"
+        );
+        let again = resume_pipeline(
+            Some(&resources),
+            Some(&airflow),
+            &member,
+            &namespace,
+            "smoke",
+        )
+        .await
+        .expect("resuming a running pipeline is fine");
+        assert!(!again.paused);
+
+        let patches = fake
+            .lock()
+            .unwrap()
+            .calls
+            .iter()
+            .filter(|call| call.starts_with("PATCH /api/v2/dags/stardelt__smoke"))
+            .count();
+        assert_eq!(patches, 4, "two pauses and two resumes reached Airflow");
+
+        let error = pause_pipeline(
+            Some(&resources),
+            Some(&airflow),
+            &member,
+            &namespace,
+            "brand-new",
+        )
+        .await
+        .expect_err("no DAG yet");
+        assert_eq!(error.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            error.message(),
+            "the scheduler has not loaded this pipeline yet"
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_marks_only_active_runs_failed() {
+        const ACTIVE_RUN: &str = "manual__2026-10-20T09:30:00Z";
+        const FAILED_RUN: &str = "manual__2026-10-20T09:00:00Z";
+        let resources = memory(&[("smoke", resource("smoke", Some("analytics")))]);
+        let (airflow, fake) = fake_airflow::start().await;
+        fake.lock().unwrap().runs.insert(
+            "stardelt__smoke".into(),
+            vec![
+                run(ACTIVE_RUN, "running"),
+                run(FAILED_RUN, "failed"),
+                run(SMOKE_RUN, "success"),
+            ],
+        );
+        let namespace = crate::cluster::namespace();
+        let member = who("sub-ada", &["analytics"], false);
+
+        for finished in [SMOKE_RUN, FAILED_RUN] {
+            let error = stop_run(
+                Some(&resources),
+                Some(&airflow),
+                &member,
+                &namespace,
+                "smoke",
+                finished,
+            )
+            .await
+            .expect_err("a finished run cannot stop");
+            assert_eq!(error.status(), StatusCode::CONFLICT, "{finished}");
+            assert_eq!(error.message(), "the run is not active");
+        }
+        assert!(
+            !fake
+                .lock()
+                .unwrap()
+                .calls
+                .iter()
+                .any(|call| call.starts_with("PATCH ")),
+            "a finished run is not patched"
+        );
+
+        let stopped = stop_run(
+            Some(&resources),
+            Some(&airflow),
+            &member,
+            &namespace,
+            "smoke",
+            ACTIVE_RUN,
+        )
+        .await
+        .expect("an active run stops");
+        assert_eq!(stopped.state, "failed");
+        assert_eq!(stopped.run_id, ACTIVE_RUN);
+        let fake = fake.lock().unwrap();
+        let patches = fake
+            .calls
+            .iter()
+            .filter(|call| call.starts_with("PATCH /api/v2/dags/stardelt__smoke/dagRuns/"))
+            .count();
+        assert_eq!(patches, 1, "exactly one PATCH: {:?}", fake.calls);
+        assert_eq!(
+            fake.runs["stardelt__smoke"]
+                .iter()
+                .find(|run| run["dag_run_id"] == ACTIVE_RUN)
+                .expect("the run")["state"],
+            "failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_ignores_a_run_id_of_another_pipeline() {
+        let resources = memory(&[
+            ("smoke", resource("smoke", Some("analytics"))),
+            ("other", resource("other", Some("analytics"))),
+        ]);
+        let (airflow, fake) = fake_airflow::start().await;
+
+        let error = stop_run(
+            Some(&resources),
+            Some(&airflow),
+            &admin(),
+            &crate::cluster::namespace(),
+            "smoke",
+            OTHER_RUN,
+        )
+        .await
+        .expect_err("another pipeline's run id does not resolve under smoke");
+        assert_eq!(error.status(), StatusCode::NOT_FOUND);
+        assert_eq!(error.message(), "no such run");
+        let fake = fake.lock().unwrap();
+        assert!(
+            !fake
+                .calls
+                .iter()
+                .any(|call| call.starts_with("PATCH ") || call.contains("stardelt__other")),
+            "no PATCH, and the other DAG was never addressed: {:?}",
+            fake.calls
+        );
+    }
+
+    #[tokio::test]
+    async fn every_action_is_audited_including_refusals() {
+        let resources = memory(&[(
+            "smoke",
+            with_concurrency(resource("smoke", Some("analytics")), "Allow"),
+        )]);
+        let (airflow, fake) = fake_airflow::start().await;
+        let namespace = crate::cluster::namespace();
+        // A `sub` of this test's own: the sink is process-wide, and other tests' records must
+        // not be mistaken for these.
+        let actor = who("sub-audit-196", &["stardelt-admins"], true);
+        let _ = audit::test_sink::take();
+
+        let started = run_now(
+            Some(&resources),
+            Some(&airflow),
+            &limiter(),
+            &actor,
+            &namespace,
+            "smoke",
+        )
+        .await
+        .expect("run");
+        set_dag_paused(&fake, "stardelt__smoke", true);
+        run_now(
+            Some(&resources),
+            Some(&airflow),
+            &limiter(),
+            &actor,
+            &namespace,
+            "smoke",
+        )
+        .await
+        .expect_err("paused");
+        pause_pipeline(
+            Some(&resources),
+            Some(&airflow),
+            &actor,
+            &namespace,
+            "smoke",
+        )
+        .await
+        .expect("pause");
+        resume_pipeline(
+            Some(&resources),
+            Some(&airflow),
+            &actor,
+            &namespace,
+            "smoke",
+        )
+        .await
+        .expect("resume");
+        stop_run(
+            Some(&resources),
+            Some(&airflow),
+            &actor,
+            &namespace,
+            "smoke",
+            SMOKE_RUN,
+        )
+        .await
+        .expect_err("the seeded run already succeeded");
+        stop_run(
+            Some(&resources),
+            Some(&airflow),
+            &actor,
+            &namespace,
+            "smoke",
+            &started.run_id,
+        )
+        .await
+        .expect("stop the queued run");
+        let down = AirflowClient::new(
+            reqwest::Client::new(),
+            AirflowConfig {
+                url: "http://127.0.0.1:9".into(),
+                user: "nova-api".into(),
+                password: Secret::new("x"),
+            },
+        );
+        run_now(
+            Some(&resources),
+            Some(&down),
+            &limiter(),
+            &actor,
+            &namespace,
+            "smoke",
+        )
+        .await
+        .expect_err("Airflow is down");
+
+        let records: Vec<audit::test_sink::Record> = audit::test_sink::take()
+            .into_iter()
+            .filter(|record| record.sub == "sub-audit-196")
+            .collect();
+        let outcomes: Vec<(&str, &str)> = records
+            .iter()
+            .map(|record| (record.action.as_str(), record.outcome.as_str()))
+            .collect();
+        assert_eq!(
+            outcomes,
+            [
+                ("run", "ok"),
+                ("run", "refused:paused"),
+                ("pause", "ok"),
+                ("resume", "ok"),
+                ("stop", "refused:not-active"),
+                ("stop", "ok"),
+                ("run", "error"),
+            ],
+            "one record per action, refusals and errors included"
+        );
+        assert!(
+            records
+                .iter()
+                .all(|record| record.pipeline == "smoke" && record.namespace == namespace),
+            "the record names the pipeline: {records:?}"
+        );
+        assert_eq!(
+            records[0].run.as_deref(),
+            Some(started.run_id.as_str()),
+            "a started run is named"
+        );
+        assert_eq!(
+            records[1].run, None,
+            "a refusal before the trigger has no run"
+        );
+        assert_eq!(records[4].run.as_deref(), Some(SMOKE_RUN));
+        // No field of the record can hold the note or log text: there is none to hold it.
+        let serialized = format!("{records:?}");
+        assert!(
+            !serialized.contains("Started from Nova"),
+            "the fixed note text is not repeated in the audit: {serialized}"
+        );
+    }
+
+    #[tokio::test]
+    async fn not_loaded_after_three_minutes() {
+        assert_eq!(
+            pipeline_state(false, false, None, Some(120.0)),
+            "loading",
+            "two minutes is still loading"
+        );
+        assert_eq!(
+            pipeline_state(false, false, None, Some(240.0)),
+            "not-loaded",
+            "four minutes without a DAG is not loading"
+        );
+        assert_eq!(
+            pipeline_state(false, false, None, None),
+            "loading",
+            "without a creationTimestamp there is nothing to compare"
+        );
+        assert_eq!(
+            pipeline_state(false, true, None, Some(600.0)),
+            "idle",
+            "a loaded pipeline is never not-loaded"
+        );
+
+        let resources = memory(&[
+            (
+                "two-minutes",
+                with_created_ago(resource("two-minutes", Some("analytics")), 120),
+            ),
+            (
+                "four-minutes",
+                with_created_ago(resource("four-minutes", Some("analytics")), 240),
+            ),
+        ]);
+        let (airflow, _fake) = fake_airflow::start().await;
+        let namespace = crate::cluster::namespace();
+
+        let young = pipeline_detail(
+            Some(&resources),
+            Some(&airflow),
+            &admin(),
+            &namespace,
+            "two-minutes",
+        )
+        .await
+        .expect("the detail is readable");
+        assert_eq!(young.pipeline.state, "loading");
+        assert!(young.pipeline.created_at.is_some(), "createdAt is exposed");
+
+        let old = pipeline_detail(
+            Some(&resources),
+            Some(&airflow),
+            &admin(),
+            &namespace,
+            "four-minutes",
+        )
+        .await
+        .expect("the detail is readable");
+        assert!(!old.pipeline.loaded);
+        assert_eq!(old.pipeline.state, "not-loaded");
+        assert!(old.pipeline.created_at.is_some());
     }
 }

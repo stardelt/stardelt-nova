@@ -46,7 +46,11 @@ Browser
          ├─ GET  /api/connections/break-glass-log  who used break-glass and why (administrators only)
          ├─ GET  /api/pipelines        the pipelines of the caller's groups (administrators: all)
          ├─ GET  /api/pipelines/:namespace/:name  one pipeline: latest runs, params, retries
+         ├─ POST /api/pipelines/:namespace/:name/runs  run now (409 paused/active/unloaded, 429 over 10 a minute)
+         ├─ POST /api/pipelines/:namespace/:name/pause  pause (idempotent, answers the fresh view)
+         ├─ POST /api/pipelines/:namespace/:name/resume  resume (idempotent, answers the fresh view)
          ├─ GET  /api/pipelines/…/runs/:run_id    one run with its task instances
+         ├─ POST /api/pipelines/…/runs/:run_id/stop  mark a run failed — not a cancel
          ├─ GET  /api/pipelines/…/tasks/:task_id/logs  one task's log, paged and capped
          ├─ POST /api/ingest/upload    load CSV/JSON into a table (a failed load keeps the old table)
          ├─ POST /api/transfer         copy table → table (a failed copy keeps the target)

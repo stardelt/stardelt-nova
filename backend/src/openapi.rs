@@ -69,7 +69,11 @@ pub struct ErrorResponse {
         crate::connection_routes::break_glass_log,
         crate::pipelines::list,
         crate::pipelines::detail,
+        crate::pipelines::trigger_run,
+        crate::pipelines::pause,
+        crate::pipelines::resume,
         crate::pipelines::run,
+        crate::pipelines::stop,
         crate::pipelines::logs,
     ),
     components(schemas(
