@@ -3110,12 +3110,26 @@
           "identity_forwarding"
         ],
         "properties": {
+          "admin_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`\"group\"` or `\"role\"`: which of the two `admin_group` is. `None` with it."
+          },
           "admin_console_url": {
             "type": [
               "string",
               "null"
             ],
             "description": "Realm admin console derived from the issuer; `None` for non-Keycloak issuers."
+          },
+          "admin_group": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The configured value behind this caller's administrator decision: the group\nmatched, or the role held (and the configured precedence for a member). `None`\nwhen neither is configured (#213)."
           },
           "auth_mode": {
             "type": "string"
@@ -3155,6 +3169,15 @@
             "items": {
               "type": "string"
             }
+          },
+          "session_expires_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix seconds at which the browser session can no longer be renewed and the\nperson signs in again; `None` for an Authorization-header call, which has no\nsession. Never the access token's own `exp`.",
+            "minimum": 0
           },
           "sub": {
             "type": "string"

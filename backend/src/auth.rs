@@ -123,19 +123,49 @@ pub enum AuthMode {
 pub struct ClaimConfig {
     /// `NOVA_OIDC_GROUP_CLAIM`, default `groups`.
     pub group_claim: String,
-    /// `NOVA_OIDC_ADMIN_GROUP`, default `stardelt-admins`.
-    pub admin_group: String,
-    /// `NOVA_OIDC_ADMIN_ROLE`, default = the admin group. Matched against `roles`.
-    pub admin_role: String,
+    /// `NOVA_OIDC_ADMIN_GROUP`, default `stardelt-admins`. `None` turns the group
+    /// mechanism off (an explicitly empty environment variable); an installation whose
+    /// IdP decides administrators elsewhere then reports `admin_group: null`.
+    pub admin_group: Option<String>,
+    /// `NOVA_OIDC_ADMIN_ROLE`, default = the admin group. Matched against `roles`;
+    /// `None` as for `admin_group`.
+    pub admin_role: Option<String>,
 }
 
 impl Default for ClaimConfig {
     fn default() -> Self {
         Self {
             group_claim: "groups".into(),
-            admin_group: "stardelt-admins".into(),
-            admin_role: "stardelt-admins".into(),
+            admin_group: Some("stardelt-admins".into()),
+            admin_role: Some("stardelt-admins".into()),
         }
+    }
+}
+
+impl ClaimConfig {
+    /// Why this caller is an administrator, and the configured value behind it: the role
+    /// first (the precedence `is_admin` uses), then the group. A caller who is not an
+    /// administrator still gets the configured precedence — the Profile page shows it only
+    /// for administrators — and `None` is reserved for "neither is configured" (#213).
+    pub fn admin_source(
+        &self,
+        roles: &[String],
+        groups: &[String],
+    ) -> Option<(&'static str, &str)> {
+        if let Some(role) = self.admin_role.as_deref()
+            && roles.iter().any(|r| r == role)
+        {
+            return Some(("role", role));
+        }
+        if let Some(group) = self.admin_group.as_deref()
+            && has_group(groups, group)
+        {
+            return Some(("group", group));
+        }
+        self.admin_role
+            .as_deref()
+            .map(|role| ("role", role))
+            .or_else(|| self.admin_group.as_deref().map(|group| ("group", group)))
     }
 }
 
@@ -250,10 +280,21 @@ impl AuthMode {
             .filter(|a| !a.is_empty())
             .unwrap_or_else(|| vec![client_id.clone()]);
 
-        let admin_group = var("NOVA_OIDC_ADMIN_GROUP").unwrap_or_else(|| "stardelt-admins".into());
+        // An administrator mechanism is on by default; an explicitly empty value turns
+        // it off, which is the configuration that reports `admin_group: null` (#213).
+        let raw = |k: &str| get(k).map(|v| v.trim().to_string());
+        let admin_group = match raw("NOVA_OIDC_ADMIN_GROUP").as_deref() {
+            None => Some("stardelt-admins".to_string()),
+            Some("") => None,
+            Some(group) => Some(group.to_string()),
+        };
         let claims = ClaimConfig {
             group_claim: var("NOVA_OIDC_GROUP_CLAIM").unwrap_or_else(|| "groups".into()),
-            admin_role: var("NOVA_OIDC_ADMIN_ROLE").unwrap_or_else(|| admin_group.clone()),
+            admin_role: match raw("NOVA_OIDC_ADMIN_ROLE").as_deref() {
+                None => admin_group.clone(),
+                Some("") => None,
+                Some(role) => Some(role.to_string()),
+            },
             admin_group,
         };
 
@@ -398,9 +439,16 @@ fn has_group(groups: &[String], wanted: &str) -> bool {
 
 /// Admin decision. Precedence: the `roles` claim (Entra app roles) is checked first
 /// against `admin_role`, then the configured group claim against `admin_group`;
-/// either grants admin. An overage never grants anything.
+/// either grants admin. An overage never grants anything. An unset mechanism (empty
+/// `NOVA_OIDC_ADMIN_GROUP` / `NOVA_OIDC_ADMIN_ROLE`) grants nothing.
 pub fn is_admin(roles: &[String], groups: &[String], cfg: &ClaimConfig) -> bool {
-    roles.iter().any(|r| r == &cfg.admin_role) || has_group(groups, &cfg.admin_group)
+    cfg.admin_role
+        .as_deref()
+        .is_some_and(|role| roles.iter().any(|r| r == role))
+        || cfg
+            .admin_group
+            .as_deref()
+            .is_some_and(|group| has_group(groups, group))
 }
 
 pub fn identity_from_claims(claims: &Value, cfg: &ClaimConfig) -> Result<Identity, AuthError> {
@@ -863,6 +911,9 @@ struct Session {
     /// of refreshing is that one sign-in outlives many access tokens, not that it lives
     /// forever.
     expires: Instant,
+    /// The same deadline as wall clock (Unix seconds), so `/api/me` can tell the browser
+    /// when it must sign in again. Recorded once, at sign-in, from the same deadline.
+    expires_unix: u64,
     /// One lock per session for everything mutable. It is what makes "exactly one
     /// refresh per expiring session" true under concurrent requests: Keycloak rotates
     /// refresh tokens, so spending one twice would invalidate the session. The lock is
@@ -892,6 +943,7 @@ impl SessionStore {
             id.clone(),
             Arc::new(Session {
                 expires: now + SESSION_TTL,
+                expires_unix: unix_now() + SESSION_TTL.as_secs(),
                 credentials: tokio::sync::Mutex::new(credentials),
             }),
         );
@@ -913,6 +965,15 @@ impl SessionStore {
             m.remove(id);
         }
     }
+}
+
+/// Seconds since the Unix epoch: the one wall-clock fact a session records, for the
+/// browser's "you sign in again then" (#213). Durations are still measured on `Instant`.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// How long the access token in a token response is good for, and where that number
@@ -1028,6 +1089,22 @@ pub struct Principal {
     pub access_token: Option<Secret>,
 }
 
+/// What `/api/me` reports beyond the identity (#213): why this caller is an
+/// administrator, and when the sign-in behind the request ends. Inserted into request
+/// extensions by `require_auth`, next to the `Principal`; no other route reads it, and
+/// it never carries a token.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MeFacts {
+    /// `"group"` or `"role"`: which configured value decided this caller's admin
+    /// status. `None` when neither is configured.
+    pub admin_by: Option<&'static str>,
+    /// The group name or role value `admin_by` refers to.
+    pub admin_group: Option<String>,
+    /// Unix seconds at which the browser session can no longer be renewed. `None` for
+    /// a bearer call, which has no session; never the access token's own `exp`.
+    pub session_expires_at: Option<u64>,
+}
+
 pub struct AuthState {
     pub config: OidcConfig,
     pub provider: Arc<Provider>,
@@ -1085,7 +1162,10 @@ impl AuthState {
 
     /// Bearer first (an invalid bearer is a 401, never a fallback to the cookie),
     /// then the session cookie.
-    pub async fn authenticate(&self, headers: &HeaderMap) -> Result<Principal, AuthError> {
+    pub async fn authenticate(
+        &self,
+        headers: &HeaderMap,
+    ) -> Result<(Principal, MeFacts), AuthError> {
         if let Some(authz) = headers.get(header::AUTHORIZATION) {
             let value = authz.to_str().map_err(|_| AuthError::Unauthenticated)?;
             let token = match value.split_once(' ') {
@@ -1097,29 +1177,60 @@ impl AuthState {
                 _ => return Err(AuthError::Unauthenticated),
             };
             let identity = self.bearer.validate(token).await?;
-            return Ok(Principal {
-                identity,
-                via: "bearer",
-                access_token: Some(Secret(token.to_string())),
-            });
+            // A bearer call has no session: there is nothing to end, so no session end —
+            // and never the token's own `exp`.
+            let facts = self.me_facts(&identity, None);
+            return Ok((
+                Principal {
+                    identity,
+                    via: "bearer",
+                    access_token: Some(Secret(token.to_string())),
+                },
+                facts,
+            ));
         }
         let jar = self.jar(headers);
         let id = jar.get(SESSION_COOKIE).ok_or(AuthError::Unauthenticated)?;
-        let (identity, access_token) = self.session_credentials(id.value()).await?;
-        Ok(Principal {
-            identity,
-            via: "session",
-            access_token,
-        })
+        let (identity, access_token, session_expires_at) =
+            self.session_credentials(id.value()).await?;
+        let facts = self.me_facts(&identity, session_expires_at);
+        Ok((
+            Principal {
+                identity,
+                via: "session",
+                access_token,
+            },
+            facts,
+        ))
     }
 
-    /// The identity and access token behind a session cookie, refreshing the token first
-    /// when it is inside its refresh window.
+    /// What `/api/me` reports beyond the identity: the administrator decision and, for a
+    /// browser session, the end of the session's absolute lifetime. `session_end` is
+    /// already Unix seconds.
+    fn me_facts(&self, identity: &Identity, session_end: Option<u64>) -> MeFacts {
+        let source = self
+            .config
+            .claims
+            .admin_source(&identity.roles, &identity.groups);
+        MeFacts {
+            admin_by: source.map(|(by, _)| by),
+            admin_group: source.map(|(_, value)| value.to_string()),
+            session_expires_at: session_end,
+        }
+    }
+
+    /// The identity, access token and session end behind a session cookie, refreshing the
+    /// token first when it is inside its refresh window.
     ///
     /// Every session-cookie request goes through here, so `/api/me`, the admin check and
     /// the token forwarded to Trino and the catalog all see the same, current identity.
-    async fn session_credentials(&self, id: &str) -> Result<(Identity, Option<Secret>), AuthError> {
+    async fn session_credentials(
+        &self,
+        id: &str,
+    ) -> Result<(Identity, Option<Secret>, Option<u64>), AuthError> {
         let session = self.sessions.find(id).ok_or(AuthError::Unauthenticated)?;
+        // The absolute deadline is fixed at sign-in; a refresh never moves it.
+        let ends_at = Some(session.expires_unix);
         let mut creds = session.credentials.lock().await;
         if creds.needs_refresh() {
             if let Err(reason) = self.refresh_session(&mut creds).await {
@@ -1141,6 +1252,7 @@ impl AuthState {
         Ok((
             creds.identity.clone(),
             Some(creds.tokens.access_token.clone()),
+            ends_at,
         ))
     }
 
@@ -1211,8 +1323,9 @@ pub async fn require_auth(
     next: Next,
 ) -> Response {
     match auth.authenticate(req.headers()).await {
-        Ok(p) => {
-            req.extensions_mut().insert(p);
+        Ok((principal, facts)) => {
+            req.extensions_mut().insert(principal);
+            req.extensions_mut().insert(facts);
             next.run(req).await
         }
         Err(e) => {
@@ -1905,7 +2018,7 @@ mod tests {
     #[test]
     fn entra_app_roles_grant_admin_without_groups() {
         let cfg = ClaimConfig {
-            admin_role: "Nova.Admin".into(),
+            admin_role: Some("Nova.Admin".into()),
             ..ClaimConfig::default()
         };
         let c = json!({ "sub": "e-1", "upn": "ada@contoso.com", "name": "Ada", "roles": ["Nova.Admin"] });
@@ -1919,8 +2032,8 @@ mod tests {
     fn entra_group_object_id_as_admin_group() {
         let gid = "8f1c2b7e-0000-4000-8000-000000000001";
         let cfg = ClaimConfig {
-            admin_group: gid.into(),
-            admin_role: "unused".into(),
+            admin_group: Some(gid.into()),
+            admin_role: Some("unused".into()),
             ..ClaimConfig::default()
         };
         let c = json!({ "sub": "e-2", "groups": [gid] });
@@ -2058,7 +2171,8 @@ mod tests {
         assert_eq!(c.scopes, "openid profile email");
         assert_eq!(c.audiences, vec![CLIENT]);
         assert_eq!(c.claims.group_claim, "groups");
-        assert_eq!(c.claims.admin_role, "stardelt-admins");
+        assert_eq!(c.claims.admin_role.as_deref(), Some("stardelt-admins"));
+        assert_eq!(c.claims.admin_group.as_deref(), Some("stardelt-admins"));
         assert!(!format!("{c:?}").contains("s3cret"));
 
         for missing in [
@@ -2086,6 +2200,42 @@ mod tests {
         assert!(with("NOVA_OIDC_ISSUER", "http://localhost:8081/realms/stardelt").is_ok());
         assert!(with("NOVA_OIDC_SCOPES", "profile email").is_err());
         assert!(with("NOVA_PUBLIC_URL", "https://nova.example.com/sub").is_err());
+    }
+
+    /// `NOVA_OIDC_ADMIN_GROUP` and `NOVA_OIDC_ADMIN_ROLE` are on by default and are
+    /// turned off by an explicitly empty value — the configuration that makes `/api/me`
+    /// report `admin_group: null` (#213). Unset still means the default.
+    #[test]
+    fn an_empty_admin_setting_turns_the_mechanism_off() {
+        let claims_for = |pairs: &[(&'static str, &'static str)]| {
+            let mut v: Vec<_> = FULL.to_vec();
+            v.extend_from_slice(pairs);
+            let Ok(AuthMode::Oidc(c)) = AuthMode::from_lookup(env(&v)) else {
+                panic!()
+            };
+            c.claims
+        };
+
+        let claims = claims_for(&[("NOVA_OIDC_ADMIN_GROUP", ""), ("NOVA_OIDC_ADMIN_ROLE", "")]);
+        assert_eq!(claims.admin_group, None);
+        assert_eq!(claims.admin_role, None);
+
+        let claims = claims_for(&[("NOVA_OIDC_ADMIN_ROLE", "")]);
+        assert_eq!(claims.admin_group.as_deref(), Some("stardelt-admins"));
+        assert_eq!(claims.admin_role, None);
+
+        // The role's default is the group value, so turning the group off turns both off
+        // unless a role is named.
+        let claims = claims_for(&[("NOVA_OIDC_ADMIN_GROUP", "")]);
+        assert_eq!(claims.admin_group, None);
+        assert_eq!(claims.admin_role, None);
+
+        let claims = claims_for(&[
+            ("NOVA_OIDC_ADMIN_GROUP", ""),
+            ("NOVA_OIDC_ADMIN_ROLE", "Nova.Admin"),
+        ]);
+        assert_eq!(claims.admin_group, None);
+        assert_eq!(claims.admin_role.as_deref(), Some("Nova.Admin"));
     }
 
     #[test]
@@ -2277,7 +2427,7 @@ mod tests {
         let session_expires = auth.sessions.find(&sid).unwrap().expires;
         let headers = cookie_map(&auth, &sid);
 
-        let p = auth.authenticate(&headers).await.unwrap();
+        let (p, _) = auth.authenticate(&headers).await.unwrap();
         assert_eq!(p.via, "session");
         assert_eq!(p.identity.sub, "kc-42");
         assert!(p.identity.groups.is_empty());
@@ -2298,7 +2448,7 @@ mod tests {
             assert_eq!(creds.lifetime, Duration::from_secs(300));
         }
         // A request with a fresh token spends nothing.
-        let again = auth.authenticate(&headers).await.unwrap();
+        let (again, _) = auth.authenticate(&headers).await.unwrap();
         assert_eq!(again.access_token.unwrap().expose(), new_token);
         assert_eq!(idp.refusals(), 1);
         // A refresh does not extend the session: the 8 h cap is the 8 h cap.
@@ -2330,6 +2480,7 @@ mod tests {
                 auth.authenticate(&headers)
                     .await
                     .unwrap()
+                    .0
                     .access_token
                     .unwrap()
                     .expose()
@@ -2422,7 +2573,7 @@ mod tests {
         );
         idp.set_groups(&[]);
 
-        let p = auth.authenticate(&cookie_map(&auth, &sid)).await.unwrap();
+        let (p, _) = auth.authenticate(&cookie_map(&auth, &sid)).await.unwrap();
         assert_eq!(p.identity.sub, "kc-42");
         assert!(!p.identity.is_admin);
         assert_eq!(idp.refusals(), 1);
@@ -2755,6 +2906,172 @@ mod tests {
             call(&app, "/api/me", &cookie).await.0,
             StatusCode::UNAUTHORIZED
         );
+    }
+
+    // --- `/api/me` beyond the identity (#213) ---------------------------------
+
+    /// The real `/api/me` behind the real `require_auth`: what a browser gets.
+    fn me_app(auth: Arc<AuthState>) -> Router {
+        Router::new()
+            .route("/api/me", get(crate::me))
+            .route_layer(axum::middleware::from_fn_with_state(auth, require_auth))
+            .with_state(crate::router_tests::test_state())
+    }
+
+    /// Auth state with a claim configuration of the test's choosing.
+    fn auth_with_claims(claims: ClaimConfig) -> Arc<AuthState> {
+        let Ok(AuthMode::Oidc(mut cfg)) = AuthMode::from_lookup(env(FULL)) else {
+            panic!()
+        };
+        cfg.claims = claims;
+        let provider = Arc::new(Provider::new(reqwest::Client::new(), cfg.issuer.clone()));
+        AuthState::with_validator(*cfg, provider, Arc::new(MockValidator))
+    }
+
+    /// The JSON body of a 200 from `/api/me`.
+    async fn me_json(app: &Router, headers: &[(header::HeaderName, String)]) -> Value {
+        let (status, body) = call(app, "/api/me", headers).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        serde_json::from_str(&body).expect("the answer is JSON")
+    }
+
+    #[tokio::test]
+    async fn me_in_oidc_mode_reports_the_admin_group_and_how_it_is_decided() {
+        // A group decides it (the default configuration): the matched group is named.
+        let auth = test_auth();
+        let sid = session_with(
+            &auth,
+            json!({ "sub": "kc-1", "groups": ["/stardelt-admins"] }),
+            "a",
+            None,
+            Duration::from_secs(300),
+        );
+        let me = me_json(&me_app(auth.clone()), &cookie_header(&auth, &sid)).await;
+        assert_eq!(me["is_admin"], true);
+        assert_eq!(me["admin_by"], "group");
+        assert_eq!(me["admin_group"], "stardelt-admins");
+
+        // A role decides it: the role's value is named and `admin_by` says so.
+        let auth = auth_with_claims(ClaimConfig {
+            admin_role: Some("Nova.Admin".into()),
+            ..ClaimConfig::default()
+        });
+        let sid = session_with(
+            &auth,
+            json!({ "sub": "e-1", "roles": ["Nova.Admin"] }),
+            "a",
+            None,
+            Duration::from_secs(300),
+        );
+        let me = me_json(&me_app(auth.clone()), &cookie_header(&auth, &sid)).await;
+        assert_eq!(me["is_admin"], true);
+        assert_eq!(me["admin_by"], "role");
+        assert_eq!(me["admin_group"], "Nova.Admin");
+
+        // Neither configured: nobody is an administrator because of a claim, and the two
+        // fields are null rather than a name nobody configured.
+        let auth = auth_with_claims(ClaimConfig {
+            admin_group: None,
+            admin_role: None,
+            ..ClaimConfig::default()
+        });
+        let sid = session_with(
+            &auth,
+            json!({ "sub": "e-2", "groups": ["stardelt-admins"], "roles": ["Nova.Admin"] }),
+            "a",
+            None,
+            Duration::from_secs(300),
+        );
+        let me = me_json(&me_app(auth.clone()), &cookie_header(&auth, &sid)).await;
+        assert_eq!(me["is_admin"], false);
+        assert_eq!(me["admin_by"], Value::Null);
+        assert_eq!(me["admin_group"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn me_in_oidc_mode_reports_the_session_end_for_a_browser_session_and_null_for_a_bearer_call()
+     {
+        let auth = test_auth();
+        let sid = session_with(
+            &auth,
+            json!({ "sub": "kc-1" }),
+            "a",
+            None,
+            Duration::from_secs(300),
+        );
+        let stored = auth.sessions.find(&sid).unwrap().expires_unix;
+        let now = unix_now();
+
+        let me = me_json(&me_app(auth.clone()), &cookie_header(&auth, &sid)).await;
+        assert_eq!(me["via"], "session");
+        assert_eq!(me["session_expires_at"].as_u64(), Some(stored));
+        // The end of the session, not the end of the access token: the token here has
+        // 300 s left, the session its 8 h lifetime.
+        assert!(
+            stored >= now + SESSION_TTL.as_secs() - 5 && stored <= now + SESSION_TTL.as_secs() + 5,
+            "session end {stored} is not ~{}s from {now}",
+            SESSION_TTL.as_secs()
+        );
+
+        // A bearer call has no session, so there is no end to report — and the access
+        // token's own `exp` is never used in its place.
+        let bearer = [(header::AUTHORIZATION, "Bearer good".to_string())];
+        let me = me_json(&me_app(auth.clone()), &bearer).await;
+        assert_eq!(me["via"], "bearer");
+        assert_eq!(me["session_expires_at"], Value::Null);
+    }
+
+    /// `dev` mode keeps the exact pre-OIDC answer: no administrator decision, no session,
+    /// and not even the new keys (`skip_serializing_if` territory — a separate struct).
+    #[tokio::test]
+    async fn me_in_dev_mode_has_exactly_the_old_keys() {
+        let app = Router::new()
+            .route("/api/me", get(crate::me))
+            .with_state(crate::router_tests::test_state());
+        let (status, body) = call(&app, "/api/me", &[]).await;
+        assert_eq!(status, StatusCode::OK);
+        let value: Value = serde_json::from_str(&body).unwrap();
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .expect("the answer is an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "admin_console_url",
+                "auth_mode",
+                "demo",
+                "user",
+                "warehouse"
+            ],
+            "{body}"
+        );
+        assert_eq!(value["auth_mode"], "static-dev");
+    }
+
+    /// The answer holds claims, never credentials: a session whose access token is
+    /// `tok-canary-7f3a` never serialises it.
+    #[tokio::test]
+    async fn me_never_contains_a_token() {
+        let auth = test_auth();
+        let sid = session_with(
+            &auth,
+            json!({ "sub": "kc-1" }),
+            "tok-canary-7f3a",
+            None,
+            Duration::from_secs(300),
+        );
+        let (status, body) = call(
+            &me_app(auth.clone()),
+            "/api/me",
+            &cookie_header(&auth, &sid),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(!body.contains("tok-canary-7f3a"), "{body}");
     }
 
     #[tokio::test]
