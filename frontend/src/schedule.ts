@@ -11,6 +11,8 @@
  * preview and the body cannot disagree.
  */
 
+import type { PipelineOptionsView } from './api'
+
 export type WhenPreset =
   | 'ondemand'
   | 'hourly'
@@ -255,4 +257,144 @@ export function timezoneChoices(): string[] {
     zones.push(zone)
   }
   return zones
+}
+
+// ---------------------------------------------------------------------------
+// Parameters, placeholders and advanced options (stardelt-nova#223, #224)
+// ---------------------------------------------------------------------------
+
+/** At most this many `${params.<name>}` values per schedule. */
+export const MAX_PARAMS = 16
+/** The longest parameter value the resource may carry. */
+export const MAX_PARAM_VALUE = 256
+/** The loader's parameter name: `^[a-z][a-z0-9_]{0,31}$`. */
+export const PARAM_NAME_RE = /^[a-z][a-z0-9_]{0,31}$/
+/** The API's sentence for a name outside the rule; the dialog shows it as written. */
+export const PARAM_NAME_SENTENCE = 'parameter names are lower-case letters, digits and underscores'
+export const PARAM_DUPLICATE_SENTENCE = 'two parameters have the same name'
+
+/** One row of the dialog's parameter table: a name and the value it stands for. */
+export type ParameterRow = { name: string; value: string }
+
+/**
+ * The rows that ask for anything: a row the person has not written into yet is ignored, so an
+ * accidental "Add" does not block Create.
+ */
+export function namedParameters(rows: ParameterRow[]): ParameterRow[] {
+  return rows.filter((row) => row.name !== '' || row.value !== '')
+}
+
+/** The parameter map a request carries. Rows without a name are not part of it. */
+export function parameterTable(rows: ParameterRow[]): Record<string, string> {
+  const table: Record<string, string> = {}
+  for (const row of rows) if (row.name !== '') table[row.name] = row.value
+  return table
+}
+
+/**
+ * What is wrong with the parameter table, in the API's sentences. Empty when the API would
+ * accept it: names follow the loader's rule and are unique, at most 16 rows, values of at most
+ * 256 characters without NUL.
+ */
+export function parameterProblems(rows: ParameterRow[]): string[] {
+  const written = namedParameters(rows)
+  const problems: string[] = []
+  if (written.length > MAX_PARAMS) problems.push(`at most ${MAX_PARAMS} parameters`)
+  const seen = new Set<string>()
+  for (const row of written) {
+    if (!PARAM_NAME_RE.test(row.name)) {
+      if (!problems.includes(PARAM_NAME_SENTENCE)) problems.push(PARAM_NAME_SENTENCE)
+    } else if (seen.has(row.name)) {
+      if (!problems.includes(PARAM_DUPLICATE_SENTENCE)) problems.push(PARAM_DUPLICATE_SENTENCE)
+    } else {
+      seen.add(row.name)
+    }
+    if (row.value.length > MAX_PARAM_VALUE) {
+      const sentence = `a parameter value is at most ${MAX_PARAM_VALUE} characters`
+      if (!problems.includes(sentence)) problems.push(sentence)
+    }
+    if (row.value.includes('\0')) {
+      const sentence = 'a parameter value cannot contain NUL'
+      if (!problems.includes(sentence)) problems.push(sentence)
+    }
+  }
+  return problems
+}
+
+/**
+ * Every `${…}` the loader's `expand.py` would replace, in the order it first appears and
+ * without duplicates. The grammar is the loader's, so a `${` it leaves alone is not one here
+ * either.
+ */
+export function placeholders(statement: string): string[] {
+  const names: string[] = []
+  for (const match of statement.matchAll(/\$\{([A-Za-z_][A-Za-z0-9_.]*)\}/g)) {
+    const name = match[1]
+    if (!names.includes(name)) names.push(name)
+  }
+  return names
+}
+
+/**
+ * The placeholders the loader cannot fill: everything but `run.date`, `run.id` and
+ * `params.<name>` for a parameter the schedule defines. The API refuses the write with
+ * `unknown placeholder ${x}`, the same sentence the dialog shows inline.
+ */
+export function unknownPlaceholders(statement: string, paramNames: Iterable<string>): string[] {
+  const known = new Set(['run.date', 'run.id'])
+  for (const name of paramNames) known.add(`params.${name}`)
+  return placeholders(statement).filter((name) => !known.has(name))
+}
+
+/** The placeholder's text, as a chip inserts it and as an inline message names it. */
+export function placeholderText(name: string): string {
+  return '${' + name + '}'
+}
+
+/** The placeholder chips: the run's own values, then one per named parameter. */
+export function placeholderChips(paramNames: Iterable<string>): string[] {
+  const chips = ['run.date', 'run.id']
+  const seen = new Set(chips)
+  for (const name of paramNames) {
+    if (!PARAM_NAME_RE.test(name) || seen.has(`params.${name}`)) continue
+    seen.add(`params.${name}`)
+    chips.push(`params.${name}`)
+  }
+  return chips
+}
+
+/** The advanced options as the API's defaults: one retry after five minutes, a two-hour limit. */
+export const DEFAULT_OPTIONS: PipelineOptionsView = {
+  retries: 1,
+  backoffMinutes: 5,
+  timeoutMinutes: 120,
+  concurrency: 'Forbid',
+}
+
+/** The retry choices: 0 to 5 extra attempts. */
+export const RETRY_CHOICES: ReadonlyArray<number> = [0, 1, 2, 3, 4, 5]
+/** The waits the dialog offers between attempts, in minutes. */
+export const BACKOFF_CHOICES: ReadonlyArray<number> = [1, 5, 10, 30, 60]
+/** The time limits the dialog offers, in minutes. */
+export const TIMEOUT_CHOICES: ReadonlyArray<{ value: number; label: string }> = [
+  { value: 30, label: '30 min' },
+  { value: 60, label: '1 h' },
+  { value: 120, label: '2 h' },
+  { value: 360, label: '6 h' },
+  { value: 720, label: '12 h' },
+]
+
+/**
+ * A select's choices with the stored value added when it is outside them. A resource written
+ * elsewhere may carry 7 minutes or 45 minutes; the dialog shows it rather than silently
+ * rewriting it to the closest choice.
+ */
+export function withCurrent(values: ReadonlyArray<number>, current: number): number[] {
+  const all = values.includes(current) ? [...values] : [...values, current]
+  return all.sort((a, b) => a - b)
+}
+
+/** The time limit's label, for a choice or a stored value. */
+export function timeoutLabel(minutes: number): string {
+  return TIMEOUT_CHOICES.find((choice) => choice.value === minutes)?.label ?? `${minutes} min`
 }

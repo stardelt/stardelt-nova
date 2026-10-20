@@ -338,6 +338,27 @@ export type PipelineTaskSpec = { name: string; kind: string; sql?: string | null
 /** A cron and its IANA zone, as `POST`/`PUT /api/pipelines` carries them. */
 export type ScheduleSpec = { cron: string; timezone: string }
 
+/**
+ * The advanced options of a schedule (stardelt-nova#223). Every field is optional in a request:
+ * an omitted one keeps its default (one retry, five minutes between retries, a two-hour time
+ * limit, one run at a time). `Replace` is deliberately not offered — the loader runs it as
+ * `Forbid`.
+ */
+export type PipelineOptions = {
+  retries?: number
+  backoffMinutes?: number
+  timeoutMinutes?: number
+  concurrency?: 'Allow' | 'Forbid'
+}
+
+/** The options as the pipeline detail carries them, defaults filled in — what edit mode prefills. */
+export type PipelineOptionsView = {
+  retries: number
+  backoffMinutes: number
+  timeoutMinutes: number
+  concurrency: string
+}
+
 /** One of the caller's groups and the pipeline principal that would run its schedules. */
 export type PipelinePrincipal = {
   group: string
@@ -348,19 +369,52 @@ export type PipelinePrincipal = {
   message: string | null
 }
 
-/** `POST /api/pipelines` (`Schedule`, stardelt-nova#210). */
+/** `POST /api/pipelines` (`Schedule`, stardelt-nova#210, options stardelt-nova#223). */
 export type CreatePipelineRequest = {
   name: string
   ownerGroup: string
   sql: string
   schedule: ScheduleSpec | null
+  /** Values for `${params.<name>}` in the statement; at most 16. */
+  params?: Record<string, string>
+  /** Retries, the wait between them, the time limit and the run mode. */
+  options?: PipelineOptions
 }
 
-/** `PUT /api/pipelines/{namespace}/{name}`: only the statement and the schedule change. */
+/**
+ * `PUT /api/pipelines/{namespace}/{name}`: the statement, the schedule, the parameters and the
+ * options. The body is the whole editable state — an omitted `schedule` or `params` removes it
+ * and an omitted option keeps its default — so the dialog sends all four.
+ */
 export type UpdatePipelineRequest = {
   sql: string
   schedule: ScheduleSpec | null
+  params?: Record<string, string>
+  options?: PipelineOptions
 }
+
+/** `POST /api/pipelines/check`: what the engine says about a statement, without running it. */
+export type CheckStatementRequest = {
+  sql: string
+  /** Values for the statement's `${params.<name>}` placeholders. Only names, never secrets. */
+  params?: Record<string, string>
+}
+
+/**
+ * The engine's verdict. `checked: false` means this kind of statement cannot be checked here
+ * (then `ok` is absent). `ok: false` carries the engine's sentence in `message`.
+ */
+export type CheckStatementView = {
+  checked: boolean
+  ok?: boolean
+  message?: string
+}
+
+/** `POST /api/pipelines/preview-schedule`: the next fire times of a cron in its zone. */
+export type PreviewScheduleRequest = { cron: string; timezone: string; count?: number }
+
+/** The next fire times, RFC 3339 with the schedule's offset. */
+export type PreviewScheduleView = { runs: string[] }
 
 /**
  * One run, as the list and the detail share it. Times are Airflow's RFC 3339 strings;
@@ -407,6 +461,11 @@ export type PipelineDetail = PipelineView & {
   runs: RunView[]
   params: Record<string, string>
   retries: { attempts: number; backoff: string | null } | null
+  /**
+   * The advanced options, defaults filled in (stardelt-nova#223). A backend that predates them
+   * sends nothing; the dialog then starts from the defaults.
+   */
+  options?: PipelineOptionsView | null
 }
 
 /** One task instance of a run. */
@@ -691,6 +750,10 @@ export const api = {
   pipelines:    ()                            => jget<{ pipelines: PipelineView[] }>('/api/pipelines'),
   /** The caller's own groups and their principals (`Schedule`, #210). */
   pipelinePrincipals: ()                      => jget<{ groups: PipelinePrincipal[] }>('/api/pipelines/principals'),
+  /** Fill the placeholders and ask the engine to plan the statement: nothing runs (#223). */
+  checkStatement: (req: CheckStatementRequest) => jpost<CheckStatementView>('/api/pipelines/check', req),
+  /** The next fire times of a cron in its zone, at most ten (#223). */
+  previewSchedule: (req: PreviewScheduleRequest) => jpost<PreviewScheduleView>('/api/pipelines/preview-schedule', req),
   createPipeline: (req: CreatePipelineRequest) => jpost<PipelineView>('/api/pipelines', req),
   updatePipeline: (ns: string, name: string, req: UpdatePipelineRequest) =>
     jput<PipelineView>(`/api/pipelines/${seg(ns)}/${seg(name)}`, req),
