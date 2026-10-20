@@ -33,7 +33,9 @@
 //!   PUT  /api/connections/{scope}/…/secret  — rotate fields
 //!   DELETE /api/connections/{scope}/…       — delete one
 //!   GET  /api/pipelines                     — the caller's pipelines, with state and last run
-//!   GET  /api/pipelines/{ns}/{name}         — one pipeline: latest runs, params, retries
+//!   GET  /api/pipelines/{ns}/{name}         — one pipeline: latest runs, params, options
+//!   POST /api/pipelines/check               — what the engine says about a statement (EXPLAIN)
+//!   POST /api/pipelines/preview-schedule    — the next fire times of a cron in its zone
 //!   GET  /api/pipelines/{ns}/{name}/runs/{run_id} — one run with its tasks
 //!   GET  /api/pipelines/…/tasks/{task_id}/logs — one task's log (paged)
 //!   POST /api/ingest/upload                 — load CSV/JSON into a table

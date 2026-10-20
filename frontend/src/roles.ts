@@ -7,7 +7,7 @@ import type { Me } from './api'
  * The IdP is the authority — Nova's `/api/me` reports `is_admin`, derived from the
  * configured admin group of the OIDC claims. In `static-dev` (no login configured)
  * there is no IdP and no second user, so the person running it is the operator and
- * gets the admin surface; that is also how CI, `make demo` and the kind gate behave.
+ * gets the admin surface; that is also how CI and `make demo` behave.
  *
  * This decides what the UI *shows*, and it mirrors the API rather than inventing a rule:
  * the same claim drives `auth::require_admin` on the operator routes (`/api/apps`,

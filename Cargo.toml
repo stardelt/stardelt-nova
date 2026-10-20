@@ -32,6 +32,11 @@ percent-encoding = "2"
 # IANA time zones for a pipeline's schedule (stardelt-nova#210): a typo is a 400 sentence,
 # not a pipeline the loader cannot schedule. MIT OR Apache-2.0.
 chrono-tz = "0.10"
+# Local wall-clock times for the next-runs preview (stardelt-nova#223): the next fire times in
+# the schedule's zone, across a DST change. Already in the tree through `chrono-tz`; no `clock`
+# feature, because Nova reads the clock through `std` and never asks for the machine's zone.
+# MIT OR Apache-2.0.
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 tower = { version = "0.5", features = ["util"] }
 # Bounded concurrency for the connection listing (ticket #171): at most eight metadata
 # reads in flight. MIT OR Apache-2.0.

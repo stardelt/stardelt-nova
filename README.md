@@ -47,8 +47,10 @@ Browser
          ├─ GET  /api/pipelines        the pipelines of the caller's groups (administrators: all)
          ├─ GET  /api/pipelines/principals  each of the caller's groups and its pipeline principal
          ├─ POST /api/pipelines        schedule a statement: a Nova-owned Pipeline for one of the caller's groups
-         ├─ GET  /api/pipelines/:namespace/:name  one pipeline: latest runs, params, retries
-         ├─ PUT  /api/pipelines/:namespace/:name  change the statement and the schedule of a Nova pipeline
+         ├─ POST /api/pipelines/check  what the engine says about a statement (EXPLAIN, never runs it)
+         ├─ POST /api/pipelines/preview-schedule  the next fire times of a cron in its zone
+         ├─ GET  /api/pipelines/:namespace/:name  one pipeline: latest runs, params, options
+         ├─ PUT  /api/pipelines/:namespace/:name  change the statement, schedule, params and options of a Nova pipeline
          ├─ DELETE /api/pipelines/:namespace/:name  delete a Nova pipeline (kubectl/GitOps ones are 409)
          ├─ POST /api/pipelines/:namespace/:name/runs  run now (409 paused/active/unloaded, 429 over 10 a minute)
          ├─ POST /api/pipelines/:namespace/:name/pause  pause (idempotent, answers the fresh view)
@@ -364,7 +366,13 @@ has no read-only role — and a pipeline of another group answers `404`, not `40
 *Schedule* in the SQL editor writes the resource; the loader turns it into a DAG. Nova validates what
 the loader would refuse, so a pipeline it writes always becomes a DAG: the name (1 to 40 lower-case
 letters, digits and dashes, starting with a letter), the statement (at most 20,000 characters, one
-trailing `;` dropped), a five-field cron no more often than every five minutes, and an IANA timezone.
+trailing `;` dropped), its parameter table (at most 16 names of `[a-z][a-z0-9_]{0,31}`, values up to
+256 characters), every `${…}` placeholder the statement uses (`run.date`, `run.id`, or a
+`params.<name>` the table defines — an unknown one would fail the run, so it is a 400), a five-field
+cron no more often than every five minutes, and an IANA timezone. The optional `options` carry the
+retries (0 to 5, default 1), the wait between them (1 to 60 minutes, default 5), the time limit (1 to
+720 minutes, default 120) and the run mode (`Forbid`, the default, or `Allow`); an omitted field keeps
+its default, so an older body writes what it always wrote.
 The owner group must be one of the caller's own — an administrator schedules for the groups they
 belong to, never on somebody else's behalf — and the group's principal must exist and be ready:
 
@@ -380,14 +388,25 @@ resource carries `runAs: pipeline-<group>` next to `ownerGroup`.
 
 Only a pipeline labelled `app.kubernetes.io/managed-by: stardelt-nova` may be changed or deleted: a
 `kubectl` or GitOps manifest answers `409 this pipeline is managed outside Nova (kubectl or Git);
-change it there`, so Nova never rewrites somebody's file. `PUT` changes `spec.tasks[0].sql` and
-`spec.schedule` and nothing else, carrying the `resourceVersion` it read (a concurrent change is `409
-the pipeline changed while you edited it: reload`); a task shape other than one `sql` task named `run`
-is `409`. At most ten pipelines may be created per person per hour (`429`, in memory). Airflow is not
-needed to create, change or delete one — the resource is the source of truth and the loader removes a
-deleted DAG from its default list after about 90 seconds, while the run history stays readable; the
-read routes keep answering `503` without Airflow. Each create, change and delete writes one `audit`
-line with the statement's **length** and the cron, never the statement.
+change it there`, so Nova never rewrites somebody's file. `PUT` changes `spec.tasks[0].sql`,
+`spec.schedule`, `spec.params` and the options and nothing else — the body describes the whole editable
+state, so an omitted `schedule` or `params` removes it and an omitted option keeps its default — carrying
+the `resourceVersion` it read (a concurrent change is `409 the pipeline changed while you edited it:
+reload`); a task shape other than one `sql` task named `run` is `409`. At most ten pipelines may be
+created per person per hour (`429`, in memory). Airflow is not needed to create, change or delete one —
+the resource is the source of truth and the loader removes a deleted DAG from its default list after
+about 90 seconds, while the run history stays readable; the read routes keep answering `503` without
+Airflow. Each create, change and delete writes one `audit` line with the statement's **length** and the
+cron, never the statement.
+
+Two helpers belong to the Schedule dialog. `POST /api/pipelines/check` fills the placeholders and sends
+`EXPLAIN <statement>` to the engine as the caller (never `EXPLAIN ANALYZE`, never the statement itself),
+so the dialog can say whether the engine accepts it before anything is saved: `{"checked": true, "ok":
+true}`, `{"checked": true, "ok": false, "message": "<engine sentence>"}` for a refused statement,
+`{"checked": false}` for a kind of statement that cannot be explained, and `502` when the engine does not
+answer. `POST /api/pipelines/preview-schedule` answers the next fire times of a cron in its zone
+(`{"runs": ["2026-10-21T03:00:00+02:00", …]}`, `count` 1 to 10, default 5), following the same cron and
+timezone rules as a create.
 
 ## Published notebooks
 
