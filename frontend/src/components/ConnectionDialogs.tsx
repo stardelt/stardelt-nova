@@ -27,6 +27,9 @@ const SECRET_WORD_RE = /password|secret|token|passphrase|credential/i
 const SECRET_WORD_SENTENCE = 'That name holds a secret: put it under Secret fields'
 const MAX_SETTINGS = 32
 const MAX_SECRET_FIELDS = 16
+/** Shown when the `generic` type is chosen: it is the type for a secret that fits none. */
+const GENERIC_HINT =
+  'For any secret that is not one of the types above: name the settings and secret fields yourself.'
 
 /** `1m` to `24h`, the same rule the backend applies. */
 function refreshOk(value: string): boolean {
@@ -536,19 +539,25 @@ export function NewConnectionDialog({
         )}
 
         <div className="grid gap-4 sm:grid-cols-2">
-          <label htmlFor={`${prefix}-type`} className="block">
-            <span className="label block mb-1.5">Type</span>
-            <select
-              id={`${prefix}-type`}
-              className="input"
-              value={type}
-              onChange={(event) => changeType(event.target.value)}
-            >
-              {Object.entries(CONNECTION_TYPES).map(([id, typeSpec]) => (
-                <option key={id} value={id}>{typeSpec.label}</option>
-              ))}
-            </select>
-          </label>
+          <div>
+            <label htmlFor={`${prefix}-type`} className="block">
+              <span className="label block mb-1.5">Type</span>
+              <select
+                id={`${prefix}-type`}
+                className="input"
+                value={type}
+                aria-describedby={generic ? `${prefix}-type-hint` : undefined}
+                onChange={(event) => changeType(event.target.value)}
+              >
+                {Object.entries(CONNECTION_TYPES).map(([id, typeSpec]) => (
+                  <option key={id} value={id}>{typeSpec.label}</option>
+                ))}
+              </select>
+            </label>
+            {generic && (
+              <p id={`${prefix}-type-hint`} className="mt-1 text-xs text-text-mute">{GENERIC_HINT}</p>
+            )}
+          </div>
 
           <div>
             <label htmlFor={`${prefix}-name`} className="block">

@@ -287,13 +287,16 @@ test.describe('connections', () => {
     me = ADMIN,
     rows = [] as unknown[],
     write,
+    init,
   }: {
     me?: unknown
     rows?: unknown[]
     write?: (route: Route, path: string, method: string, body: string | null) => boolean
+    init?: () => void
   } = {}) {
     const context = await browser.newContext({ viewport: { width: 1280, height: 800 } })
     const page = await context.newPage()
+    if (init) await page.addInitScript(init)
     const requests: Recorded[] = []
     const messages: string[] = []
     page.on('request', (request) => requests.push({
@@ -512,6 +515,71 @@ test.describe('connections', () => {
     await expect(page.getByRole('dialog', { name: 'New connection' })).toBeVisible()
     const findings = await auditPage(page)
     expect(findings.filter((finding) => finding.rule === 'U5')).toEqual([])
+    await context.close()
+  })
+
+  test('the sentences are true today', async ({ browser }) => {
+    // The exact three sentences (stardelt-nova#202). A sentence that promises a consumer
+    // that does not exist yet fails here, so the page cannot drift ahead of the product.
+    const { context, page } = await open(browser, {
+      rows: [
+        { name: 'my-db', scope: 'personal', type: 'postgresql', config: { host: 'localhost' }, secretKeys: ['password'], version: 1 },
+        { name: 'crm-db', scope: 'group', type: 'postgresql', ownerGroup: 'analytics', config: { host: 'db' }, secretKeys: ['user', 'password'], version: 1, sync: { ready: true, reason: 'Synced' } },
+        { name: 'platform-s3', scope: 'managed', type: 's3', config: { bucket: 'b' }, secretKeys: ['secretAccessKey'], version: 1, sync: { ready: true, reason: 'Synced' } },
+      ],
+    })
+    const text = await page.locator('main').innerText()
+    expect(text).toContain('Only you can see and use these, from a Python notebook. They are never used by pipelines or SQL.')
+    expect(text).toContain('Every member of the group can use and rotate these from a Python notebook.')
+    expect(text).toContain('For platform services only. Nobody can read the values.')
+    // No sentence may name a surface that reads a connection today.
+    for (const phrase of ['SQL editor', 'federated', 'pipelines that run']) {
+      expect(text, `the page still says "${phrase}"`).not.toContain(phrase)
+    }
+    await context.close()
+  })
+
+  test('the Use disclosure shows how a notebook reads a connection, and only names fields', async ({ browser }) => {
+    const evil = '<img src=x onerror="window.__xss=1">'
+    const { context, page } = await open(browser, {
+      init: () => { (window as unknown as { __xss: number }).__xss = 0 },
+      rows: [
+        { name: 'crm-db', scope: 'group', type: 'postgresql', ownerGroup: 'analytics', config: { host: 'db' }, secretKeys: ['user', 'password'], version: 1, sync: { ready: true, reason: 'Synced' } },
+        { name: evil, scope: 'personal', type: 'generic', config: {}, secretKeys: ['password'], version: 1 },
+        { name: 'platform-s3', scope: 'managed', type: 's3', config: { bucket: 'b' }, secretKeys: ['secretAccessKey'], version: 1, sync: { ready: true, reason: 'Synced' } },
+      ],
+    })
+
+    // A group row names the group and the first secret field, and nothing else.
+    const groupRow = page.getByRole('row').filter({ hasText: 'crm-db' })
+    await groupRow.getByText('Use in a notebook').click()
+    expect(await groupRow.locator('pre').innerText()).toBe(
+      'import stardelt\nc = stardelt.connection("crm-db", group="analytics")\nc.value("user")',
+    )
+
+    // A managed row has no Python reader, so it has nothing to disclose.
+    const managedRow = page.getByRole('row').filter({ hasText: 'platform-s3' })
+    expect(await managedRow.getByText('Use in a notebook').count()).toBe(0)
+    expect(await managedRow.locator('pre').count()).toBe(0)
+
+    // A hostile name stays text in the snippet, and a personal row names no group.
+    const evilRow = page.getByRole('row').filter({ hasText: evil })
+    await evilRow.getByText('Use in a notebook').click()
+    const evilSnippet = await evilRow.locator('pre').innerText()
+    expect(evilSnippet).toBe(`import stardelt\nc = stardelt.connection("${evil}")\nc.value("password")`)
+    expect(await page.evaluate(() => (window as unknown as { __xss?: number }).__xss ?? 0)).toBe(0)
+    expect(await page.locator('img[src="x"]').count()).toBe(0)
+    await context.close()
+  })
+
+  test('the Other secret type is named and explains itself', async ({ browser }) => {
+    const { context, page } = await open(browser)
+    await page.getByRole('button', { name: 'New connection' }).click()
+    const type = page.getByLabel('Type')
+    await expect(type.locator('option[value="generic"]')).toHaveText('Other secret (any fields)')
+    expect(await page.getByText('For any secret that is not one of the types above: name the settings and secret fields yourself.').count()).toBe(0)
+    await type.selectOption('generic')
+    await expect(page.getByText('For any secret that is not one of the types above: name the settings and secret fields yourself.')).toBeVisible()
     await context.close()
   })
 })
