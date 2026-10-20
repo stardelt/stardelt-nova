@@ -5,8 +5,6 @@
 export type Known = { rule: string; route?: string; contains?: string; ticket: string }
 
 export const KNOWN: Known[] = [
-  { rule: 'U3', route: '/catalog', contains: '0 <h1>', ticket: '#162' },
-  { rule: 'U3', route: '/query', contains: '0 <h1>', ticket: '#162' },
   { rule: 'U11', ticket: '#163' },
   { rule: 'U8', contains: 'ApiError', ticket: '#163' },
   { rule: 'U8', contains: 'an /api/ path', ticket: '#163' },
