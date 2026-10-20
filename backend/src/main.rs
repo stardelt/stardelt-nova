@@ -41,7 +41,10 @@
 //! `NOVA_QUERY_TIMEOUT_SECS` bounds how long `POST /api/query` waits for Trino
 //! (default 300 s): a slower query is cancelled server-side and answered
 //! `400 {"error":"query exceeded the Ns limit and was cancelled"}`.
+//! `NOVA_AIRFLOW_URL`, `NOVA_AIRFLOW_USER` and `NOVA_AIRFLOW_PASSWORD` (all three or
+//! none) switch on the Airflow client (`airflow.rs`) that the pipeline views use.
 
+mod airflow;
 mod api_json;
 mod apps;
 mod audit;
@@ -121,6 +124,11 @@ pub struct AppState {
     /// The state store (`db.rs`). `None` when `NOVA_DATABASE_URL` is unset: every
     /// feature that needs it must answer 503 then, never panic.
     pub db: Option<sqlx::PgPool>,
+    /// Airflow's REST API (`airflow.rs`), for the pipeline views. `None` unless
+    /// `NOVA_AIRFLOW_URL`, `NOVA_AIRFLOW_USER` and `NOVA_AIRFLOW_PASSWORD` are all set.
+    /// Nova signs in as one service user (built-in role `User`) and decides itself who may
+    /// see what: Airflow cannot scope that credential to owner groups.
+    pub airflow: Option<airflow::AirflowClient>,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -590,6 +598,16 @@ async fn main() -> anyhow::Result<()> {
         info!("NOVA_SECRET_STORE_URL is not set — the Connections API answers 503");
     }
 
+    // Airflow is plain HTTP in-cluster and adds no trust configuration of its own. All three
+    // variables or none: a half-configured client is a platform mistake, not a runtime guess.
+    let airflow = airflow::AirflowConfig::from_env()
+        .map(|cfg| airflow::AirflowClient::new(http.clone(), cfg));
+    if airflow.is_none() {
+        info!(
+            "NOVA_AIRFLOW_URL, NOVA_AIRFLOW_USER and NOVA_AIRFLOW_PASSWORD are not all set — the pipelines API is disabled"
+        );
+    }
+
     let state = Arc::new(AppState {
         dev_user: std::env::var("NOVA_DEV_USER").unwrap_or_else(|_| "stardelt-dev".into()),
         trino_url: std::env::var("NOVA_TRINO_URL")
@@ -612,6 +630,7 @@ async fn main() -> anyhow::Result<()> {
         admin_console_url: admin_console,
         db,
         store,
+        airflow,
     });
 
     let auth = match auth_mode {
@@ -739,6 +758,7 @@ mod router_tests {
             admin_console_url: admin_console_url("https://id.example.com/realms/stardelt"),
             db,
             store: None,
+            airflow: None,
         })
     }
 

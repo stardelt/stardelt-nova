@@ -591,6 +591,7 @@ mod tests {
             admin_console_url: None,
             db: None,
             store: None,
+            airflow: None,
         }
     }
 

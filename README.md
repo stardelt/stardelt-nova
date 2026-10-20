@@ -210,6 +210,9 @@ The backend is configured entirely through environment variables:
 | `NOVA_WAREHOUSE_NAME` | `warehouse` | Lakekeeper warehouse name to resolve on startup |
 | `NOVA_SUPERSET_URL` | `http://superset:8088` | Superset base URL (probe + embed check) |
 | `NOVA_JUPYTERHUB_URL` | `http://proxy-public:80` | JupyterHub public proxy base URL (probe + embed check) |
+| `NOVA_AIRFLOW_URL` | — (empty) | Airflow API server base URL, plain HTTP in-cluster (`http://airflow-api-server:8080`). Needs `NOVA_AIRFLOW_USER` and `NOVA_AIRFLOW_PASSWORD` too; unless all three are set the pipelines API is disabled and says so. Nova signs in once as that service user (built-in role `User`, enough to read, trigger, pause and mark a run failed), keeps the 24 h token until shortly before it expires, and decides itself who may see what — Airflow cannot scope the credential to owner groups |
+| `NOVA_AIRFLOW_USER` | — (required with the URL) | The Airflow user Nova signs in as (`nova-api`) |
+| `NOVA_AIRFLOW_PASSWORD` | — (required with the user) | That user's password, from a Kubernetes Secret. Never logged, never part of an error |
 | `POD_NAMESPACE` | `stardelt` | Namespace whose workloads Nova reports (downward API in the manifests); `NOVA_NAMESPACE` overrides it for a local run |
 | `NOVA_BASE_DOMAIN` | — (empty) | Base domain for the app deep-links (`trino.<domain>`, …). Empty = the UI links nothing; the install sets it from a ConfigMap |
 | `NOVA_FORWARD_IDENTITY` | off | Send the caller's own token to Trino and the catalog (`Authorization: Bearer`). Only useful once the platform configures those to validate it — the identity contract's phase 2; until then the catalog sees Nova's service connection and `/api/me` says so |
