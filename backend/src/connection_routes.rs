@@ -674,6 +674,7 @@ async fn create_connection(
         scope_word(req.scope),
         req.owner_group.as_deref(),
         &req.name,
+        None,
     );
     Ok((
         StatusCode::CREATED,
@@ -685,6 +686,8 @@ async fn create_connection(
             &meta,
             // The operator has not synced the new resource yet; the next read shows its status.
             None,
+            // `authorize` only lets a caller create in a scope they belong to.
+            true,
         ),
     ))
 }
@@ -743,7 +746,7 @@ async fn rotate_connection(
         tracing::warn!(error = ?e, "could not clear the break-glass notice after a rotation");
     }
     let rows = resource_rows(resources, view_scope).await;
-    audit::connection_event("rotate", who, scope_word(view_scope), group, name);
+    audit::connection_event("rotate", who, scope_word(view_scope), group, name, None);
     Ok(connections::view_from_store(
         name,
         view_scope,
@@ -753,11 +756,14 @@ async fn rotate_connection(
             .unwrap_or_default(),
         &meta,
         sync_in(&rows, view_scope, group, name),
+        // A rotation is members-only for a group and administrators-only for a managed one.
+        true,
     ))
 }
 
 /// Delete the value first, then the resource: if the second step fails the value is gone and the
-/// resource stays visible as not-ready, which is retryable.
+/// resource stays visible as not-ready, which is retryable. A member and an administrator who is
+/// not one both remove the resource; the audit line says when it was the administrator.
 async fn delete_connection(
     store: &StoreClient,
     resources: Option<&Resources>,
@@ -772,6 +778,9 @@ async fn delete_connection(
     if view_scope != Scope::Personal && resources.is_none() {
         return Err(no_cluster());
     }
+    // Personal and managed connections are always the caller's own business; a group connection is
+    // this person's only when they are a member.
+    let member = group.is_none_or(|g| who.groups.iter().any(|own| own == g));
 
     let path = secret_store::secret_path(&scope, name).map_err(store_fail)?;
     let token = store.login(access).await.map_err(store_fail)?;
@@ -783,11 +792,20 @@ async fn delete_connection(
         resources.delete(name).await.map_err(cluster_fail)?;
     }
 
-    audit::connection_event("delete", who, scope_word(view_scope), group, name);
+    audit::connection_event(
+        "delete",
+        who,
+        scope_word(view_scope),
+        group,
+        name,
+        if member { None } else { Some("administrator") },
+    );
     Ok(())
 }
 
-/// `GET /api/connections`: personal, then group, then managed, each sorted by name.
+/// `GET /api/connections`: personal, then group, then managed, each sorted by name. An
+/// administrator sees every group's connections, not only their own groups': the incident case is
+/// exactly the one where the owning group is unavailable (ticket #203, D27).
 async fn list_connections(
     store: &StoreClient,
     resources: Option<&Resources>,
@@ -800,7 +818,7 @@ async fn list_connections(
     let personal = StoreScope::Personal {
         sub: who.sub.clone(),
     };
-    rows.extend(rows_from_store(store, &token, &personal, Scope::Personal, None, &[]).await?);
+    rows.extend(rows_from_store(store, &token, &personal, Scope::Personal, None, &[], true).await?);
 
     // The resources are an index and a status hint. For an administrator a failed read is fatal
     // (the managed section would silently disappear); for everybody else it only means no `sync`.
@@ -826,9 +844,40 @@ async fn list_connections(
                 Scope::Group,
                 Some(group),
                 &cluster_rows,
+                true,
             )
             .await?,
         );
+    }
+
+    // An administrator also sees the connections of groups they are not a member of. The store
+    // names them (its `connections-admin` policy grants `list` on every scope's metadata); a
+    // member's token is refused and never asks.
+    if who.is_admin {
+        for group in store.list_group_names(&token).await.map_err(store_fail)? {
+            if who.groups.iter().any(|own| own == &group) {
+                continue;
+            }
+            let scope = StoreScope::Group {
+                group: group.clone(),
+            };
+            if secret_store::scope_prefix(&scope).is_err() {
+                continue;
+            }
+            rows.extend(
+                rows_from_store(
+                    store,
+                    &token,
+                    &scope,
+                    Scope::Group,
+                    Some(&group),
+                    &cluster_rows,
+                    // Seen as an administrator, not as a member: read-only except delete.
+                    false,
+                )
+                .await?,
+            );
+        }
     }
 
     // Managed: administrators only; a managed value cannot be read, so the resources are the index.
@@ -855,6 +904,7 @@ async fn list_connections(
                 usable_by(resource),
                 &meta,
                 connections::sync_from_resource(resource),
+                true,
             ));
         }
     }
@@ -1068,6 +1118,8 @@ async fn break_glass_refused_scope(
 }
 
 /// The rows of one store scope. Values are read for nothing here: the listing is metadata only.
+/// `member` is the caller's membership of the scope, carried onto every row.
+#[allow(clippy::too_many_arguments)]
 async fn rows_from_store(
     store: &StoreClient,
     token: &StoreToken,
@@ -1075,6 +1127,7 @@ async fn rows_from_store(
     view: Scope,
     group: Option<&str>,
     cluster_rows: &[Value],
+    member: bool,
 ) -> Result<Vec<ConnectionView>, Fail> {
     let prefix = secret_store::scope_prefix(scope).map_err(store_fail)?;
     let names = match store.list(token, &prefix).await {
@@ -1109,6 +1162,7 @@ async fn rows_from_store(
                     Vec::new(),
                     &meta,
                     sync_in(cluster_rows, view, group, &name),
+                    member,
                 );
                 if view == Scope::Group {
                     row.break_glass = resource_row(cluster_rows, Scope::Group, group, &name)
@@ -1752,6 +1806,15 @@ mod tests {
         );
     }
 
+    /// A connection of a group the administrator is **not** a member of.
+    fn seed_finance(fake: &fake::Shared) {
+        fake.lock().unwrap().seed(
+            "connections/group/finance/ledger",
+            &[("user", "etl"), ("password", CANARY)],
+            &[("type", "postgresql"), ("keys", "password,user")],
+        );
+    }
+
     fn group_resource() -> Value {
         json!({
             "metadata": { "name": "crm-db" },
@@ -1929,19 +1992,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_admin_cannot_create_in_a_group_they_are_not_in() {
+    async fn an_administrator_cannot_create_in_it() {
         let (store, fake) = fake::start().await;
         let admin = who("sub-admin", &["stardelt-admins"], true);
-        let req = body(json!({ "ownerGroup": "analytics" }));
+        let req = body(json!({ "ownerGroup": "finance" }));
 
-        let err = create_connection(&store, None, &admin, &Secret::new("good"), req)
+        let err = create_connection(&store, None, &admin, &Secret::new("admin"), req)
             .await
             .expect_err("an administrator is not a member");
         assert_eq!(err.status, StatusCode::FORBIDDEN);
-        assert!(
-            fake.lock().unwrap().data.is_empty(),
-            "the store is untouched"
-        );
+        let fake = fake.lock().unwrap();
+        assert!(fake.data.is_empty(), "the store is untouched");
+        assert_eq!(fake.requests, 0, "not even a sign-in");
     }
 
     #[tokio::test]
@@ -2202,6 +2264,170 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].name, "crm-db");
         assert_eq!(rows[0].owner_group.as_deref(), Some("analytics"));
+    }
+
+    /// An administrator is a member of `analytics` and not of `finance`; both have a connection.
+    #[tokio::test]
+    async fn an_administrator_sees_the_connections_of_every_group() {
+        let (store, fake) = fake::start().await;
+        seed_group(&fake);
+        seed_finance(&fake);
+        let (resources, _items) = memory_with(&[
+            ("crm-db", group_resource()),
+            (
+                "ledger",
+                json!({
+                    "metadata": { "name": "ledger" },
+                    "spec": { "scope": "group", "ownerGroup": "finance" },
+                    "status": { "conditions": [
+                        { "type": "Ready", "status": "False", "reason": "StoreUnavailable" }
+                    ]},
+                }),
+            ),
+        ]);
+        let admin = who("sub-admin", &["analytics", "stardelt-admins"], true);
+
+        let rows = list_connections(&store, Some(&resources), &admin, &Secret::new("admin"))
+            .await
+            .expect("listed");
+
+        assert_eq!(
+            rows.len(),
+            2,
+            "one row per connection, the member group not twice: {rows:#?}"
+        );
+        let analytics = rows
+            .iter()
+            .find(|r| r.owner_group.as_deref() == Some("analytics"))
+            .expect("the caller's own group");
+        let finance = rows
+            .iter()
+            .find(|r| r.owner_group.as_deref() == Some("finance"))
+            .expect("the group the caller is not a member of");
+        assert!(analytics.member, "their own group");
+        assert!(
+            !finance.member,
+            "seen only because they are an administrator"
+        );
+        assert_eq!(
+            finance.sync.as_ref().map(|s| s.reason.as_str()),
+            Some("StoreUnavailable"),
+            "the sync still comes from the resources fetched for administrators"
+        );
+        let answer = serde_json::to_string(&rows).unwrap();
+        assert!(answer.contains("\"member\":false"), "{answer}");
+        assert!(
+            !answer.contains(CANARY) && !answer.contains("etl"),
+            "no value in the listing: {answer}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_normal_person_still_sees_only_their_groups() {
+        let (store, fake) = fake::start().await;
+        seed_group(&fake);
+        seed_finance(&fake);
+        let alice = who("sub-alice", &["analytics"], false);
+
+        let rows = list_connections(&store, None, &alice, &Secret::new("good"))
+            .await
+            .expect("listed");
+
+        assert_eq!(rows.len(), 1, "{rows:#?}");
+        assert_eq!(rows[0].name, "crm-db");
+        assert!(rows[0].member);
+        let lists = fake.lock().unwrap().lists.clone();
+        assert!(
+            !lists.iter().any(|path| path == "connections/group"),
+            "a member never asks the store to name the groups: {lists:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_administrator_may_delete_a_group_connection_of_a_group_they_are_not_in() {
+        let captured = Captured::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .with_writer(captured.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let (store, fake) = fake::start().await;
+        seed_finance(&fake);
+        let (resources, items) = memory_with(&[(
+            "ledger",
+            json!({
+                "metadata": { "name": "ledger" },
+                "spec": { "scope": "group", "ownerGroup": "finance" },
+            }),
+        )]);
+        let admin = who("sub-admin", &["stardelt-admins"], true);
+
+        delete_connection(
+            &store,
+            Some(&resources),
+            &admin,
+            &Secret::new("admin"),
+            StoreScope::Group {
+                group: "finance".into(),
+            },
+            "ledger",
+        )
+        .await
+        .expect("an administrator destroys it in an incident");
+
+        assert!(
+            stored(&fake, "connections/group/finance/ledger").is_none(),
+            "the value is gone"
+        );
+        assert!(
+            !items.lock().unwrap().contains_key("ledger"),
+            "the resource is gone exactly like a member's delete"
+        );
+        let text = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            text.contains("via=administrator"),
+            "the audit line says how the right was held: {text}"
+        );
+        assert!(
+            text.contains("action=\"delete\"") && text.contains("name=ledger"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_administrator_cannot_rotate_it() {
+        let (store, fake) = fake::start().await;
+        seed_finance(&fake);
+        let (resources, _items) = memory();
+        let admin = who("sub-admin", &["stardelt-admins"], true);
+        let patch: BTreeMap<String, String> = [("password".to_string(), "p2".to_string())].into();
+
+        let err = rotate_connection(
+            &store,
+            Some(&resources),
+            &admin,
+            &Secret::new("admin"),
+            StoreScope::Group {
+                group: "finance".into(),
+            },
+            "ledger",
+            patch,
+        )
+        .await
+        .expect_err("an administrator cannot write into a group");
+
+        assert_eq!(err.status, StatusCode::FORBIDDEN);
+        let fake = fake.lock().unwrap();
+        assert_eq!(
+            fake.requests, 0,
+            "refused before the store was called, not even to sign in"
+        );
+        assert_eq!(
+            fake.data["connections/group/finance/ledger"]["password"], CANARY,
+            "the value is untouched"
+        );
     }
 
     /// A signed-in caller, as `require_auth` would have put it in the request.
@@ -2878,7 +3104,9 @@ mod tests {
         ]);
         let alice = who("sub-alice", &["analytics"], true);
 
-        let rows = list_connections(&store, Some(&resources), &alice, &Secret::new("good"))
+        // An administrator's own token carries the `connections-admin` policy, which is what lets
+        // the listing name every group (see `list_group_names`).
+        let rows = list_connections(&store, Some(&resources), &alice, &Secret::new("admin"))
             .await
             .expect("listed");
 

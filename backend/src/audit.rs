@@ -92,15 +92,31 @@ pub async fn record_mutations(req: Request, next: Next) -> Response {
 /// One connection event: what was done, to which scope, group and name, by whom. Never a value,
 /// never a field's value — the field *names* are fine. The line goes to the `audit` target, so a
 /// deployment that routes `audit` separately gets these beside the mutating-request lines.
+///
+/// `via` names how the right was held when that is not the obvious way: an administrator who
+/// deletes a group connection they are not a member of is recorded as `via = administrator`, so an
+/// incident action reads differently from a member's own.
 pub fn connection_event(
     action: &str,
     who: &crate::auth::Identity,
     scope: &str,
     group: Option<&str>,
     name: &str,
+    via: Option<&str>,
 ) {
-    match group {
-        Some(group) => tracing::info!(
+    match (group, via) {
+        (Some(group), Some(via)) => tracing::info!(
+            target: "audit",
+            action,
+            scope,
+            group = %group,
+            name = %name,
+            actor = %who.display_name,
+            sub = %who.sub,
+            via = %via,
+            "connection"
+        ),
+        (Some(group), None) => tracing::info!(
             target: "audit",
             action,
             scope,
@@ -110,7 +126,17 @@ pub fn connection_event(
             sub = %who.sub,
             "connection"
         ),
-        None => tracing::info!(
+        (None, Some(via)) => tracing::info!(
+            target: "audit",
+            action,
+            scope,
+            name = %name,
+            actor = %who.display_name,
+            sub = %who.sub,
+            via = %via,
+            "connection"
+        ),
+        (None, None) => tracing::info!(
             target: "audit",
             action,
             scope,
