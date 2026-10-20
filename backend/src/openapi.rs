@@ -81,6 +81,9 @@ pub struct ErrorResponse {
         crate::pipelines::run,
         crate::pipelines::stop,
         crate::pipelines::logs,
+        crate::notebooks::publish,
+        crate::notebooks::list,
+        crate::notebooks::versions,
     ),
     components(schemas(
         crate::Me,
@@ -128,6 +131,10 @@ pub struct ErrorResponse {
         crate::pipelines::LogView,
         crate::pipelines::LogLine,
         crate::pipelines::RetriesView,
+        crate::notebooks::PublishedNotebook,
+        crate::notebooks::NotebookSummary,
+        crate::notebooks::NotebookVersion,
+        crate::notebooks::NotebookParameter,
         ErrorResponse,
     )),
     tags(

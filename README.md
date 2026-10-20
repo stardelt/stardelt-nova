@@ -267,6 +267,10 @@ The backend is configured entirely through environment variables:
 | `NOVA_AIRFLOW_URL` | — (empty) | Airflow API server base URL, plain HTTP in-cluster (`http://airflow-api-server:8080`). Needs `NOVA_AIRFLOW_USER` and `NOVA_AIRFLOW_PASSWORD` too; unless all three are set the pipelines API is disabled and says so. Nova signs in once as that service user (built-in role `User`, enough to read, trigger, pause and mark a run failed), keeps the 24 h token until shortly before it expires, and decides itself who may see what — Airflow cannot scope the credential to owner groups |
 | `NOVA_AIRFLOW_USER` | — (required with the URL) | The Airflow user Nova signs in as (`nova-api`) |
 | `NOVA_AIRFLOW_PASSWORD` | — (required with the user) | That user's password, from a Kubernetes Secret. Never logged, never part of an error |
+| `NOVA_S3_URL` | — (empty) | S3 endpoint of the versioned `notebooks` bucket, plain HTTP in-cluster (`http://seaweedfs-s3.stardelt.svc.cluster.local:8333`). Needs the three below; unless all four are set the notebook routes answer `503 {"error":"notebook storage is not configured"}` and publishing is off. A partial set refuses to start |
+| `NOVA_S3_ACCESS_KEY` | — (required with the URL) | Access key of the platform identity every object-store consumer already uses (Secret `stardelt-s3-creds`, key `access-key`) |
+| `NOVA_S3_SECRET_KEY` | — (required with the URL) | That identity's secret key. Held as an `auth::Secret`; never logged, never part of an error or a response |
+| `NOVA_S3_NOTEBOOK_BUCKET` | — (required with the URL) | Bucket for published notebooks (`notebooks`). Versioning must be enabled (`make notebooks-bucket` in stardelt-platform); a publish without a returned version is `502` rather than a Notebook that is not immutable |
 | `POD_NAMESPACE` | `stardelt` | Namespace whose workloads Nova reports (downward API in the manifests); `NOVA_NAMESPACE` overrides it for a local run |
 | `NOVA_BASE_DOMAIN` | — (empty) | Base domain for the app deep-links (`trino.<domain>`, …). Empty = the UI links nothing; the install sets it from a ConfigMap |
 | `NOVA_FORWARD_IDENTITY` | off | Send the caller's own token to Trino (`Authorization: Bearer`). Only useful once the platform configures the engine to validate it — the identity contract's phase 2. The catalog is not affected: Lakekeeper always sees Nova's own service token (above), never the caller's, until per-user catalog rights exist. `/api/me` reports whether forwarding is on (`identity_forwarding`) |
@@ -403,6 +407,39 @@ true}`, `{"checked": true, "ok": false, "message": "<engine sentence>"}` for a r
 answer. `POST /api/pipelines/preview-schedule` answers the next fire times of a cron in its zone
 (`{"runs": ["2026-10-21T03:00:00+02:00", …]}`, `count` 1 to 10, default 5), following the same cron and
 timezone rules as a create.
+
+## Published notebooks
+
+A notebook is published as **an immutable object version** in the versioned `notebooks` bucket, so a
+schedule can pin exactly the bytes a person approved. The bucket and its versioning are created by
+stardelt-platform (`make notebooks-bucket`); Nova only writes to it with the platform identity in
+`NOVA_S3_*` (see [Configuration](#configuration)), never with the caller's token.
+
+```text
+PUT /api/notebooks/{group}/{name}                body: the .ipynb (nbformat 4, at most 5 MiB)
+GET /api/notebooks                               the caller's groups, latest version, newest first
+GET /api/notebooks/{group}/{name}/versions       at most 50 versions, newest first
+```
+
+Publishing needs a signed-in person (browser session or `Authorization: Bearer`). `{group}` must be
+one of the caller's groups (`403 you are not a member of the group <g>`); `{name}` must match
+`^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}\.ipynb$`; the body must be an nbformat 4 notebook with a `cells`
+array. **Cell outputs, `execution_count` and the notebook's widget metadata are removed before the
+bytes are stored** — a cell that printed `os.environ` leaves no token or secret in the object store.
+The answer carries the new `objectVersion`, the `sha256` of the stored bytes, the size and the
+notebook's parameters (the `name = literal` lines of the first cell tagged `parameters`, at most 32,
+defaults as text and never evaluated). A 61st publish by one person in an hour is `429`. Every publish
+writes one `audit` line with the group, the name, the version and the size — never content.
+
+The key is built by Nova as `{group}/{name}`; the browser never supplies a path. Listing and versions
+are owner-group scoped: an administrator sees their own groups only, because being a platform
+administrator does not make someone a member of a tenant's group. Without `NOVA_S3_URL` (or any of the
+other three `NOVA_S3_*` variables) the three routes answer
+`503 {"error":"notebook storage is not configured"}`; an S3 gateway that is down or refuses answers
+`502`, never `500`. Answers are `application/json` with `Cache-Control: no-store`.
+
+The hub token already carries audience `nova` (the `aud-nova` mapper, stardelt-platform#290), which is
+Nova's client id, so a notebook can call `PUT /api/notebooks/...` with the token it holds.
 
 ## Sign-in (OIDC)
 

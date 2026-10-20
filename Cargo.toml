@@ -28,6 +28,7 @@ base64 = "0.23"
 getrandom = "0.4"
 sha2 = "0.11"
 url = "2"
+percent-encoding = "2"
 # IANA time zones for a pipeline's schedule (stardelt-nova#210): a typo is a 400 sentence,
 # not a pipeline the loader cannot schedule. MIT OR Apache-2.0.
 chrono-tz = "0.10"
@@ -43,6 +44,12 @@ futures = { version = "0.3", default-features = false, features = ["std"] }
 # OpenAPI description of the public API (ticket #107). utoipa is MIT/Apache-2.0;
 # annotations only — no new runtime behaviour beyond serving the document.
 utoipa = { version = "5" }
+# Published notebooks (`notebooks.rs`): SigV4 presigning for S3 (BSD-2-Clause) and the
+# XML parser it already depends on (Apache-2.0 OR MIT). `jiff` is rusty-s3's clock,
+# needed to sign a `ListObjectVersions` request it has no action for.
+rusty-s3 = { version = "0.10", default-features = false, features = ["rustcrypto", "xml"] }
+instant-xml = "0.7"
+jiff = "0.2"
 # State store (ticket stardelt-nova#103): PostgreSQL through sqlx. MIT OR Apache-2.0.
 # No `default` features: no sqlite/mysql drivers, no native-tls; rustls with `ring`
 # (the provider reqwest already uses) and the bundled WebPKI roots.

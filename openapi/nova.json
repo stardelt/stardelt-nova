@@ -1510,6 +1510,276 @@
         }
       }
     },
+    "/api/notebooks": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`GET /api/notebooks`: the latest version of every notebook in the caller's groups,\nnewest first. Administrators see their own groups only.",
+        "description": "The latest published version of every notebook in the caller's groups, newest first. Each row carries the group, the name, the latest `objectVersion`, its size, S3's `uploadedAt` (ISO 8601) and the publisher's `uploadedBy` display name. An administrator gets no wider view than their own groups. Unset `NOVA_S3_*` is 503; an S3 that is down or refuses is 502. Answers `Cache-Control: no-store`.",
+        "operationId": "list",
+        "responses": {
+          "200": {
+            "description": "One row per notebook",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/NotebookSummary"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The notebook store did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Notebook storage is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/notebooks/{group}/{name}": {
+      "put": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`PUT /api/notebooks/{group}/{name}`: validate, strip, store one immutable version.",
+        "description": "Publish a notebook as a new immutable object version in the `notebooks` bucket. Needs a signed-in person whose groups include `{group}` (403 `you are not a member of the group <g>`; administrators are not exempt). `{name}` must match `^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}\\.ipynb$` and the body must be an nbformat 4 notebook of at most 5 MiB. Every cell's `outputs` and `execution_count` and the notebook's widget metadata are removed before storing — no cell output reaches the object store. `sha256` is of the stored (stripped) bytes. `parameters` are the `name = literal` lines of the first cell tagged `parameters`, at most 32; defaults are text and are never evaluated. A 61st publish by one person in an hour is 429. Unset `NOVA_S3_*` is 503 `notebook storage is not configured`; an S3 that is down or refuses is 502. Each publish writes one audit line with group, name, version and size, never content.",
+        "operationId": "publish",
+        "parameters": [
+          {
+            "name": "group",
+            "in": "path",
+            "description": "One of the caller's groups",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Notebook file name, ending in .ipynb",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The stored version and its parsed parameters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublishedNotebook"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad name or not an nbformat 4 notebook",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a member of the group",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Larger than 5 MiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "More than 60 publishes in an hour",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The notebook store did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Notebook storage is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/notebooks/{group}/{name}/versions": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`GET /api/notebooks/{group}/{name}/versions`: the versions of one notebook, newest\nfirst, at most 50.",
+        "description": "The published versions of one notebook, newest first, at most 50. Needs a member of `{group}` (403 `you are not a member of the group <g>`; administrators are not exempt). Each row carries the immutable `objectVersion`, its size, S3's `uploadedAt` (ISO 8601), the publisher's `uploadedBy` and the `sha256` of the stored bytes. A group with no such notebook answers an empty list. Unset `NOVA_S3_*` is 503; an S3 that is down or refuses is 502. Answers `Cache-Control: no-store`.",
+        "operationId": "versions",
+        "parameters": [
+          {
+            "name": "group",
+            "in": "path",
+            "description": "One of the caller's groups",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Notebook file name, ending in .ipynb",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The versions, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/NotebookVersion"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a member of the group",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The notebook store did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Notebook storage is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/pipelines": {
       "get": {
         "tags": [
@@ -3273,6 +3543,88 @@
           }
         }
       },
+      "NotebookParameter": {
+        "type": "object",
+        "required": [
+          "name",
+          "default"
+        ],
+        "properties": {
+          "default": {
+            "type": "string",
+            "description": "The default as the cell would run it: a string literal without its quotes, any\nother literal exactly as written. Never evaluated."
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "NotebookSummary": {
+        "type": "object",
+        "required": [
+          "group",
+          "name",
+          "objectVersion",
+          "size",
+          "uploadedAt",
+          "uploadedBy"
+        ],
+        "properties": {
+          "group": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "objectVersion": {
+            "type": "string",
+            "description": "The latest version."
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "uploadedAt": {
+            "type": "string",
+            "description": "S3's `LastModified` for that version, ISO 8601."
+          },
+          "uploadedBy": {
+            "type": "string",
+            "description": "The `x-amz-meta-uploaded-by` the publisher wrote (their display name)."
+          }
+        }
+      },
+      "NotebookVersion": {
+        "type": "object",
+        "required": [
+          "objectVersion",
+          "size",
+          "uploadedAt",
+          "uploadedBy",
+          "sha256"
+        ],
+        "properties": {
+          "objectVersion": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "uploadedAt": {
+            "type": "string",
+            "description": "S3's `LastModified` for that version, ISO 8601."
+          },
+          "uploadedBy": {
+            "type": "string"
+          }
+        }
+      },
       "OidcMe": {
         "type": "object",
         "description": "`/api/me` in `oidc` mode: claims, never tokens. Nova still talks to Trino and\nLakekeeper with its service connection, and says so (`identity_forwarding`).",
@@ -3666,6 +4018,44 @@
             "items": {
               "$ref": "#/components/schemas/PrincipalView"
             }
+          }
+        }
+      },
+      "PublishedNotebook": {
+        "type": "object",
+        "required": [
+          "name",
+          "group",
+          "objectVersion",
+          "sha256",
+          "size",
+          "parameters"
+        ],
+        "properties": {
+          "group": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "objectVersion": {
+            "type": "string",
+            "description": "The immutable S3 version id a schedule pins."
+          },
+          "parameters": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NotebookParameter"
+            }
+          },
+          "sha256": {
+            "type": "string",
+            "description": "Lower-case hex SHA-256 of the stored bytes (outputs already stripped)."
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
           }
         }
       },

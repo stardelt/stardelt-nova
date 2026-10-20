@@ -4256,6 +4256,7 @@ mod tests {
             pipeline_creates: Mutex::new(std::collections::HashMap::new()),
             airflow: Some(airflow),
             table_locks: Mutex::new(std::collections::HashMap::new()),
+            notebooks: None,
         })
     }
 
