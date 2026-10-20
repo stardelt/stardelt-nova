@@ -61,6 +61,43 @@ export type TableMetadata = {
   }
 }
 
+/** One column as the table documentation reports it: the current schema's name, type and `doc`. */
+export type ColumnDoc = {
+  name: string
+  type: string
+  description: string | null
+}
+
+/**
+ * `GET /api/catalog/tables/{ns}/{tbl}/documentation` — the Iceberg `comment` as
+ * `description`, the `stardelt.tags`/`stardelt.owner`/`stardelt.domain` properties,
+ * and every field of the current schema.
+ *
+ * `canEdit`/`editRule` are Nova's interim rule: until the catalog enforces permissions,
+ * Nova decides who may edit these properties. Anyone who reaches Lakekeeper or Trino
+ * directly can still change them.
+ */
+export type TableDocumentation = {
+  description: string | null
+  tags: string[]
+  owner: string | null
+  domain: string | null
+  columns: ColumnDoc[]
+  canEdit: boolean
+  editRule: string
+}
+
+/**
+ * A `PUT …/documentation` body. An absent key changes nothing; `null` removes the
+ * property, and an empty tag list removes the tags.
+ */
+export type TableDocsUpdate = {
+  description?: string | null
+  tags?: string[] | null
+  owner?: string | null
+  domain?: string | null
+}
+
 export type QueryColumn = { name: string; type: string }
 export type QueryResult = {
   columns: QueryColumn[]
@@ -473,6 +510,11 @@ export const api = {
   namespaces:   ()                            => jget<NamespaceList>('/api/catalog/namespaces'),
   tables:       (ns: string)                  => jget<TableList>(`/api/catalog/namespaces/${seg(ns)}/tables`),
   tableMeta:    (ns: string, tbl: string)     => jget<TableMetadata>(`/api/catalog/tables/${seg(ns)}/${seg(tbl)}`),
+  tableDocs:    (ns: string, tbl: string)     => jget<TableDocumentation>(`/api/catalog/tables/${seg(ns)}/${seg(tbl)}/documentation`),
+  putTableDocs: (ns: string, tbl: string, body: TableDocsUpdate) =>
+    jput<TableDocumentation>(`/api/catalog/tables/${seg(ns)}/${seg(tbl)}/documentation`, body),
+  putColumnDoc: (ns: string, tbl: string, column: string, description: string | null) =>
+    jput<TableDocumentation>(`/api/catalog/tables/${seg(ns)}/${seg(tbl)}/columns/${seg(column)}/description`, { description }),
   tableHistory: (ns: string, tbl: string)     => jget<QueryResult>(`/api/catalog/tables/${seg(ns)}/${seg(tbl)}/history`),
   rollback:     (ns: string, tbl: string, snapshotId: string) => jpost<QueryResult>(`/api/catalog/tables/${seg(ns)}/${seg(tbl)}/rollback`, { snapshot_id: snapshotId }),
   query:        (sql: string)                 => jpost<QueryResult>('/api/query', { sql }),

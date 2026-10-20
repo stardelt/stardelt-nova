@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
-import { api, errorMessage, formatCell, formatTime, type QueryResult, type TableMetadata } from '../api'
+import { api, errorMessage, formatCell, formatTime, type IcebergField, type QueryResult, type TableDocumentation, type TableMetadata } from '../api'
 import ErrorBox from '../components/ErrorBox'
+import TableAbout, { type DocsState } from '../components/TableAbout'
 import { sqlTableRef, rowsLabel } from '../format'
 import { isAdmin } from '../roles'
 
@@ -123,12 +124,25 @@ function NamespaceItem({ ns, filter, onSelect, selected }: {
 
 function TableDetail({ ns, tbl }: Sel) {
   const [tab, setTab] = useState<'preview' | 'columns' | 'details' | 'history'>('preview')
+  const qc = useQueryClient()
+  const me = useQuery({ queryKey: ['me'], queryFn: api.me })
   const meta = useQuery({ queryKey: ['catalog', 'table', ns, tbl], queryFn: () => api.tableMeta(ns, tbl) })
+  const docs = useQuery({
+    queryKey: ['catalog', 'table-docs', ns, tbl],
+    queryFn: () => api.tableDocs(ns, tbl),
+  })
   const preview = useQuery({
     queryKey: ['preview', ns, tbl],
     queryFn: () => api.query(`SELECT * FROM ${sqlTableRef(ns, tbl)} LIMIT 50`),
     enabled: tab === 'preview',
   })
+
+  /** A write answers the fresh documentation; it replaces the read's data for both halves. */
+  const onDocsSaved = (answer: TableDocumentation) => {
+    qc.setQueryData(['catalog', 'table-docs', ns, tbl], answer)
+    // The Details tab shows the same catalog properties; let it read them again.
+    void qc.invalidateQueries({ queryKey: ['catalog', 'table', ns, tbl] })
+  }
 
   const m = meta.data?.metadata
   const schemaId = m?.['current-schema-id'] ?? m?.schemas[0]?.['schema-id'] ?? 0
@@ -153,6 +167,8 @@ function TableDetail({ ns, tbl }: Sel) {
         </div>
       </header>
 
+      <TableAbout ns={ns} tbl={tbl} me={me.data} docs={docs} onSaved={onDocsSaved} />
+
       <div className="flex gap-2">
         {(['preview', 'columns', 'details', 'history'] as const).map(t => (
           <button
@@ -176,29 +192,13 @@ function TableDetail({ ns, tbl }: Sel) {
       {tab === 'preview' && <Preview q={preview} />}
 
       {tab === 'columns' && (
-        <div className="card overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead className="bg-bg-soft/50">
-              <tr>
-                <th className="th px-4 py-2.5">#</th>
-                <th className="th px-4 py-2.5">Column</th>
-                <th className="th px-4 py-2.5">Type</th>
-                <th className="th px-4 py-2.5">Required</th>
-              </tr>
-            </thead>
-            <tbody>
-              {schema?.fields.map(f => (
-                <tr key={f.id} className="border-t border-border/70">
-                  <td className="td px-4 text-text-mute font-mono">{f.id}</td>
-                  <td className="td px-4 font-mono">{f.name}</td>
-                  <td className="td px-4 text-text-dim font-mono">{typeof f.type === 'string' ? f.type : JSON.stringify(f.type)}</td>
-                  <td className="td px-4 text-text-mute">{f.required ? 'yes' : '—'}</td>
-                </tr>
-              ))}
-              {!schema && <tr><td className="px-4 py-5 text-text-mute" colSpan={4}>loading…</td></tr>}
-            </tbody>
-          </table>
-        </div>
+        <ColumnsTab
+          ns={ns}
+          tbl={tbl}
+          fields={schema?.fields}
+          docs={docs}
+          onSaved={onDocsSaved}
+        />
       )}
 
       {tab === 'details' && meta.data && <Details meta={meta.data} partition={partSpec} />}
@@ -207,6 +207,161 @@ function TableDetail({ ns, tbl }: Sel) {
     </div>
   )
 }
+
+function ColumnsTab({ ns, tbl, fields, docs, onSaved }: {
+  ns: string
+  tbl: string
+  fields?: IcebergField[]
+  docs: DocsState
+  onSaved: (doc: TableDocumentation) => void
+}) {
+  const canEdit = docs.data?.canEdit === true
+  const descriptions = new Map((docs.data?.columns ?? []).map(c => [c.name, c.description]))
+  const [editing, setEditing] = useState<string | null>(null)
+  const [text, setText] = useState('')
+  const [saving, setSaving] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+  const area = useRef<HTMLTextAreaElement>(null)
+  const editButtons = useRef(new Map<string, HTMLButtonElement>())
+  const pendingFocus = useRef<string | null>(null)
+
+  useEffect(() => {
+    if (editing !== null) {
+      area.current?.focus()
+    } else if (pendingFocus.current !== null) {
+      editButtons.current.get(pendingFocus.current)?.focus()
+      pendingFocus.current = null
+    }
+  }, [editing])
+
+  function open(name: string) {
+    setEditing(name)
+    setText(descriptions.get(name) ?? '')
+    setError(null)
+    setNotice(null)
+  }
+
+  function close() {
+    if (editing !== null) pendingFocus.current = editing
+    setEditing(null)
+    setError(null)
+  }
+
+  async function save() {
+    if (editing === null) return
+    const next = text.trim() === '' ? null : text.trim()
+    if (next === (descriptions.get(editing) ?? null)) {
+      close()
+      return
+    }
+    setSaving(editing)
+    setError(null)
+    try {
+      const answer = await api.putColumnDoc(ns, tbl, editing, next)
+      onSaved(answer)
+      setNotice('Saved.')
+      pendingFocus.current = editing
+      setEditing(null)
+    } catch (e) {
+      setError(errorMessage(e))
+    } finally {
+      setSaving(null)
+    }
+  }
+
+  return (
+    <div className="card overflow-hidden min-w-0">
+      {notice && <p role="status" className="border-b border-border px-4 py-2 text-sm text-ok break-words">{notice}</p>}
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead className="bg-bg-soft/50">
+            <tr>
+              <th className="th px-4 py-2.5">#</th>
+              <th className="th px-4 py-2.5">Column</th>
+              <th className="th px-4 py-2.5">Type</th>
+              <th className="th px-4 py-2.5">Required</th>
+              <th className="th px-4 py-2.5">Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            {fields?.map(f => (
+              <tr key={f.id} className="border-t border-border/70">
+                <td className="td px-4 text-text-mute font-mono">{f.id}</td>
+                <td className="td px-4 font-mono break-words">{f.name}</td>
+                <td className="td px-4 text-text-dim font-mono break-words">{typeof f.type === 'string' ? f.type : JSON.stringify(f.type)}</td>
+                <td className="td px-4 text-text-mute">{f.required ? 'yes' : '—'}</td>
+                <td className="td px-4 text-text-dim max-w-[32rem]">
+                  {editing === f.name ? (
+                    <div
+                      className="min-w-[15rem] space-y-1"
+                      onKeyDown={(e) => {
+                        if (e.key === 'Escape') {
+                          e.preventDefault()
+                          close()
+                        }
+                      }}
+                    >
+                      <textarea
+                        ref={area}
+                        aria-label={`Description of ${f.name}`}
+                        className="input min-h-[4rem] resize-y"
+                        maxLength={4000}
+                        value={text}
+                        onChange={(e) => setText(e.target.value)}
+                      />
+                      <div className="text-right text-[11px] text-text-mute">{text.length} / 4000</div>
+                      {error && <p role="alert" className="text-xs text-bad whitespace-pre-wrap break-words">{error}</p>}
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          className="btn-primary py-1 px-2 text-xs"
+                          aria-label={`Save description of ${f.name}`}
+                          disabled={saving === f.name}
+                          onClick={() => void save()}
+                        >
+                          {saving === f.name ? 'Saving…' : 'Save'}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-ghost py-1 px-2 text-xs"
+                          aria-label={`Cancel description of ${f.name}`}
+                          onClick={close}
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex min-w-0 items-start gap-2">
+                      <span className="min-w-0 flex-1 break-words">{descriptions.get(f.name) ?? '—'}</span>
+                      {canEdit && (
+                        <button
+                          type="button"
+                          ref={(el) => {
+                            if (el) editButtons.current.set(f.name, el)
+                            else editButtons.current.delete(f.name)
+                          }}
+                          aria-label={`Edit description of ${f.name}`}
+                          className="btn-ghost shrink-0 py-0.5 px-2 text-xs"
+                          onClick={() => open(f.name)}
+                        >
+                          <span aria-hidden="true">✎</span> Edit
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </td>
+              </tr>
+            ))}
+            {!fields && <tr><td className="px-4 py-5 text-text-mute" colSpan={5}>Loading…</td></tr>}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
 
 function Preview({ q }: { q: { data?: QueryResult; isLoading: boolean; error: unknown; refetch: () => void } }) {
   if (q.isLoading) return <div className="card p-6 text-text-mute text-sm">loading preview…</div>

@@ -830,3 +830,356 @@ test.describe('break-glass', () => {
     await context.close()
   })
 })
+
+test.describe('table documentation', () => {
+  const EVIL = '<img src=x onerror="window.__xss=1">'
+  const TAG_RULE = 'Tags are lower-case letters, digits, dash and underscore, up to 32 characters'
+  const ADMIN = {
+    user: 'alice', auth_mode: 'oidc', demo: false, warehouse: 'warehouse',
+    is_admin: true, groups: ['admins'],
+  }
+  const MEMBER = {
+    user: 'bob', auth_mode: 'oidc', demo: false, warehouse: 'warehouse',
+    is_admin: false, groups: ['data-eng', 'analytics'],
+  }
+  const TABLE = '/api/catalog/tables/sales/orders'
+  const FIELDS = [
+    { id: 1, name: 'id', required: true, type: 'long' },
+    { id: 2, name: 'amount', required: false, type: 'double' },
+  ]
+  const METADATA = {
+    'metadata-location': 's3://warehouse/sales/orders/metadata/00001.metadata.json',
+    metadata: {
+      'table-uuid': '00000000-0000-0000-0000-000000000001',
+      location: 's3://warehouse/sales/orders',
+      'last-updated-ms': 1_760_000_000_000,
+      'current-schema-id': 0,
+      schemas: [{ 'schema-id': 0, fields: FIELDS }],
+      'partition-specs': [],
+      properties: {},
+    },
+  }
+
+  type Doc = {
+    description: string | null
+    tags: string[]
+    owner: string | null
+    domain: string | null
+    columns: Array<{ name: string; type: string; description: string | null }>
+    canEdit: boolean
+    editRule: string
+  }
+
+  const makeDoc = (over: Partial<Doc> = {}): Doc => ({
+    description: 'Orders from the shop.',
+    tags: ['finance', 'pii'],
+    owner: 'data-eng',
+    domain: 'sales',
+    columns: [
+      { name: 'id', type: 'long', description: 'the order id' },
+      { name: 'amount', type: 'double', description: 'the amount' },
+    ],
+    canEdit: true,
+    editRule: 'You can edit because you belong to the owner group data-eng.',
+    ...over,
+  })
+
+  function applyDoc(base: Doc, body: Record<string, unknown>): Doc {
+    const next: Doc = { ...base, columns: base.columns.map((column) => ({ ...column })) }
+    if ('description' in body) next.description = (body.description as string | null) ?? null
+    if ('tags' in body) next.tags = (body.tags as string[] | null) ?? []
+    if ('owner' in body) next.owner = (body.owner as string | null) ?? null
+    if ('domain' in body) next.domain = (body.domain as string | null) ?? null
+    return next
+  }
+
+  type Recorded = { method: string; url: string; body: string | null }
+
+  /**
+   * The table page with every `/api/**` call stubbed. The documentation route keeps a
+   * mutable copy of the answer, so a successful write is read back like the real API's
+   * freshly loaded answer.
+   */
+  async function open(browser: Browser, {
+    me = MEMBER as unknown,
+    doc = makeDoc(),
+    write,
+    init,
+  }: {
+    me?: unknown
+    doc?: Doc
+    write?: (route: Route, path: string, body: Record<string, unknown>) => boolean
+    init?: () => void
+  } = {}) {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 800 } })
+    const page = await context.newPage()
+    if (init) await page.addInitScript(init)
+    const requests: Recorded[] = []
+    page.on('request', (request) => requests.push({
+      method: request.method(),
+      url: request.url(),
+      body: request.postData(),
+    }))
+    let current = doc
+    await page.route('**/api/**', (route) => {
+      const request = route.request()
+      const path = new URL(request.url()).pathname
+      const method = request.method()
+      if (path === '/api/me' && method === 'GET') return json(route, me)
+      if (path === '/api/catalog/warehouse' && method === 'GET') return json(route, { name: 'warehouse', id: 'w' })
+      if (path === '/api/catalog/namespaces' && method === 'GET') return json(route, { namespaces: [['sales']] })
+      if (path === '/api/catalog/namespaces/sales/tables' && method === 'GET') {
+        return json(route, { identifiers: [{ namespace: ['sales'], name: 'orders' }] })
+      }
+      if (path === TABLE && method === 'GET') return json(route, METADATA)
+      if (path === `${TABLE}/documentation` && method === 'GET') return json(route, current)
+      if (path === `${TABLE}/documentation` && method === 'PUT') {
+        const body = JSON.parse(request.postData() ?? '{}') as Record<string, unknown>
+        if (write?.(route, path, body)) return
+        current = applyDoc(current, body)
+        return json(route, current)
+      }
+      const column = path.match(/^\/api\/catalog\/tables\/sales\/orders\/columns\/([^/]+)\/description$/)
+      if (method === 'PUT' && column) {
+        const body = JSON.parse(request.postData() ?? '{}') as Record<string, unknown>
+        if (write?.(route, path, body)) return
+        const name = decodeURIComponent(column[1])
+        current = {
+          ...current,
+          columns: current.columns.map((c) => c.name === name
+            ? { ...c, description: (body.description as string | null) ?? null }
+            : c),
+        }
+        return json(route, current)
+      }
+      if (path === '/api/query' && method === 'POST') return json(route, { columns: [], rows: [], row_count: 0 })
+      return json(route, { error: 'not found' }, 404)
+    })
+    await page.goto('/catalog?ns=sales&tbl=orders')
+    const card = page.getByRole('region', { name: 'About this table' })
+    await expect(card).toBeVisible()
+    await expect(card).not.toContainText('Loading…')
+    return { context, page, requests, card, doc: () => current, setDoc: (next: Doc) => { current = next } }
+  }
+
+  const puts = (requests: Recorded[]) => requests.filter((request) => request.method === 'PUT')
+
+  test('read-only view', async ({ browser }) => {
+    const rule = 'Only members of the owner group data-eng and administrators may edit this.'
+    const { context, page, card } = await open(browser, {
+      doc: makeDoc({ canEdit: false, editRule: rule }),
+    })
+    await expect(card).toContainText('Orders from the shop.')
+    for (const tag of ['finance', 'pii']) await expect(card.getByText(tag, { exact: true })).toBeVisible()
+    await expect(card.getByText('data-eng', { exact: true })).toBeVisible()
+    await expect(card.getByText('sales', { exact: true })).toBeVisible()
+    await expect(card.getByText(rule, { exact: true })).toBeVisible()
+    expect(await page.getByRole('button', { name: /^Edit/ }).count()).toBe(0)
+
+    await page.getByRole('button', { name: 'columns' }).click()
+    await expect(page.getByText('the amount', { exact: true })).toBeVisible()
+    expect(await page.getByRole('button', { name: /^Edit/ }).count()).toBe(0)
+    await context.close()
+  })
+
+  test('markup is text', async ({ browser }) => {
+    const { context, page, card, setDoc, doc } = await open(browser, {
+      init: () => { (window as unknown as { __xss: number }).__xss = 0 },
+      doc: makeDoc({
+        description: EVIL,
+        tags: [EVIL],
+        owner: EVIL,
+        domain: EVIL,
+        canEdit: false,
+        columns: [
+          { name: 'id', type: 'long', description: EVIL },
+          { name: 'amount', type: 'double', description: 'the amount' },
+        ],
+      }),
+    })
+    await expect(card).toContainText(EVIL)
+    await page.getByRole('button', { name: 'columns' }).click()
+    await expect(page.getByText(EVIL).first()).toBeVisible()
+    const rendered = await page.evaluate(() => ({
+      xss: (window as unknown as { __xss: number }).__xss,
+      imgs: document.querySelectorAll('img[src="x"]').length,
+    }))
+    expect(rendered).toEqual({ xss: 0, imgs: 0 })
+
+    setDoc({ ...doc(), description: 'x'.repeat(400), tags: ['finance'], owner: 'data-eng', domain: 'sales' })
+    for (const width of [1280, 360]) {
+      await page.setViewportSize({ width, height: 800 })
+      await page.reload()
+      await expect(page.getByText('x'.repeat(400), { exact: true })).toBeVisible()
+      const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
+      expect(overflow, `${width}px`).toBeLessThanOrEqual(1)
+      expect(await page.locator('img[src="x"]').count()).toBe(0)
+    }
+    await context.close()
+  })
+
+  test('editing sends only what changed', async ({ browser }) => {
+    const { context, page, requests } = await open(browser, { doc: makeDoc() })
+    const save = () => page.getByRole('button', { name: 'Save', exact: true })
+
+    // Description only.
+    await page.getByRole('button', { name: 'Edit about this table' }).click()
+    await expect(save()).toBeDisabled()
+    await page.getByLabel('Description').fill('Settled orders from the shop.')
+    await save().click()
+    await expect(page.getByRole('status')).toHaveText('Saved.')
+    let bodies = puts(requests).map((request) => JSON.parse(request.body ?? '{}'))
+    expect(bodies).toEqual([{ description: 'Settled orders from the shop.' }])
+
+    // One tag added: the body carries the whole list.
+    await page.getByRole('button', { name: 'Edit about this table' }).click()
+    await page.getByLabel('Tags').fill('urgent')
+    await page.getByLabel('Tags').press('Enter')
+    await save().click()
+    await expect(page.getByRole('status')).toHaveText('Saved.')
+    bodies = puts(requests).map((request) => JSON.parse(request.body ?? '{}'))
+    expect(bodies[1]).toEqual({ tags: ['finance', 'pii', 'urgent'] })
+
+    // A cleared description is sent as null.
+    await page.getByRole('button', { name: 'Edit about this table' }).click()
+    await page.getByLabel('Description').fill('')
+    await save().click()
+    await expect(page.getByRole('status')).toHaveText('Saved.')
+    bodies = puts(requests).map((request) => JSON.parse(request.body ?? '{}'))
+    expect(bodies[2]).toEqual({ description: null })
+    await context.close()
+  })
+
+  test('limits and tag rules', async ({ browser }) => {
+    const { context, page, requests } = await open(browser, { doc: makeDoc({ tags: [] }) })
+    await page.getByRole('button', { name: 'Edit about this table' }).click()
+
+    const description = page.getByLabel('Description')
+    await description.fill('x'.repeat(4001))
+    await expect(description).toHaveValue('x'.repeat(4000))
+    await expect(page.getByText('4000 / 4000')).toBeVisible()
+
+    const tags = page.getByLabel('Tags')
+    await tags.fill('Finance')
+    await tags.press('Enter')
+    await expect(page.getByText(TAG_RULE, { exact: true })).toBeVisible()
+    expect(puts(requests)).toEqual([])
+
+    for (let i = 0; i < 20; i++) {
+      await tags.fill(`tag-${i}`)
+      await tags.press('Enter')
+    }
+    await expect(page.getByRole('button', { name: /^Remove tag / })).toHaveCount(20)
+    await tags.fill('tag-20')
+    await tags.press('Enter')
+    await expect(page.getByText('At most 20 tags', { exact: true })).toBeVisible()
+    expect(puts(requests)).toEqual([])
+    await context.close()
+  })
+
+  test('owner choices', async ({ browser }) => {
+    const member = await open(browser)
+    await member.page.getByRole('button', { name: 'Edit about this table' }).click()
+    const select = member.page.getByLabel('Owner')
+    expect(await select.evaluate((element) => element.tagName)).toBe('SELECT')
+    await expect(select.locator('option')).toHaveText(['data-eng', 'analytics'])
+    expect(await select.locator('option[value=""]').count()).toBe(0)
+    await member.context.close()
+
+    const admin = await open(browser, { me: ADMIN })
+    await admin.page.getByRole('button', { name: 'Edit about this table' }).click()
+    const input = admin.page.getByLabel('Owner')
+    expect(await input.evaluate((element) => element.tagName)).toBe('INPUT')
+    await expect(input).toHaveValue('data-eng')
+    await admin.context.close()
+
+    const ownerless = await open(browser, { doc: makeDoc({ owner: null }) })
+    await expect(ownerless.card.getByText('No owner', { exact: true })).toBeVisible()
+    await ownerless.page.getByRole('button', { name: 'Edit about this table' }).click()
+    const claim = ownerless.page.getByLabel('Owner')
+    await expect(claim.locator('option')).toHaveText(['data-eng', 'analytics'])
+    expect(await claim.locator('option[value=""]').count()).toBe(0)
+    await expect(ownerless.page.getByText('The first editor claims the table for one of their groups.'))
+      .toBeVisible()
+    await ownerless.context.close()
+  })
+
+  test('cancel and Escape drop the edit', async ({ browser }) => {
+    const { context, page, card, requests } = await open(browser, { doc: makeDoc() })
+    await page.getByRole('button', { name: 'Edit about this table' }).click()
+    await page.getByLabel('Description').fill('this must not be saved')
+    await page.keyboard.press('Escape')
+    await expect(page.getByRole('button', { name: 'Edit about this table' })).toBeFocused()
+    await expect(card).toContainText('Orders from the shop.')
+    await expect(card).not.toContainText('this must not be saved')
+    expect(puts(requests)).toEqual([])
+    await context.close()
+  })
+
+  test('a 400 or 502 keeps the form', async ({ browser }) => {
+    let attempts = 0
+    const opened = await open(browser, {
+      write: (route, path, body) => {
+        if (!path.endsWith('/documentation')) return false
+        attempts += 1
+        if (attempts === 1) {
+          json(route, { error: 'the catalog is busy, try again' }, 502)
+          return true
+        }
+        const next = applyDoc(opened.doc(), body)
+        opened.setDoc(next)
+        json(route, next)
+        return true
+      },
+    })
+    const { context, page } = opened
+    await page.getByRole('button', { name: 'Edit about this table' }).click()
+    await page.getByLabel('Description').fill('kept after the failure')
+    await page.getByRole('button', { name: 'Save', exact: true }).click()
+
+    await expect(page.getByRole('alert')).toContainText('the catalog is busy, try again')
+    await expect(page.getByLabel('Description')).toHaveValue('kept after the failure')
+    await expect(page.getByRole('button', { name: 'Save', exact: true })).toBeVisible()
+
+    await page.getByRole('button', { name: 'Save', exact: true }).click()
+    await expect(page.getByRole('status')).toHaveText('Saved.')
+    await expect(page.getByRole('button', { name: 'Edit about this table' })).toBeVisible()
+    await expect(page.getByRole('alert')).toHaveCount(0)
+    await expect(page.getByRole('region', { name: 'About this table' }))
+      .toContainText('kept after the failure')
+    await context.close()
+  })
+
+  test('column description edit', async ({ browser }) => {
+    const { context, page, requests } = await open(browser)
+    await page.getByRole('button', { name: 'columns' }).click()
+    await page.getByRole('button', { name: 'Edit description of amount' }).click()
+    await page.getByRole('textbox', { name: 'Description of amount' }).fill('the amount in cents')
+    await page.getByRole('button', { name: 'Save description of amount' }).click()
+
+    await expect(page.getByRole('button', { name: 'Edit description of amount' })).toBeFocused()
+    const columnPuts = puts(requests)
+    expect(columnPuts).toHaveLength(1)
+    expect(new URL(columnPuts[0].url).pathname).toBe('/api/catalog/tables/sales/orders/columns/amount/description')
+    expect(JSON.parse(columnPuts[0].body ?? '{}')).toEqual({ description: 'the amount in cents' })
+
+    const amountRow = page.getByRole('row', { name: /amount/ })
+    const idRow = page.getByRole('row', { name: /the order id/ })
+    await expect(amountRow).toContainText('the amount in cents')
+    await expect(idRow).toContainText('the order id')
+    await expect(page.getByRole('textbox', { name: 'Description of id' })).toHaveCount(0)
+    await context.close()
+  })
+
+  test('U5 the form and a column row have accessible names', async ({ browser }) => {
+    const { context, page } = await open(browser)
+    await page.getByRole('button', { name: 'Edit about this table' }).click()
+    expect((await auditPage(page)).filter((finding) => finding.rule === 'U5')).toEqual([])
+    await page.getByRole('button', { name: 'Cancel' }).click()
+
+    await page.getByRole('button', { name: 'columns' }).click()
+    await page.getByRole('button', { name: 'Edit description of amount' }).click()
+    expect((await auditPage(page)).filter((finding) => finding.rule === 'U5')).toEqual([])
+    await context.close()
+  })
+})
