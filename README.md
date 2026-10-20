@@ -42,6 +42,10 @@ Browser
          ├─ DELETE /api/connections/…  delete one connection
          ├─ POST /api/connections/group/:group/:name/break-glass  emergency read (administrators only)
          ├─ GET  /api/connections/break-glass-log  who used break-glass and why (administrators only)
+         ├─ GET  /api/pipelines        the pipelines of the caller's groups (administrators: all)
+         ├─ GET  /api/pipelines/:namespace/:name  one pipeline: latest runs, params, retries
+         ├─ GET  /api/pipelines/…/runs/:run_id    one run with its task instances
+         ├─ GET  /api/pipelines/…/tasks/:task_id/logs  one task's log, paged and capped
          ├─ POST /api/ingest/upload    load CSV/JSON into a table (a failed load keeps the old table)
          ├─ POST /api/transfer         copy table → table (a failed copy keeps the target)
          │

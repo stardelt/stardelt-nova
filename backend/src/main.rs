@@ -30,6 +30,10 @@
 //!   POST /api/connections                   — create one: values go to the store, never back
 //!   PUT  /api/connections/{scope}/…/secret  — rotate fields
 //!   DELETE /api/connections/{scope}/…       — delete one
+//!   GET  /api/pipelines                     — the caller's pipelines, with state and last run
+//!   GET  /api/pipelines/{ns}/{name}         — one pipeline: latest runs, params, retries
+//!   GET  /api/pipelines/{ns}/{name}/runs/{run_id} — one run with its tasks
+//!   GET  /api/pipelines/…/tasks/{task_id}/logs — one task's log (paged)
 //!   POST /api/ingest/upload                 — load CSV/JSON into a table
 //!   POST /api/transfer                      — copy table → table
 //!
@@ -59,6 +63,7 @@ mod demo;
 mod embed;
 mod jobs;
 mod openapi;
+mod pipelines;
 // Wired into the collector and the API by the follow-up query-log tickets (stardelt-nova#116).
 #[allow(dead_code)]
 mod query_log;
@@ -523,6 +528,9 @@ fn api_router() -> Router<Arc<AppState>> {
         )
         .route("/ingest/upload", post(data::upload))
         .route("/transfer", post(data::transfer))
+        // Pipelines: only the caller's groups' pipelines, administrators see all. Nova checks
+        // the resource before it asks Airflow; a hidden pipeline is 404. Uncacheable.
+        .merge(pipelines::router())
 }
 
 /// The operator surfaces: the service inventory, the workload list and the engine
