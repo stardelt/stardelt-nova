@@ -1,8 +1,9 @@
 import { useState } from 'react'
 import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import { ApiError, api, type LogLine, type PipelineDetail as PipelineDetailView, type RunView } from '../api'
 import ErrorBox from '../components/ErrorBox'
+import ScheduleDialog, { DeletePipelineDialog } from '../components/ScheduleDialog'
 import StopRunDialog from '../components/StopRunDialog'
 import {
   NOT_LOADED_NOTE,
@@ -25,9 +26,12 @@ import {
  */
 export default function PipelineDetail() {
   const { namespace = '', name = '' } = useParams()
+  const navigate = useNavigate()
   const queryClient = useQueryClient()
   const [openRun, setOpenRun] = useState<string | null>(null)
   const [stopping, setStopping] = useState<RunView | null>(null)
+  const [editing, setEditing] = useState(false)
+  const [deleting, setDeleting] = useState(false)
 
   const detail = useQuery({
     queryKey: ['pipeline', namespace, name],
@@ -105,7 +109,19 @@ export default function PipelineDetail() {
           <h1 className="text-2xl font-bold tracking-tight break-words">{pipeline.name}</h1>
           <p className="text-text-dim text-sm mt-1">The runs, tasks and logs of this pipeline.</p>
         </div>
-        <PipelineActions pipeline={pipeline} pending={actions.pending} onAct={actions.act} />
+        <div className="flex flex-wrap items-center gap-2">
+          <PipelineActions pipeline={pipeline} pending={actions.pending} onAct={actions.act} />
+          <button type="button" className="btn-ghost py-1.5 text-xs" onClick={() => setEditing(true)}>
+            Edit schedule
+          </button>
+          <button
+            type="button"
+            className="btn-ghost py-1.5 text-xs text-bad"
+            onClick={() => setDeleting(true)}
+          >
+            Delete pipeline
+          </button>
+        </div>
       </header>
 
       <PipelineFeedback notice={actions.notice} error={actions.error} />
@@ -205,6 +221,33 @@ export default function PipelineDetail() {
           run={stopping}
           onClose={() => setStopping(null)}
           onStopped={stopped}
+        />
+      )}
+
+      {editing && (
+        <ScheduleDialog
+          mode="edit"
+          pipeline={pipeline}
+          onClose={() => setEditing(false)}
+          onScheduled={(view) => {
+            setEditing(false)
+            actions.clearError()
+            actions.announce(`Saved ${view.name}.`)
+            void queryClient.invalidateQueries({ queryKey: ['pipeline', namespace, name] })
+            void queryClient.invalidateQueries({ queryKey: ['pipelines'] })
+          }}
+        />
+      )}
+
+      {deleting && (
+        <DeletePipelineDialog
+          pipeline={pipeline}
+          onClose={() => setDeleting(false)}
+          onDeleted={() => {
+            setDeleting(false)
+            void queryClient.invalidateQueries({ queryKey: ['pipelines'] })
+            navigate('/pipelines', { state: { notice: `Deleted ${pipeline.name}.` } })
+          }}
         />
       )}
     </div>

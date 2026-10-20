@@ -1848,7 +1848,8 @@ test.describe('pipelines', () => {
 
   test('states: loading, empty, a retryable error and 503 without Retry', async ({ browser }) => {
     const empty = await open(browser)
-    await expect(empty.page.getByText('No pipelines yet. Pipelines you or your groups own appear here.')).toBeVisible()
+    await expect(empty.page.getByText('No pipelines yet. Open the SQL editor, write a statement and press Schedule.')).toBeVisible()
+    await expect(empty.page.getByRole('link', { name: 'Open the SQL editor' })).toHaveAttribute('href', '/query')
     await empty.context.close()
 
     const loading = await open(browser, {
@@ -1859,7 +1860,7 @@ test.describe('pipelines', () => {
       },
     })
     await expect(loading.page.getByText('Loading pipelines…')).toBeVisible()
-    await expect(loading.page.getByText('No pipelines yet. Pipelines you or your groups own appear here.')).toBeVisible()
+    await expect(loading.page.getByText('No pipelines yet. Open the SQL editor, write a statement and press Schedule.')).toBeVisible()
     await loading.context.close()
 
     const broken = await open(browser, {
@@ -1941,6 +1942,463 @@ test.describe('pipelines', () => {
     await page.keyboard.press('Escape')
     await page.getByRole('button', { name: 'View log of load try 1' }).click()
     await expect(page.locator('main')).toContainText('hello')
+    expect((await auditPage(page)).filter((finding) => finding.rule === 'U5')).toEqual([])
+    await context.close()
+  })
+})
+
+test.describe('schedule', () => {
+  // *Schedule* (stardelt-nova#211): the SQL editor's dialog, the same dialog in edit mode on
+  // the pipeline page, and the one destructive confirmation there. Every `/api/**` call is
+  // stubbed; the principals route reports one ready group and one without a principal.
+  const NS = 'stardelt'
+  const ADMIN = {
+    user: 'alice', auth_mode: 'oidc', demo: false, warehouse: 'warehouse',
+    is_admin: true, groups: ['analytics', 'finance'],
+  }
+  const READY = { group: 'analytics', principal: 'pipeline-analytics', ready: true, message: null }
+  const NO_PRINCIPAL = {
+    group: 'finance',
+    principal: null,
+    ready: false,
+    message: 'No principal for this group yet: an administrator creates one with make sync-principal NAME=pipeline-finance GROUP=finance',
+  }
+
+  type Recorded = { method: string; url: string; body: string | null }
+
+  function pipeline(overrides: Record<string, unknown> = {}) {
+    return {
+      name: 'team-smoke',
+      namespace: NS,
+      ownerGroup: 'analytics',
+      schedule: '0 3 * * * (Europe/Berlin)',
+      paused: false,
+      loaded: true,
+      nextRun: null,
+      state: 'idle',
+      lastRun: null,
+      tasks: [{ name: 'run', kind: 'sql', sql: 'select 1' }],
+      runAs: 'pipeline-analytics',
+      concurrency: 'Forbid',
+      createdAt: '2026-10-19T10:00:00Z',
+      ...overrides,
+    }
+  }
+
+  /** The editor or the pipeline page with every `/api/**` call stubbed; `write` decides writes. */
+  async function open(browser: Browser, {
+    start = '/query',
+    me = ADMIN,
+    groups = [READY, NO_PRINCIPAL] as unknown[],
+    rows = [] as unknown[],
+    detail,
+    write,
+    init,
+  }: {
+    start?: string
+    me?: unknown
+    groups?: unknown[]
+    rows?: unknown[]
+    detail?: Record<string, unknown>
+    write?: (route: Route, path: string, method: string, body: string | null) => boolean
+    init?: () => void
+  } = {}) {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 800 } })
+    const page = await context.newPage()
+    if (init) await page.addInitScript(init)
+    const requests: Recorded[] = []
+    page.on('request', (request) => requests.push({
+      method: request.method(),
+      url: request.url(),
+      body: request.postData(),
+    }))
+    await page.route('**/api/**', (route) => {
+      const request = route.request()
+      const path = new URL(request.url()).pathname
+      const method = request.method()
+      if (path === '/api/me' && method === 'GET') return json(route, me)
+      if (path === '/api/catalog/namespaces' && method === 'GET') return json(route, { namespaces: [] })
+      if (path === '/api/pipelines/principals' && method === 'GET') return json(route, { groups })
+      if (path === '/api/pipelines' && method === 'GET') return json(route, { pipelines: rows })
+      if (method !== 'GET' && write?.(route, path, method, request.postData())) return
+      if (method === 'GET' && detail
+        && path === `/api/pipelines/${NS}/${encodeURIComponent(String(detail.name))}`) {
+        return json(route, detail)
+      }
+      return json(route, [])
+    })
+    await page.goto(start)
+    return { context, page, requests }
+  }
+
+  /** Open the editor's dialog and return it. */
+  async function openDialog(page: Page): Promise<Locator> {
+    await page.getByRole('button', { name: 'Schedule this statement' }).click()
+    const dialog = page.getByRole('dialog', { name: 'Schedule this statement' })
+    await expect(dialog).toBeVisible()
+    return dialog
+  }
+
+  /** The values of every attribute on the page, one per line. */
+  async function attributes(page: Page): Promise<string> {
+    return page.evaluate(() => [...document.querySelectorAll('*')]
+      .flatMap((element) => [...element.attributes].map((attribute) => attribute.value))
+      .join('\n'))
+  }
+
+  test('schedule button needs a statement and opens with it', async ({ browser }) => {
+    const { context, page } = await open(browser)
+    const editor = page.getByLabel('SQL query')
+    const opener = page.getByRole('button', { name: 'Schedule this statement' })
+
+    await expect(opener).toBeEnabled()
+    await editor.fill('')
+    await expect(opener).toBeDisabled()
+    await expect(opener).toHaveAttribute('title', 'Write a statement first')
+    expect(await page.getByRole('dialog').count()).toBe(0)
+
+    await editor.fill('select 1')
+    await expect(opener).toBeEnabled()
+    const dialog = await openDialog(page)
+    await expect(dialog.getByRole('textbox', { name: 'Statement', exact: true })).toHaveValue('select 1')
+    await expect(dialog.getByRole('textbox', { name: 'Name', exact: true })).toBeFocused()
+    await context.close()
+  })
+
+  test('groups without a principal are disabled and say why', async ({ browser }) => {
+    const first = await open(browser)
+    let dialog = await openDialog(first.page)
+    const options = dialog.getByRole('combobox', { name: 'Group', exact: true }).locator('option')
+    expect(await options.filter({ hasText: 'analytics' }).evaluate((element) => (element as HTMLOptionElement).disabled)).toBe(false)
+    expect(await options.filter({ hasText: 'finance' }).evaluate((element) => (element as HTMLOptionElement).disabled)).toBe(true)
+    // The ready group is the default, so Create works without a detour.
+    await expect(dialog.getByRole('combobox', { name: 'Group', exact: true })).toHaveValue('analytics')
+    await expect(dialog.getByRole('button', { name: 'Create schedule' })).toBeEnabled()
+    await first.context.close()
+
+    // No group is ready: the first group's sentence, Create stays disabled.
+    const third = await open(browser, {
+      groups: [NO_PRINCIPAL, { ...READY, group: 'analytics', principal: null, ready: false, message: 'pipeline-analytics is not ready' }],
+    })
+    dialog = await openDialog(third.page)
+    await expect(dialog.getByText(NO_PRINCIPAL.message, { exact: true })).toBeVisible()
+    await expect(dialog.getByRole('button', { name: 'Create schedule' })).toBeDisabled()
+    // A pending group cannot be chosen, so the dialog says why for the one it shows.
+    await expect(dialog.getByRole('combobox', { name: 'Group', exact: true }).locator('option').filter({ hasText: 'analytics' }))
+      .toHaveJSProperty('disabled', true)
+    await third.context.close()
+
+    // No group at all is said plainly.
+    const none = await open(browser, { groups: [] })
+    dialog = await openDialog(none.page)
+    await expect(dialog.getByText('You are not a member of any group, so you cannot schedule.', { exact: true })).toBeVisible()
+    await expect(dialog.getByRole('button', { name: 'Create schedule' })).toBeDisabled()
+    await none.context.close()
+  })
+
+  test('the cron rule matches the backend table', async () => {
+    // The ticket asks for the rule's table as plain assertions (not through the dialog).
+    const { validateCron } = await import('../src/schedule')
+    const accepted = [
+      '0 3 * * *',
+      '0 8 * * 1',
+      '0 9 1 * *',
+      '0 3 * * 1-5',
+      '30 6 * * 0,6',
+      '0 3 * * 7',
+      '0 3 * * SUN',
+      '0 3 * JAN mon',
+      '0,30 3 * * *',
+      '0-5/5 3 1-15 * *',
+      '  0 3 * * *  ',
+    ]
+    for (const text of accepted) expect(validateCron(text), text).toBeNull()
+
+    const refused: Array<[string, string]> = [
+      ['* * * * *', 'at most one run every 5 minutes'],
+      ['*/2 * * * *', 'at most one run every 5 minutes'],
+      ['0,1 3 * * *', 'at most one run every 5 minutes'],
+      ['0 3 * *', 'a schedule has five fields: minute hour day month weekday'],
+      ['0 3 * * * *', 'a schedule has five fields: minute hour day month weekday'],
+      ['@daily', 'a schedule has five fields: minute hour day month weekday'],
+      ['', 'a schedule has five fields: minute hour day month weekday'],
+      ['0 25 * * *', 'a field is out of range'],
+      ['0 3 1 13 *', 'a field is out of range'],
+      ['0 3 * * 8', 'a field is out of range'],
+      ['0 3 * * 1/2', 'a field is out of range'],
+      ['*/0 * * * *', 'a field is out of range'],
+      ['0 3 * nope *', 'a field is out of range'],
+    ]
+    for (const [text, sentence] of refused) expect(validateCron(text), text).toBe(sentence)
+  })
+
+  test('presets build the cron', async ({ browser }) => {
+    const { context, page } = await open(browser)
+    const dialog = await openDialog(page)
+    const shows = (text: string) => expect(dialog.getByText(text, { exact: true })).toBeVisible()
+
+    await dialog.getByRole('radio', { name: 'Every hour' }).check()
+    await shows('0 * * * *')
+
+    await dialog.getByRole('radio', { name: 'Every day at' }).check()
+    await dialog.getByRole('textbox', { name: 'Time of day', exact: true }).fill('06:30')
+    await shows('30 6 * * *')
+
+    await dialog.getByRole('radio', { name: 'Every weekday at' }).check()
+    await shows('30 6 * * 1-5')
+
+    await dialog.getByRole('radio', { name: 'Every week on' }).check()
+    await dialog.getByRole('combobox', { name: 'Weekday', exact: true }).selectOption('1')
+    await dialog.getByRole('textbox', { name: 'Time of day', exact: true }).fill('08:00')
+    await shows('0 8 * * 1')
+
+    await dialog.getByRole('radio', { name: 'Every month on the 1st at' }).check()
+    await dialog.getByRole('textbox', { name: 'Time of day', exact: true }).fill('09:00')
+    await shows('0 9 1 * *')
+
+    await dialog.getByRole('radio', { name: 'On demand only' }).check()
+    await expect(dialog.getByText('0 9 1 * *')).toHaveCount(0)
+    await context.close()
+  })
+
+  test('custom cron is checked like the backend', async ({ browser }) => {
+    const { context, page } = await open(browser)
+    const dialog = await openDialog(page)
+    const create = dialog.getByRole('button', { name: 'Create schedule' })
+    await dialog.getByRole('radio', { name: 'Custom' }).check()
+    const field = dialog.getByRole('textbox', { name: 'Custom schedule', exact: true })
+
+    for (const [text, sentence] of [
+      ['* * * * *', 'at most one run every 5 minutes'],
+      ['*/2 * * * *', 'at most one run every 5 minutes'],
+      ['0 3 * *', 'a schedule has five fields: minute hour day month weekday'],
+      ['0 25 * * *', 'a field is out of range'],
+      ['@daily', 'a schedule has five fields: minute hour day month weekday'],
+    ] as const) {
+      await field.fill(text)
+      await expect(dialog.getByText(sentence, { exact: true }), text).toBeVisible()
+      await expect(create, text).toBeDisabled()
+    }
+
+    await field.fill('0 3 * * *')
+    await expect(dialog.getByText('at most one run every 5 minutes', { exact: true })).toHaveCount(0)
+    await expect(dialog.getByText('a schedule has five fields: minute hour day month weekday', { exact: true })).toHaveCount(0)
+    await expect(create).toBeEnabled()
+    await context.close()
+  })
+
+  test('create sends exactly the expected body and shows the status line', async ({ browser }) => {
+    const detail = pipeline({ name: 'nightly-report' })
+    let posted: unknown = null
+    const first = await open(browser, {
+      write: (route, path, method, body) => {
+        if (path !== '/api/pipelines' || method !== 'POST') return false
+        posted = JSON.parse(body ?? '{}')
+        json(route, { ...detail, runs: [], params: {}, retries: null }, 201)
+        return true
+      },
+    })
+    await first.page.getByLabel('SQL query').fill('  select 1  ')
+    const dialog = await openDialog(first.page)
+    await expect(dialog.getByRole('textbox', { name: 'Statement', exact: true })).toHaveValue('  select 1  ')
+    await dialog.getByRole('textbox', { name: 'Name', exact: true }).fill('nightly-report')
+    await dialog.getByRole('radio', { name: 'Every day at' }).check()
+    await dialog.getByRole('textbox', { name: 'Time of day', exact: true }).fill('03:00')
+    await dialog.getByRole('combobox', { name: 'Time zone', exact: true }).selectOption('Europe/Berlin')
+    await dialog.getByRole('button', { name: 'Create schedule' }).click()
+
+    await expect(first.page.getByRole('status')).toContainText(
+      'Scheduled nightly-report. It appears under Pipelines within a minute.',
+    )
+    await expect(first.page.getByRole('link', { name: 'nightly-report' }))
+      .toHaveAttribute('href', `/pipelines/${NS}/nightly-report`)
+    expect(posted).toEqual({
+      name: 'nightly-report',
+      ownerGroup: 'analytics',
+      sql: 'select 1',
+      schedule: { cron: '0 3 * * *', timezone: 'Europe/Berlin' },
+    })
+    expect(await first.page.getByRole('dialog').count()).toBe(0)
+    await first.context.close()
+  })
+
+  test('a 409 keeps the dialog, its sentence and the typed fields', async ({ browser }) => {
+    const { context, page } = await open(browser, {
+      write: (route, path, method) => {
+        if (path !== '/api/pipelines' || method !== 'POST') return false
+        json(route, { error: 'a pipeline with this name already exists' }, 409)
+        return true
+      },
+    })
+    await page.getByLabel('SQL query').fill('select 2')
+    const dialog = await openDialog(page)
+    await dialog.getByRole('textbox', { name: 'Name', exact: true }).fill('taken-name')
+    await dialog.getByRole('radio', { name: 'Every weekday at' }).check()
+    await dialog.getByRole('button', { name: 'Create schedule' }).click()
+
+    await expect(dialog.getByRole('alert')).toHaveText('a pipeline with this name already exists')
+    await expect(dialog).toBeVisible()
+    await expect(dialog.getByRole('textbox', { name: 'Name', exact: true })).toHaveValue('taken-name')
+    await expect(dialog.getByRole('textbox', { name: 'Statement', exact: true })).toHaveValue('select 2')
+    await expect(dialog.getByRole('radio', { name: 'Every weekday at' })).toBeChecked()
+    await context.close()
+  })
+
+  test('edit changes only sql and schedule, and delete asks once', async ({ browser }) => {
+    const detail = { ...pipeline(), runs: [], params: {}, retries: null }
+    const { context, page, requests } = await open(browser, {
+      start: `/pipelines/${NS}/team-smoke`,
+      detail,
+      write: (route, path, method) => {
+        if (path !== `/api/pipelines/${NS}/team-smoke`) return false
+        if (method === 'PUT') {
+          json(route, detail)
+          return true
+        }
+        if (method === 'DELETE') {
+          void route.fulfill({ status: 204 })
+          return true
+        }
+        return false
+      },
+    })
+
+    await page.getByRole('button', { name: 'Edit schedule' }).click()
+    const dialog = page.getByRole('dialog', { name: 'Edit the schedule' })
+    await expect(dialog).toBeVisible()
+    await expect(dialog.getByRole('textbox', { name: 'Name', exact: true })).toHaveValue('team-smoke')
+    await expect(dialog.getByRole('textbox', { name: 'Group', exact: true })).toHaveValue('analytics')
+    await expect(dialog.getByRole('textbox', { name: 'Statement', exact: true })).toHaveValue('select 1')
+    await dialog.getByRole('textbox', { name: 'Time of day', exact: true }).fill('04:00')
+    await dialog.getByRole('button', { name: 'Save schedule' }).click()
+    await expect(page.getByRole('status')).toHaveText('Saved team-smoke.')
+
+    const puts = requests.filter((request) => request.method === 'PUT')
+    expect(puts.map((request) => new URL(request.url).pathname)).toEqual([`/api/pipelines/${NS}/team-smoke`])
+    const putBody = JSON.parse(puts[0].body ?? '{}') as Record<string, unknown>
+    expect(Object.keys(putBody).sort()).toEqual(['schedule', 'sql'])
+    expect(putBody).toEqual({ sql: 'select 1', schedule: { cron: '0 4 * * *', timezone: 'Europe/Berlin' } })
+
+    const opener = page.getByRole('button', { name: 'Delete pipeline' })
+    await opener.click()
+    const confirm = page.getByRole('dialog', { name: 'Delete team-smoke?' })
+    await expect(confirm).toContainText(
+      'The pipeline and its schedule are removed. Past runs stay readable for a while in Airflow but disappear from this page.',
+    )
+    await expect(confirm.getByRole('button', { name: 'Cancel' })).toBeFocused()
+    expect(requests.filter((request) => request.method === 'DELETE')).toEqual([])
+
+    await page.keyboard.press('Escape')
+    await expect(confirm).toHaveCount(0)
+    expect(requests.filter((request) => request.method === 'DELETE')).toEqual([])
+    await expect(opener).toBeFocused()
+
+    await opener.click()
+    await page.getByRole('dialog', { name: 'Delete team-smoke?' })
+      .getByRole('button', { name: 'Delete pipeline' })
+      .click()
+    await expect(page.getByRole('status')).toHaveText('Deleted team-smoke.')
+    const deletes = requests.filter((request) => request.method === 'DELETE')
+    expect(deletes).toHaveLength(1)
+    expect(new URL(deletes[0].url).pathname).toBe(`/api/pipelines/${NS}/team-smoke`)
+    await context.close()
+  })
+
+  test('edit without a statement from the read API asks for it and stays truthful', async ({ browser }) => {
+    // The read API does not carry `tasks[].sql` yet (stardelt-nova#211 asks for it); until it
+    // does, edit mode shows an empty statement and says so rather than inventing one.
+    const detail = {
+      ...pipeline({ tasks: [{ name: 'run', kind: 'sql' }] }),
+      runs: [],
+      params: {},
+      retries: null,
+    }
+    const { context, page } = await open(browser, { start: `/pipelines/${NS}/team-smoke`, detail })
+    await page.getByRole('button', { name: 'Edit schedule' }).click()
+    const dialog = page.getByRole('dialog', { name: 'Edit the schedule' })
+    await expect(dialog.getByText(
+      "This pipeline's statement did not arrive with the pipeline, so it is empty here. Type it to change the schedule.",
+      { exact: true },
+    )).toBeVisible()
+    await expect(dialog.getByRole('textbox', { name: 'Statement', exact: true })).toHaveValue('')
+    await expect(dialog.getByRole('button', { name: 'Save schedule' })).toBeDisabled()
+    await dialog.getByRole('textbox', { name: 'Statement', exact: true }).fill('select 7')
+    await expect(dialog.getByRole('button', { name: 'Save schedule' })).toBeEnabled()
+    await context.close()
+  })
+
+  test('hostile statement, name and refusal stay text and out of attributes', async ({ browser }) => {
+    const evil = '<img src=x onerror="window.__xss=1">'
+    const canary = 'canary-7f3a'
+    const first = await open(browser, {
+      init: () => { (window as unknown as { __xss: number }).__xss = 0 },
+      write: (route, path, method) => {
+        if (path !== '/api/pipelines' || method !== 'POST') return false
+        json(route, { error: evil }, 409)
+        return true
+      },
+    })
+    await first.page.getByLabel('SQL query').fill(`select '${canary}' -- ${evil}`)
+    const dialog = await openDialog(first.page)
+    await dialog.getByRole('textbox', { name: 'Name', exact: true }).fill('hostile-one')
+    await dialog.getByRole('button', { name: 'Create schedule' }).click()
+    await expect(dialog.getByRole('alert')).toHaveText(evil)
+    expect(await first.page.evaluate(() => ({
+      xss: (window as unknown as { __xss?: number }).__xss ?? 0,
+      imgs: document.querySelectorAll('img[src="x"]').length,
+    }))).toEqual({ xss: 0, imgs: 0 })
+
+    await first.page.keyboard.press('Escape')
+    await expect(dialog).toHaveCount(0)
+    // The statement may live in the textarea; it may not live in an attribute or anywhere
+    // outside a textarea (a title, a URL, an error box).
+    expect(await attributes(first.page)).not.toContain(canary)
+    const outsideTextareas = await first.page.evaluate(() => {
+      const clone = document.documentElement.cloneNode(true) as HTMLElement
+      clone.querySelectorAll('textarea').forEach((element) => element.remove())
+      return clone.outerHTML
+    })
+    expect(outsideTextareas).not.toContain(canary)
+    await first.context.close()
+
+    // A hostile pipeline name is text in the heading and in the confirmation's title.
+    const detail = { ...pipeline({ name: evil }), runs: [], params: {}, retries: null }
+    const second = await open(browser, {
+      start: `/pipelines/${NS}/${encodeURIComponent(evil)}`,
+      detail,
+      init: () => { (window as unknown as { __xss: number }).__xss = 0 },
+    })
+    await expect(second.page.getByRole('heading', { name: evil })).toBeVisible()
+    await second.page.getByRole('button', { name: 'Delete pipeline' }).click()
+    await expect(second.page.getByRole('dialog')).toContainText(`Delete ${evil}?`)
+    expect(await second.page.evaluate(() => (window as unknown as { __xss?: number }).__xss ?? 0)).toBe(0)
+    expect(await second.page.locator('img[src="x"]').count()).toBe(0)
+    await second.context.close()
+  })
+
+  test('U5 the create dialog, the edit dialog and the delete dialog have accessible names', async ({ browser }) => {
+    const detail = { ...pipeline(), runs: [], params: {}, retries: null }
+    const { context, page } = await open(browser, { detail })
+    await page.setViewportSize({ width: 360, height: 740 })
+
+    await openDialog(page)
+    expect((await auditPage(page)).filter((finding) => finding.rule === 'U5')).toEqual([])
+    const box = await page.getByRole('dialog').boundingBox()
+    expect(box).not.toBeNull()
+    expect(box!.x).toBeGreaterThanOrEqual(0)
+    expect(box!.x + box!.width).toBeLessThanOrEqual(361)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1)
+    await page.keyboard.press('Escape')
+
+    await page.goto(`/pipelines/${NS}/team-smoke`)
+    await expect(page.getByRole('heading', { name: 'team-smoke' })).toBeVisible()
+    await page.getByRole('button', { name: 'Edit schedule' }).click()
+    await expect(page.getByRole('dialog', { name: 'Edit the schedule' })).toBeVisible()
+    expect((await auditPage(page)).filter((finding) => finding.rule === 'U5')).toEqual([])
+    await page.keyboard.press('Escape')
+
+    await page.getByRole('button', { name: 'Delete pipeline' }).click()
+    await expect(page.getByRole('dialog', { name: 'Delete team-smoke?' })).toBeVisible()
     expect((await auditPage(page)).filter((finding) => finding.rule === 'U5')).toEqual([])
     await context.close()
   })
