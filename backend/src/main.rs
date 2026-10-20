@@ -13,6 +13,8 @@
 //!   POST /api/catalog/namespaces            — create a schema
 //!   GET  /api/catalog/namespaces/:ns/tables — list tables
 //!   GET  /api/catalog/tables/:ns/:tbl       — table metadata
+//!   GET/PUT /api/catalog/tables/:ns/:tbl/documentation — descriptions, tags, owner, domain
+//!   PUT  /api/catalog/tables/:ns/:tbl/columns/:column/description — one column's description
 //!   GET  /api/catalog/tables/:ns/:tbl/history — last 100 snapshots
 //!   POST /api/catalog/tables/:ns/:tbl/rollback — roll back to a snapshot
 //!   POST /api/query                         — run SQL
@@ -54,6 +56,7 @@ mod apps;
 mod audit;
 mod auth;
 mod catalog;
+mod catalog_docs;
 mod cluster;
 mod connection_routes;
 mod connections;
@@ -78,6 +81,7 @@ mod secret_store;
 mod trino;
 mod user_settings;
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 
 use axum::{
@@ -137,6 +141,11 @@ pub struct AppState {
     /// Nova signs in as one service user (built-in role `User`) and decides itself who may
     /// see what: Airflow cannot scope that credential to owner groups.
     pub airflow: Option<airflow::AirflowClient>,
+    /// One edit lock per table (`"{ns}.{tbl}"`) for the documentation writes. In-process,
+    /// so it serialises one Nova replica; more than one replica needs a database lock (a
+    /// later ticket). Lakekeeper 0.12.2 deadlocks on concurrent commits to one table
+    /// instead of answering 409, which is why this exists (stardelt-nova#189).
+    pub table_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -450,6 +459,14 @@ fn api_router() -> Router<Arc<AppState>> {
         .route("/catalog/namespaces/{ns}/tables", get(catalog::list_tables))
         .route("/catalog/tables/{ns}/{tbl}", get(catalog::table_metadata))
         .route(
+            "/catalog/tables/{ns}/{tbl}/documentation",
+            get(catalog_docs::read).put(catalog_docs::update),
+        )
+        .route(
+            "/catalog/tables/{ns}/{tbl}/columns/{column}/description",
+            put(catalog_docs::update_column),
+        )
+        .route(
             "/catalog/tables/{ns}/{tbl}/history",
             get(catalog::table_history),
         )
@@ -660,6 +677,7 @@ async fn main() -> anyhow::Result<()> {
         store,
         break_glass_reads: Mutex::new(std::collections::HashMap::new()),
         airflow,
+        table_locks: Mutex::new(HashMap::new()),
     });
 
     let auth = match auth_mode {
@@ -789,6 +807,7 @@ mod router_tests {
             store: None,
             break_glass_reads: Mutex::new(std::collections::HashMap::new()),
             airflow: None,
+            table_locks: Mutex::new(std::collections::HashMap::new()),
         })
     }
 

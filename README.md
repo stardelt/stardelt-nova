@@ -23,6 +23,8 @@ Browser
          ├─ GET  /api/trino/cluster    → Trino /v1/info
          ├─ GET  /api/catalog/*        → Lakekeeper REST catalog
          ├─ POST /api/catalog/namespaces  create schema
+         ├─ GET/PUT /api/catalog/tables/:ns/:tbl/documentation  description, tags, owner, domain
+         ├─ PUT  /api/catalog/tables/:ns/:tbl/columns/:column/description  one column's description
          ├─ POST /api/query            → Trino query engine
          ├─ GET  /api/jobs             recent activity
          ├─ GET  /api/saved-queries    the caller's saved queries (needs the state store)
@@ -64,6 +66,38 @@ Every response carries `X-Content-Type-Options: nosniff`, `X-Frame-Options: SAME
 their names are hashed). Upstream failures answer one sentence — Trino's raw error
 document, with its Java stack, stays in Nova's log at debug level.
 
+### Table documentation
+
+`GET /api/catalog/tables/:ns/:tbl/documentation` reads a table's description, tags,
+owner, domain and every column of the **current** schema, plus `canEdit`/`editRule`.
+`PUT` on the same path applies any subset of `{description, tags, owner, domain}` in one
+Lakekeeper commit; `PUT …/columns/:column/description` writes one column's description
+through Trino.
+
+The fields live in the catalog, so every engine sees them:
+
+| Field | Where |
+|---|---|
+| description | Iceberg property `comment` (the REST `set-properties` path, one commit) |
+| tags | custom property `stardelt.tags` (sorted, comma separated; at most 20, `^[a-z0-9][a-z0-9_-]{0,31}$`) |
+| owner | custom property `stardelt.owner` (a group name) |
+| domain | custom property `stardelt.domain` (`^[a-z0-9][a-z0-9_-]{0,39}$`) |
+| column description | the field's `doc` in a new Iceberg schema — only `COMMENT ON COLUMN` writes it, run as the caller with source `nova-catalog` |
+
+A write body is a patch: an absent key changes nothing, `null` (or `[]`, or a blank
+description) removes the property, and a write with nothing to change sends no commit.
+Descriptions are capped at 4,000 characters. Writes are serialised **per table** in the
+process and a commit answered 500/503 is retried (three attempts), because Lakekeeper
+0.12.2 deadlocks on concurrent commits to one table; a catalog that stays busy answers
+`502 {"error":"the catalog is busy, try again"}`.
+
+**Interim rule, enforced by Nova and not yet by the catalog:** an administrator may edit;
+a member of the owner group may edit; a table with no owner may be edited by anybody, but
+the first editor must set the owner to one of their own groups. Everyone else gets 403.
+Anyone who reaches Lakekeeper or Trino directly can still change these properties until
+the catalog enforces permissions. The lock covers one Nova replica; more than one replica
+needs a database lock (a later change). Demo mode answers 503.
+
 ## Demo mode (no cluster)
 
 `NOVA_DEMO=1` serves an in-memory lakehouse — a seeded Iceberg-shaped catalog
@@ -84,6 +118,7 @@ stardelt-nova/
 │   │   ├── main.rs   server setup, /api/health, /api/me, /api/trino
 │   │   ├── api_json.rs  `ApiJson` body extractor: JSON, never text, on rejection
 │   │   ├── catalog.rs Lakekeeper proxy routes
+│   │   ├── catalog_docs.rs  table documentation: description, tags, owner, domain, column docs
 │   │   ├── connection_routes.rs  `/api/connections`: list, create, rotate, delete, break-glass
 │   │   ├── connections.rs  connection rules: validation, authorization, payloads
 │   │   ├── secret_store.rs  secret store client, signed in with the caller's own token

@@ -31,3 +31,5 @@ futures.workspace = true
 
 [dev-dependencies]
 tower.workspace = true
+# `tokio::time::pause` for the commit-retry tests (no runtime behaviour in the binary).
+tokio = { workspace = true, features = ["test-util"] }

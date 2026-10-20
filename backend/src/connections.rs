@@ -128,7 +128,9 @@ fn setting_name_ok(k: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
 }
 
-fn group_ok(g: &str) -> bool {
+/// A group name: 1 to 64 ASCII letters, digits, dots, dashes or underscores, starting with
+/// a letter or digit. Shared with the table-documentation owner field (`catalog_docs.rs`).
+pub(crate) fn group_ok(g: &str) -> bool {
     !g.is_empty()
         && g.len() <= 64
         && g.as_bytes()[0].is_ascii_alphanumeric()

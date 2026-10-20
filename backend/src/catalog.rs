@@ -173,7 +173,7 @@ async fn proxy(state: &AppState, path: String, authorization: Option<&str>) -> R
 /// Resolve the warehouse id, or the response to send back. The error is boxed: an
 /// unboxed `Response` in the `Err` variant trips `clippy::result_large_err`, and the
 /// happy path is what this function is for.
-async fn warehouse_id_or_error(state: &AppState) -> Result<String, Box<Response>> {
+pub(crate) async fn warehouse_id_or_error(state: &AppState) -> Result<String, Box<Response>> {
     resolve_warehouse_id(state).await.map_err(|e| {
         Box::new(
             (
@@ -506,7 +506,7 @@ pub async fn table_rollback(
 /// to another Lakekeeper endpoint. Encoding keeps it one segment; a bare `.` or `..`
 /// (which parsers collapse even when encoded as unreserved characters) or an empty
 /// segment is refused.
-fn path_segment(raw: &str) -> Option<String> {
+pub(crate) fn path_segment(raw: &str) -> Option<String> {
     if raw.is_empty() || raw == "." || raw == ".." {
         return None;
     }

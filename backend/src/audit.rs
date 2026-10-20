@@ -177,6 +177,35 @@ pub fn break_glass_event(rec: &BreakGlassRecord) {
     );
 }
 
+/// What one table-documentation change records: the fields that changed, **never their text**.
+/// `changed` holds `description`, `tags`, `owner`, `domain` or `column:<name>`.
+// The fields are read only through `Debug`, which dead-code analysis does not count.
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct CatalogDocRecord<'a> {
+    pub actor: &'a str,
+    pub sub: &'a str,
+    pub table: &'a str,
+    pub changed: &'a [&'a str],
+}
+
+/// The table-documentation audit line on the `audit` target. The description and the tags
+/// themselves are content, not action, so only the names of the changed fields appear.
+pub fn catalog_doc_event(who: &crate::auth::Identity, table: &str, changed: &[&str]) {
+    let record = CatalogDocRecord {
+        actor: &who.display_name,
+        sub: &who.sub,
+        table,
+        changed,
+    };
+    tracing::info!(
+        target: "audit",
+        action = "catalog-documentation",
+        record = ?record,
+        "table documentation"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

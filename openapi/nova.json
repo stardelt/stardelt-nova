@@ -203,6 +203,296 @@
         }
       }
     },
+    "/api/catalog/tables/{ns}/{tbl}/columns/{column}/description": {
+      "put": {
+        "tags": [
+          "public"
+        ],
+        "description": "Set or remove one column's description. The column must be a field of the current schema, matched exactly. Nova runs `COMMENT ON COLUMN warehouse.<ns>.<tbl>.<column>` through Trino **as the caller** (source `nova-catalog`), because a column description lives in a new Iceberg schema and only the engine writes it. Same 4,000-character limit and null rule as the table description. The interim rule is enforced by Nova; the catalog does not enforce it yet. Demo mode answers 503.",
+        "operationId": "update_column",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "description": "Namespace (schema) name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tbl",
+            "in": "path",
+            "description": "Table name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "column",
+            "in": "path",
+            "description": "Column name, exactly as the current schema spells it",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ColumnDescriptionUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The table's documentation after the change, freshly loaded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TableDocumentation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body is invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Only the owner group and administrators may edit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such table or no such column in the current schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The catalog or the engine is not reachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Demo mode",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/catalog/tables/{ns}/{tbl}/documentation": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "description": "A table's documentation: the Iceberg `comment` as `description`, the `stardelt.tags`/`stardelt.owner`/`stardelt.domain` custom properties, and the description and type of every column of the **current** schema. `canEdit`/`editRule` apply Nova's interim rule: until the catalog enforces permissions, Nova decides who may edit, and anyone who reaches Lakekeeper or Trino directly can still change these properties. Demo mode answers 503.",
+        "operationId": "read",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "description": "Namespace (schema) name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tbl",
+            "in": "path",
+            "description": "Table name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The table's documentation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TableDocumentation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A name is not a single path segment",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such table",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The catalog is not reachable or did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Demo mode",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "public"
+        ],
+        "description": "Set or remove a table's description, tags, owner and domain in one Lakekeeper commit. Every key is optional: absent changes nothing, `null` (or an empty tag list, or a blank description) removes the property, and a write with nothing to change sends no commit. Description at most 4,000 characters; at most 20 unique tags `^[a-z0-9][a-z0-9_-]{0,31}$`; owner a group name; domain `^[a-z0-9][a-z0-9_-]{0,39}$`. An ownerless table may be edited by anybody, but the request must then set `owner` to one of the caller's own groups. **The interim rule is enforced by Nova; the catalog does not enforce it yet** — anyone who reaches Lakekeeper or Trino directly can still change these properties. Edits of one table are serialised by Nova and a contended commit is retried; a catalog that stays busy answers 502 `the catalog is busy, try again`. Demo mode answers 503.",
+        "operationId": "update",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "description": "Namespace (schema) name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tbl",
+            "in": "path",
+            "description": "Table name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DocumentationUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The documentation after the change, freshly loaded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TableDocumentation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body is invalid, or the table has no owner and this request does not claim it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Only the owner group and administrators may edit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such table",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The catalog is not reachable, did not answer, or stayed busy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Demo mode",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/catalog/warehouse": {
       "get": {
         "tags": [
@@ -1676,6 +1966,44 @@
           }
         }
       },
+      "ColumnDescriptionUpdate": {
+        "type": "object",
+        "description": "`PUT /api/catalog/tables/{ns}/{tbl}/columns/{column}/description` body.",
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "New column description (`null` removes it)."
+          }
+        }
+      },
+      "ColumnDocumentation": {
+        "type": "object",
+        "description": "One column of the current schema, as the documentation read reports it.",
+        "required": [
+          "name",
+          "type"
+        ],
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The field's Iceberg `doc`, or `null`."
+          },
+          "name": {
+            "type": "string",
+            "description": "Field name, exactly as the current schema spells it."
+          },
+          "type": {
+            "type": "string",
+            "description": "The field's type as text; a complex type is its JSON text."
+          }
+        }
+      },
       "ConnectionView": {
         "type": "object",
         "description": "One row of `GET /api/connections`. Never carries a value.",
@@ -1796,6 +2124,43 @@
         "properties": {
           "namespace": {
             "type": "string"
+          }
+        }
+      },
+      "DocumentationUpdate": {
+        "type": "object",
+        "description": "`PUT /api/catalog/tables/{ns}/{tbl}/documentation` body.\n\nEvery key is optional. Absent changes nothing; `null` removes the property; an empty tag\nlist and a blank description also remove. A field whose value equals what the table\nalready stores is not a change.",
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "New table description (`null` removes it)."
+          },
+          "domain": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "New domain (`null` removes it)."
+          },
+          "owner": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "New owner group (`null` removes it)."
+          },
+          "tags": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "New tag list (`null` or `[]` removes them)."
           }
         }
       },
@@ -2323,6 +2688,61 @@
           },
           "reason": {
             "type": "string"
+          }
+        }
+      },
+      "TableDocumentation": {
+        "type": "object",
+        "description": "The documentation of one table, plus what the caller may do with it.",
+        "required": [
+          "tags",
+          "columns",
+          "canEdit",
+          "editRule"
+        ],
+        "properties": {
+          "canEdit": {
+            "type": "boolean",
+            "description": "Whether the interim rule lets this caller edit (see the module docs)."
+          },
+          "columns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ColumnDocumentation"
+            },
+            "description": "The fields of the **current** schema, in schema order."
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The Iceberg `comment` property, or `null`."
+          },
+          "domain": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The `stardelt.domain` property, or `null`."
+          },
+          "editRule": {
+            "type": "string",
+            "description": "One sentence for a person: why `canEdit` has the value it has."
+          },
+          "owner": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The `stardelt.owner` property: a group name, or `null`."
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The `stardelt.tags` property, split on commas, trimmed and sorted."
           }
         }
       },
