@@ -10,7 +10,6 @@ export const KNOWN: Known[] = [
   { rule: 'U11', ticket: '#163' },
   { rule: 'U8', contains: 'ApiError', ticket: '#163' },
   { rule: 'U8', contains: 'an /api/ path', ticket: '#163' },
-  { rule: 'U12', ticket: '#164' },
   { rule: 'U8', contains: 'MVP', ticket: '#165' },
   { rule: 'U8', contains: 'phase N', ticket: '#165' },
 ]

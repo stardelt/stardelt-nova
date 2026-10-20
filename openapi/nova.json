@@ -28,7 +28,7 @@
               }
             }
           },
-          "500": {
+          "502": {
             "description": "The catalog is not reachable",
             "content": {
               "application/json": {
@@ -129,7 +129,7 @@
               }
             }
           },
-          "500": {
+          "502": {
             "description": "The catalog is not reachable",
             "content": {
               "application/json": {
@@ -221,8 +221,18 @@
               }
             }
           },
-          "500": {
-            "description": "The catalog is not reachable or has no such warehouse",
+          "502": {
+            "description": "The catalog is not reachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The configured warehouse does not exist",
             "content": {
               "application/json": {
                 "schema": {
