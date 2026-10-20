@@ -391,7 +391,7 @@ Nova is an OIDC *client*; the identity provider is either your own (Microsoft En
 ID, Okta, any standards-compliant OIDC provider) or the platform's Keycloak. The
 contract is [Identity](https://stardelt.io/architecture/identity).
 
-`NOVA_AUTH_MODE=dev` (the default) keeps the no-login behaviour that CI, the kind gate
+`NOVA_AUTH_MODE=dev` (the default) keeps the no-login behaviour that CI
 and `make demo` use. `NOVA_AUTH_MODE=oidc` puts every `/api/*` route except
 `/api/health` and `/api/auth/*` behind sign-in: a browser gets a 401 and the UI sends
 it to `/api/auth/login?return_to=<path>` (authorization code + PKCE + `state` +
