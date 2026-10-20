@@ -2396,7 +2396,8 @@
           "type",
           "config",
           "secretKeys",
-          "version"
+          "version",
+          "member"
         ],
         "properties": {
           "breakGlass": {
@@ -2424,6 +2425,10 @@
               "string",
               "null"
             ]
+          },
+          "member": {
+            "type": "boolean",
+            "description": "Whether the caller belongs to the scope that owns this row: `true` for a personal or managed\nconnection and for a group connection of one of the caller's groups; `false` for a group\nconnection an administrator sees only because they are an administrator. `false` means\nread-only for this person — no create, no rotation — except delete and break-glass."
           },
           "name": {
             "type": "string"
