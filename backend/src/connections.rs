@@ -125,16 +125,20 @@ fn group_ok(g: &str) -> bool {
 
 /// `1m` to `24h`, written as digits and `m` or `h`.
 fn refresh_ok(s: &str) -> bool {
-    let (digits, unit) = s.split_at(s.len().saturating_sub(1));
+    let (digits, minutes_per_unit) = if let Some(d) = s.strip_suffix('m') {
+        (d, 1)
+    } else if let Some(d) = s.strip_suffix('h') {
+        (d, 60)
+    } else {
+        return false;
+    };
+    if digits.is_empty() || digits.len() > 4 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
     let Ok(n) = digits.parse::<u32>() else {
         return false;
     };
-    let minutes = match unit {
-        "m" => n,
-        "h" => n.saturating_mul(60),
-        _ => return false,
-    };
-    (1..=1440).contains(&minutes) && digits.len() <= 4
+    (1..=1440).contains(&(n * minutes_per_unit))
 }
 
 /// Check a new connection. Returns the first problem as a sentence for the caller.
@@ -553,6 +557,37 @@ mod tests {
         assert!(bad(json!({ "secret": { "user": "u", "pass word": "x" } })).contains("field name"));
         assert!(bad(json!({ "refreshInterval": "90s" })).contains("refreshInterval"));
         assert!(bad(json!({ "config": { "host": "h", "x": "y".repeat(513) } })).contains("longer"));
+    }
+
+    #[test]
+    fn refresh_interval_edges() {
+        for (s, ok) in [
+            ("15m", true),
+            ("1m", true),
+            ("1440m", true),
+            ("24h", true),
+            ("1h", true),
+            ("0024h", true),
+            ("0m", false),
+            ("1441m", false),
+            ("25h", false),
+            ("9999h", false),
+            ("99999h", false),
+            ("90s", false),
+            ("", false),
+            ("m", false),
+            ("h", false),
+            ("+5m", false),
+            ("-5m", false),
+            ("5 m", false),
+            ("1m\n", false),
+            // multi-byte characters: used to panic, must answer false
+            ("1é", false),
+            ("é", false),
+            ("٣m", false),
+        ] {
+            assert_eq!(refresh_ok(s), ok, "{s:?}");
+        }
     }
 
     #[test]
