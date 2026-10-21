@@ -39,6 +39,7 @@ Browser
          ├─ GET  /api/apps             installed apps: live status + images
          ├─ GET  /api/apps/:id         one app: workloads, facts, links, embed check
          ├─ GET  /api/workloads        workloads in Nova's namespace + read state (ok/stale/unreachable)
+         ├─ GET  /api/admin/catalogs   every Catalog and its grants (administrators only)
          ├─ GET  /api/connections      the caller's connections (needs the secret store)
          ├─ POST /api/connections      create one: the values go to the store, never back
          ├─ PUT  /api/connections/…/secret  rotate fields of one connection
