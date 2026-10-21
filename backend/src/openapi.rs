@@ -48,6 +48,7 @@ pub struct ErrorResponse {
     paths(
         crate::me,
         crate::catalog::warehouse_info,
+        crate::catalog::list_catalogs,
         crate::catalog::list_namespaces,
         crate::catalog::create_namespace,
         crate::catalog::list_tables,
@@ -89,6 +90,8 @@ pub struct ErrorResponse {
         crate::Me,
         crate::OidcMe,
         crate::catalog::WarehouseInfo,
+        crate::catalog::CatalogInfo,
+        crate::catalog::CatalogsResponse,
         crate::catalog::NamespacesResponse,
         crate::catalog::TablesResponse,
         crate::catalog::TableIdentifier,

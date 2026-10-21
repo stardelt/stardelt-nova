@@ -59,7 +59,7 @@ use std::sync::Arc;
 
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
@@ -236,12 +236,15 @@ struct LoadedColumn {
 }
 
 /// Lakekeeper's catalog REST under one warehouse, with the caller's authorization (when the
-/// platform forwards it). The route resolves the warehouse id; this only builds URLs.
+/// platform forwards it). The route resolves the warehouse id and the catalog name; this
+/// builds URLs and names the catalog in the statements and edit locks it keys on.
 struct Catalog<'a> {
     http: &'a reqwest::Client,
     /// `NOVA_LAKEKEEPER_URL/catalog/v1/<warehouse-id>`
     base: String,
     authorization: Option<&'a str>,
+    /// The catalog's name (`warehouse`, `finance`, …), for SQL and the edit lock.
+    name: &'a str,
 }
 
 impl Catalog<'_> {
@@ -636,9 +639,10 @@ fn validate_update(req: DocumentationUpdate) -> Result<Requested, String> {
 }
 
 /// The per-table edit lock. Held for the whole write, including the load that decides the
-/// rule and the statement a column write runs.
-fn table_lock(state: &AppState, ns: &str, tbl: &str) -> Arc<tokio::sync::Mutex<()>> {
-    let key = format!("{ns}.{tbl}");
+/// rule and the statement a column write runs. The catalog is part of the key: `sales.orders`
+/// in `finance` and in `warehouse` are two tables.
+fn table_lock(state: &AppState, catalog: &str, ns: &str, tbl: &str) -> Arc<tokio::sync::Mutex<()>> {
+    let key = format!("{catalog}.{ns}.{tbl}");
     Arc::clone(
         state
             .table_locks
@@ -673,7 +677,7 @@ async fn write_documentation(
     req: DocumentationUpdate,
 ) -> Result<TableDocumentation, DocError> {
     let requested = validate_update(req).map_err(|e| DocError::new(StatusCode::BAD_REQUEST, e))?;
-    let lock = table_lock(state, ns, tbl);
+    let lock = table_lock(state, catalog.name, ns, tbl);
     let _guard = lock.lock().await;
 
     let loaded = catalog.load(ns, tbl).await.map_err(catalog_fail)?;
@@ -784,7 +788,7 @@ where
             Some(checked_description(raw).map_err(|e| DocError::new(StatusCode::BAD_REQUEST, e))?)
         }
     };
-    let lock = table_lock(state, ns, tbl);
+    let lock = table_lock(state, catalog.name, ns, tbl);
     let _guard = lock.lock().await;
 
     let loaded = catalog.load(ns, tbl).await.map_err(catalog_fail)?;
@@ -798,7 +802,8 @@ where
     let loaded = match requested {
         None => loaded,
         Some(description) => {
-            let sql = comment_on_column_sql(ns, tbl, &field.name, description.as_deref());
+            let sql =
+                comment_on_column_sql(catalog.name, ns, tbl, &field.name, description.as_deref());
             run_sql(sql)
                 .await
                 .map_err(|e| DocError::new(crate::trino::error_status(&e), e))?;
@@ -817,16 +822,23 @@ fn sql_literal(raw: &str) -> String {
     raw.replace('\'', "''")
 }
 
-/// `COMMENT ON COLUMN warehouse.<ns>.<tbl>.<column> IS '<text>'` (or `IS NULL`). Every
+/// `COMMENT ON COLUMN <catalog>.<ns>.<tbl>.<column> IS '<text>'` (or `IS NULL`). Every
 /// identifier goes through `quote_ident`, so a field named `a"b` or `x; DROP TABLE y` is one
 /// quoted identifier, never SQL.
-fn comment_on_column_sql(ns: &str, tbl: &str, column: &str, description: Option<&str>) -> String {
+fn comment_on_column_sql(
+    catalog: &str,
+    ns: &str,
+    tbl: &str,
+    column: &str,
+    description: Option<&str>,
+) -> String {
     let value = match description {
         Some(text) => format!("'{}'", sql_literal(text)),
         None => "NULL".to_string(),
     };
     format!(
-        "COMMENT ON COLUMN warehouse.{}.{}.{} IS {value}",
+        "COMMENT ON COLUMN {}.{}.{}.{} IS {value}",
+        quote_ident(catalog),
         quote_ident(ns),
         quote_ident(tbl),
         quote_ident(column),
@@ -859,15 +871,16 @@ fn demo_unavailable() -> Response {
         .into_response()
 }
 
-/// Resolve the warehouse id and build the catalog client for one request.
+/// Build the catalog client for one request from a resolved warehouse id.
 ///
 /// The catalog is called with Nova's own service token (`catalog_token.rs`), never the
-/// caller's: per-user catalog rights do not exist yet, so one identity reaches Lakekeeper.
-async fn catalog_or_error(state: &AppState) -> Result<(String, Option<String>), Box<Response>> {
-    let id = match catalog::warehouse_id_or_error(state).await {
-        Ok(id) => id,
-        Err(response) => return Err(response),
-    };
+/// caller's: the catalog sees one identity, Nova's. Which catalog the caller may use is
+/// decided before this, by `catalog::catalog_scope` (asked of the engine with the caller's
+/// own token).
+async fn catalog_or_error(
+    state: &AppState,
+    id: &str,
+) -> Result<(String, Option<String>), Box<Response>> {
     let authorization = match catalog::lakekeeper_authorization(state).await {
         Ok(authorization) => authorization,
         Err(e) => {
@@ -890,15 +903,17 @@ async fn catalog_or_error(state: &AppState) -> Result<(String, Option<String>), 
     get,
     path = "/api/catalog/tables/{ns}/{tbl}/documentation",
     tag = "public",
-    description = "A table's documentation: the Iceberg `comment` as `description`, the `stardelt.tags`/`stardelt.owner`/`stardelt.domain` custom properties, and the description and type of every column of the **current** schema. `canEdit`/`editRule` apply Nova's interim rule: until the catalog enforces permissions, Nova decides who may edit, and anyone who reaches Lakekeeper or Trino directly can still change these properties. Demo mode answers 503.",
+    description = "A table's documentation: the Iceberg `comment` as `description`, the `stardelt.tags`/`stardelt.owner`/`stardelt.domain` custom properties, and the description and type of every column of the **current** schema. `?catalog=` picks the catalog. `canEdit`/`editRule` apply Nova's interim rule: until the catalog enforces permissions, Nova decides who may edit, and anyone who reaches Lakekeeper or Trino directly can still change these properties. Demo mode answers 503.",
     params(
         ("ns" = String, Path, description = "Namespace (schema) name"),
         ("tbl" = String, Path, description = "Table name"),
+        crate::catalog::CatalogParam,
     ),
     responses(
         (status = 200, description = "The table's documentation", body = TableDocumentation),
-        (status = 400, description = "A name is not a single path segment", body = crate::openapi::ErrorResponse),
-        (status = 404, description = "No such table", body = crate::openapi::ErrorResponse),
+        (status = 400, description = "A name is not a single path segment, or the catalog name is invalid", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller may not browse that catalog", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such catalog or no such table", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The catalog is not reachable or did not answer", body = crate::openapi::ErrorResponse),
         (status = 503, description = "Demo mode", body = crate::openapi::ErrorResponse),
     )
@@ -906,6 +921,7 @@ async fn catalog_or_error(state: &AppState) -> Result<(String, Option<String>), 
 pub async fn read(
     State(s): State<Arc<AppState>>,
     Path((ns, tbl)): Path<(String, String)>,
+    Query(q): Query<crate::catalog::CatalogParam>,
     caller: Option<axum::Extension<Principal>>,
 ) -> Response {
     if s.demo {
@@ -913,7 +929,11 @@ pub async fn read(
     }
     let caller = caller.as_ref().map(|c| &c.0);
     let who = caller_identity(&s, caller);
-    let (base, authorization) = match catalog_or_error(&s).await {
+    let (name, id) = match crate::catalog::catalog_scope(&s, caller, q.catalog.as_deref()).await {
+        Ok(scope) => scope,
+        Err(response) => return response,
+    };
+    let (base, authorization) = match catalog_or_error(&s, &id).await {
         Ok(v) => v,
         Err(response) => return *response,
     };
@@ -921,6 +941,7 @@ pub async fn read(
         http: &s.http,
         base,
         authorization: authorization.as_deref(),
+        name: &name,
     };
     match read_documentation(&catalog, &who, &ns, &tbl).await {
         Ok(doc) => Json(doc).into_response(),
@@ -932,17 +953,18 @@ pub async fn read(
     put,
     path = "/api/catalog/tables/{ns}/{tbl}/documentation",
     tag = "public",
-    description = "Set or remove a table's description, tags, owner and domain in one Lakekeeper commit. Every key is optional: absent changes nothing, `null` (or an empty tag list, or a blank description) removes the property, and a write with nothing to change sends no commit. Description at most 4,000 characters; at most 20 unique tags `^[a-z0-9][a-z0-9_-]{0,31}$`; owner a group name; domain `^[a-z0-9][a-z0-9_-]{0,39}$`. An ownerless table may be edited by anybody, but the request must then set `owner` to one of the caller's own groups. **The interim rule is enforced by Nova; the catalog does not enforce it yet** — anyone who reaches Lakekeeper or Trino directly can still change these properties. Edits of one table are serialised by Nova and a contended commit is retried; a catalog that stays busy answers 502 `the catalog is busy, try again`. Demo mode answers 503.",
+    description = "Set or remove a table's description, tags, owner and domain in one Lakekeeper commit. `?catalog=` picks the catalog. Every key is optional: absent changes nothing, `null` (or an empty tag list, or a blank description) removes the property, and a write with nothing to change sends no commit. Description at most 4,000 characters; at most 20 unique tags `^[a-z0-9][a-z0-9_-]{0,31}$`; owner a group name; domain `^[a-z0-9][a-z0-9_-]{0,39}$`. An ownerless table may be edited by anybody, but the request must then set `owner` to one of the caller's own groups. **The interim rule is enforced by Nova; the catalog does not enforce it yet** — anyone who reaches Lakekeeper or Trino directly can still change these properties. Edits of one table are serialised by Nova and a contended commit is retried; a catalog that stays busy answers 502 `the catalog is busy, try again`. Demo mode answers 503.",
     params(
         ("ns" = String, Path, description = "Namespace (schema) name"),
         ("tbl" = String, Path, description = "Table name"),
+        crate::catalog::CatalogParam,
     ),
     request_body = DocumentationUpdate,
     responses(
         (status = 200, description = "The documentation after the change, freshly loaded", body = TableDocumentation),
-        (status = 400, description = "The body is invalid, or the table has no owner and this request does not claim it", body = crate::openapi::ErrorResponse),
-        (status = 403, description = "Only the owner group and administrators may edit", body = crate::openapi::ErrorResponse),
-        (status = 404, description = "No such table", body = crate::openapi::ErrorResponse),
+        (status = 400, description = "The body is invalid, the catalog name is invalid, or the table has no owner and this request does not claim it", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller may not browse that catalog, or only the owner group and administrators may edit", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such catalog or no such table", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The catalog is not reachable, did not answer, or stayed busy", body = crate::openapi::ErrorResponse),
         (status = 503, description = "Demo mode", body = crate::openapi::ErrorResponse),
     )
@@ -950,6 +972,7 @@ pub async fn read(
 pub async fn update(
     State(s): State<Arc<AppState>>,
     Path((ns, tbl)): Path<(String, String)>,
+    Query(q): Query<crate::catalog::CatalogParam>,
     caller: Option<axum::Extension<Principal>>,
     ApiJson(req): ApiJson<DocumentationUpdate>,
 ) -> Response {
@@ -958,7 +981,11 @@ pub async fn update(
     }
     let caller = caller.as_ref().map(|c| &c.0);
     let who = caller_identity(&s, caller);
-    let (base, authorization) = match catalog_or_error(&s).await {
+    let (name, id) = match crate::catalog::catalog_scope(&s, caller, q.catalog.as_deref()).await {
+        Ok(scope) => scope,
+        Err(response) => return response,
+    };
+    let (base, authorization) = match catalog_or_error(&s, &id).await {
         Ok(v) => v,
         Err(response) => return *response,
     };
@@ -966,6 +993,7 @@ pub async fn update(
         http: &s.http,
         base,
         authorization: authorization.as_deref(),
+        name: &name,
     };
     match write_documentation(&s, &catalog, &who, &ns, &tbl, req).await {
         Ok(doc) => Json(doc).into_response(),
@@ -977,18 +1005,19 @@ pub async fn update(
     put,
     path = "/api/catalog/tables/{ns}/{tbl}/columns/{column}/description",
     tag = "public",
-    description = "Set or remove one column's description. The column must be a field of the current schema, matched exactly. Nova runs `COMMENT ON COLUMN warehouse.<ns>.<tbl>.<column>` through Trino **as the caller** (source `nova-catalog`), because a column description lives in a new Iceberg schema and only the engine writes it. Same 4,000-character limit and null rule as the table description. The interim rule is enforced by Nova; the catalog does not enforce it yet. Demo mode answers 503.",
+    description = "Set or remove one column's description. The column must be a field of the current schema, matched exactly. Nova runs `COMMENT ON COLUMN <catalog>.<ns>.<tbl>.<column>` through Trino **as the caller** (source `nova-catalog`), because a column description lives in a new Iceberg schema and only the engine writes it. `?catalog=` picks the catalog. Same 4,000-character limit and null rule as the table description. The interim rule is enforced by Nova; the catalog does not enforce it yet. Demo mode answers 503.",
     params(
         ("ns" = String, Path, description = "Namespace (schema) name"),
         ("tbl" = String, Path, description = "Table name"),
         ("column" = String, Path, description = "Column name, exactly as the current schema spells it"),
+        crate::catalog::CatalogParam,
     ),
     request_body = ColumnDescriptionUpdate,
     responses(
         (status = 200, description = "The table's documentation after the change, freshly loaded", body = TableDocumentation),
-        (status = 400, description = "The body is invalid", body = crate::openapi::ErrorResponse),
-        (status = 403, description = "Only the owner group and administrators may edit", body = crate::openapi::ErrorResponse),
-        (status = 404, description = "No such table or no such column in the current schema", body = crate::openapi::ErrorResponse),
+        (status = 400, description = "The body is invalid, or the catalog name is invalid", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller may not browse that catalog, or only the owner group and administrators may edit", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such catalog, no such table or no such column in the current schema", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The catalog or the engine is not reachable", body = crate::openapi::ErrorResponse),
         (status = 503, description = "Demo mode", body = crate::openapi::ErrorResponse),
     )
@@ -996,6 +1025,7 @@ pub async fn update(
 pub async fn update_column(
     State(s): State<Arc<AppState>>,
     Path((ns, tbl, column)): Path<(String, String, String)>,
+    Query(q): Query<crate::catalog::CatalogParam>,
     caller: Option<axum::Extension<Principal>>,
     ApiJson(req): ApiJson<ColumnDescriptionUpdate>,
 ) -> Response {
@@ -1004,7 +1034,11 @@ pub async fn update_column(
     }
     let caller = caller.as_ref().map(|c| &c.0);
     let who = caller_identity(&s, caller);
-    let (base, authorization) = match catalog_or_error(&s).await {
+    let (name, id) = match crate::catalog::catalog_scope(&s, caller, q.catalog.as_deref()).await {
+        Ok(scope) => scope,
+        Err(response) => return response,
+    };
+    let (base, authorization) = match catalog_or_error(&s, &id).await {
         Ok(v) => v,
         Err(response) => return *response,
     };
@@ -1012,6 +1046,7 @@ pub async fn update_column(
         http: &s.http,
         base,
         authorization: authorization.as_deref(),
+        name: &name,
     };
     let trino_state = Arc::clone(&s);
     let result = write_column_description(
@@ -1048,7 +1083,6 @@ mod tests {
         routing::get,
     };
     use serde_json::{Value, json};
-    use tokio::sync::OnceCell;
 
     use super::*;
     use crate::auth::Identity;
@@ -1260,7 +1294,8 @@ mod tests {
             superset_url: "http://127.0.0.1:1".into(),
             jupyterhub_url: "http://127.0.0.1:1".into(),
             warehouse_name: "warehouse".into(),
-            warehouse_id: OnceCell::new(),
+            catalog_ids: std::sync::RwLock::new(std::collections::HashMap::new()),
+            catalog_access: std::sync::Mutex::new(std::collections::HashMap::new()),
             http: reqwest::Client::new(),
             demo: false,
             forward_identity: false,
@@ -1285,6 +1320,7 @@ mod tests {
             http: &state.http,
             base: format!("{addr}/catalog/v1/wh"),
             authorization: None,
+            name: "warehouse",
         }
     }
 
@@ -1663,12 +1699,12 @@ mod tests {
             "only the apostrophe doubles"
         );
         assert_eq!(
-            comment_on_column_sql("a\"b", "x; DROP TABLE y", "amount", Some("it's")),
-            "COMMENT ON COLUMN warehouse.\"a\"\"b\".\"x; DROP TABLE y\".\"amount\" IS 'it''s'"
+            comment_on_column_sql("finance", "a\"b", "x; DROP TABLE y", "amount", Some("it's")),
+            "COMMENT ON COLUMN \"finance\".\"a\"\"b\".\"x; DROP TABLE y\".\"amount\" IS 'it''s'"
         );
         assert_eq!(
-            comment_on_column_sql("sales", "orders", "amount", None),
-            "COMMENT ON COLUMN warehouse.\"sales\".\"orders\".\"amount\" IS NULL"
+            comment_on_column_sql("warehouse", "sales", "orders", "amount", None),
+            "COMMENT ON COLUMN \"warehouse\".\"sales\".\"orders\".\"amount\" IS NULL"
         );
     }
 

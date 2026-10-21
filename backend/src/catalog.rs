@@ -1,25 +1,63 @@
 //! Lakekeeper catalog proxy, with an in-memory demo branch (`NOVA_DEMO=1`).
 //!
 //! Lakekeeper's Iceberg REST routes are prefixed by the warehouse UUID, not
-//! the warehouse name. We look up the UUID at first request and cache it.
+//! the warehouse name. Nova maps catalog names to warehouse ids from the warehouse
+//! list (`warehouse_id_for`) and caches that map.
 //!
 //! Every request to Lakekeeper carries Nova's own service token
 //! (`catalog_token.rs`, stardelt-nova#222) when the platform configured the catalog
-//! client. The caller's token is **not** forwarded to the catalog: per-user catalog
-//! rights do not exist yet, and until they do the catalog sees one identity, Nova's.
+//! client. The caller's token is **not** forwarded to the catalog: the catalog sees one
+//! identity, Nova's. **Which catalogs a person may browse is asked of Trino with that
+//! person's own token** (`allowed_catalogs`): the engine's `SHOW CATALOGS` is filtered by
+//! the platform's permission bridge, so Nova never re-implements the rule
+//! (`design/multitenant-catalogs.md` §5.4). Nova is not the authority; it only fails
+//! before the person tries.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
 use serde::Deserialize;
 use tracing::warn;
 
-use crate::{AppState, api_json::ApiJson, auth, data, trino::error_status};
+use crate::{
+    AppState,
+    api_json::ApiJson,
+    auth::{self, Principal},
+    data,
+    trino::error_status,
+};
+
+/// Catalogs the engine always has and Nova never offers: `system`, the connectors'
+/// information schemas, and the in-memory and TPC connectors. They answer `SHOW CATALOGS`
+/// but are not lakehouse catalogs a person browses.
+pub const HIDDEN_CATALOGS: [&str; 6] = [
+    "system",
+    "information_schema",
+    "memory",
+    "tpch",
+    "tpcds",
+    "jmx",
+];
+
+/// How long one person's catalog visibility is trusted before Trino is asked again.
+const ACCESS_TTL: Duration = Duration::from_secs(30);
+
+/// The `?catalog=` of every catalog route. Omitted means the default catalog: the
+/// configured `NOVA_WAREHOUSE_NAME` when the caller may browse it, else the first one
+/// they may.
+#[derive(Default, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct CatalogParam {
+    /// Catalog to work in (`warehouse`, `finance`, …). Omitted, the default catalog is used.
+    pub catalog: Option<String>,
+}
 
 /// OpenAPI shapes for the catalog routes (first slice of ticket #107).
 ///
@@ -68,6 +106,24 @@ pub struct TableMetadataResponse {
 #[derive(serde::Serialize, utoipa::ToSchema)]
 pub struct CreateNamespaceResponse {
     pub namespace: String,
+}
+
+/// One catalog the caller may browse, with its Lakekeeper warehouse id.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct CatalogInfo {
+    /// Catalog name, as the engine and the catalog spell it (`warehouse`, `finance`, …).
+    pub name: String,
+    /// The Lakekeeper warehouse id behind that name.
+    pub id: String,
+}
+
+/// `GET /api/catalog/catalogs`: the catalogs the caller may browse, sorted by name.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct CatalogsResponse {
+    /// Every catalog the caller may browse (`?catalog=` accepts any of these names).
+    pub catalogs: Vec<CatalogInfo>,
+    /// The catalog a request without `?catalog=` works in.
+    pub default: String,
 }
 
 #[derive(Deserialize)]
@@ -131,39 +187,76 @@ pub(crate) async fn lakekeeper_authorization(
     }
 }
 
-pub(crate) async fn resolve_warehouse_id(state: &AppState) -> Result<String, WarehouseError> {
-    state
-        .warehouse_id
-        .get_or_try_init(|| async {
-            let url = format!("{}/management/v1/warehouse", state.lakekeeper_url);
-            let mut request = state.http.get(&url);
-            if let Some(authorization) = lakekeeper_authorization(state)
-                .await
-                .map_err(WarehouseError::Token)?
-            {
-                request = request.header(reqwest::header::AUTHORIZATION, authorization);
-            }
-            let resp: WarehouseList = request
-                .send()
-                .await
-                .map_err(|e| {
-                    warn!("lakekeeper unreachable: {e}");
-                    WarehouseError::Unreachable
-                })?
-                .json()
-                .await
-                .map_err(|e| {
-                    warn!("lakekeeper warehouse list malformed: {e}");
-                    WarehouseError::Malformed
-                })?;
-            resp.warehouses
-                .into_iter()
-                .find(|w| w.name == state.warehouse_name)
-                .map(|w| w.id)
-                .ok_or_else(|| WarehouseError::NotFound(state.warehouse_name.clone()))
-        })
+/// A catalog name: 1 to 40 characters, `[a-z][a-z0-9]*`. The rule is what the platform's
+/// catalogs are named; it also keeps the name safe to use as one SQL identifier (which
+/// still goes through `quote_ident`) and as one URL query value.
+pub fn valid_catalog(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 40
+        && bytes[0].is_ascii_lowercase()
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+}
+
+/// List every Lakekeeper warehouse, with Nova's own service token (`catalog_token.rs`).
+async fn warehouse_list(state: &AppState) -> Result<Vec<WarehouseListItem>, WarehouseError> {
+    let url = format!("{}/management/v1/warehouse", state.lakekeeper_url);
+    let mut request = state.http.get(&url);
+    if let Some(authorization) = lakekeeper_authorization(state)
         .await
+        .map_err(WarehouseError::Token)?
+    {
+        request = request.header(reqwest::header::AUTHORIZATION, authorization);
+    }
+    let resp: WarehouseList = request
+        .send()
+        .await
+        .map_err(|e| {
+            warn!("lakekeeper unreachable: {e}");
+            WarehouseError::Unreachable
+        })?
+        .json()
+        .await
+        .map_err(|e| {
+            warn!("lakekeeper warehouse list malformed: {e}");
+            WarehouseError::Malformed
+        })?;
+    Ok(resp.warehouses)
+}
+
+/// The Lakekeeper warehouse id for one catalog name.
+///
+/// Answers from the map; a miss lists the warehouses once (a new catalog appears without
+/// a restart) and refills it, then answers or `NotFound(name)` — a name the catalog does
+/// not know, never a stale id, except for a warehouse deleted after it was cached.
+pub(crate) async fn warehouse_id_for(
+    state: &AppState,
+    name: &str,
+) -> Result<String, WarehouseError> {
+    if let Some(id) = state
+        .catalog_ids
+        .read()
+        .expect("catalog ids poisoned")
+        .get(name)
+    {
+        return Ok(id.clone());
+    }
+    let warehouses = warehouse_list(state).await?;
+    let mut ids = state.catalog_ids.write().expect("catalog ids poisoned");
+    for w in warehouses {
+        ids.insert(w.name, w.id);
+    }
+    ids.get(name)
         .cloned()
+        .ok_or_else(|| WarehouseError::NotFound(name.to_string()))
+}
+
+/// The configured default catalog's warehouse id (`NOVA_WAREHOUSE_NAME`): the dashboard
+/// facts and `/api/catalog/warehouse` keep working on it, unchanged.
+pub(crate) async fn resolve_warehouse_id(state: &AppState) -> Result<String, WarehouseError> {
+    warehouse_id_for(state, &state.warehouse_name).await
 }
 
 async fn proxy(state: &AppState, path: String) -> Response {
@@ -207,19 +300,190 @@ async fn proxy(state: &AppState, path: String) -> Response {
     }
 }
 
-/// Resolve the warehouse id, or the response to send back. The error is boxed: an
-/// unboxed `Response` in the `Err` variant trips `clippy::result_large_err`, and the
-/// happy path is what this function is for.
-pub(crate) async fn warehouse_id_or_error(state: &AppState) -> Result<String, Box<Response>> {
-    resolve_warehouse_id(state).await.map_err(|e| {
-        Box::new(
-            (
-                e.status(),
-                Json(serde_json::json!({"error": e.to_string()})),
-            )
-                .into_response(),
-        )
-    })
+/// One error sentence, the envelope every `/api/` failure uses.
+fn sentence(status: StatusCode, message: &str) -> Response {
+    (status, Json(serde_json::json!({ "error": message }))).into_response()
+}
+
+/// The catalogs `caller` may browse, **as the engine shows them to that caller**.
+///
+/// `SHOW CATALOGS` runs with the caller's own token through `trino::execute_from`, so the
+/// platform's permission bridge filters it (stardelt-platform, authz 8/8); Nova only drops
+/// the engine's own catalogs ([`HIDDEN_CATALOGS`]). The answer is cached for 30 s per
+/// subject: a grant change shows up within half a minute, and browsing the catalog does
+/// not run a statement per click.
+///
+/// Demo mode — and `dev` mode, which has no caller — has one catalog and no permission
+/// bridge: the configured warehouse, exactly as before. An unreachable engine is the
+/// `Err` string from `execute_from` (502 through [`error_status`]).
+pub async fn allowed_catalogs(
+    state: &AppState,
+    caller: Option<&Principal>,
+) -> Result<BTreeSet<String>, String> {
+    let Some(caller) = caller.filter(|_| !state.demo) else {
+        return Ok(BTreeSet::from([state.warehouse_name.clone()]));
+    };
+
+    let sub = caller.identity.sub.clone();
+    let cached = state
+        .catalog_access
+        .lock()
+        .expect("catalog access poisoned")
+        .get(&sub)
+        .and_then(|(at, names)| (at.elapsed() < ACCESS_TTL).then(|| names.clone()));
+    if let Some(names) = cached {
+        return Ok(names);
+    }
+
+    let result =
+        crate::trino::execute_from(state, "SHOW CATALOGS".into(), Some(caller), "nova-catalog")
+            .await?;
+    let mut allowed = BTreeSet::new();
+    for row in &result.rows {
+        if let Some(name) = row.first().and_then(serde_json::Value::as_str)
+            && !name.is_empty()
+            && !HIDDEN_CATALOGS.contains(&name)
+        {
+            allowed.insert(name.to_string());
+        }
+    }
+    state
+        .catalog_access
+        .lock()
+        .expect("catalog access poisoned")
+        .insert(sub, (Instant::now(), allowed.clone()));
+    Ok(allowed)
+}
+
+/// The catalog one request works in, and its Lakekeeper warehouse id.
+///
+/// `requested` is the route's optional `?catalog=`. The answer is
+/// `(catalog name, warehouse id)`; the `Err` is the response to send back: 400 for a name
+/// that is not a catalog name, 403 when the caller may not browse it, 404 when no catalog
+/// by that name exists, 502/503 when Trino or Lakekeeper does not answer. A catalog the
+/// person may not browse is answered 403 and never proxied; the name of a catalog nobody
+/// has is 404.
+// The `Err` is the ready-made refusal every catalog handler returns, and the signature is
+// fixed by the ticket; boxing it at eight call sites would only move the dereference.
+#[allow(clippy::result_large_err)]
+pub async fn catalog_scope(
+    state: &AppState,
+    caller: Option<&Principal>,
+    requested: Option<&str>,
+) -> Result<(String, String), Response> {
+    let requested = requested.map(str::trim).filter(|name| !name.is_empty());
+    if let Some(name) = requested
+        && !valid_catalog(name)
+    {
+        return Err(sentence(
+            StatusCode::BAD_REQUEST,
+            "catalog name must be lower-case letters and digits",
+        ));
+    }
+
+    let allowed = allowed_catalogs(state, caller)
+        .await
+        .map_err(|e| (error_status(&e), Json(serde_json::json!({ "error": e }))).into_response())?;
+
+    let name = match requested {
+        Some(name) => name.to_string(),
+        None if allowed.is_empty() => {
+            return Err(sentence(
+                StatusCode::FORBIDDEN,
+                "no catalog is open to you yet; ask an administrator for access",
+            ));
+        }
+        None if !allowed.contains(&state.warehouse_name) => {
+            // The configured default is not open to this person: the first one that is.
+            allowed
+                .iter()
+                .next()
+                .cloned()
+                .expect("a non-empty set has a first name")
+        }
+        None => state.warehouse_name.clone(),
+    };
+
+    // Resolve the id before refusing: a name no catalog knows is 404 and a catalog the
+    // person may not browse is 403, whichever group owns it.
+    let id = if state.demo {
+        "demo".to_string()
+    } else {
+        match warehouse_id_for(state, &name).await {
+            Ok(id) => id,
+            Err(WarehouseError::NotFound(_)) => {
+                return Err(sentence(
+                    StatusCode::NOT_FOUND,
+                    &format!("catalog '{name}' not found"),
+                ));
+            }
+            Err(e) => {
+                return Err(sentence(e.status(), &e.to_string()));
+            }
+        }
+    };
+    if !allowed.contains(&name) {
+        return Err(sentence(
+            StatusCode::FORBIDDEN,
+            &format!("you cannot browse catalog '{name}'"),
+        ));
+    }
+    Ok((name, id))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/catalog/catalogs",
+    tag = "public",
+    description = "The catalogs the caller may browse, sorted by name, each with its Lakekeeper warehouse id, plus the catalog a request without `?catalog=` uses. The list is what the engine's `SHOW CATALOGS` shows the caller (through the caller's own token), minus the engine's own catalogs (`system`, `information_schema`, `memory`, `tpch`, `tpcds`, `jmx`); it is cached for 30 s. Every other `/api/catalog/*` route takes the same `?catalog=`; a catalog the caller may not browse answers 403 there and is never proxied. Empty when no catalog is open to the caller. `demo` in demo mode.",
+    responses(
+        (status = 200, description = "The browsable catalogs and the default one", body = CatalogsResponse),
+        (status = 502, description = "The query engine or the catalog is not reachable", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "A catalog the engine lists has no warehouse", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub async fn list_catalogs(
+    State(s): State<Arc<AppState>>,
+    caller: Option<axum::Extension<auth::Principal>>,
+) -> Response {
+    let caller = caller.as_ref().map(|c| &c.0);
+    let allowed = match allowed_catalogs(&s, caller).await {
+        Ok(allowed) => allowed,
+        Err(e) => {
+            return (error_status(&e), Json(serde_json::json!({ "error": e }))).into_response();
+        }
+    };
+    let mut catalogs = Vec::with_capacity(allowed.len());
+    for name in allowed {
+        let id = if s.demo {
+            "demo".to_string()
+        } else {
+            match warehouse_id_for(&s, &name).await {
+                Ok(id) => id,
+                Err(e) => {
+                    return (
+                        e.status(),
+                        Json(serde_json::json!({"error": e.to_string()})),
+                    )
+                        .into_response();
+                }
+            }
+        };
+        catalogs.push(CatalogInfo { name, id });
+    }
+    let default = if catalogs.iter().any(|c| c.name == s.warehouse_name) {
+        s.warehouse_name.clone()
+    } else {
+        catalogs
+            .first()
+            .map(|c| c.name.clone())
+            .unwrap_or_else(|| s.warehouse_name.clone())
+    };
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(CatalogsResponse { catalogs, default }),
+    )
+        .into_response()
 }
 
 #[utoipa::path(
@@ -251,21 +515,31 @@ pub async fn warehouse_info(State(s): State<Arc<AppState>>) -> Response {
     get,
     path = "/api/catalog/namespaces",
     tag = "public",
-    description = "List catalog namespaces (schemas). Each namespace is a list of levels.",
+    description = "List one catalog's namespaces (schemas). Each namespace is a list of levels. `?catalog=` picks the catalog; omitted, the default one is used. A catalog the caller may not browse answers 403, a name no catalog knows 404.",
+    params(CatalogParam),
     responses(
-        (status = 200, description = "Namespaces in the warehouse", body = NamespacesResponse),
-        (status = 502, description = "The catalog is not reachable", body = crate::openapi::ErrorResponse),
+        (status = 200, description = "Namespaces in the catalog", body = NamespacesResponse),
+        (status = 400, description = "The catalog name is not lower-case letters and digits", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller may not browse that catalog", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such catalog", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The catalog or the engine is not reachable", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "The configured warehouse does not exist", body = crate::openapi::ErrorResponse),
     )
 )]
-pub async fn list_namespaces(State(s): State<Arc<AppState>>) -> Response {
+pub async fn list_namespaces(
+    State(s): State<Arc<AppState>>,
+    Query(q): Query<CatalogParam>,
+    caller: Option<axum::Extension<auth::Principal>>,
+) -> Response {
+    let caller = caller.as_ref().map(|c| &c.0);
+    let (_, id) = match catalog_scope(&s, caller, q.catalog.as_deref()).await {
+        Ok(scope) => scope,
+        Err(response) => return response,
+    };
     if s.demo {
         let demo = s.demo_state.read().expect("demo state poisoned");
         return Json(demo.namespaces_json()).into_response();
     }
-    let id = match warehouse_id_or_error(&s).await {
-        Ok(v) => v,
-        Err(r) => return *r,
-    };
     proxy(&s, format!("/catalog/v1/{id}/namespaces")).await
 }
 
@@ -273,20 +547,29 @@ pub async fn list_namespaces(State(s): State<Arc<AppState>>) -> Response {
     post,
     path = "/api/catalog/namespaces",
     tag = "internal",
-    description = "Create a schema via Trino (`CREATE SCHEMA IF NOT EXISTS`). UI-only for now: not promised stable.",
+    description = "Create a schema in one catalog via Trino (`CREATE SCHEMA IF NOT EXISTS`). `?catalog=` picks the catalog; omitted, the default one is used. UI-only for now: not promised stable.",
+    params(CatalogParam),
     request_body = CreateNamespaceRequest,
     responses(
         (status = 200, description = "The created schema name", body = CreateNamespaceResponse),
-        (status = 400, description = "Missing name, or the engine refused it", body = crate::openapi::ErrorResponse),
+        (status = 400, description = "Missing name, invalid catalog name, or the engine refused it", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller may not browse that catalog", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such catalog", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The query engine is not reachable", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn create_namespace(
     State(s): State<Arc<AppState>>,
+    Query(q): Query<CatalogParam>,
     caller: Option<axum::Extension<auth::Principal>>,
     // The body extractor has to be last: axum consumes the request for it.
     ApiJson(req): ApiJson<CreateNamespaceRequest>,
 ) -> Response {
+    let caller = caller.as_ref().map(|c| &c.0);
+    let (catalog, _) = match catalog_scope(&s, caller, q.catalog.as_deref()).await {
+        Ok(scope) => scope,
+        Err(response) => return response,
+    };
     let ns = req.namespace.trim();
     if ns.is_empty() {
         return (
@@ -305,10 +588,11 @@ pub async fn create_namespace(
             .into_response();
     }
     let sql = format!(
-        "CREATE SCHEMA IF NOT EXISTS warehouse.{}",
+        "CREATE SCHEMA IF NOT EXISTS {}.{}",
+        data::quote_ident(&catalog),
         data::quote_ident(ns)
     );
-    match crate::trino::execute(&s, sql, caller.as_ref().map(|c| &c.0)).await {
+    match crate::trino::execute(&s, sql, caller).await {
         Ok(_) => Json(serde_json::json!({ "namespace": ns })).into_response(),
         Err(e) => (error_status(&e), Json(serde_json::json!({"error": e}))).into_response(),
     }
@@ -318,25 +602,34 @@ pub async fn create_namespace(
     get,
     path = "/api/catalog/namespaces/{ns}/tables",
     tag = "public",
-    description = "List tables in one namespace.",
+    description = "List tables in one namespace of one catalog. `?catalog=` picks the catalog; omitted, the default one is used.",
     params(
         ("ns" = String, Path, description = "Namespace (schema) name"),
+        CatalogParam,
     ),
     responses(
         (status = 200, description = "Table identifiers in the namespace", body = TablesResponse),
-        (status = 400, description = "The name is not a single path segment", body = crate::openapi::ErrorResponse),
-        (status = 502, description = "The catalog is not reachable", body = crate::openapi::ErrorResponse),
+        (status = 400, description = "The name is not a single path segment, or the catalog name is invalid", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller may not browse that catalog", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such catalog", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The catalog or the engine is not reachable", body = crate::openapi::ErrorResponse),
     )
 )]
-pub async fn list_tables(State(s): State<Arc<AppState>>, Path(ns): Path<String>) -> Response {
+pub async fn list_tables(
+    State(s): State<Arc<AppState>>,
+    Path(ns): Path<String>,
+    Query(q): Query<CatalogParam>,
+    caller: Option<axum::Extension<auth::Principal>>,
+) -> Response {
+    let caller = caller.as_ref().map(|c| &c.0);
+    let (_, id) = match catalog_scope(&s, caller, q.catalog.as_deref()).await {
+        Ok(scope) => scope,
+        Err(response) => return response,
+    };
     if s.demo {
         let demo = s.demo_state.read().expect("demo state poisoned");
         return Json(demo.tables_json(&ns)).into_response();
     }
-    let id = match warehouse_id_or_error(&s).await {
-        Ok(v) => v,
-        Err(r) => return *r,
-    };
     let Some(ns) = path_segment(&ns) else {
         return bad_segment(&ns);
     };
@@ -347,21 +640,31 @@ pub async fn list_tables(State(s): State<Arc<AppState>>, Path(ns): Path<String>)
     get,
     path = "/api/catalog/tables/{ns}/{tbl}",
     tag = "public",
-    description = "Iceberg metadata for one table (metadata location plus the metadata document).",
+    description = "Iceberg metadata for one table (metadata location plus the metadata document). `?catalog=` picks the catalog; omitted, the default one is used.",
     params(
         ("ns" = String, Path, description = "Namespace (schema) name"),
         ("tbl" = String, Path, description = "Table name"),
+        CatalogParam,
     ),
     responses(
         (status = 200, description = "The table metadata document", body = TableMetadataResponse),
-        (status = 400, description = "A name is not a single path segment", body = crate::openapi::ErrorResponse),
-        (status = 404, description = "No such table", body = crate::openapi::ErrorResponse),
+        (status = 400, description = "A name is not a single path segment, or the catalog name is invalid", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller may not browse that catalog", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such catalog or no such table", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The catalog or the engine is not reachable", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn table_metadata(
     State(s): State<Arc<AppState>>,
     Path((ns, tbl)): Path<(String, String)>,
+    Query(q): Query<CatalogParam>,
+    caller: Option<axum::Extension<auth::Principal>>,
 ) -> Response {
+    let caller = caller.as_ref().map(|c| &c.0);
+    let (_, id) = match catalog_scope(&s, caller, q.catalog.as_deref()).await {
+        Ok(scope) => scope,
+        Err(response) => return response,
+    };
     if s.demo {
         let demo = s.demo_state.read().expect("demo state poisoned");
         return match demo.table_metadata_json(&ns, &tbl) {
@@ -373,10 +676,6 @@ pub async fn table_metadata(
                 .into_response(),
         };
     }
-    let id = match warehouse_id_or_error(&s).await {
-        Ok(v) => v,
-        Err(r) => return *r,
-    };
     let (Some(ns), Some(tbl)) = (path_segment(&ns), path_segment(&tbl)) else {
         return bad_segment(&format!("{ns}.{tbl}"));
     };
@@ -385,9 +684,10 @@ pub async fn table_metadata(
 
 /// The last 100 snapshots of a table, newest first (Trino 480 Iceberg syntax).
 /// Names go through `quote_ident` only — never interpolated raw.
-fn history_sql(ns: &str, tbl: &str) -> String {
+fn history_sql(catalog: &str, ns: &str, tbl: &str) -> String {
     format!(
-        "SELECT committed_at, snapshot_id, parent_id, operation, summary FROM warehouse.{}.{} ORDER BY committed_at DESC LIMIT 100",
+        "SELECT committed_at, snapshot_id, parent_id, operation, summary FROM {}.{}.{} ORDER BY committed_at DESC LIMIT 100",
+        crate::data::quote_ident(catalog),
         crate::data::quote_ident(ns),
         crate::data::quote_ident(&format!("{tbl}$snapshots")),
     )
@@ -395,9 +695,10 @@ fn history_sql(ns: &str, tbl: &str) -> String {
 
 /// Move the table's current pointer to an earlier snapshot. The snapshot id is
 /// an `i64`, so it is interpolated as an integer — never as a quoted string.
-fn rollback_sql(ns: &str, tbl: &str, snapshot_id: i64) -> String {
+fn rollback_sql(catalog: &str, ns: &str, tbl: &str, snapshot_id: i64) -> String {
     format!(
-        "ALTER TABLE warehouse.{}.{} EXECUTE rollback_to_snapshot({snapshot_id})",
+        "ALTER TABLE {}.{}.{} EXECUTE rollback_to_snapshot({snapshot_id})",
+        crate::data::quote_ident(catalog),
         crate::data::quote_ident(ns),
         crate::data::quote_ident(tbl),
     )
@@ -472,15 +773,21 @@ fn stringify_snapshot_ids(mut r: crate::trino::QueryResult) -> crate::trino::Que
 pub async fn table_history(
     State(s): State<Arc<AppState>>,
     Path((ns, tbl)): Path<(String, String)>,
+    Query(q): Query<CatalogParam>,
     caller: Option<axum::Extension<auth::Principal>>,
 ) -> Response {
+    let caller = caller.as_ref().map(|c| &c.0);
+    let (catalog, _) = match catalog_scope(&s, caller, q.catalog.as_deref()).await {
+        Ok(scope) => scope,
+        Err(response) => return response,
+    };
     if s.demo {
         return Json(serde_json::json!({"columns": [], "rows": []})).into_response();
     }
     if path_segment(&ns).is_none() || path_segment(&tbl).is_none() {
         return bad_segment(&format!("{ns}.{tbl}"));
     }
-    match crate::trino::execute(&s, history_sql(&ns, &tbl), caller.as_ref().map(|c| &c.0)).await {
+    match crate::trino::execute(&s, history_sql(&catalog, &ns, &tbl), caller).await {
         Ok(r) => Json(stringify_snapshot_ids(r)).into_response(),
         Err(e) => (error_status(&e), Json(serde_json::json!({"error": e}))).into_response(),
     }
@@ -489,9 +796,15 @@ pub async fn table_history(
 pub async fn table_rollback(
     State(s): State<Arc<AppState>>,
     Path((ns, tbl)): Path<(String, String)>,
+    Query(q): Query<CatalogParam>,
     caller: Option<axum::Extension<auth::Principal>>,
     ApiJson(req): ApiJson<RollbackRequest>,
 ) -> Response {
+    let caller = caller.as_ref().map(|c| &c.0);
+    let (catalog, _) = match catalog_scope(&s, caller, q.catalog.as_deref()).await {
+        Ok(scope) => scope,
+        Err(response) => return response,
+    };
     if s.demo {
         return (
             StatusCode::BAD_REQUEST,
@@ -504,8 +817,8 @@ pub async fn table_rollback(
     }
     match crate::trino::execute(
         &s,
-        rollback_sql(&ns, &tbl, req.snapshot_id),
-        caller.as_ref().map(|c| &c.0),
+        rollback_sql(&catalog, &ns, &tbl, req.snapshot_id),
+        caller,
     )
     .await
     {
@@ -546,8 +859,128 @@ fn bad_segment(what: &str) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use super::{WarehouseError, history_sql, path_segment, rollback_sql};
-    use axum::http::StatusCode;
+    use std::collections::{BTreeSet, HashMap};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use axum::{
+        Router,
+        http::HeaderMap,
+        routing::{get, post},
+    };
+    use serde_json::{Value, json};
+
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // Fakes: one Trino that answers `SHOW CATALOGS` per person, one Lakekeeper
+    // -----------------------------------------------------------------------
+
+    /// Answers `SHOW CATALOGS` with the named person's catalogs, as the permission
+    /// bridge does: `X-Trino-User` is the display name (`trino::upstream_headers`).
+    #[derive(Clone, Default)]
+    struct FakeTrino {
+        by_user: HashMap<String, Vec<String>>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    async fn show_catalogs(State(fake): State<FakeTrino>, headers: HeaderMap) -> Json<Value> {
+        fake.calls.fetch_add(1, Ordering::SeqCst);
+        let user = headers
+            .get("x-trino-user")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        let rows: Vec<Value> = fake
+            .by_user
+            .get(user)
+            .map(|names| names.iter().map(|name| json!([name])).collect())
+            .unwrap_or_default();
+        Json(json!({
+            "id": "query_1",
+            "columns": [{"name": "Catalog", "type": "varchar"}],
+            "data": rows,
+            "stats": { "state": "FINISHED" }
+        }))
+    }
+
+    async fn fake_trino(by_user: &[(&str, &[&str])]) -> (String, Arc<AtomicUsize>) {
+        let fake = FakeTrino {
+            by_user: by_user
+                .iter()
+                .map(|(user, names)| {
+                    (
+                        user.to_string(),
+                        names.iter().map(|name| name.to_string()).collect(),
+                    )
+                })
+                .collect(),
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let calls = Arc::clone(&fake.calls);
+        let app = Router::new()
+            .route("/v1/statement", post(show_catalogs))
+            .with_state(fake);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{addr}"), calls)
+    }
+
+    /// The four warehouses the platform seeds (`stardelt-platform` #309).
+    async fn fake_lakekeeper() -> String {
+        let app = Router::new().route(
+            "/management/v1/warehouse",
+            get(|| async {
+                Json(json!({
+                    "warehouses": [
+                        {"id": "wid-warehouse", "name": "warehouse"},
+                        {"id": "wid-finance", "name": "finance"},
+                        {"id": "wid-product", "name": "product"},
+                        {"id": "wid-sandbox", "name": "sandbox"},
+                    ]
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    fn person(name: &str) -> Principal {
+        Principal {
+            identity: crate::auth::Identity {
+                sub: name.into(),
+                display_name: name.into(),
+                email: None,
+                name: None,
+                groups: Vec::new(),
+                roles: Vec::new(),
+                groups_overage: false,
+                is_admin: false,
+            },
+            via: "session",
+            access_token: None,
+        }
+    }
+
+    async fn error_sentence(response: Response) -> (StatusCode, String) {
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let value: Value = serde_json::from_slice(&bytes).expect("json");
+        (
+            status,
+            value["error"]
+                .as_str()
+                .expect("an error sentence")
+                .to_string(),
+        )
+    }
 
     #[test]
     fn warehouse_errors_carry_upstream_statuses() {
@@ -589,6 +1022,229 @@ mod tests {
     }
 
     #[test]
+    fn valid_catalog_is_lower_case_letters_and_digits() {
+        assert!(valid_catalog("finance"));
+        assert!(valid_catalog("a"));
+        assert!(valid_catalog(&"a".repeat(40)), "40 characters are allowed");
+        assert!(!valid_catalog("System"), "upper case is refused");
+        assert!(!valid_catalog("a-b"), "a dash is not a catalog name");
+        assert!(!valid_catalog(""), "an empty name is refused");
+        assert!(
+            !valid_catalog(&"a".repeat(41)),
+            "41 characters are too long"
+        );
+        assert!(
+            !valid_catalog("1finance"),
+            "the first character is a letter"
+        );
+    }
+
+    #[tokio::test]
+    async fn each_person_sees_only_their_catalogs() {
+        let (trino, calls) = fake_trino(&[
+            ("ada", &["warehouse", "finance", "system", "tpch"]),
+            ("bob", &["warehouse", "product"]),
+            ("outsider", &["warehouse"]),
+        ])
+        .await;
+        let lakekeeper = fake_lakekeeper().await;
+        let state = crate::router_tests::catalog_scope_test_state(&trino, &lakekeeper);
+        let set = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<BTreeSet<_>>();
+
+        // The finance member sees her group's catalog plus the open one; the engine's own
+        // catalogs (`system`, `tpch`) are dropped even though `SHOW CATALOGS` lists them.
+        let ada = person("ada");
+        assert_eq!(
+            allowed_catalogs(&state, Some(&ada))
+                .await
+                .expect("the engine answers"),
+            set(&["finance", "warehouse"])
+        );
+        // A member of the product group sees product, not finance.
+        let bob = person("bob");
+        assert_eq!(
+            allowed_catalogs(&state, Some(&bob))
+                .await
+                .expect("the engine answers"),
+            set(&["product", "warehouse"])
+        );
+        // An outsider sees exactly what is left open to everybody.
+        let outsider = person("outsider");
+        assert_eq!(
+            allowed_catalogs(&state, Some(&outsider))
+                .await
+                .expect("the engine answers"),
+            set(&["warehouse"])
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 3, "one statement per person");
+
+        // Within 30 s the cached answer is used: a second call asks nobody.
+        assert_eq!(
+            allowed_catalogs(&state, Some(&ada))
+                .await
+                .expect("the engine answers"),
+            set(&["finance", "warehouse"])
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "a second call within 30 s must not run SHOW CATALOGS again"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_caller_gets_the_configured_warehouse_without_asking_the_engine() {
+        let (trino, calls) = fake_trino(&[]).await;
+        let lakekeeper = fake_lakekeeper().await;
+        let state = crate::router_tests::catalog_scope_test_state(&trino, &lakekeeper);
+
+        assert_eq!(
+            allowed_catalogs(&state, None).await.expect("one catalog"),
+            BTreeSet::from(["warehouse".to_string()])
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "dev mode runs no statement"
+        );
+
+        let (name, id) = catalog_scope(&state, None, None)
+            .await
+            .expect("the default catalog resolves");
+        assert_eq!((name.as_str(), id.as_str()), ("warehouse", "wid-warehouse"));
+    }
+
+    #[tokio::test]
+    async fn catalog_scope_names_the_reason_for_a_refusal() {
+        let (trino, _) = fake_trino(&[("ada", &["warehouse", "finance", "system", "tpch"])]).await;
+        let lakekeeper = fake_lakekeeper().await;
+        let state = crate::router_tests::catalog_scope_test_state(&trino, &lakekeeper);
+        let ada = person("ada");
+
+        let (name, id) = catalog_scope(&state, Some(&ada), Some("finance"))
+            .await
+            .expect("a catalog she may browse");
+        assert_eq!((name.as_str(), id.as_str()), ("finance", "wid-finance"));
+
+        // Known to the catalog, not in her list: 403 with the sentence, never proxied.
+        let (status, sentence) = error_sentence(
+            catalog_scope(&state, Some(&ada), Some("product"))
+                .await
+                .expect_err("not hers"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(sentence, "you cannot browse catalog 'product'");
+
+        // No catalog by that name: 404.
+        let (status, sentence) = error_sentence(
+            catalog_scope(&state, Some(&ada), Some("nope"))
+                .await
+                .expect_err("unknown"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(sentence, "catalog 'nope' not found");
+
+        // A hidden engine catalog is not offered and no warehouse carries it: 404.
+        let (status, _) = error_sentence(
+            catalog_scope(&state, Some(&ada), Some("system"))
+                .await
+                .expect_err("hidden"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let (status, sentence) = error_sentence(
+            catalog_scope(&state, Some(&ada), Some("System"))
+                .await
+                .expect_err("invalid"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            sentence,
+            "catalog name must be lower-case letters and digits"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_person_with_no_catalog_is_told_whom_to_ask() {
+        let (trino, _) = fake_trino(&[("nobody", &["system", "tpch"])]).await;
+        let lakekeeper = fake_lakekeeper().await;
+        let state = crate::router_tests::catalog_scope_test_state(&trino, &lakekeeper);
+        let nobody = person("nobody");
+
+        let (status, sentence) = error_sentence(
+            catalog_scope(&state, Some(&nobody), None)
+                .await
+                .expect_err("nothing to default to"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            sentence,
+            "no catalog is open to you yet; ask an administrator for access"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_engine_or_catalog_is_502() {
+        let lakekeeper = fake_lakekeeper().await;
+        let engine_down =
+            crate::router_tests::catalog_scope_test_state("http://127.0.0.1:1", &lakekeeper);
+        let ada = person("ada");
+        let (status, sentence) = error_sentence(
+            catalog_scope(&engine_down, Some(&ada), None)
+                .await
+                .expect_err("no engine"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(sentence, "the query engine is not reachable");
+
+        let (trino, _) = fake_trino(&[("ada", &["warehouse", "finance"])]).await;
+        // Nothing listens on that port: the warehouse list cannot be read.
+        let catalog_down =
+            crate::router_tests::catalog_scope_test_state(&trino, "http://127.0.0.1:1");
+        let (status, sentence) = error_sentence(
+            catalog_scope(&catalog_down, Some(&ada), Some("finance"))
+                .await
+                .expect_err("no catalog"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(sentence, "the catalog is not reachable");
+    }
+
+    #[tokio::test]
+    async fn the_catalog_list_is_the_defaults_and_nothing_else_in_dev_mode() {
+        let (trino, _) = fake_trino(&[]).await;
+        let lakekeeper = fake_lakekeeper().await;
+        let state = crate::router_tests::catalog_scope_test_state(&trino, &lakekeeper);
+
+        let response = list_catalogs(State(Arc::clone(&state)), None).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let body: Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(
+            body,
+            json!({
+                "catalogs": [{"name": "warehouse", "id": "wid-warehouse"}],
+                "default": "warehouse"
+            })
+        );
+    }
+    #[test]
     fn plain_names_pass_through() {
         assert_eq!(
             path_segment("nyc_taxi-2024").as_deref(),
@@ -614,29 +1270,37 @@ mod tests {
 
     #[test]
     fn history_sql_quotes_the_metadata_table() {
-        let sql = history_sql("demo", "t");
+        let sql = history_sql("warehouse", "demo", "t");
         assert!(
             sql.contains("\"t$snapshots\""),
             "metadata table must stay quoted: {sql}"
         );
         assert!(sql.contains("LIMIT 100"), "history is bounded: {sql}");
         assert!(sql.contains("\"demo\""), "namespace must be quoted: {sql}");
+        assert!(
+            sql.contains("\"warehouse\""),
+            "catalog must be quoted: {sql}"
+        );
     }
 
     #[test]
     fn rollback_sql_embeds_only_an_integer() {
         assert_eq!(
-            rollback_sql("a", "t", 42),
-            "ALTER TABLE warehouse.\"a\".\"t\" EXECUTE rollback_to_snapshot(42)"
+            rollback_sql("finance", "a", "t", 42),
+            "ALTER TABLE \"finance\".\"a\".\"t\" EXECUTE rollback_to_snapshot(42)"
         );
     }
 
     #[test]
     fn sql_builders_escape_double_quotes() {
-        let sql = history_sql("a\"b", "t");
+        let sql = history_sql("warehouse", "a\"b", "t");
         assert!(sql.contains("\"a\"\"b\""), "quote must be doubled: {sql}");
-        let sql = rollback_sql("a", "x\"y", 7);
+        let sql = rollback_sql("fin\"ance", "a", "x\"y", 7);
         assert!(sql.contains("\"x\"\"y\""), "quote must be doubled: {sql}");
+        assert!(
+            sql.contains("\"fin\"\"ance\""),
+            "the catalog is an identifier too: {sql}"
+        );
         // No raw interpolation: the doubled quote is the only quoting present.
         assert!(!sql.contains("\"y\"\""), "unexpected quoting: {sql}");
     }

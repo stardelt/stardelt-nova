@@ -10,16 +10,68 @@
     "version": "0.1.0"
   },
   "paths": {
+    "/api/catalog/catalogs": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "description": "The catalogs the caller may browse, sorted by name, each with its Lakekeeper warehouse id, plus the catalog a request without `?catalog=` uses. The list is what the engine's `SHOW CATALOGS` shows the caller (through the caller's own token), minus the engine's own catalogs (`system`, `information_schema`, `memory`, `tpch`, `tpcds`, `jmx`); it is cached for 30 s. Every other `/api/catalog/*` route takes the same `?catalog=`; a catalog the caller may not browse answers 403 there and is never proxied. Empty when no catalog is open to the caller. `demo` in demo mode.",
+        "operationId": "list_catalogs",
+        "responses": {
+          "200": {
+            "description": "The browsable catalogs and the default one",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CatalogsResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The query engine or the catalog is not reachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A catalog the engine lists has no warehouse",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/catalog/namespaces": {
       "get": {
         "tags": [
           "public"
         ],
-        "description": "List catalog namespaces (schemas). Each namespace is a list of levels.",
+        "description": "List one catalog's namespaces (schemas). Each namespace is a list of levels. `?catalog=` picks the catalog; omitted, the default one is used. A catalog the caller may not browse answers 403, a name no catalog knows 404.",
         "operationId": "list_namespaces",
+        "parameters": [
+          {
+            "name": "catalog",
+            "in": "query",
+            "description": "Catalog to work in (`warehouse`, `finance`, …). Omitted, the default catalog is used.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
-            "description": "Namespaces in the warehouse",
+            "description": "Namespaces in the catalog",
             "content": {
               "application/json": {
                 "schema": {
@@ -28,8 +80,48 @@
               }
             }
           },
+          "400": {
+            "description": "The catalog name is not lower-case letters and digits",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not browse that catalog",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such catalog",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "502": {
-            "description": "The catalog is not reachable",
+            "description": "The catalog or the engine is not reachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The configured warehouse does not exist",
             "content": {
               "application/json": {
                 "schema": {
@@ -44,8 +136,19 @@
         "tags": [
           "internal"
         ],
-        "description": "Create a schema via Trino (`CREATE SCHEMA IF NOT EXISTS`). UI-only for now: not promised stable.",
+        "description": "Create a schema in one catalog via Trino (`CREATE SCHEMA IF NOT EXISTS`). `?catalog=` picks the catalog; omitted, the default one is used. UI-only for now: not promised stable.",
         "operationId": "create_namespace",
+        "parameters": [
+          {
+            "name": "catalog",
+            "in": "query",
+            "description": "Catalog to work in (`warehouse`, `finance`, …). Omitted, the default catalog is used.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -68,7 +171,27 @@
             }
           },
           "400": {
-            "description": "Missing name, or the engine refused it",
+            "description": "Missing name, invalid catalog name, or the engine refused it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not browse that catalog",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such catalog",
             "content": {
               "application/json": {
                 "schema": {
@@ -95,7 +218,7 @@
         "tags": [
           "public"
         ],
-        "description": "List tables in one namespace.",
+        "description": "List tables in one namespace of one catalog. `?catalog=` picks the catalog; omitted, the default one is used.",
         "operationId": "list_tables",
         "parameters": [
           {
@@ -103,6 +226,15 @@
             "in": "path",
             "description": "Namespace (schema) name",
             "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "catalog",
+            "in": "query",
+            "description": "Catalog to work in (`warehouse`, `finance`, …). Omitted, the default catalog is used.",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -120,7 +252,27 @@
             }
           },
           "400": {
-            "description": "The name is not a single path segment",
+            "description": "The name is not a single path segment, or the catalog name is invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not browse that catalog",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such catalog",
             "content": {
               "application/json": {
                 "schema": {
@@ -130,7 +282,7 @@
             }
           },
           "502": {
-            "description": "The catalog is not reachable",
+            "description": "The catalog or the engine is not reachable",
             "content": {
               "application/json": {
                 "schema": {
@@ -147,7 +299,7 @@
         "tags": [
           "public"
         ],
-        "description": "Iceberg metadata for one table (metadata location plus the metadata document).",
+        "description": "Iceberg metadata for one table (metadata location plus the metadata document). `?catalog=` picks the catalog; omitted, the default one is used.",
         "operationId": "table_metadata",
         "parameters": [
           {
@@ -167,6 +319,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "catalog",
+            "in": "query",
+            "description": "Catalog to work in (`warehouse`, `finance`, …). Omitted, the default catalog is used.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -181,7 +342,17 @@
             }
           },
           "400": {
-            "description": "A name is not a single path segment",
+            "description": "A name is not a single path segment, or the catalog name is invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not browse that catalog",
             "content": {
               "application/json": {
                 "schema": {
@@ -191,7 +362,17 @@
             }
           },
           "404": {
-            "description": "No such table",
+            "description": "No such catalog or no such table",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The catalog or the engine is not reachable",
             "content": {
               "application/json": {
                 "schema": {
@@ -208,7 +389,7 @@
         "tags": [
           "public"
         ],
-        "description": "Set or remove one column's description. The column must be a field of the current schema, matched exactly. Nova runs `COMMENT ON COLUMN warehouse.<ns>.<tbl>.<column>` through Trino **as the caller** (source `nova-catalog`), because a column description lives in a new Iceberg schema and only the engine writes it. Same 4,000-character limit and null rule as the table description. The interim rule is enforced by Nova; the catalog does not enforce it yet. Demo mode answers 503.",
+        "description": "Set or remove one column's description. The column must be a field of the current schema, matched exactly. Nova runs `COMMENT ON COLUMN <catalog>.<ns>.<tbl>.<column>` through Trino **as the caller** (source `nova-catalog`), because a column description lives in a new Iceberg schema and only the engine writes it. `?catalog=` picks the catalog. Same 4,000-character limit and null rule as the table description. The interim rule is enforced by Nova; the catalog does not enforce it yet. Demo mode answers 503.",
         "operationId": "update_column",
         "parameters": [
           {
@@ -237,6 +418,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "catalog",
+            "in": "query",
+            "description": "Catalog to work in (`warehouse`, `finance`, …). Omitted, the default catalog is used.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -261,7 +451,7 @@
             }
           },
           "400": {
-            "description": "The body is invalid",
+            "description": "The body is invalid, or the catalog name is invalid",
             "content": {
               "application/json": {
                 "schema": {
@@ -271,7 +461,7 @@
             }
           },
           "403": {
-            "description": "Only the owner group and administrators may edit",
+            "description": "The caller may not browse that catalog, or only the owner group and administrators may edit",
             "content": {
               "application/json": {
                 "schema": {
@@ -281,7 +471,7 @@
             }
           },
           "404": {
-            "description": "No such table or no such column in the current schema",
+            "description": "No such catalog, no such table or no such column in the current schema",
             "content": {
               "application/json": {
                 "schema": {
@@ -318,7 +508,7 @@
         "tags": [
           "public"
         ],
-        "description": "A table's documentation: the Iceberg `comment` as `description`, the `stardelt.tags`/`stardelt.owner`/`stardelt.domain` custom properties, and the description and type of every column of the **current** schema. `canEdit`/`editRule` apply Nova's interim rule: until the catalog enforces permissions, Nova decides who may edit, and anyone who reaches Lakekeeper or Trino directly can still change these properties. Demo mode answers 503.",
+        "description": "A table's documentation: the Iceberg `comment` as `description`, the `stardelt.tags`/`stardelt.owner`/`stardelt.domain` custom properties, and the description and type of every column of the **current** schema. `?catalog=` picks the catalog. `canEdit`/`editRule` apply Nova's interim rule: until the catalog enforces permissions, Nova decides who may edit, and anyone who reaches Lakekeeper or Trino directly can still change these properties. Demo mode answers 503.",
         "operationId": "read",
         "parameters": [
           {
@@ -338,6 +528,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "catalog",
+            "in": "query",
+            "description": "Catalog to work in (`warehouse`, `finance`, …). Omitted, the default catalog is used.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -352,7 +551,17 @@
             }
           },
           "400": {
-            "description": "A name is not a single path segment",
+            "description": "A name is not a single path segment, or the catalog name is invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not browse that catalog",
             "content": {
               "application/json": {
                 "schema": {
@@ -362,7 +571,7 @@
             }
           },
           "404": {
-            "description": "No such table",
+            "description": "No such catalog or no such table",
             "content": {
               "application/json": {
                 "schema": {
@@ -397,7 +606,7 @@
         "tags": [
           "public"
         ],
-        "description": "Set or remove a table's description, tags, owner and domain in one Lakekeeper commit. Every key is optional: absent changes nothing, `null` (or an empty tag list, or a blank description) removes the property, and a write with nothing to change sends no commit. Description at most 4,000 characters; at most 20 unique tags `^[a-z0-9][a-z0-9_-]{0,31}$`; owner a group name; domain `^[a-z0-9][a-z0-9_-]{0,39}$`. An ownerless table may be edited by anybody, but the request must then set `owner` to one of the caller's own groups. **The interim rule is enforced by Nova; the catalog does not enforce it yet** — anyone who reaches Lakekeeper or Trino directly can still change these properties. Edits of one table are serialised by Nova and a contended commit is retried; a catalog that stays busy answers 502 `the catalog is busy, try again`. Demo mode answers 503.",
+        "description": "Set or remove a table's description, tags, owner and domain in one Lakekeeper commit. `?catalog=` picks the catalog. Every key is optional: absent changes nothing, `null` (or an empty tag list, or a blank description) removes the property, and a write with nothing to change sends no commit. Description at most 4,000 characters; at most 20 unique tags `^[a-z0-9][a-z0-9_-]{0,31}$`; owner a group name; domain `^[a-z0-9][a-z0-9_-]{0,39}$`. An ownerless table may be edited by anybody, but the request must then set `owner` to one of the caller's own groups. **The interim rule is enforced by Nova; the catalog does not enforce it yet** — anyone who reaches Lakekeeper or Trino directly can still change these properties. Edits of one table are serialised by Nova and a contended commit is retried; a catalog that stays busy answers 502 `the catalog is busy, try again`. Demo mode answers 503.",
         "operationId": "update",
         "parameters": [
           {
@@ -414,6 +623,15 @@
             "in": "path",
             "description": "Table name",
             "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "catalog",
+            "in": "query",
+            "description": "Catalog to work in (`warehouse`, `finance`, …). Omitted, the default catalog is used.",
+            "required": false,
             "schema": {
               "type": "string"
             }
@@ -441,7 +659,7 @@
             }
           },
           "400": {
-            "description": "The body is invalid, or the table has no owner and this request does not claim it",
+            "description": "The body is invalid, the catalog name is invalid, or the table has no owner and this request does not claim it",
             "content": {
               "application/json": {
                 "schema": {
@@ -451,7 +669,7 @@
             }
           },
           "403": {
-            "description": "Only the owner group and administrators may edit",
+            "description": "The caller may not browse that catalog, or only the owner group and administrators may edit",
             "content": {
               "application/json": {
                 "schema": {
@@ -461,7 +679,7 @@
             }
           },
           "404": {
-            "description": "No such table",
+            "description": "No such catalog or no such table",
             "content": {
               "application/json": {
                 "schema": {
@@ -3069,6 +3287,45 @@
           },
           "readAt": {
             "type": "string"
+          }
+        }
+      },
+      "CatalogInfo": {
+        "type": "object",
+        "description": "One catalog the caller may browse, with its Lakekeeper warehouse id.",
+        "required": [
+          "name",
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The Lakekeeper warehouse id behind that name."
+          },
+          "name": {
+            "type": "string",
+            "description": "Catalog name, as the engine and the catalog spell it (`warehouse`, `finance`, …)."
+          }
+        }
+      },
+      "CatalogsResponse": {
+        "type": "object",
+        "description": "`GET /api/catalog/catalogs`: the catalogs the caller may browse, sorted by name.",
+        "required": [
+          "catalogs",
+          "default"
+        ],
+        "properties": {
+          "catalogs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CatalogInfo"
+            },
+            "description": "Every catalog the caller may browse (`?catalog=` accepts any of these names)."
+          },
+          "default": {
+            "type": "string",
+            "description": "The catalog a request without `?catalog=` works in."
           }
         }
       },

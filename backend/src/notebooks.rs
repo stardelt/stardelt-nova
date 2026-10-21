@@ -1517,7 +1517,6 @@ mod tests {
     use jsonwebtoken::jwk::Jwk;
     use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
     use serde_json::{Value, json};
-    use tokio::sync::OnceCell;
     use tower::ServiceExt;
 
     use crate::auth::{
@@ -1546,7 +1545,8 @@ mod tests {
             superset_url: "http://127.0.0.1:1".into(),
             jupyterhub_url: "http://127.0.0.1:1".into(),
             warehouse_name: "warehouse".into(),
-            warehouse_id: OnceCell::new(),
+            catalog_ids: std::sync::RwLock::new(std::collections::HashMap::new()),
+            catalog_access: std::sync::Mutex::new(std::collections::HashMap::new()),
             http: reqwest::Client::new(),
             demo: false,
             forward_identity: false,
