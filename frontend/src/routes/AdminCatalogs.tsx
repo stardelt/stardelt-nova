@@ -9,6 +9,7 @@ import {
   type AdminCatalogGrant,
 } from '../api'
 import ErrorBox from '../components/ErrorBox'
+import LayerBadge from '../components/LayerBadge'
 
 // Administrator view of every catalog and its grants (stardelt-nova#251), and the one
 // write (stardelt-nova#253): an administrator changes the owner, managed access and
@@ -77,12 +78,10 @@ export default function AdminCatalogs() {
   const [pending, setPending] = useState<Record<string, Pending>>({})
   const [outcomes, setOutcomes] = useState<Record<string, Outcome>>({})
 
-  // The API sorts by name; sorting here as well keeps the page honest if the answer ever
-  // arrives in another order, and both views use the same order.
-  const rows = useMemo(
-    () => [...(catalogs.data ?? [])].sort((a, b) => a.name.localeCompare(b.name)),
-    [catalogs.data],
-  )
+  // The API orders the rows (stardelt-nova#109): bronze, silver, gold first, then
+  // alphabetically. Both views use that order, so a list the API already sorted is never
+  // rearranged here.
+  const rows = catalogs.data ?? []
 
   // Every group the page knows, for both datalists in the dialog: owners and grantees.
   const knownGroups = useMemo(() => {
@@ -302,7 +301,10 @@ function ByCatalog({
             return (
               <tr key={catalog.name} className="border-t border-border/70">
                 <td className="td px-5 py-3">
-                  <div className="font-mono font-medium break-words">{catalog.name}</div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-mono font-medium break-words">{catalog.name}</span>
+                    <LayerBadge layer={catalog.layer} />
+                  </div>
                   {catalog.displayName && (
                     <div className="text-xs text-text-mute break-words">{catalog.displayName}</div>
                   )}

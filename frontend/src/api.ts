@@ -48,8 +48,13 @@ export type Warehouse = { name: string; id: string }
  * One catalog the caller may browse (`GET /api/catalog/catalogs`): the name the SQL
  * addresses and the Lakekeeper warehouse id behind it. A catalog a person may not
  * browse is not in the list at all — the engine's `SHOW CATALOGS` filters it.
+ *
+ * `layer` is the medallion layer Nova knows for the catalog (stardelt-nova#109):
+ * `bronze`, `silver` or `gold`, from the `stardelt.io/layer` label on the `Catalog`
+ * resource or the catalog's own name. The API omits it for every other catalog, and
+ * sends the list already ordered bronze, silver, gold, then alphabetically.
  */
-export type Catalog = { name: string; id: string }
+export type Catalog = { name: string; id: string; layer?: string | null }
 
 export type CatalogList = { catalogs: Catalog[]; default: string }
 
@@ -59,9 +64,11 @@ export type CatalogList = { catalogs: Catalog[]; default: string }
  * commit among the loaded tables (null when none has one). `truncated` means `records`
  * and `sizeBytes` cover the first 200 tables while `tables` stays exact. `error` is the
  * sentence for a catalog whose scan failed; its numbers are then zeros, never omitted.
+ * `layer` and the row order are the catalog layers of stardelt-nova#109.
  */
 export type CatalogStat = {
   name: string
+  layer?: string | null
   schemas: number
   tables: number
   records: number
@@ -321,6 +328,8 @@ export type AppDetail = {
 export type AdminCatalog = {
   /** `metadata.name`, also the name the SQL addresses and the warehouse name. */
   name: string
+  /** The medallion layer (stardelt-nova#109), from the label or the name; absent otherwise. */
+  layer?: string | null
   displayName: string | null
   description: string | null
   /** The one owning group; ownership means `manage`, not `select`. */
