@@ -3776,7 +3776,18 @@ test.describe('admin catalogs', () => {
     await expect(rows.nth(1).locator('td').first().getByText('Silver', { exact: true })).toBeVisible()
     await expect(rows.nth(2).locator('td').first().getByText('Gold', { exact: true })).toBeVisible()
     await expect(rows.nth(3).locator('td').first().getByText(/^(Bronze|Silver|Gold)$/)).toHaveCount(0)
+    judge('/admin/catalogs', await auditPage(page))
     await context.close()
+
+    // The same badge and the same order on the light theme; U7 checks its contrast.
+    const light = await open(browser, {
+      catalogs,
+      init: () => { localStorage.setItem('stardelt-nova:theme', 'light') },
+    })
+    await light.page.goto('/admin/catalogs')
+    await expect(light.page.getByRole('table', { name: 'All catalogs' })).toBeVisible()
+    judge('/admin/catalogs', await auditPage(light.page))
+    await light.context.close()
   })
 
   test('matrix_shows_groups_by_catalog_and_filters', async ({ browser }) => {
@@ -4324,6 +4335,7 @@ test.describe('overview metrics', () => {
     await expect(rows.nth(2).getByText('Gold', { exact: true })).toBeVisible()
     // Warehouse is not a medallion layer: no badge is invented for it.
     await expect(rows.nth(3).getByText(/^(Bronze|Silver|Gold)$/)).toHaveCount(0)
+    judge('/', await auditPage(page))
     await context.close()
   })
 
