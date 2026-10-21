@@ -196,6 +196,47 @@
         }
       }
     },
+    "/api/catalog/metrics": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "description": "What is in each catalog the caller may browse: schemas, tables, rows, bytes on the object store and the newest commit, plus the sums. The catalog list is the caller's own `SHOW CATALOGS` (`GET /api/catalog/catalogs`); a catalog the caller may not browse is never read and never appears. The numbers come from the catalog's Iceberg metadata (the current snapshot's `total-records` and `total-files-size`), so the endpoint runs no query. They are cached per catalog for 60 s — they describe the catalog, not the person — and at most 200 tables per catalog are loaded: `truncated` says the rows and bytes are a sample while `tables` stays exact. A catalog that cannot be read is listed with zeros and an `error` sentence; only an unreachable engine or catalog fails the request with 502. 403 when no catalog is open to the caller. Never cached by the client.",
+        "operationId": "get",
+        "responses": {
+          "200": {
+            "description": "One entry per browsable catalog, sorted by name, with the totals",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MetricsResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "No catalog is open to the caller",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The query engine is not reachable, so the catalogs cannot be named",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/catalog/namespaces": {
       "get": {
         "tags": [
@@ -3630,6 +3671,80 @@
           }
         }
       },
+      "CatalogMetricsView": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CatalogStats"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "error": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Why this catalog could not be read — absent for a catalog that was. A sentence,\nnever URL, token or stack trace."
+              }
+            }
+          }
+        ],
+        "description": "One catalog in the answer: the numbers, plus the sentence when the scan failed. A\nfailed catalog is zeros, never omitted — a page that silently drops a catalog says\n\"you have none\", which is not what happened."
+      },
+      "CatalogStats": {
+        "type": "object",
+        "description": "One catalog's numbers, as the endpoint answers them.",
+        "required": [
+          "name",
+          "schemas",
+          "tables",
+          "records",
+          "sizeBytes",
+          "truncated"
+        ],
+        "properties": {
+          "lastCommitMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The newest commit among the loaded tables (Unix ms); `null` when none has one."
+          },
+          "name": {
+            "type": "string",
+            "description": "Catalog name, as the engine and the catalog spell it."
+          },
+          "records": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Rows in the loaded tables' current snapshots.",
+            "minimum": 0
+          },
+          "schemas": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Schemas (namespaces) in the catalog.",
+            "minimum": 0
+          },
+          "sizeBytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Bytes the loaded tables' current snapshots occupy on the object store.",
+            "minimum": 0
+          },
+          "tables": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Tables in the catalog — every one the catalog lists, loaded or not.",
+            "minimum": 0
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "More tables exist than the endpoint loads (200 per catalog): `tables` is exact,\n`records` and `sizeBytes` cover the first 200 only."
+          }
+        }
+      },
       "CatalogsResponse": {
         "type": "object",
         "description": "`GET /api/catalog/catalogs`: the catalogs the caller may browse, sorted by name.",
@@ -4052,6 +4167,77 @@
           },
           "warehouse": {
             "type": "string"
+          }
+        }
+      },
+      "MetricsResponse": {
+        "type": "object",
+        "description": "`GET /api/catalog/metrics`: what is in each catalog the caller may browse.",
+        "required": [
+          "catalogs",
+          "totals",
+          "generatedAt"
+        ],
+        "properties": {
+          "catalogs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CatalogMetricsView"
+            },
+            "description": "One entry per catalog the caller may browse, sorted by name."
+          },
+          "generatedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When this answer was built (Unix ms). Per-catalog numbers may be up to a minute\nolder (they are cached).",
+            "minimum": 0
+          },
+          "totals": {
+            "$ref": "#/components/schemas/MetricsTotals",
+            "description": "The sums over `catalogs`."
+          }
+        }
+      },
+      "MetricsTotals": {
+        "type": "object",
+        "description": "The sums over every catalog in the answer. Failed catalogs contribute their zeros.",
+        "required": [
+          "catalogs",
+          "schemas",
+          "tables",
+          "records",
+          "sizeBytes"
+        ],
+        "properties": {
+          "catalogs": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many catalogs are listed.",
+            "minimum": 0
+          },
+          "records": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Rows in the loaded tables' current snapshots.",
+            "minimum": 0
+          },
+          "schemas": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Schemas across them.",
+            "minimum": 0
+          },
+          "sizeBytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Bytes the loaded tables' snapshots occupy.",
+            "minimum": 0
+          },
+          "tables": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Tables across them.",
+            "minimum": 0
           }
         }
       },

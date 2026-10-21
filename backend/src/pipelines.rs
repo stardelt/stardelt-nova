@@ -4607,6 +4607,7 @@ mod tests {
             warehouse_name: "warehouse".into(),
             catalog_ids: std::sync::RwLock::new(std::collections::HashMap::new()),
             catalog_access: std::sync::Mutex::new(std::collections::HashMap::new()),
+            catalog_metrics: std::sync::Mutex::new(std::collections::HashMap::new()),
             http: reqwest::Client::new(),
             demo: false,
             forward_identity: false,
