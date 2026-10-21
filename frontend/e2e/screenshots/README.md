@@ -35,3 +35,9 @@ holds browse and `analytics` select), `product` and `sandbox` (no status yet, so
 inside its card. `admin-catalogs-matrix-1280-dark.png` is the same answer as a matrix:
 groups down, catalogs across, the owner prefixed in its cell and an em dash where a group
 holds nothing.
+
+`overview-metrics-*.png` — the Overview with catalog metrics (stardelt-nova#250) at
+1280×800 and 360×740, dark and light, from the built demo UI: the Catalogs and Tables
+tiles show the totals, the Catalogs card lists `warehouse` with its schemas, tables, size,
+rows and last change, and the static Iceberg tile is gone. The phone width shows the
+catalog table scrolling inside its card while the page itself does not widen.

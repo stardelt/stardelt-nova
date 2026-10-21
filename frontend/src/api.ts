@@ -53,6 +53,40 @@ export type Catalog = { name: string; id: string }
 
 export type CatalogList = { catalogs: Catalog[]; default: string }
 
+/**
+ * One catalog's numbers (`GET /api/catalog/metrics`, stardelt-nova#249), read from the
+ * catalog's Iceberg metadata rather than counted by a query. `lastCommitMs` is the newest
+ * commit among the loaded tables (null when none has one). `truncated` means `records`
+ * and `sizeBytes` cover the first 200 tables while `tables` stays exact. `error` is the
+ * sentence for a catalog whose scan failed; its numbers are then zeros, never omitted.
+ */
+export type CatalogStat = {
+  name: string
+  schemas: number
+  tables: number
+  records: number
+  sizeBytes: number
+  lastCommitMs: number | null
+  truncated: boolean
+  error?: string
+}
+
+/** The sums over the catalogs the caller may see; a failed catalog contributes its zeros. */
+export type CatalogMetricsTotals = {
+  catalogs: number
+  schemas: number
+  tables: number
+  records: number
+  sizeBytes: number
+}
+
+/** `GET /api/catalog/metrics`: one row per catalog the caller may browse, plus the sums. */
+export type CatalogMetrics = {
+  catalogs: CatalogStat[]
+  totals: CatalogMetricsTotals
+  generatedAt: number
+}
+
 export type NamespaceList = { namespaces: string[][] }
 
 export type TableIdentifier = { namespace: string[]; name: string }
@@ -867,6 +901,8 @@ export const api = {
   warehouse:    ()                            => jget<Warehouse>('/api/catalog/warehouse'),
   /** The catalogs the caller may browse and the one a request without `?catalog=` uses. */
   catalogs:     ()                            => jget<CatalogList>('/api/catalog/catalogs'),
+  /** Schemas, tables, rows, bytes and the newest commit per catalog, plus the totals (#249). */
+  catalogMetrics: ()                          => jget<CatalogMetrics>('/api/catalog/metrics'),
   namespaces:   (catalog?: string)            => jget<NamespaceList>(catalogPath('/api/catalog/namespaces', catalog)),
   tables:       (ns: string, catalog?: string) =>
     jget<TableList>(catalogPath(`/api/catalog/namespaces/${seg(ns)}/tables`, catalog)),

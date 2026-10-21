@@ -1,7 +1,7 @@
 import { test, expect, type Browser, type Locator, type Page, type Route } from '@playwright/test'
 import { KNOWN, type Known } from './known'
 import { auditPage, focusAudit, type Finding } from './audit'
-import { formatTime, setTimeDisplay, sqlTableRef } from '../src/format'
+import { formatTime, relativeTime, setTimeDisplay, sqlTableRef } from '../src/format'
 
 // Rules U1–U13 are written down in stardelt-internal/design/ui-conformance.md.
 
@@ -4149,6 +4149,161 @@ test.describe('admin catalogs', () => {
     })
     const dialog = await openEdit(page)
     await expect(dialog).toBeVisible()
+    expect((await auditPage(page)).filter((finding) => finding.rule === 'U5')).toEqual([])
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
+    expect(overflow).toBeLessThanOrEqual(1)
+    await context.close()
+  })
+})
+
+test.describe('overview metrics', () => {
+  // stardelt-nova#250: the Overview shows the catalog metrics API's numbers per catalog
+  // the person may see, instead of the static "Format: Iceberg" tile. The one answer is
+  // stubbed; the rest of the shell uses the dev backend, as the other suites do.
+  const now = Date.now()
+  const CATALOGS = [
+    { name: 'gold', schemas: 2, tables: 7, records: 1234, sizeBytes: 1536, lastCommitMs: now - 5 * 60_000, truncated: false },
+    { name: 'silver', schemas: 1, tables: 1, records: 1, sizeBytes: 512, lastCommitMs: now - 2 * 3600_000, truncated: false },
+    { name: 'bronze', schemas: 2, tables: 1, records: 0, sizeBytes: 0, lastCommitMs: null, truncated: false },
+  ]
+  const TOTALS = { catalogs: 3, schemas: 5, tables: 9, records: 1235, sizeBytes: 2048 }
+  const METRICS = { catalogs: CATALOGS, totals: TOTALS, generatedAt: now }
+
+  /** The Overview with its one metrics answer stubbed; every test overrides what it needs. */
+  async function open(browser: Browser, { metrics = METRICS, status, viewport = { width: 1280, height: 800 }, init }: {
+    metrics?: unknown
+    status?: number
+    viewport?: { width: number; height: number }
+    init?: () => void
+  } = {}) {
+    const context = await browser.newContext({ viewport })
+    const page = await context.newPage()
+    if (init) await page.addInitScript(init)
+    await page.route('**/api/catalog/metrics', (route) => json(route, metrics, status))
+    return { context, page }
+  }
+
+  /** One summary tile, found by its label; the card around it holds the value and hint. */
+  const tile = (page: Page, label: string) =>
+    page.locator('div.card').filter({ has: page.locator('span.label', { hasText: label }) })
+
+  test('tiles_show_totals_and_no_format_tile', async ({ browser }) => {
+    const { context, page } = await open(browser)
+    await page.goto('/')
+    await expect(page.getByRole('heading', { level: 1, name: 'Lakehouse overview' })).toBeVisible()
+
+    // The tiles read the totals: catalogs, schemas, tables, size and rows.
+    await expect(tile(page, 'Catalogs')).toContainText('3')
+    await expect(tile(page, 'Catalogs')).toContainText('5 schemas')
+    await expect(tile(page, 'Tables')).toContainText('9')
+    await expect(tile(page, 'Tables')).toContainText('2.0 KiB · 1,235 rows')
+
+    // The static format tile is gone, and its claims with it.
+    await expect(page.getByText('Format', { exact: true })).toHaveCount(0)
+    await expect(page.getByText('Iceberg', { exact: true })).toHaveCount(0)
+    await expect(page.getByText('open tables on S3')).toHaveCount(0)
+    await context.close()
+  })
+
+  test('catalog_rows_link_to_the_explorer', async ({ browser }) => {
+    const { context, page } = await open(browser)
+    await page.goto('/')
+
+    const table = page.getByRole('table', { name: 'Catalogs you can see' })
+    await expect(table).toBeVisible()
+    await expect(table.getByRole('columnheader')).toHaveText([
+      'Catalog', 'Schemas', 'Tables', 'Size', 'Rows', 'Last change',
+    ])
+    // One row per catalog, in the API's order, with the numbers it sent.
+    await expect(table.locator('tbody tr')).toHaveCount(3)
+    const gold = table.locator('tbody tr').filter({ hasText: 'gold' })
+    await expect(gold).toContainText('2')
+    await expect(gold).toContainText('7')
+    await expect(gold).toContainText('1.5 KiB')
+    await expect(gold).toContainText('1,234')
+    const goldChanged = CATALOGS[0].lastCommitMs as number
+    await expect(gold.getByText(relativeTime(goldChanged))).toHaveAttribute('title', formatTime(goldChanged))
+    // A catalog with no commit says so instead of inventing a time.
+    await expect(table.locator('tbody tr').filter({ hasText: 'bronze' })).toContainText('—')
+
+    const link = table.getByRole('link', { name: 'gold' })
+    await expect(link).toHaveAttribute('href', '/catalog?catalog=gold')
+    await link.click()
+    await expect(page).toHaveURL(/\/catalog\?catalog=gold$/)
+    await context.close()
+  })
+
+  test('error_row_and_truncated_note', async ({ browser }) => {
+    const error = 'the warehouse is not reachable right now'
+    const catalogs = [
+      { ...CATALOGS[0], truncated: true },
+      { name: 'broken', schemas: 0, tables: 0, records: 0, sizeBytes: 0, lastCommitMs: null, truncated: false, error },
+    ]
+    const { context, page } = await open(browser, { metrics: { catalogs, totals: TOTALS, generatedAt: now } })
+    await page.goto('/')
+
+    const table = page.getByRole('table', { name: 'Catalogs you can see' })
+    // A failed scan keeps its row and its sentence; it is not dropped, which would read
+    // "you have no such catalog".
+    const broken = table.locator('tbody tr').filter({ hasText: 'broken' })
+    await expect(broken.getByRole('status')).toHaveText(error)
+    await expect(table.locator('tbody tr')).toHaveCount(2)
+
+    // Rows and size are a sample in this answer; the note says so under the table.
+    await expect(page.getByText('first 200 tables counted')).toBeVisible()
+    await context.close()
+  })
+
+  test('forbidden_shows_the_sentence', async ({ browser }) => {
+    const sentence = 'no catalog is open to you yet; ask an administrator for access'
+    const { context, page } = await open(browser, { metrics: { error: sentence }, status: 403 })
+    await page.goto('/')
+
+    await expect(page.getByRole('status').filter({ hasText: sentence })).toBeVisible()
+    await expect(page.getByText('Ask an administrator for access.')).toBeVisible()
+    // The tiles answer with a dash and the API's sentence as the hint, never a zero.
+    await expect(tile(page, 'Catalogs')).toContainText('—')
+    await expect(tile(page, 'Catalogs')).toContainText(sentence)
+    await expect(tile(page, 'Tables')).toContainText('—')
+    await expect(page.getByRole('table', { name: 'Catalogs you can see' })).toHaveCount(0)
+    await context.close()
+  })
+
+  test('hostile_catalog_name_is_text', async ({ browser }) => {
+    const evil = '<img src=x onerror="window.__xss=1">'
+    const long = 'x'.repeat(400)
+    const catalogs = [
+      { name: evil, schemas: 1, tables: 1, records: 1, sizeBytes: 1, lastCommitMs: now, truncated: false },
+      { name: long, schemas: 1, tables: 1, records: 1, sizeBytes: 1, lastCommitMs: now, truncated: false },
+    ]
+    const { context, page } = await open(browser, {
+      metrics: { catalogs, totals: { catalogs: 2, schemas: 2, tables: 2, records: 2, sizeBytes: 2 }, generatedAt: now },
+      init: () => { (window as unknown as { __xss: number }).__xss = 0 },
+    })
+    await page.goto('/')
+    // Markup in a catalog name is text: no element, no script.
+    await expect(page.getByText(evil, { exact: true })).toBeVisible()
+
+    for (const width of [1280, 360]) {
+      await page.setViewportSize({ width, height: 800 })
+      const s = await page.evaluate(() => ({
+        xss: (window as unknown as { __xss: number }).__xss,
+        imgs: document.querySelectorAll('img[src="x"]').length,
+        overflow: document.documentElement.scrollWidth - window.innerWidth,
+      }))
+      expect(s, `${width}px`).toEqual({ xss: 0, imgs: 0, overflow: expect.any(Number) })
+      expect(s.overflow, `${width}px overflow`).toBeLessThanOrEqual(1)
+    }
+    // At the phone width the table scrolls inside its card rather than widening the page.
+    const table = page.getByRole('table', { name: 'Catalogs you can see' })
+    expect(await table.evaluate((el) => getComputedStyle(el.parentElement as HTMLElement).overflowX)).toBe('auto')
+    await context.close()
+  })
+
+  test('U5 audit of the page at 360 px', async ({ browser }) => {
+    const { context, page } = await open(browser, { viewport: { width: 360, height: 740 } })
+    await page.goto('/')
+    await expect(page.getByRole('table', { name: 'Catalogs you can see' })).toBeVisible()
     expect((await auditPage(page)).filter((finding) => finding.rule === 'U5')).toEqual([])
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
     expect(overflow).toBeLessThanOrEqual(1)
