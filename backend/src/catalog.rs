@@ -882,18 +882,29 @@ mod tests {
     #[derive(Clone, Default)]
     struct FakeTrino {
         by_user: HashMap<String, Vec<String>>,
+        /// bearer token -> person key: with a forwarded token the engine sees only
+        /// the Authorization header (platform#311/#259).
+        tokens: HashMap<String, String>,
         calls: Arc<AtomicUsize>,
     }
 
     async fn show_catalogs(State(fake): State<FakeTrino>, headers: HeaderMap) -> Json<Value> {
         fake.calls.fetch_add(1, Ordering::SeqCst);
         let user = headers
-            .get("x-trino-user")
+            .get("authorization")
             .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .and_then(|token| fake.tokens.get(token).cloned())
+            .or_else(|| {
+                headers
+                    .get("x-trino-user")
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_string)
+            })
             .unwrap_or_default();
         let rows: Vec<Value> = fake
             .by_user
-            .get(user)
+            .get(&user)
             .map(|names| names.iter().map(|name| json!([name])).collect())
             .unwrap_or_default();
         Json(json!({
@@ -914,6 +925,10 @@ mod tests {
                         names.iter().map(|name| name.to_string()).collect(),
                     )
                 })
+                .collect(),
+            tokens: by_user
+                .iter()
+                .map(|(user, _)| (format!("token-{user}"), user.to_string()))
                 .collect(),
             calls: Arc::new(AtomicUsize::new(0)),
         };
@@ -965,7 +980,7 @@ mod tests {
                 is_admin: false,
             },
             via: "session",
-            access_token: None,
+            access_token: Some(crate::auth::Secret::new(format!("token-{name}"))),
         }
     }
 

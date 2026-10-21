@@ -163,13 +163,28 @@ impl Drop for CancelOnDrop {
             let user = self.user.clone();
             let auth = self.auth.clone();
             tokio::spawn(async move {
-                let mut req = http.delete(uri).header("X-Trino-User", user);
-                if let Some(a) = auth {
-                    req = req.header(reqwest::header::AUTHORIZATION, a);
-                }
-                let _ = req.send().await;
+                let _ = cancel_request(&http, uri, &user, auth.as_deref())
+                    .send()
+                    .await;
             });
         }
+    }
+}
+
+/// The cancel DELETE carries the same single identity header as the statement POST:
+/// the forwarded bearer when the caller has one, `X-Trino-User` in dev mode. Sending
+/// both would make the cancel an impersonation request (platform#311).
+fn cancel_request(
+    http: &reqwest::Client,
+    uri: String,
+    user: &str,
+    auth: Option<&str>,
+) -> reqwest::RequestBuilder {
+    match auth {
+        Some(token) => http
+            .delete(uri)
+            .header(reqwest::header::AUTHORIZATION, token),
+        None => http.delete(uri).header("X-Trino-User", user),
     }
 }
 
@@ -631,6 +646,36 @@ mod tests {
         assert_eq!(off.len(), 1);
         assert_eq!(off[0].0.as_str(), "x-trino-user");
         assert_eq!(off[0].1, "alice");
+    }
+
+    #[test]
+    fn cancel_on_drop_sends_bearer_without_user() {
+        let client = reqwest::Client::new();
+        let req = cancel_request(&client, "http://example/".into(), "alice", Some("Bearer t"))
+            .build()
+            .unwrap();
+        assert!(req.headers().get("x-trino-user").is_none());
+        assert_eq!(req.headers().get("authorization").unwrap(), "Bearer t");
+
+        let dev = cancel_request(&client, "http://example/".into(), "dev", None)
+            .build()
+            .unwrap();
+        assert_eq!(dev.headers().get("x-trino-user").unwrap(), "dev");
+        assert!(dev.headers().get("authorization").is_none());
+    }
+
+    #[test]
+    fn dev_mode_still_sends_the_user_header() {
+        // No bearer forwarded: Trino has no authentication and trusts the header.
+        let h = upstream_headers("dev", false, Some(&alice(Some("t"))));
+        assert_eq!(h.len(), 1);
+        assert_eq!(h[0].0.as_str(), "x-trino-user");
+        assert_eq!(h[0].1, "alice");
+
+        // Nobody signed in: the dev user.
+        let h = upstream_headers("dev", true, None);
+        assert_eq!(h.len(), 1);
+        assert_eq!(h[0].1, "dev");
     }
 
     #[test]
