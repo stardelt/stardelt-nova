@@ -145,6 +145,11 @@ pub struct AppState {
     /// the catalog, the caller only decides which catalogs are listed.
     pub catalog_metrics:
         Mutex<HashMap<String, (std::time::Instant, catalog_metrics::CatalogStats)>>,
+    /// Which medallion layer each catalog carries (`bronze`, `silver`, `gold`), from the
+    /// `stardelt.io/layer` label on the `Catalog` resources and cached for 60 s
+    /// (`catalog::catalog_layers`). Caller independent: a layer describes the catalog, the
+    /// caller only decides which catalogs are listed.
+    pub catalog_layers: Mutex<Option<(std::time::Instant, HashMap<String, String>)>>,
     pub http: reqwest::Client,
     pub demo: bool,
     /// Forward the caller's own token to Trino, when the platform has configured it to
@@ -794,6 +799,7 @@ async fn main() -> anyhow::Result<()> {
         catalog_ids: RwLock::new(HashMap::new()),
         catalog_access: Mutex::new(HashMap::new()),
         catalog_metrics: Mutex::new(HashMap::new()),
+        catalog_layers: Mutex::new(None),
         http,
         demo: demo_mode,
         forward_identity: env_flag("NOVA_FORWARD_IDENTITY"),
@@ -993,6 +999,7 @@ mod router_tests {
             catalog_ids: RwLock::new(HashMap::new()),
             catalog_access: Mutex::new(HashMap::new()),
             catalog_metrics: Mutex::new(HashMap::new()),
+            catalog_layers: Mutex::new(None),
             http: reqwest::Client::new(),
             demo: demo_mode,
             forward_identity: false,

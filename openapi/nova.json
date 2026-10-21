@@ -15,11 +15,11 @@
         "tags": [
           "internal"
         ],
-        "description": "Every `Catalog` of the platform namespace, sorted by name: identity, owner, managed access, the storage key prefix, phase and the grants and conditions the access-sync job last wrote. Administrator-only; a non-administrator answers 403 `this view is for platform administrators`. The write is `PUT /api/admin/catalogs/{name}/access`; this route never changes anything. A catalog the job has not observed yet answers `phase: \"Unknown\"` with no conditions. Without a cluster connection (demo mode, a local run) the answer is the one in-memory `warehouse` catalog. Answers `Cache-Control: no-store`.",
+        "description": "Every `Catalog` of the platform namespace, ordered bronze, silver, gold, then the rest alphabetically (`layer`: the `stardelt.io/layer` label, else the catalog's own name): identity, owner, managed access, the storage key prefix, phase and the grants and conditions the access-sync job last wrote. Administrator-only; a non-administrator answers 403 `this view is for platform administrators`. The write is `PUT /api/admin/catalogs/{name}/access`; this route never changes anything. A catalog the job has not observed yet answers `phase: \"Unknown\"` with no conditions. Without a cluster connection (demo mode, a local run) the answer is the one in-memory `warehouse` catalog. Answers `Cache-Control: no-store`.",
         "operationId": "list",
         "responses": {
           "200": {
-            "description": "One row per catalog, sorted by name",
+            "description": "One row per catalog, medallion layers first, then by name",
             "content": {
               "application/json": {
                 "schema": {
@@ -160,7 +160,7 @@
         "tags": [
           "public"
         ],
-        "description": "The catalogs the caller may browse, sorted by name, each with its Lakekeeper warehouse id, plus the catalog a request without `?catalog=` uses. The list is what the engine's `SHOW CATALOGS` shows the caller (through the caller's own token), minus the engine's own catalogs (`system`, `information_schema`, `memory`, `tpch`, `tpcds`, `jmx`); it is cached for 30 s. Every other `/api/catalog/*` route takes the same `?catalog=`; a catalog the caller may not browse answers 403 there and is never proxied. Empty when no catalog is open to the caller. `demo` in demo mode.",
+        "description": "The catalogs the caller may browse, each with its Lakekeeper warehouse id and its medallion layer when it has one, plus the catalog a request without `?catalog=` uses. The order is bronze, silver, gold first (in that order), then the rest alphabetically; `layer` is `stardelt.io/layer` from the catalog's `Catalog` resource, else the catalog's own name when that is `bronze`, `silver` or `gold`, and absent otherwise. The list is what the engine's `SHOW CATALOGS` shows the caller (through the caller's own token), minus the engine's own catalogs (`system`, `information_schema`, `memory`, `tpch`, `tpcds`, `jmx`); it is cached for 30 s (the layer for 60 s). Every other `/api/catalog/*` route takes the same `?catalog=`; a catalog the caller may not browse answers 403 there and is never proxied. Empty when no catalog is open to the caller. `demo` in demo mode.",
         "operationId": "list_catalogs",
         "responses": {
           "200": {
@@ -201,11 +201,11 @@
         "tags": [
           "public"
         ],
-        "description": "What is in each catalog the caller may browse: schemas, tables, rows, bytes on the object store and the newest commit, plus the sums. The catalog list is the caller's own `SHOW CATALOGS` (`GET /api/catalog/catalogs`); a catalog the caller may not browse is never read and never appears. The numbers come from the catalog's Iceberg metadata (the current snapshot's `total-records` and `total-files-size`), so the endpoint runs no query. They are cached per catalog for 60 s — they describe the catalog, not the person — and at most 200 tables per catalog are loaded: `truncated` says the rows and bytes are a sample while `tables` stays exact. A catalog that cannot be read is listed with zeros and an `error` sentence; only an unreachable engine or catalog fails the request with 502. 403 when no catalog is open to the caller. Never cached by the client.",
+        "description": "What is in each catalog the caller may browse: schemas, tables, rows, bytes on the object store and the newest commit, plus the sums. Rows are ordered bronze, silver, gold first, then by name, and carry `layer` when the catalog is one of the three (the `stardelt.io/layer` label, else the catalog's own name). The catalog list is the caller's own `SHOW CATALOGS` (`GET /api/catalog/catalogs`); a catalog the caller may not browse is never read and never appears. The numbers come from the catalog's Iceberg metadata (the current snapshot's `total-records` and `total-files-size`), so the endpoint runs no query. They are cached per catalog for 60 s — they describe the catalog, not the person — and at most 200 tables per catalog are loaded: `truncated` says the rows and bytes are a sample while `tables` stays exact. A catalog that cannot be read is listed with zeros and an `error` sentence; only an unreachable engine or catalog fails the request with 502. 403 when no catalog is open to the caller. Never cached by the client.",
         "operationId": "get",
         "responses": {
           "200": {
-            "description": "One entry per browsable catalog, sorted by name, with the totals",
+            "description": "One entry per browsable catalog, medallion layers first, then by name, with the totals",
             "content": {
               "application/json": {
                 "schema": {
@@ -3428,6 +3428,13 @@
             ],
             "description": "`spec.storage.keyPrefix`, or `null` when the catalog uses the lakehouse's defaults."
           },
+          "layer": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The medallion layer (`bronze`, `silver`, `gold`) from the `stardelt.io/layer` label\nor the catalog's own name; absent for every other catalog (stardelt-nova#109)."
+          },
           "managedAccess": {
             "type": "boolean",
             "description": "`spec.managedAccess`: the owner cannot grant on this catalog."
@@ -3655,7 +3662,7 @@
       },
       "CatalogInfo": {
         "type": "object",
-        "description": "One catalog the caller may browse, with its Lakekeeper warehouse id.",
+        "description": "One catalog the caller may browse, with its Lakekeeper warehouse id and its medallion\nlayer when it has one.",
         "required": [
           "name",
           "id"
@@ -3664,6 +3671,13 @@
           "id": {
             "type": "string",
             "description": "The Lakekeeper warehouse id behind that name."
+          },
+          "layer": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`bronze`, `silver` or `gold` when the catalog is a medallion layer — from the\n`stardelt.io/layer` label on its `Catalog` resource, else from its name. Absent for\nevery other catalog."
           },
           "name": {
             "type": "string",
@@ -3711,6 +3725,13 @@
             "format": "int64",
             "description": "The newest commit among the loaded tables (Unix ms); `null` when none has one."
           },
+          "layer": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`bronze`, `silver` or `gold` when the catalog is a medallion layer (see\n`crate::catalog::catalog_layers`); absent for every other catalog."
+          },
           "name": {
             "type": "string",
             "description": "Catalog name, as the engine and the catalog spell it."
@@ -3747,7 +3768,7 @@
       },
       "CatalogsResponse": {
         "type": "object",
-        "description": "`GET /api/catalog/catalogs`: the catalogs the caller may browse, sorted by name.",
+        "description": "`GET /api/catalog/catalogs`: the catalogs the caller may browse, the medallion layers\nfirst.",
         "required": [
           "catalogs",
           "default"
@@ -3758,7 +3779,7 @@
             "items": {
               "$ref": "#/components/schemas/CatalogInfo"
             },
-            "description": "Every catalog the caller may browse (`?catalog=` accepts any of these names)."
+            "description": "Every catalog the caller may browse (`?catalog=` accepts any of these names),\nordered bronze, silver, gold, then the rest alphabetically."
           },
           "default": {
             "type": "string",
@@ -4184,7 +4205,7 @@
             "items": {
               "$ref": "#/components/schemas/CatalogMetricsView"
             },
-            "description": "One entry per catalog the caller may browse, sorted by name."
+            "description": "One entry per catalog the caller may browse: bronze, silver, gold first, then the\nrest by name."
           },
           "generatedAt": {
             "type": "integer",

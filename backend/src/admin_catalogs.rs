@@ -54,6 +54,10 @@ use crate::connection_routes::Fail;
 pub struct AdminCatalog {
     /// `metadata.name`: the name users type (`finance.orders`) and the warehouse name.
     pub name: String,
+    /// The medallion layer (`bronze`, `silver`, `gold`) from the `stardelt.io/layer` label
+    /// or the catalog's own name; absent for every other catalog (stardelt-nova#109).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layer: Option<String>,
     /// `spec.displayName`, or `null`.
     pub display_name: Option<String>,
     /// `spec.description`, or `null`.
@@ -134,9 +138,9 @@ pub struct CatalogAccessUpdate {
     get,
     path = "/api/admin/catalogs",
     tag = "internal",
-    description = "Every `Catalog` of the platform namespace, sorted by name: identity, owner, managed access, the storage key prefix, phase and the grants and conditions the access-sync job last wrote. Administrator-only; a non-administrator answers 403 `this view is for platform administrators`. The write is `PUT /api/admin/catalogs/{name}/access`; this route never changes anything. A catalog the job has not observed yet answers `phase: \"Unknown\"` with no conditions. Without a cluster connection (demo mode, a local run) the answer is the one in-memory `warehouse` catalog. Answers `Cache-Control: no-store`.",
+    description = "Every `Catalog` of the platform namespace, ordered bronze, silver, gold, then the rest alphabetically (`layer`: the `stardelt.io/layer` label, else the catalog's own name): identity, owner, managed access, the storage key prefix, phase and the grants and conditions the access-sync job last wrote. Administrator-only; a non-administrator answers 403 `this view is for platform administrators`. The write is `PUT /api/admin/catalogs/{name}/access`; this route never changes anything. A catalog the job has not observed yet answers `phase: \"Unknown\"` with no conditions. Without a cluster connection (demo mode, a local run) the answer is the one in-memory `warehouse` catalog. Answers `Cache-Control: no-store`.",
     responses(
-        (status = 200, description = "One row per catalog, sorted by name", body = [AdminCatalog]),
+        (status = 200, description = "One row per catalog, medallion layers first, then by name", body = [AdminCatalog]),
         (status = 403, description = "The caller is not a platform administrator", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The cluster did not answer, or Nova may not list catalogs", body = crate::openapi::ErrorResponse),
     )
@@ -497,12 +501,13 @@ async fn catalog_rows(state: &AppState) -> Result<Vec<AdminCatalog>, Fail> {
         })?;
         rows.push(row_from_object(&value));
     }
-    sort_by_name(&mut rows);
+    sort_by_layer(&mut rows);
     Ok(rows)
 }
 
-/// The `Catalog` resources of Nova's namespace, through the cluster client.
-fn catalogs_api(client: kube::Client) -> Api<DynamicObject> {
+/// The `Catalog` resources of Nova's namespace, through the cluster client. Also what the
+/// catalog-layer reader lists (`catalog::catalog_layers`).
+pub(crate) fn catalogs_api(client: kube::Client) -> Api<DynamicObject> {
     Api::namespaced_with(
         client,
         &crate::cluster::namespace(),
@@ -526,6 +531,7 @@ fn row_from_object(object: &Value) -> AdminCatalog {
 
     AdminCatalog {
         name: text(metadata.get("name")).unwrap_or_default(),
+        layer: crate::catalog::layer_of_object(object),
         display_name: text(spec.get("displayName")),
         description: text(spec.get("description")),
         owner: text(spec.get("owner")),
@@ -602,8 +608,8 @@ fn integer(value: Option<&Value>) -> Option<i64> {
     }
 }
 
-fn sort_by_name(rows: &mut [AdminCatalog]) {
-    rows.sort_by(|a, b| a.name.cmp(&b.name));
+fn sort_by_layer(rows: &mut [AdminCatalog]) {
+    crate::catalog::sort_by_layer(rows, |row| row.layer.as_deref(), |row| row.name.as_str());
 }
 
 /// What a Nova without a cluster client answers: the in-memory demo lakehouse,
@@ -625,6 +631,8 @@ fn demo_row_for(state: &AppState) -> AdminCatalog {
 fn demo_row() -> AdminCatalog {
     AdminCatalog {
         name: "warehouse".to_string(),
+        // The demo catalog is `warehouse`: not one of the three layer names.
+        layer: None,
         display_name: None,
         description: None,
         owner: Some("stardelt-admins".to_string()),
@@ -735,6 +743,13 @@ mod tests {
         row_from_object(&catalog_object(name, Some("Ready")))
     }
 
+    /// A row whose `Catalog` object carries the `stardelt.io/layer` label.
+    fn layered(name: &str, layer: &str) -> AdminCatalog {
+        let mut object = catalog_object(name, Some("Ready"));
+        object["metadata"]["labels"] = json!({ crate::catalog::LAYER_LABEL: layer });
+        row_from_object(&object)
+    }
+
     #[test]
     fn maps_a_catalog_object_to_a_row() {
         let mapped = row_from_object(&catalog_object("finance", Some("Ready")));
@@ -742,6 +757,7 @@ mod tests {
             mapped,
             AdminCatalog {
                 name: "finance".into(),
+                layer: None,
                 display_name: Some("Finance".into()),
                 description: Some("Contracted revenue, orders and billing.".into()),
                 owner: Some("stardelt-finops".into()),
@@ -803,14 +819,22 @@ mod tests {
     }
 
     #[test]
-    fn rows_sorted_by_name() {
-        let mut rows: Vec<AdminCatalog> = ["product", "finance", "analytics", "sandbox"]
-            .iter()
-            .map(|name| row(name))
-            .collect();
-        sort_by_name(&mut rows);
+    fn rows_sorted_by_layer_then_name() {
+        // `warehouse` is labelled bronze, `gold` is gold by its name, `silver` by its name;
+        // `product` and `shared` carry no layer.
+        let mut rows = vec![
+            row("product"),
+            layered("gold", "gold"),
+            row("shared"),
+            layered("warehouse", "bronze"),
+            row("silver"),
+        ];
+        sort_by_layer(&mut rows);
         let names: Vec<&str> = rows.iter().map(|row| row.name.as_str()).collect();
-        assert_eq!(names, ["analytics", "finance", "product", "sandbox"]);
+        assert_eq!(names, ["warehouse", "silver", "gold", "product", "shared"]);
+        assert_eq!(rows[0].layer.as_deref(), Some("bronze"));
+        assert_eq!(rows[2].layer.as_deref(), Some("gold"));
+        assert_eq!(rows[3].layer, None);
     }
 
     #[tokio::test]

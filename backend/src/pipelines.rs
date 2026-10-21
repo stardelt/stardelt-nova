@@ -4608,6 +4608,7 @@ mod tests {
             catalog_ids: std::sync::RwLock::new(std::collections::HashMap::new()),
             catalog_access: std::sync::Mutex::new(std::collections::HashMap::new()),
             catalog_metrics: std::sync::Mutex::new(std::collections::HashMap::new()),
+            catalog_layers: std::sync::Mutex::new(None),
             http: reqwest::Client::new(),
             demo: false,
             forward_identity: false,

@@ -118,13 +118,23 @@ The platform runs several catalogs (one Lakekeeper warehouse each, rendered into
 one catalog per warehouse). **A person sees only the catalogs they may browse**, and Nova
 does not decide that itself: it asks the engine.
 
-`GET /api/catalog/catalogs` answers the caller's catalogs, sorted by name, each with its
-warehouse id, plus the default:
+`GET /api/catalog/catalogs` answers the caller's catalogs, each with its warehouse id and
+— when it is one — its medallion layer, plus the default:
 
 ```json
-{"catalogs": [{"name": "finance", "id": "5e6c…"}, {"name": "warehouse", "id": "a1b2…"}],
+{"catalogs": [{"name": "bronze", "id": "3d0a…", "layer": "bronze"},
+              {"name": "finance", "id": "5e6c…"},
+              {"name": "warehouse", "id": "a1b2…"}],
  "default": "warehouse"}
 ```
+
+The order is **bronze, silver, gold first** (in that order), then every other catalog
+alphabetically. The layer is the `stardelt.io/layer` label on the catalog's `Catalog`
+resource, and when the label is absent the catalog's own name if it is one of the three;
+labels are not sensitive, and a value that is not `bronze`, `silver` or `gold` is ignored.
+The label list is read once and cached for 60 s, so a changed label shows up within a
+minute; without a cluster connection only the name convention applies. `layer` is absent,
+not `null`, for every other catalog.
 
 Every `/api/catalog/*` route takes an optional `?catalog=<name>`; omitted, the default is
 used — the configured `NOVA_WAREHOUSE_NAME` when the caller may browse it, otherwise the
@@ -171,7 +181,8 @@ browse — the tile on the Overview page instead of a static "Format: Iceberg":
 ```
 
 The list is the caller's own (`GET /api/catalog/catalogs`): a catalog they may not browse is
-never read and never appears. The numbers come from each table's Iceberg metadata — the
+never read and never appears. Rows carry the same `layer` and the same order — bronze,
+silver, gold first, then by name. The numbers come from each table's Iceberg metadata — the
 current snapshot's `total-records`, `total-files-size` and `timestamp-ms` — so the endpoint
 runs no query over the data. They are cached per catalog for 60 s (they describe the
 catalog, not the person), and at most 200 tables per catalog are loaded: `tables` stays
