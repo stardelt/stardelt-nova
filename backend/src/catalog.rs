@@ -12,8 +12,15 @@
 //! the platform's permission bridge, so Nova never re-implements the rule
 //! (`design/multitenant-catalogs.md` §5.4). Nova is not the authority; it only fails
 //! before the person tries.
+//!
+//! **The medallion layer.** The lakehouse keeps one catalog per layer — `bronze`, `silver`,
+//! `gold` — next to the catalogs that carry none (stardelt-nova#109). The layer is the
+//! `stardelt.io/layer` label on the `Catalog` resource, else the catalog's own name when it
+//! is one of the three ([`catalog_layers`], cached for 60 s); the catalog list, the
+//! Overview metrics and the administrator page all carry it and put bronze, silver, gold
+//! first, then the rest alphabetically.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -48,6 +55,19 @@ pub const HIDDEN_CATALOGS: [&str; 6] = [
 
 /// How long one person's catalog visibility is trusted before Trino is asked again.
 const ACCESS_TTL: Duration = Duration::from_secs(30);
+
+/// The medallion layers, in the order the platform reads them (`bronze` → `silver` →
+/// `gold`). One catalog per layer, next to the catalogs that carry none
+/// (stardelt-nova#109, `design/data-engineer-workflow.md`).
+pub const LAYERS: [&str; 3] = ["bronze", "silver", "gold"];
+
+/// The label on a `Catalog` resource that names its medallion layer. Labels are not
+/// sensitive: the value is the same string this API answers for everyone.
+pub const LAYER_LABEL: &str = "stardelt.io/layer";
+
+/// How long a catalog's layer is trusted before the `Catalog` objects are listed again.
+/// A label added or removed with `kubectl` shows up within a minute.
+const LAYERS_TTL: Duration = Duration::from_secs(60);
 
 /// The refusal when no catalog is open to a person. One sentence, shared with every route
 /// that has to say it (`catalog_scope`, `catalog_metrics`), so the UI can match on it.
@@ -113,19 +133,27 @@ pub struct CreateNamespaceResponse {
     pub namespace: String,
 }
 
-/// One catalog the caller may browse, with its Lakekeeper warehouse id.
+/// One catalog the caller may browse, with its Lakekeeper warehouse id and its medallion
+/// layer when it has one.
 #[derive(serde::Serialize, utoipa::ToSchema)]
 pub struct CatalogInfo {
     /// Catalog name, as the engine and the catalog spell it (`warehouse`, `finance`, …).
     pub name: String,
     /// The Lakekeeper warehouse id behind that name.
     pub id: String,
+    /// `bronze`, `silver` or `gold` when the catalog is a medallion layer — from the
+    /// `stardelt.io/layer` label on its `Catalog` resource, else from its name. Absent for
+    /// every other catalog.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layer: Option<String>,
 }
 
-/// `GET /api/catalog/catalogs`: the catalogs the caller may browse, sorted by name.
+/// `GET /api/catalog/catalogs`: the catalogs the caller may browse, the medallion layers
+/// first.
 #[derive(serde::Serialize, utoipa::ToSchema)]
 pub struct CatalogsResponse {
-    /// Every catalog the caller may browse (`?catalog=` accepts any of these names).
+    /// Every catalog the caller may browse (`?catalog=` accepts any of these names),
+    /// ordered bronze, silver, gold, then the rest alphabetically.
     pub catalogs: Vec<CatalogInfo>,
     /// The catalog a request without `?catalog=` works in.
     pub default: String,
@@ -229,6 +257,134 @@ async fn warehouse_list(state: &AppState) -> Result<Vec<WarehouseListItem>, Ware
             WarehouseError::Malformed
         })?;
     Ok(resp.warehouses)
+}
+
+/// The medallion layer a label value names, or `None` for anything else.
+///
+/// The value is trimmed and compared case-insensitively: a hand-written manifest that says
+/// `Gold` means gold. A value that is not one of the three is ignored — the next rule (the
+/// name convention) still applies, and a typo never becomes a layer of its own.
+pub fn layer_value(value: &str) -> Option<String> {
+    let value = value.trim();
+    LAYERS
+        .iter()
+        .find(|layer| layer.eq_ignore_ascii_case(value))
+        .map(|layer| (*layer).to_string())
+}
+
+/// The layer a catalog *name* stands for: a catalog called `bronze`, `silver` or `gold` is
+/// that layer. Every other name carries none.
+pub fn layer_from_name(name: &str) -> Option<String> {
+    LAYERS
+        .iter()
+        .find(|layer| **layer == name)
+        .map(|layer| (*layer).to_string())
+}
+
+/// The layer a `Catalog` object declares: the `stardelt.io/layer` label when that names a
+/// layer, else the name convention.
+pub fn layer_of_object(object: &serde_json::Value) -> Option<String> {
+    let metadata = object.get("metadata");
+    let label = metadata
+        .and_then(|metadata| metadata.get("labels"))
+        .and_then(|labels| labels.get(LAYER_LABEL))
+        .and_then(serde_json::Value::as_str);
+    let name = metadata
+        .and_then(|metadata| metadata.get("name"))
+        .and_then(serde_json::Value::as_str);
+    label
+        .and_then(layer_value)
+        .or_else(|| name.and_then(layer_from_name))
+}
+
+/// One catalog's layer: the label from [`catalog_layers`] when the resource carries one,
+/// else the name convention.
+pub fn layer_in(layers: &HashMap<String, String>, name: &str) -> Option<String> {
+    layers.get(name).cloned().or_else(|| layer_from_name(name))
+}
+
+/// Where a catalog sorts: bronze, silver, gold, then everything without a layer.
+pub fn layer_rank(layer: Option<&str>) -> usize {
+    layer
+        .and_then(|layer| LAYERS.iter().position(|known| *known == layer))
+        .unwrap_or(LAYERS.len())
+}
+
+/// Sort catalogs by [`layer_rank`], then by name: the medallion layers first, in platform
+/// order, then every other catalog alphabetically.
+pub fn sort_by_layer<T>(
+    rows: &mut [T],
+    layer: impl Fn(&T) -> Option<&str>,
+    name: impl Fn(&T) -> &str,
+) {
+    rows.sort_by(|a, b| {
+        layer_rank(layer(a))
+            .cmp(&layer_rank(layer(b)))
+            .then_with(|| name(a).cmp(name(b)))
+    });
+}
+
+/// Every catalog's medallion layer, from the `stardelt.io/layer` label on the `Catalog`
+/// resources of Nova's namespace: one list per refresh, cached for [`LAYERS_TTL`], caller
+/// independent (the layer describes the catalog, not the person).
+///
+/// The list is read with Nova's own service account — the same `get`/`list` on `catalogs`
+/// the administrator page uses. A catalog the list does not cover gets no entry here; the
+/// name convention still applies through [`layer_in`]. Without a cluster client — demo
+/// mode, a local run, `dev` mode outside a cluster — there is nothing to read, so only the
+/// name convention remains. A list that fails leaves the map empty and is retried after the
+/// TTL: a missing label must not fail the catalog list.
+pub async fn catalog_layers(state: &AppState) -> HashMap<String, String> {
+    catalog_layers_within(state, LAYERS_TTL).await
+}
+
+/// [`catalog_layers`] with an explicit TTL. The tests use it instead of waiting a minute;
+/// production always passes [`LAYERS_TTL`].
+async fn catalog_layers_within(state: &AppState, ttl: Duration) -> HashMap<String, String> {
+    let cached = state
+        .catalog_layers
+        .lock()
+        .expect("catalog layers poisoned")
+        .as_ref()
+        .filter(|(at, _)| at.elapsed() < ttl)
+        .map(|(_, layers)| layers.clone());
+    if let Some(layers) = cached {
+        return layers;
+    }
+
+    let mut layers = HashMap::new();
+    if let Some(client) = state.kube.clone() {
+        match crate::admin_catalogs::catalogs_api(client)
+            .list(&kube::api::ListParams::default())
+            .await
+        {
+            Ok(list) => {
+                for object in list.items {
+                    let name = object.metadata.name.unwrap_or_default();
+                    let label = object
+                        .metadata
+                        .labels
+                        .as_ref()
+                        .and_then(|labels| labels.get(LAYER_LABEL));
+                    let layer = label
+                        .and_then(|label| layer_value(label))
+                        .or_else(|| layer_from_name(&name));
+                    if let Some(layer) = layer {
+                        layers.insert(name, layer);
+                    }
+                }
+            }
+            // A label is a nicety: the name convention keeps working, and the next request
+            // after the TTL asks again instead of caching a failure forever.
+            Err(e) => warn!(error = %e, "catalog layer list failed"),
+        }
+    }
+    state
+        .catalog_layers
+        .lock()
+        .expect("catalog layers poisoned")
+        .replace((Instant::now(), layers.clone()));
+    layers
 }
 
 /// The Lakekeeper warehouse id for one catalog name.
@@ -437,7 +593,7 @@ pub async fn catalog_scope(
     get,
     path = "/api/catalog/catalogs",
     tag = "public",
-    description = "The catalogs the caller may browse, sorted by name, each with its Lakekeeper warehouse id, plus the catalog a request without `?catalog=` uses. The list is what the engine's `SHOW CATALOGS` shows the caller (through the caller's own token), minus the engine's own catalogs (`system`, `information_schema`, `memory`, `tpch`, `tpcds`, `jmx`); it is cached for 30 s. Every other `/api/catalog/*` route takes the same `?catalog=`; a catalog the caller may not browse answers 403 there and is never proxied. Empty when no catalog is open to the caller. `demo` in demo mode.",
+    description = "The catalogs the caller may browse, each with its Lakekeeper warehouse id and its medallion layer when it has one, plus the catalog a request without `?catalog=` uses. The order is bronze, silver, gold first (in that order), then the rest alphabetically; `layer` is `stardelt.io/layer` from the catalog's `Catalog` resource, else the catalog's own name when that is `bronze`, `silver` or `gold`, and absent otherwise. The list is what the engine's `SHOW CATALOGS` shows the caller (through the caller's own token), minus the engine's own catalogs (`system`, `information_schema`, `memory`, `tpch`, `tpcds`, `jmx`); it is cached for 30 s (the layer for 60 s). Every other `/api/catalog/*` route takes the same `?catalog=`; a catalog the caller may not browse answers 403 there and is never proxied. Empty when no catalog is open to the caller. `demo` in demo mode.",
     responses(
         (status = 200, description = "The browsable catalogs and the default one", body = CatalogsResponse),
         (status = 502, description = "The query engine or the catalog is not reachable", body = crate::openapi::ErrorResponse),
@@ -455,6 +611,7 @@ pub async fn list_catalogs(
             return (error_status(&e), Json(serde_json::json!({ "error": e }))).into_response();
         }
     };
+    let layers = catalog_layers(&s).await;
     let mut catalogs = Vec::with_capacity(allowed.len());
     for name in allowed {
         let id = if s.demo {
@@ -471,8 +628,15 @@ pub async fn list_catalogs(
                 }
             }
         };
-        catalogs.push(CatalogInfo { name, id });
+        let layer = layer_in(&layers, &name);
+        catalogs.push(CatalogInfo { name, id, layer });
     }
+    // The engine answers alphabetically; the medallion layers come first here.
+    sort_by_layer(
+        &mut catalogs,
+        |catalog| catalog.layer.as_deref(),
+        |catalog| catalog.name.as_str(),
+    );
     let default = if catalogs.iter().any(|c| c.name == s.warehouse_name) {
         s.warehouse_name.clone()
     } else {
@@ -865,7 +1029,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use axum::{
-        Router,
+        Extension, Router,
         http::HeaderMap,
         routing::{get, post},
     };
@@ -946,17 +1110,20 @@ mod tests {
 
     /// The four warehouses the platform seeds (`stardelt-platform` #309).
     async fn fake_lakekeeper() -> String {
+        fake_lakekeeper_names(&["warehouse", "finance", "product", "sandbox"]).await
+    }
+
+    /// One Lakekeeper warehouse per name, so the layer tests can list any catalog.
+    async fn fake_lakekeeper_names(names: &[&str]) -> String {
+        let warehouses: Vec<Value> = names
+            .iter()
+            .map(|name| json!({"id": format!("wid-{name}"), "name": name}))
+            .collect();
         let app = Router::new().route(
             "/management/v1/warehouse",
-            get(|| async {
-                Json(json!({
-                    "warehouses": [
-                        {"id": "wid-warehouse", "name": "warehouse"},
-                        {"id": "wid-finance", "name": "finance"},
-                        {"id": "wid-product", "name": "product"},
-                        {"id": "wid-sandbox", "name": "sandbox"},
-                    ]
-                }))
+            get(move || {
+                let warehouses = warehouses.clone();
+                async move { Json(json!({ "warehouses": warehouses })) }
             }),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -965,6 +1132,90 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
         format!("http://{addr}")
+    }
+
+    /// A `Catalog` object as the API server hands it over: a name, and optionally the
+    /// `stardelt.io/layer` label.
+    fn catalog_object(name: &str, label: Option<&str>) -> Value {
+        let mut object = json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "Catalog",
+            "metadata": { "name": name }
+        });
+        if let Some(label) = label {
+            object["metadata"]["labels"] = json!({ "stardelt.io/layer": label });
+        }
+        object
+    }
+
+    /// An API server that answers one `Catalog` list and counts the calls, so the layer
+    /// cache's "one list per refresh" is observable (`cache_ttl`).
+    mod fake_catalog_api {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use axum::{Json, Router, extract::State, routing::get};
+        use serde_json::{Value, json};
+
+        #[derive(Default)]
+        pub struct Fake {
+            pub items: Vec<Value>,
+            pub lists: AtomicUsize,
+        }
+
+        async fn list(State(fake): State<Arc<Fake>>) -> Json<Value> {
+            fake.lists.fetch_add(1, Ordering::SeqCst);
+            Json(json!({
+                "apiVersion": "stardelt.io/v1alpha1",
+                "kind": "CatalogList",
+                "metadata": { "resourceVersion": "1" },
+                "items": fake.items,
+            }))
+        }
+
+        pub async fn start(items: Vec<Value>) -> (kube::Client, Arc<Fake>) {
+            let fake = Arc::new(Fake {
+                items,
+                ..Fake::default()
+            });
+            let app = Router::new()
+                .route(
+                    "/apis/stardelt.io/v1alpha1/namespaces/{namespace}/catalogs",
+                    get(list),
+                )
+                .with_state(Arc::clone(&fake));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let url = format!("http://{addr}").parse().unwrap();
+            let client =
+                kube::Client::try_from(kube::Config::new(url)).expect("a client for the fake API");
+            (client, fake)
+        }
+    }
+
+    /// The freshly built test state, owned, so one field can be changed.
+    fn own_state(state: Arc<AppState>) -> AppState {
+        Arc::try_unwrap(state).unwrap_or_else(|_| panic!("a fresh state"))
+    }
+
+    /// A state that talks to the fakes and has a cluster client: the catalog list reads
+    /// its layers from `Catalog` objects.
+    fn state_with_catalogs(trino: &str, lakekeeper: &str, kube: kube::Client) -> Arc<AppState> {
+        let mut state = own_state(crate::router_tests::catalog_scope_test_state(
+            trino, lakekeeper,
+        ));
+        state.kube = Some(kube);
+        Arc::new(state)
+    }
+
+    async fn json_body(response: Response) -> Value {
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        serde_json::from_slice(&bytes).expect("json")
     }
 
     fn person(name: &str) -> Principal {
@@ -1261,6 +1512,156 @@ mod tests {
             })
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Medallion layers (stardelt-nova#109): label first, name second, layers first
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn layer_from_label() {
+        assert_eq!(LAYER_LABEL, "stardelt.io/layer");
+        assert_eq!(
+            layer_of_object(&catalog_object("shared", Some("gold"))).as_deref(),
+            Some("gold")
+        );
+        // The label counts on any catalog, and it wins over the name.
+        assert_eq!(
+            layer_of_object(&catalog_object("bronze", Some("silver"))).as_deref(),
+            Some("silver")
+        );
+        assert_eq!(
+            layer_of_object(&catalog_object("finance", Some("bronze"))).as_deref(),
+            Some("bronze")
+        );
+        // A hand-written `Gold` is gold; the API answers the lower-case spelling.
+        assert_eq!(
+            layer_of_object(&catalog_object("shared", Some(" Gold "))).as_deref(),
+            Some("gold")
+        );
+    }
+
+    #[test]
+    fn layer_from_name_when_no_label() {
+        for layer in LAYERS {
+            assert_eq!(
+                layer_of_object(&catalog_object(layer, None)).as_deref(),
+                Some(layer)
+            );
+        }
+        assert_eq!(layer_of_object(&catalog_object("warehouse", None)), None);
+        assert_eq!(layer_of_object(&catalog_object("shared", None)), None);
+    }
+
+    #[test]
+    fn invalid_label_ignored() {
+        assert_eq!(
+            layer_of_object(&catalog_object("shared", Some("platinum"))),
+            None
+        );
+        assert_eq!(layer_of_object(&catalog_object("shared", Some(""))), None);
+        assert_eq!(
+            layer_of_object(&catalog_object("shared", Some("gold, silver"))),
+            None
+        );
+        // The name convention is the second rule, not a fallback value of the label.
+        assert_eq!(
+            layer_of_object(&catalog_object("silver", Some("platinum"))).as_deref(),
+            Some("silver")
+        );
+    }
+
+    #[tokio::test]
+    async fn sorted_bronze_silver_gold_then_alphabetical() {
+        let names = ["warehouse", "shared", "gold", "alpha", "bronze", "silver"];
+        let (trino, _) = fake_trino(&[("ada", &names)]).await;
+        let lakekeeper = fake_lakekeeper_names(&names).await;
+        // `shared` is labelled gold; `warehouse` carries no layer; the rest follow the name.
+        let (kube, _) = fake_catalog_api::start(vec![
+            catalog_object("shared", Some("gold")),
+            catalog_object("warehouse", None),
+        ])
+        .await;
+        let state = state_with_catalogs(&trino, &lakekeeper, kube);
+
+        let response = list_catalogs(State(state), Some(Extension(person("ada")))).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        let listed: Vec<(&str, Option<&str>)> = body["catalogs"]
+            .as_array()
+            .expect("a list")
+            .iter()
+            .map(|catalog| {
+                (
+                    catalog["name"].as_str().expect("a name"),
+                    catalog["layer"].as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("bronze", Some("bronze")),
+                ("silver", Some("silver")),
+                ("gold", Some("gold")),
+                ("shared", Some("gold")),
+                ("alpha", None),
+                ("warehouse", None),
+            ]
+        );
+        assert_eq!(body["default"], "warehouse");
+    }
+
+    #[tokio::test]
+    async fn cache_ttl() {
+        let (kube, fake) = fake_catalog_api::start(vec![
+            catalog_object("bronze", None),
+            catalog_object("shared", Some("gold")),
+            catalog_object("finance", Some("platinum")),
+        ])
+        .await;
+        let state = crate::router_tests::test_state_with_kube(kube);
+
+        let first = catalog_layers_within(&state, LAYERS_TTL).await;
+        assert_eq!(
+            first,
+            HashMap::from([
+                ("bronze".to_string(), "bronze".to_string()),
+                ("shared".to_string(), "gold".to_string()),
+            ]),
+            "the label first, the name convention second, an invalid label never"
+        );
+        assert_eq!(fake.lists.load(Ordering::SeqCst), 1);
+        // Inside the TTL the map answers and the API server is not asked again.
+        assert_eq!(catalog_layers_within(&state, LAYERS_TTL).await, first);
+        assert_eq!(fake.lists.load(Ordering::SeqCst), 1);
+        // Expired (an explicit zero TTL, rather than a minute's wait): one list again.
+        assert_eq!(catalog_layers_within(&state, Duration::ZERO).await, first);
+        assert_eq!(fake.lists.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn demo_mode_names_only() {
+        let mut state = own_state(crate::router_tests::test_state());
+        state.warehouse_name = "gold".into();
+        let state = Arc::new(state);
+
+        // No cluster client: nothing to label, only the name convention.
+        let layers = catalog_layers(&state).await;
+        assert!(layers.is_empty());
+        assert_eq!(layer_in(&layers, "gold").as_deref(), Some("gold"));
+        assert_eq!(layer_in(&layers, "shared"), None);
+
+        let response = list_catalogs(State(Arc::clone(&state)), None).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            json_body(response).await,
+            json!({
+                "catalogs": [{"name": "gold", "id": "demo", "layer": "gold"}],
+                "default": "gold"
+            })
+        );
+    }
+
     #[test]
     fn plain_names_pass_through() {
         assert_eq!(

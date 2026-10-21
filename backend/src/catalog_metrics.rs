@@ -144,6 +144,10 @@ pub fn table_stats(metadata: &Value) -> TableStats {
 pub struct CatalogStats {
     /// Catalog name, as the engine and the catalog spell it.
     pub name: String,
+    /// `bronze`, `silver` or `gold` when the catalog is a medallion layer (see
+    /// `crate::catalog::catalog_layers`); absent for every other catalog.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layer: Option<String>,
     /// Schemas (namespaces) in the catalog.
     pub schemas: u32,
     /// Tables in the catalog — every one the catalog lists, loaded or not.
@@ -404,7 +408,8 @@ pub struct MetricsTotals {
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MetricsResponse {
-    /// One entry per catalog the caller may browse, sorted by name.
+    /// One entry per catalog the caller may browse: bronze, silver, gold first, then the
+    /// rest by name.
     pub catalogs: Vec<CatalogMetricsView>,
     /// The sums over `catalogs`.
     pub totals: MetricsTotals,
@@ -443,9 +448,9 @@ fn demo_numbers(state: &AppState) -> CatalogStats {
     get,
     path = "/api/catalog/metrics",
     tag = "public",
-    description = "What is in each catalog the caller may browse: schemas, tables, rows, bytes on the object store and the newest commit, plus the sums. The catalog list is the caller's own `SHOW CATALOGS` (`GET /api/catalog/catalogs`); a catalog the caller may not browse is never read and never appears. The numbers come from the catalog's Iceberg metadata (the current snapshot's `total-records` and `total-files-size`), so the endpoint runs no query. They are cached per catalog for 60 s — they describe the catalog, not the person — and at most 200 tables per catalog are loaded: `truncated` says the rows and bytes are a sample while `tables` stays exact. A catalog that cannot be read is listed with zeros and an `error` sentence; only an unreachable engine or catalog fails the request with 502. 403 when no catalog is open to the caller. Never cached by the client.",
+    description = "What is in each catalog the caller may browse: schemas, tables, rows, bytes on the object store and the newest commit, plus the sums. Rows are ordered bronze, silver, gold first, then by name, and carry `layer` when the catalog is one of the three (the `stardelt.io/layer` label, else the catalog's own name). The catalog list is the caller's own `SHOW CATALOGS` (`GET /api/catalog/catalogs`); a catalog the caller may not browse is never read and never appears. The numbers come from the catalog's Iceberg metadata (the current snapshot's `total-records` and `total-files-size`), so the endpoint runs no query. They are cached per catalog for 60 s — they describe the catalog, not the person — and at most 200 tables per catalog are loaded: `truncated` says the rows and bytes are a sample while `tables` stays exact. A catalog that cannot be read is listed with zeros and an `error` sentence; only an unreachable engine or catalog fails the request with 502. 403 when no catalog is open to the caller. Never cached by the client.",
     responses(
-        (status = 200, description = "One entry per browsable catalog, sorted by name, with the totals", body = MetricsResponse),
+        (status = 200, description = "One entry per browsable catalog, medallion layers first, then by name, with the totals", body = MetricsResponse),
         (status = 403, description = "No catalog is open to the caller", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The query engine is not reachable, so the catalogs cannot be named", body = crate::openapi::ErrorResponse),
     )
@@ -490,9 +495,20 @@ pub async fn get(State(s): State<Arc<AppState>>, caller: Option<Extension<Princi
                 }
             }
         }
-        // `allowed` is sorted already, but the scans finish in their own order.
-        catalogs.sort_by(|a, b| a.stats.name.cmp(&b.stats.name));
     }
+
+    // The layer is a property of the catalog, not of the numbers: one cached read for the
+    // whole answer (stardelt-nova#109).
+    let layers = crate::catalog::catalog_layers(&s).await;
+    for catalog in &mut catalogs {
+        catalog.stats.layer = crate::catalog::layer_in(&layers, &catalog.stats.name);
+    }
+    // `allowed` is sorted already and the scans finish in their own order.
+    crate::catalog::sort_by_layer(
+        &mut catalogs,
+        |catalog| catalog.stats.layer.as_deref(),
+        |catalog| catalog.stats.name.as_str(),
+    );
 
     let mut totals = MetricsTotals {
         catalogs: u32::try_from(catalogs.len()).unwrap_or(u32::MAX),
