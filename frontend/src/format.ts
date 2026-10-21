@@ -72,13 +72,14 @@ function sqlIdent(part: string): string {
 }
 
 /**
- * `warehouse.<ns>.<tbl>` for generated SQL. The namespace and table come from
- * the catalog (or from URL params), so a part that is not a plain identifier is
- * quoted instead of being pasted into the statement verbatim. Plain names are
- * unchanged, so the common case reads exactly as before.
+ * `<catalog>.<ns>.<tbl>` for generated SQL (stardelt-nova#234). Without a catalog the
+ * historical `warehouse` is used, so an existing caller reads exactly as before; with one,
+ * the statement names the catalog the person chose. The catalog, namespace and table come
+ * from the API or from URL params, so any part that is not a plain identifier is quoted
+ * instead of being pasted into the statement verbatim.
  */
-export function sqlTableRef(ns: string, tbl: string): string {
-  return ['warehouse', ...ns.split('.').filter(Boolean), tbl].map(sqlIdent).join('.')
+export function sqlTableRef(ns: string, tbl: string, catalog = 'warehouse'): string {
+  return [catalog, ...ns.split('.').filter(Boolean), tbl].map(sqlIdent).join('.')
 }
 
 /** `850 ms`, `2.3 s`, `1 m 04 s`, `1 h 05 m`; a missing value is a dash. */

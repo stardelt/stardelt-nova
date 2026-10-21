@@ -18,3 +18,10 @@ height in the image so every option is visible; the page itself still scrolls th
 versions and parameters. It shows the mode control, the pinned version with its helper,
 the tagged parameters and Advanced closed; the dialog is drawn at full height so the
 whole form is visible. The viewport is taller than 800/740 px for the same reason.
+
+`catalog-switcher-*.png` — the Catalog page with four catalogs (stardelt-nova#234) at
+1280×800 and 360×740, dark and light, from the built UI with stubbed `/api/catalog/catalogs`
+(`finance`, `product`, `sandbox`, `warehouse`), namespaces, table and preview calls.
+`finance` is the chosen catalog, `seed` is open and `nation` selected, so the switcher, the
+catalog's own namespace list and the table header are visible at once. With one catalog —
+demo mode — the switcher renders nothing and the page looks as it did before.

@@ -1,7 +1,7 @@
 import { test, expect, type Browser, type Locator, type Page, type Route } from '@playwright/test'
 import { KNOWN, type Known } from './known'
 import { auditPage, focusAudit, type Finding } from './audit'
-import { formatTime, setTimeDisplay } from '../src/format'
+import { formatTime, setTimeDisplay, sqlTableRef } from '../src/format'
 
 // Rules U1–U13 are written down in stardelt-internal/design/ui-conformance.md.
 
@@ -1386,6 +1386,145 @@ test.describe('table documentation', () => {
     await page.getByRole('button', { name: 'Edit description of amount' }).click()
     expect((await auditPage(page)).filter((finding) => finding.rule === 'U5')).toEqual([])
     await context.close()
+  })
+})
+
+test.describe('catalog switcher', () => {
+  // Several catalogs (stardelt-nova#234): the switcher offers exactly what the API says
+  // the person may browse, the choice lives in the URL, and every catalog request names
+  // the chosen catalog. A catalog they may not browse is never offered — it is not in
+  // the list the engine answers for them.
+  const ME = {
+    user: 'alice', auth_mode: 'oidc', demo: false, warehouse: 'warehouse',
+    is_admin: false, groups: ['analysts'],
+  }
+  const TWO = {
+    catalogs: [{ name: 'finance', id: 'wid-finance' }, { name: 'warehouse', id: 'wid-warehouse' }],
+    default: 'warehouse',
+  }
+  const METADATA = {
+    'metadata-location': 's3://finance/seed/nation/metadata/00001.metadata.json',
+    metadata: {
+      'table-uuid': '00000000-0000-0000-0000-000000000002',
+      location: 's3://finance/seed/nation',
+      'last-updated-ms': 1_760_000_000_000,
+      'current-schema-id': 0,
+      schemas: [{ 'schema-id': 0, fields: [{ id: 1, name: 'n_nationkey', required: true, type: 'long' }] }],
+      'partition-specs': [],
+      properties: {},
+    },
+  }
+  const DOC = {
+    description: null, tags: [], owner: null, domain: null, canEdit: false,
+    editRule: 'Only members of the owner group and administrators may edit this.',
+    columns: [{ name: 'n_nationkey', type: 'long', description: null }],
+  }
+
+  /** The Catalog page with two catalogs; `seen` records every namespaces request's query. */
+  async function open(browser: Browser, catalogs: { status?: number; body: unknown }) {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 800 } })
+    const page = await context.newPage()
+    const seen: string[] = []
+    await page.route('**/api/**', (route) => {
+      const url = new URL(route.request().url())
+      if (url.pathname === '/api/me') return json(route, ME)
+      if (url.pathname === '/api/catalog/catalogs') {
+        return json(route, catalogs.body, catalogs.status ?? 200)
+      }
+      if (url.pathname === '/api/catalog/namespaces') {
+        seen.push(url.search)
+        if (!url.searchParams.get('catalog') && (catalogs.body as { catalogs?: unknown[] }).catalogs?.length === 0) {
+          return json(route, { error: 'no catalog is open to you yet; ask an administrator for access' }, 403)
+        }
+        return json(route, { namespaces: url.searchParams.get('catalog') === 'finance' ? [['seed']] : [['nyc_taxi']] })
+      }
+      if (url.pathname === '/api/catalog/namespaces/seed/tables') {
+        return json(route, { identifiers: [{ namespace: ['seed'], name: 'nation' }] })
+      }
+      if (url.pathname === '/api/catalog/namespaces/nyc_taxi/tables') {
+        return json(route, { identifiers: [{ namespace: ['nyc_taxi'], name: 'trips' }] })
+      }
+      if (url.pathname === '/api/catalog/tables/seed/nation') return json(route, METADATA)
+      if (url.pathname === '/api/catalog/tables/seed/nation/documentation') return json(route, DOC)
+      if (url.pathname === '/api/query') return json(route, { columns: [], rows: [], row_count: 0 })
+      return json(route, [])
+    })
+    return { context, page, seen }
+  }
+
+  test('the second catalog is what every request then names', async ({ browser }) => {
+    const { context, page, seen } = await open(browser, { body: TWO })
+    await page.goto('/catalog')
+    const select = page.getByRole('combobox', { name: 'Catalog' })
+    await expect(select).toBeVisible()
+    await expect(select.locator('option')).toHaveText(['finance', 'warehouse'])
+    await expect(select).toHaveValue('warehouse')
+    await expect(page.getByRole('button', { name: /nyc_taxi/ })).toBeVisible()
+
+    await select.selectOption('finance')
+    // The choice is in the URL, so a reload or a pasted link opens the same catalog …
+    await expect(page).toHaveURL(/[?&]catalog=finance\b/)
+    // … and the table list is asked for in that catalog, not the default one.
+    await expect.poll(() => seen.at(-1) ?? '', { message: 'the next namespaces request names the catalog' })
+      .toContain('catalog=finance')
+    await expect(page.getByRole('button', { name: /seed/ })).toBeVisible()
+    await expect(page.getByRole('button', { name: /nyc_taxi/ })).toHaveCount(0)
+
+    // A generated statement names the chosen catalog, never the historical default.
+    await page.getByRole('button', { name: /nation/ }).click()
+    const link = page.getByRole('link', { name: 'Query table' })
+    const sql = await link.evaluate((a) => new URL((a as HTMLAnchorElement).href).searchParams.get('sql'))
+    expect(sql).toBe('SELECT * FROM finance.seed.nation LIMIT 100')
+
+    // Escape leaves the switcher alone and the page on the catalog the person chose.
+    await select.focus()
+    await page.keyboard.press('Escape')
+    await expect(select).toBeFocused()
+    await expect(page).toHaveURL(/[?&]catalog=finance\b/)
+
+    // The same U rules as every other page: headings, landmarks, labels, contrast, text.
+    judge('/catalog', await auditPage(page))
+    await context.close()
+  })
+
+  test('the SQL editor generates statements in the chosen catalog', async ({ browser }) => {
+    const { context, page } = await open(browser, { body: TWO })
+    await page.goto('/query')
+    const editor = page.getByLabel('SQL query')
+    await expect(editor).toHaveValue('SELECT * FROM warehouse.nyc_taxi.trips LIMIT 100')
+
+    await page.getByRole('combobox', { name: 'Catalog' }).selectOption('finance')
+    // The sample is regenerated for the catalog the person chose, and the choice is in the URL.
+    await expect(editor).toHaveValue('SELECT * FROM finance.seed.nation LIMIT 100')
+    await expect(page).toHaveURL(/[?&]catalog=finance\b/)
+    await expect(page.getByText('Samples and inserted table names use this catalog.')).toBeVisible()
+    judge('/query', await auditPage(page))
+    await context.close()
+  })
+
+  test('no catalog is open says so and offers no Retry', async ({ browser }) => {
+    const sentence = /no catalog is open to you yet; ask an administrator for access/
+    // The list route itself may answer 403. The page shows that one sentence once, and no
+    // Retry: a second ask cannot change the person's grants.
+    const denied = await open(browser, {
+      status: 403,
+      body: { error: 'no catalog is open to you yet; ask an administrator for access' },
+    })
+    await denied.page.goto('/catalog')
+    await expect(denied.page.getByRole('alert')).toContainText(sentence)
+    await expect(denied.page.getByRole('alert')).toHaveCount(1)
+    await expect(denied.page.getByRole('button', { name: 'Retry' })).toHaveCount(0)
+    await denied.context.close()
+
+    // The real backend answers an empty list, with every catalog route refusing: the
+    // namespaces refusal is the same sentence, and a Retry cannot change the grants either.
+    const empty = await open(browser, { body: { catalogs: [], default: 'warehouse' } })
+    await empty.page.goto('/catalog')
+    await expect(empty.page.getByRole('alert')).toContainText(sentence)
+    await expect(empty.page.getByRole('alert')).toHaveCount(1)
+    await expect(empty.page.getByRole('button', { name: 'Retry' })).toHaveCount(0)
+    await expect(empty.page.getByRole('combobox', { name: 'Catalog' })).toHaveCount(0)
+    await empty.context.close()
   })
 })
 
@@ -3456,6 +3595,20 @@ test.describe('preferences', () => {
     await page.goto('/preferences')
     expect((await auditPage(page)).filter((finding) => finding.rule === 'U5')).toEqual([])
     await context.close()
+  })
+})
+
+test.describe('format', () => {
+  test('sqlTableRef names the catalog the person works in', () => {
+    // Plain check, no browser: the generated SQL is the one a person pastes and runs.
+    // Existing callers keep the historical default, so nothing that worked changes.
+    expect(sqlTableRef('sales', 'orders')).toBe('warehouse.sales.orders')
+    expect(sqlTableRef('sales', 'orders', 'finance')).toBe('finance.sales.orders')
+    expect(sqlTableRef('a.b', 'orders', 'finance')).toBe('finance.a.b.orders')
+    // Names come from the API or the URL: anything not a plain identifier is quoted, and
+    // a quote inside one is doubled instead of ending the identifier early.
+    expect(sqlTableRef('sales', 'my table', 'finance')).toBe('finance.sales."my table"')
+    expect(sqlTableRef('sales', 'orders', 'x"y')).toBe('"x""y".sales.orders')
   })
 })
 

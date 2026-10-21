@@ -204,7 +204,7 @@ function LoadForm() {
 
 function TransferForm() {
   const qc = useQueryClient()
-  const tables = useQuery({ queryKey: ['catalog', 'all'], queryFn: allTables })
+  const tables = useQuery({ queryKey: ['catalog', 'all'], queryFn: () => allTables() })
   const [source, setSource] = useState('')
   const [targetNs, setTargetNs] = useState('analytics')
   const [targetTable, setTargetTable] = useState('trips_copy')
