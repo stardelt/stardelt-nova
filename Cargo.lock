@@ -2809,6 +2809,7 @@ dependencies = [
  "chrono-tz",
  "futures",
  "getrandom 0.4.3",
+ "hmac 0.13.0",
  "instant-xml",
  "jiff",
  "jsonwebtoken",

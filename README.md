@@ -508,7 +508,10 @@ writes one `audit` line with the group, the name, the version and the size — n
 
 The key is built by Nova as `{group}/{name}`; the browser never supplies a path. Listing and versions
 are owner-group scoped: an administrator sees their own groups only, because being a platform
-administrator does not make someone a member of a tenant's group. Without `NOVA_S3_URL` (or any of the
+administrator does not make someone a member of a tenant's group. Every list row carries the
+immutable `objectVersion`, the size, the publisher's `uploadedBy` and `uploadedAt` **as RFC 3339 in
+UTC** (`2026-10-21T01:24:28.000Z`) — the gateway's RFC 1123 `Last-Modified` is normalised, so the UI
+parses one shape. Without `NOVA_S3_URL` (or any of the
 other three `NOVA_S3_*` variables) the three routes answer
 `503 {"error":"notebook storage is not configured"}`; an S3 gateway that is down or refuses answers
 `502`, never `500`. Answers are `application/json` with `Cache-Control: no-store`.

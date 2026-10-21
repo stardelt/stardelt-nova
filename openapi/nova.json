@@ -1734,7 +1734,7 @@
           "public"
         ],
         "summary": "`GET /api/notebooks`: the latest version of every notebook in the caller's groups,\nnewest first. Administrators see their own groups only.",
-        "description": "The latest published version of every notebook in the caller's groups, newest first. Each row carries the group, the name, the latest `objectVersion`, its size, S3's `uploadedAt` (ISO 8601) and the publisher's `uploadedBy` display name. An administrator gets no wider view than their own groups. Unset `NOVA_S3_*` is 503; an S3 that is down or refuses is 502. Answers `Cache-Control: no-store`.",
+        "description": "The latest published version of every notebook in the caller's groups, newest first. Each row carries the group, the name, the latest `objectVersion`, its size, `uploadedAt` as an RFC 3339 timestamp in UTC (SeaweedFS's RFC 1123 `LastModified` normalised) and the publisher's `uploadedBy` display name. An administrator gets no wider view than their own groups. Unset `NOVA_S3_*` is 503; an S3 that is down or refuses is 502. Answers `Cache-Control: no-store`.",
         "operationId": "list",
         "responses": {
           "200": {
@@ -1909,7 +1909,7 @@
           "public"
         ],
         "summary": "`GET /api/notebooks/{group}/{name}/versions`: the versions of one notebook, newest\nfirst, at most 50.",
-        "description": "The published versions of one notebook, newest first, at most 50. Needs a member of `{group}` (403 `you are not a member of the group <g>`; administrators are not exempt). Each row carries the immutable `objectVersion`, its size, S3's `uploadedAt` (ISO 8601), the publisher's `uploadedBy` and the `sha256` of the stored bytes. A group with no such notebook answers an empty list. Unset `NOVA_S3_*` is 503; an S3 that is down or refuses is 502. Answers `Cache-Control: no-store`.",
+        "description": "The published versions of one notebook, newest first, at most 50. Needs a member of `{group}` (403 `you are not a member of the group <g>`; administrators are not exempt). Each row carries the immutable `objectVersion`, its size, `uploadedAt` as an RFC 3339 timestamp in UTC (SeaweedFS's RFC 1123 `LastModified` normalised), the publisher's `uploadedBy` and the `sha256` of the stored bytes. A group with no such notebook answers an empty list. Unset `NOVA_S3_*` is 503; an S3 that is down or refuses is 502. Answers `Cache-Control: no-store`.",
         "operationId": "versions",
         "parameters": [
           {
@@ -3883,7 +3883,7 @@
           },
           "uploadedAt": {
             "type": "string",
-            "description": "S3's `LastModified` for that version, ISO 8601."
+            "description": "The version's `LastModified` as RFC 3339 in UTC (`2026-10-21T01:24:28.000Z`),\nwhichever of S3's two date shapes the gateway answered."
           },
           "uploadedBy": {
             "type": "string",
@@ -3914,7 +3914,7 @@
           },
           "uploadedAt": {
             "type": "string",
-            "description": "S3's `LastModified` for that version, ISO 8601."
+            "description": "The version's `LastModified` as RFC 3339 in UTC (`2026-10-21T01:24:28.000Z`),\nwhichever of S3's two date shapes the gateway answered."
           },
           "uploadedBy": {
             "type": "string"

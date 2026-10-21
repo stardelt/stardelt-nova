@@ -33,7 +33,10 @@
 //!   `reqwest` client sends them. A signed URL *is* a credential (short-lived, five
 //!   minutes), so no error, log line or response ever contains one: [`StoreError`]'s
 //!   sentences are fixed text, and a `reqwest` error is logged only after
-//!   `without_url()`.
+//!   `without_url()`. One call is the exception: SeaweedFS refuses the presigned
+//!   `?versions` list that `rusty-s3`'s `sign` produces (`403 SignatureDoesNotMatch`),
+//!   so that listing is signed in the headers instead (stardelt-nova#245) — same
+//!   credentials, no signature in the URL at all.
 //! - **Failure sentences.** Unset `NOVA_S3_*` is `503 notebook storage is not
 //!   configured`; an S3 that is down or refuses is `502`, never `500` (rule U12 of
 //!   `design/ui-conformance.md`); a 61st publish by one person in an hour is `429`.
@@ -56,6 +59,7 @@ use axum::{
     routing::{get, put},
 };
 use futures::stream::{self, StreamExt};
+use hmac::{Hmac, KeyInit as _, Mac as _};
 use instant_xml::FromXml;
 use percent_encoding::{AsciiSet, CONTROLS, percent_decode_str, utf8_percent_encode};
 use rusty_s3::S3Action;
@@ -90,6 +94,44 @@ const S3_REGION: &str = "us-east-1";
 const MAX_PAGES: usize = 10;
 const NOTEBOOK_CONTENT_TYPE: &str = "application/x-ipynb+json";
 const S3_XML_NS: &str = "http://s3.amazonaws.com/doc/2006-03-01/";
+/// The SHA-256 of an empty body — the value `x-amz-content-sha256` carries on every
+/// request here (nothing this module sends has a body).
+const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+/// The headers a SigV4 header-signed request signs, in canonical order.
+const SIGNED_HEADERS: &str = "host;x-amz-content-sha256;x-amz-date";
+/// RFC 3986 §2.3: `A–Z a–z 0–9 - . _ ~` are the only characters a canonical query
+/// leaves alone. Everything else is percent-encoded, a space as `%20` and never `+`
+/// (which `form_urlencoded` would produce, and which AWS does not sign the same way).
+const QUERY_UNSAFE: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'!')
+    .add(b'"')
+    .add(b'#')
+    .add(b'$')
+    .add(b'%')
+    .add(b'&')
+    .add(b'\'')
+    .add(b'(')
+    .add(b')')
+    .add(b'*')
+    .add(b'+')
+    .add(b',')
+    .add(b'/')
+    .add(b':')
+    .add(b';')
+    .add(b'<')
+    .add(b'=')
+    .add(b'>')
+    .add(b'?')
+    .add(b'@')
+    .add(b'[')
+    .add(b'\\')
+    .add(b']')
+    .add(b'^')
+    .add(b'`')
+    .add(b'{')
+    .add(b'|')
+    .add(b'}');
 
 // ---------------------------------------------------------------------------
 // Configuration and the store
@@ -325,38 +367,41 @@ impl NotebookStore {
 
     /// Every version under `prefix`, newest first as S3 returns them, up to
     /// [`MAX_PAGES`] pages.
+    ///
+    /// SeaweedFS refuses the presigned `?versions` list that `rusty-s3`'s `sign`
+    /// produces (`403 SignatureDoesNotMatch`), so this one request is signed in its
+    /// headers instead of its URL (stardelt-nova#245). Every other call here keeps the
+    /// presigned form.
     async fn list_versions(&self, prefix: &str) -> Result<Vec<ListedVersion>, StoreError> {
         let mut out = Vec::new();
         let mut key_marker: Option<String> = None;
         let mut version_marker: Option<String> = None;
         for _ in 0..MAX_PAGES {
-            let max_keys = "1000".to_string();
-            let mut query: Vec<(&str, &str)> = vec![
-                ("versions", ""),
-                ("prefix", prefix),
-                ("max-keys", &max_keys),
-            ];
+            let mut query: Vec<(&str, &str)> =
+                vec![("versions", ""), ("prefix", prefix), ("max-keys", "1000")];
             if let Some(marker) = &key_marker {
                 query.push(("key-marker", marker));
             }
             if let Some(marker) = &version_marker {
                 query.push(("version-id-marker", marker));
             }
-            // rusty-s3 has no `ListObjectVersions` action; its public `sign` signs the
-            // request we build, so the gateway still checks a real SigV4 signature.
-            let url = rusty_s3::signing::sign(
-                &jiff::Timestamp::now(),
-                rusty_s3::Method::Get,
-                self.bucket.base_url().clone(),
+            // The URL carries the parameters in the same RFC 3986 encoding that is
+            // signed, so no `+` for a space can make the signature disagree with what
+            // the gateway parses.
+            let mut url = self.bucket.base_url().clone();
+            url.set_query(Some(&canonical_query_string(query.into_iter())));
+            let mut request = self.http.get(url.clone());
+            for (name, value) in sign_headers(
+                "GET",
+                &url,
+                S3_REGION,
                 self.credentials.key(),
                 self.credentials.secret(),
-                self.credentials.token(),
-                S3_REGION,
-                PRESIGN_TTL.as_secs(),
-                query.into_iter(),
-                std::iter::empty::<(&str, &str)>(),
-            );
-            let response = self.send(self.http.get(url)).await?;
+                jiff::Timestamp::now(),
+            ) {
+                request = request.header(name, value);
+            }
+            let response = self.send(request).await?;
             let body = response.text().await.map_err(|_| StoreError::Malformed)?;
             let page: ListVersionsResult =
                 instant_xml::from_str(&body).map_err(|_| StoreError::Malformed)?;
@@ -416,7 +461,7 @@ impl NotebookStore {
                 name: name.to_string(),
                 object_version: head.object_version,
                 size: head.size,
-                uploaded_at: head.uploaded_at,
+                uploaded_at: rfc3339_utc(&head.uploaded_at),
                 uploaded_by: head.uploaded_by,
             });
         }
@@ -451,7 +496,7 @@ impl NotebookStore {
             rows.push(NotebookVersion {
                 object_version: version.object_version,
                 size: version.size,
-                uploaded_at: version.last_modified,
+                uploaded_at: rfc3339_utc(&version.last_modified),
                 uploaded_by: head.uploaded_by,
                 sha256: head.sha256,
             });
@@ -485,6 +530,129 @@ fn version_id(response: &reqwest::Response) -> Option<String> {
         .and_then(|value| value.to_str().ok())
         .filter(|value| !value.is_empty())
         .map(str::to_string)
+}
+
+// ---------------------------------------------------------------------------
+// SigV4 header signing (stardelt-nova#245)
+// ---------------------------------------------------------------------------
+
+/// The SigV4 headers for a GET without a body: `Authorization`, `x-amz-date` and
+/// `x-amz-content-sha256`. `now` is a parameter so the test pins the exact date.
+///
+/// Only `ListObjectVersions` uses this. `rusty-s3` has no action for that list and its
+/// public `sign` presigns the URL, which is exactly the shape SeaweedFS refuses for
+/// `?versions`; the header form authenticates the same request the same way.
+fn sign_headers(
+    method: &str,
+    url: &Url,
+    region: &str,
+    access_key: &str,
+    secret_key: &str,
+    now: jiff::Timestamp,
+) -> Vec<(String, String)> {
+    let amz_date = now.strftime("%Y%m%dT%H%M%SZ").to_string();
+    let date = now.strftime("%Y%m%d").to_string();
+    let canonical_request = format!(
+        "{method}\n{}\n{}\nhost:{}\nx-amz-content-sha256:{EMPTY_SHA256}\nx-amz-date:{amz_date}\n\n{SIGNED_HEADERS}\n{EMPTY_SHA256}",
+        url.path(),
+        canonical_query(url),
+        host_header(url),
+    );
+    let scope = format!("{date}/{region}/s3/aws4_request");
+    let string_to_sign = format!(
+        "AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}",
+        sha256_hex(canonical_request.as_bytes())
+    );
+    // The signing key is `AWS4` + the secret, then a chain of HMACs down to the request.
+    let mut prefix = b"AWS4".to_vec();
+    prefix.extend_from_slice(secret_key.as_bytes());
+    let date_key = hmac_sha256(&prefix, date.as_bytes());
+    let region_key = hmac_sha256(&date_key, region.as_bytes());
+    let service_key = hmac_sha256(&region_key, b"s3");
+    let signing_key = hmac_sha256(&service_key, b"aws4_request");
+    let signature = hex(&hmac_sha256(&signing_key, string_to_sign.as_bytes()));
+    vec![
+        (
+            "authorization".to_string(),
+            format!(
+                "AWS4-HMAC-SHA256 Credential={access_key}/{scope}, \
+                 SignedHeaders={SIGNED_HEADERS}, Signature={signature}"
+            ),
+        ),
+        ("x-amz-date".to_string(), amz_date),
+        ("x-amz-content-sha256".to_string(), EMPTY_SHA256.to_string()),
+    ]
+}
+
+/// The canonical query of `url`: the parameters sorted by name, names and values
+/// percent-encoded per RFC 3986. A parameter written without a value signs as
+/// `name=` — which is how `?versions` is signed.
+fn canonical_query(url: &Url) -> String {
+    let params: Vec<(&str, &str)> = url
+        .query()
+        .unwrap_or_default()
+        .split('&')
+        .filter(|item| !item.is_empty())
+        .map(|item| item.split_once('=').unwrap_or((item, "")))
+        .collect();
+    canonical_query_string(params.into_iter())
+}
+
+/// Write `params` as a canonical query: sorted by name, percent-encoded per RFC 3986.
+/// One function builds the URL's query and the signed query, so the two cannot differ.
+fn canonical_query_string<'a>(params: impl Iterator<Item = (&'a str, &'a str)>) -> String {
+    let mut params: Vec<(String, String)> = params
+        .map(|(name, value)| {
+            (
+                percent_decode_str(name).decode_utf8_lossy().into_owned(),
+                percent_decode_str(value).decode_utf8_lossy().into_owned(),
+            )
+        })
+        .collect();
+    params.sort();
+    params
+        .iter()
+        .map(|(name, value)| {
+            format!(
+                "{}={}",
+                utf8_percent_encode(name, QUERY_UNSAFE),
+                utf8_percent_encode(value, QUERY_UNSAFE)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+/// The `Host` header a request to `url` carries: the port only when it is not the
+/// scheme's default.
+fn host_header(url: &Url) -> String {
+    let host = url.host_str().unwrap_or_default();
+    match (url.scheme(), url.port()) {
+        ("http" | "https", None) | ("http", Some(80)) | ("https", Some(443)) => host.to_string(),
+        (_, Some(port)) => format!("{host}:{port}"),
+        (_, None) => host.to_string(),
+    }
+}
+
+fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC-SHA256 accepts any key length");
+    mac.update(message);
+    mac.finalize().into_bytes().into()
+}
+
+/// S3 answers two date shapes: RFC 1123 (`Wed, 21 Oct 2026 01:24:28 GMT`, what SeaweedFS
+/// writes into `Last-Modified` and its version listing) and RFC 3339 (what some gateways
+/// list). Every row answers RFC 3339 in UTC with milliseconds, so one shape reaches the
+/// UI; a value in neither shape is passed through rather than failing the whole listing.
+fn rfc3339_utc(value: &str) -> String {
+    let parsed = chrono::DateTime::parse_from_rfc3339(value)
+        .or_else(|_| chrono::DateTime::parse_from_rfc2822(value));
+    match parsed {
+        Ok(time) => time
+            .with_timezone(&chrono::Utc)
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        Err(_) => value.to_string(),
+    }
 }
 
 /// Why an object-store request failed. Every sentence is fixed text: no URL, no
@@ -627,7 +795,8 @@ pub struct NotebookSummary {
     /// The latest version.
     pub object_version: String,
     pub size: u64,
-    /// S3's `LastModified` for that version, ISO 8601.
+    /// The version's `LastModified` as RFC 3339 in UTC (`2026-10-21T01:24:28.000Z`),
+    /// whichever of S3's two date shapes the gateway answered.
     pub uploaded_at: String,
     /// The `x-amz-meta-uploaded-by` the publisher wrote (their display name).
     pub uploaded_by: String,
@@ -638,7 +807,8 @@ pub struct NotebookSummary {
 pub struct NotebookVersion {
     pub object_version: String,
     pub size: u64,
-    /// S3's `LastModified` for that version, ISO 8601.
+    /// The version's `LastModified` as RFC 3339 in UTC (`2026-10-21T01:24:28.000Z`),
+    /// whichever of S3's two date shapes the gateway answered.
     pub uploaded_at: String,
     pub uploaded_by: String,
     pub sha256: String,
@@ -879,10 +1049,14 @@ fn parameters_of(notebook: &serde_json::Value) -> Vec<NotebookParameter> {
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
+    hex(&Sha256::digest(bytes))
+}
+
+/// Lower-case hex of a digest or a signature.
+fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
-    let digest = Sha256::digest(bytes);
-    let mut out = String::with_capacity(digest.len() * 2);
-    for byte in digest {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
         let _ = write!(out, "{byte:02x}");
     }
     out
@@ -1025,7 +1199,7 @@ pub(crate) async fn publish(
     get,
     path = "/api/notebooks",
     tag = "public",
-    description = "The latest published version of every notebook in the caller's groups, newest first. Each row carries the group, the name, the latest `objectVersion`, its size, S3's `uploadedAt` (ISO 8601) and the publisher's `uploadedBy` display name. An administrator gets no wider view than their own groups. Unset `NOVA_S3_*` is 503; an S3 that is down or refuses is 502. Answers `Cache-Control: no-store`.",
+    description = "The latest published version of every notebook in the caller's groups, newest first. Each row carries the group, the name, the latest `objectVersion`, its size, `uploadedAt` as an RFC 3339 timestamp in UTC (SeaweedFS's RFC 1123 `LastModified` normalised) and the publisher's `uploadedBy` display name. An administrator gets no wider view than their own groups. Unset `NOVA_S3_*` is 503; an S3 that is down or refuses is 502. Answers `Cache-Control: no-store`.",
     responses(
         (status = 200, description = "One row per notebook", body = [NotebookSummary]),
         (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
@@ -1062,7 +1236,7 @@ pub(crate) async fn list(
     get,
     path = "/api/notebooks/{group}/{name}/versions",
     tag = "public",
-    description = "The published versions of one notebook, newest first, at most 50. Needs a member of `{group}` (403 `you are not a member of the group <g>`; administrators are not exempt). Each row carries the immutable `objectVersion`, its size, S3's `uploadedAt` (ISO 8601), the publisher's `uploadedBy` and the `sha256` of the stored bytes. A group with no such notebook answers an empty list. Unset `NOVA_S3_*` is 503; an S3 that is down or refuses is 502. Answers `Cache-Control: no-store`.",
+    description = "The published versions of one notebook, newest first, at most 50. Needs a member of `{group}` (403 `you are not a member of the group <g>`; administrators are not exempt). Each row carries the immutable `objectVersion`, its size, `uploadedAt` as an RFC 3339 timestamp in UTC (SeaweedFS's RFC 1123 `LastModified` normalised), the publisher's `uploadedBy` and the `sha256` of the stored bytes. A group with no such notebook answers an empty list. Unset `NOVA_S3_*` is 503; an S3 that is down or refuses is 502. Answers `Cache-Control: no-store`.",
     params(
         ("group" = String, Path, description = "One of the caller's groups"),
         ("name" = String, Path, description = "Notebook file name, ending in .ipynb"),
@@ -1322,8 +1496,9 @@ pub(crate) mod fake {
             .map(str::to_string)
     }
 
-    /// One handler for every S3 method the store sends. Signatures are not checked (the
-    /// real gateway does that); the point is the bytes, the versions and the metadata.
+    /// One handler for every S3 method the store sends. Signatures are not verified (the
+    /// real gateway does that), but *where* the signature sits is: a `?versions` list
+    /// must be header-signed, as SeaweedFS requires (stardelt-nova#245).
     async fn fake_s3(
         State(state): State<Arc<Mutex<FakeState>>>,
         method: Method,
@@ -1423,6 +1598,19 @@ pub(crate) mod fake {
         }
 
         if method == Method::GET && query.contains_key("versions") {
+            // SeaweedFS refuses the presigned `?versions` URL `rusty-s3` produced
+            // (`403 SignatureDoesNotMatch`) and accepts the header-signed form, so the
+            // fake does exactly that: the signature must sit in `Authorization`, never in
+            // the query (stardelt-nova#245). A regression back to a presigned URL must
+            // fail here.
+            let header_signed = header_text(&headers, "authorization")
+                .is_some_and(|value| value.starts_with("AWS4-HMAC-SHA256 "));
+            let query_signed = query
+                .keys()
+                .any(|name| name.eq_ignore_ascii_case("X-Amz-Signature"));
+            if !header_signed || query_signed {
+                return StatusCode::FORBIDDEN.into_response();
+            }
             let prefix = query.get("prefix").cloned().unwrap_or_default();
             let state = state.lock().expect("fake S3 state");
             let mut objects: Vec<&StoredObject> = state
@@ -2491,6 +2679,127 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // Header-signed ListObjectVersions (stardelt-nova#245)
+    // -----------------------------------------------------------------------
+
+    /// The expected header values were produced with botocore 1.43.116 in a throwaway
+    /// venv, not by this code:
+    ///
+    /// ```text
+    /// from botocore.auth import S3SigV4Auth
+    /// from botocore.awsrequest import AWSRequest
+    /// from botocore.credentials import Credentials
+    /// auth = S3SigV4Auth(Credentials("AKIDEXAMPLE", "secretexample"), "s3", "us-east-1")
+    /// request = AWSRequest(method="GET", url="http://seaweedfs-s3.stardelt.svc.cluster.local:8333/notebooks?versions=&prefix=analytics%2Fqa.ipynb&max-keys=1000")
+    /// request.headers["x-amz-content-sha256"] = EMPTY_SHA256
+    /// botocore.auth.get_current_datetime = lambda: 2026-10-21T01:24:28Z  # pinned
+    /// auth.add_auth(request)
+    /// ```
+    ///
+    /// which printed `x-amz-date: 20261021T012428Z`, the content hash below, and the
+    /// `Authorization` line asserted here.
+    #[test]
+    fn sign_headers_matches_botocore() {
+        let url = Url::parse(
+            "http://seaweedfs-s3.stardelt.svc.cluster.local:8333/notebooks?versions=&prefix=analytics%2Fqa.ipynb&max-keys=1000",
+        )
+        .expect("S3 URL");
+        let now = "2026-10-21T01:24:28Z"
+            .parse::<jiff::Timestamp>()
+            .expect("fixed time");
+        let headers = sign_headers(
+            "GET",
+            &url,
+            "us-east-1",
+            "AKIDEXAMPLE",
+            "secretexample",
+            now,
+        );
+        let header = |name: &str| {
+            headers
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.as_str())
+        };
+        assert_eq!(header("x-amz-date"), Some("20261021T012428Z"));
+        assert_eq!(header("x-amz-content-sha256"), Some(EMPTY_SHA256));
+        assert_eq!(
+            header("authorization"),
+            Some(
+                "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20261021/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=e86c765e63de8b6e065949fcc19d121cbb730b043089840835b3098e56dd6083"
+            )
+        );
+    }
+
+    #[test]
+    fn canonical_query_sorts_and_keeps_empty_value() {
+        let url = Url::parse(
+            "http://s3.local/notebooks?versions=&prefix=analytics%2Fqa.ipynb&max-keys=1000",
+        )
+        .expect("S3 URL");
+        assert_eq!(
+            canonical_query(&url),
+            "max-keys=1000&prefix=analytics%2Fqa.ipynb&versions="
+        );
+        // A parameter that was written without `=` still signs with an empty value.
+        let url = Url::parse("http://s3.local/notebooks?versions&prefix=a%20b").expect("S3 URL");
+        assert_eq!(canonical_query(&url), "prefix=a%20b&versions=");
+    }
+
+    /// The fake refuses exactly what SeaweedFS refuses, so the test fails if the store
+    /// ever goes back to a presigned `?versions` URL.
+    #[tokio::test]
+    async fn list_versions_requires_header_auth_in_the_fake_gateway() {
+        let s3 = FakeS3::start().await;
+        s3.put_raw("analytics/a.ipynb", b"{\"v\":1}", "alice-name");
+        let http = reqwest::Client::new();
+
+        // The shape rusty-s3's `sign` produced before #245: a query signature.
+        let presigned = format!(
+            "{}/notebooks?versions=&prefix=analytics%2F&max-keys=1000&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=deadbeef",
+            s3.base
+        );
+        let response = http.get(presigned).send().await.expect("presigned request");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        // The shape Nova sends now: the same parameters, the signature in the headers.
+        let response = http
+            .get(format!(
+                "{}/notebooks?versions=&prefix=analytics%2F&max-keys=1000",
+                s3.base
+            ))
+            .header(
+                "authorization",
+                "AWS4-HMAC-SHA256 Credential=test-access-key/20261021/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=deadbeef",
+            )
+            .header("x-amz-date", "20261021T012428Z")
+            .header("x-amz-content-sha256", EMPTY_SHA256)
+            .send()
+            .await
+            .expect("header-signed request");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.text().await.expect("listing body");
+        assert!(body.contains("<Key>analytics/a.ipynb</Key>"), "{body}");
+    }
+
+    #[test]
+    fn last_modified_rfc1123_becomes_rfc3339() {
+        // What SeaweedFS writes into `Last-Modified` and its version listing.
+        assert_eq!(
+            rfc3339_utc("Wed, 21 Oct 2026 01:24:28 GMT"),
+            "2026-10-21T01:24:28.000Z"
+        );
+        // What the fake and some gateways list, and what the row already answered.
+        assert_eq!(
+            rfc3339_utc("2026-10-20T12:00:01.000Z"),
+            "2026-10-20T12:00:01.000Z"
+        );
+        // A shape this module does not know passes through: one odd row never fails the
+        // whole listing.
+        assert_eq!(rfc3339_utc("yesterday"), "yesterday");
+    }
+
     /// A real S3 gateway, when one is handed over (the deployed stack uses SeaweedFS
     /// 4.25). CI has none, so the test prints "skipped" and passes — the same contract as
     /// the secret-store live test. `NOVA_TEST_S3_BUCKET` must exist and be versioned.
@@ -2575,6 +2884,11 @@ mod tests {
             v2.as_str(),
             "the list carries the latest"
         );
+        // SeaweedFS writes RFC 1123 (`Wed, 21 Oct 2026 01:24:28 GMT`); every row answers
+        // RFC 3339 in UTC (#245).
+        let uploaded_at = row["uploadedAt"].as_str().expect("uploadedAt");
+        assert!(uploaded_at.ends_with('Z'), "RFC 3339 UTC: {uploaded_at}");
+        eprintln!("live uploadedAt: {uploaded_at}");
 
         let (status, versions) = call(&app, "GET", &versions_uri, None, &[]).await;
         assert_eq!(status, StatusCode::OK, "{versions}");
@@ -2582,6 +2896,10 @@ mod tests {
         assert!(versions.len() >= 2, "both versions are listed");
         assert_eq!(versions[0]["objectVersion"], v2.as_str(), "newest first");
         assert_eq!(versions[1]["objectVersion"], v1.as_str());
+        for version in versions {
+            let uploaded_at = version["uploadedAt"].as_str().expect("uploadedAt");
+            assert!(uploaded_at.ends_with('Z'), "RFC 3339 UTC: {uploaded_at}");
+        }
         eprintln!("live notebook versions: {v1} {v2}");
     }
 
