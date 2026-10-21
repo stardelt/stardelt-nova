@@ -4,6 +4,7 @@ import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { ApiError, api, errorMessage, type PipelineView } from '../api'
 import ErrorBox from '../components/ErrorBox'
 import { Icon } from '../components/Icon'
+import ScheduleDialog from '../components/ScheduleDialog'
 import { formatDurationMs, formatTime, relativeTime } from '../format'
 
 /**
@@ -199,6 +200,7 @@ export default function Pipelines() {
   const location = useLocation()
   const navigate = useNavigate()
   const [routedNotice, setRoutedNotice] = useState<string | null>(null)
+  const [scheduling, setScheduling] = useState(false)
   const list = useQuery({
     queryKey: ['pipelines'],
     queryFn: api.pipelines,
@@ -227,9 +229,15 @@ export default function Pipelines() {
 
   return (
     <div className="max-w-6xl space-y-5">
-      <header>
-        <h1 className="text-2xl font-bold tracking-tight">Pipelines</h1>
-        <p className="text-text-dim text-sm mt-1">Scheduled work you and your groups own.</p>
+      <header className="flex flex-wrap items-start justify-between gap-4">
+        <div className="min-w-0">
+          <h1 className="text-2xl font-bold tracking-tight">Pipelines</h1>
+          <p className="text-text-dim text-sm mt-1">Scheduled work you and your groups own.</p>
+        </div>
+        <button type="button" className="btn-primary" onClick={() => setScheduling(true)}>
+          <Icon name="clock" className="w-4 h-4" />
+          Schedule a notebook
+        </button>
       </header>
 
       <PipelineFeedback notice={routedNotice ?? actions.notice} error={actions.error} />
@@ -285,6 +293,20 @@ export default function Pipelines() {
           </table>
         )}
       </div>
+
+      {scheduling && (
+        <ScheduleDialog
+          mode="create"
+          initialKind="notebook"
+          onClose={() => setScheduling(false)}
+          onScheduled={(view) => {
+            setScheduling(false)
+            actions.clearError()
+            actions.announce(`Scheduled ${view.name}.`)
+            void queryClient.invalidateQueries({ queryKey: ['pipelines'] })
+          }}
+        />
+      )}
     </div>
   )
 }

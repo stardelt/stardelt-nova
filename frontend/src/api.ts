@@ -332,8 +332,49 @@ export type PipelineState =
  * One task as the `Pipeline` resource declares it. `sql` is the statement of a `kind: "sql"`
  * task; the read API does not send it yet (stardelt-nova#211 says it should), so the editor
  * treats it as absent and asks the person to type the statement until the API carries it.
+ * A `kind: "notebook"` task carries the file name, the version it pins and its parameter
+ * values — only on the detail route, as with `sql` (stardelt-nova#237).
  */
-export type PipelineTaskSpec = { name: string; kind: string; sql?: string | null }
+export type PipelineTaskSpec = {
+  name: string
+  kind: string
+  sql?: string | null
+  notebook?: string | null
+  objectVersion?: string | null
+  notebookParams?: Record<string, string> | null
+}
+
+/**
+ * One published notebook, the newest version of it (`GET /api/notebooks`, stardelt-nova#225).
+ * A schedule pins `objectVersion` exactly; `uploadedAt` is S3's ISO 8601 time.
+ */
+export type PublishedNotebook = {
+  group: string
+  name: string
+  objectVersion: string
+  size: number
+  uploadedAt: string
+  uploadedBy: string
+}
+
+/** One immutable published version of a notebook (`GET …/versions`), newest first. */
+export type NotebookVersion = {
+  objectVersion: string
+  size: number
+  uploadedAt: string
+  uploadedBy: string
+  sha256: string
+}
+
+/** One parameter of a notebook's tagged `parameters` cell: the name and its default as text. */
+export type NotebookParameter = { name: string; default: string }
+
+/** `GET …/parameters?version=` — the parameters of one pinned version (stardelt-nova#237). */
+export type NotebookParameters = {
+  parameters: NotebookParameter[]
+  /** The version the answer describes; a schedule pins this id. */
+  objectVersion: string
+}
 
 /** A cron and its IANA zone, as `POST`/`PUT /api/pipelines` carries them. */
 export type ScheduleSpec = { cron: string; timezone: string }
@@ -373,7 +414,10 @@ export type PipelinePrincipal = {
 export type CreatePipelineRequest = {
   name: string
   ownerGroup: string
-  sql: string
+  /** A statement; exactly one of this and `notebook` (stardelt-nova#237). */
+  sql?: string
+  /** A published notebook version to run instead of a statement. */
+  notebook?: NotebookRequest
   schedule: ScheduleSpec | null
   /** Values for `${params.<name>}` in the statement; at most 16. */
   params?: Record<string, string>
@@ -382,15 +426,27 @@ export type CreatePipelineRequest = {
 }
 
 /**
- * `PUT /api/pipelines/{namespace}/{name}`: the statement, the schedule, the parameters and the
- * options. The body is the whole editable state — an omitted `schedule` or `params` removes it
- * and an omitted option keeps its default — so the dialog sends all four.
+ * `PUT /api/pipelines/{namespace}/{name}`: the statement or the notebook, the schedule, the
+ * parameters and the options. The body is the whole editable state — an omitted `schedule` or
+ * `params` removes it and an omitted option keeps its default — so the dialog sends all four.
+ * A pipeline never changes kind: exactly one of `sql` and `notebook` is given (#237).
  */
 export type UpdatePipelineRequest = {
-  sql: string
+  sql?: string
+  notebook?: NotebookRequest
   schedule: ScheduleSpec | null
   params?: Record<string, string>
   options?: PipelineOptions
+}
+
+/** The published notebook version a schedule pins (stardelt-nova#237). */
+export type NotebookRequest = {
+  /** The `.ipynb` file name; its group is the pipeline's `ownerGroup`. */
+  name: string
+  /** The S3 object version, never a branch or a tag. */
+  objectVersion: string
+  /** The values papermill binds; names are the tagged cell's, values at most 256 characters. */
+  params: Record<string, string>
 }
 
 /** `POST /api/pipelines/check`: what the engine says about a statement, without running it. */
@@ -750,6 +806,16 @@ export const api = {
   pipelines:    ()                            => jget<{ pipelines: PipelineView[] }>('/api/pipelines'),
   /** The caller's own groups and their principals (`Schedule`, #210). */
   pipelinePrincipals: ()                      => jget<{ groups: PipelinePrincipal[] }>('/api/pipelines/principals'),
+  /** The latest published versions of the notebooks in the caller's groups (#225). */
+  notebooks:    ()                            => jget<PublishedNotebook[]>('/api/notebooks'),
+  /** One notebook's published versions, newest first, at most 50. */
+  notebookVersions: (group: string, name: string) =>
+    jget<NotebookVersion[]>(`/api/notebooks/${seg(group)}/${seg(name)}/versions`),
+  /** The parameters of one published version; no `version` means the latest (#237). */
+  notebookParameters: (group: string, name: string, version?: string) => {
+    const qs = version ? `?${new URLSearchParams({ version }).toString()}` : ''
+    return jget<NotebookParameters>(`/api/notebooks/${seg(group)}/${seg(name)}/parameters${qs}`)
+  },
   /** Fill the placeholders and ask the engine to plan the statement: nothing runs (#223). */
   checkStatement: (req: CheckStatementRequest) => jpost<CheckStatementView>('/api/pipelines/check', req),
   /** The next fire times of a cron in its zone, at most ten (#223). */

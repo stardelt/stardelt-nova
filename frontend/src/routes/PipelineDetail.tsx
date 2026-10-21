@@ -1,10 +1,11 @@
-import { useState } from 'react'
+import { Fragment, useState } from 'react'
 import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { ApiError, api, type LogLine, type PipelineDetail as PipelineDetailView, type RunView } from '../api'
 import ErrorBox from '../components/ErrorBox'
 import ScheduleDialog, { DeletePipelineDialog } from '../components/ScheduleDialog'
 import StopRunDialog from '../components/StopRunDialog'
+import { shortVersion } from '../format'
 import {
   NOT_LOADED_NOTE,
   PipelineActions,
@@ -152,13 +153,34 @@ export default function PipelineDetail() {
         {pipeline.tasks.length === 0 ? (
           <p className="mt-2 text-sm text-text-mute">This pipeline declares no tasks.</p>
         ) : (
-          <ul className="mt-3 space-y-1.5 text-sm">
-            {pipeline.tasks.map((task, index) => (
-              <li key={`${task.name}-${index}`} className="flex flex-wrap items-baseline gap-2">
-                <span className="font-mono text-xs break-all">{task.name}</span>
-                <span className="badge border-border bg-bg-soft text-text-dim">{task.kind || 'Unknown'}</span>
-              </li>
-            ))}
+          <ul className="mt-3 space-y-2 text-sm">
+            {pipeline.tasks.map((task, index) => {
+              const stored = Object.entries(task.notebookParams ?? {}).sort(([a], [b]) => a.localeCompare(b))
+              return (
+                <li key={`${task.name}-${index}`} className="min-w-0">
+                  <div className="flex flex-wrap items-baseline gap-2">
+                    <span className="font-mono text-xs break-all">{task.name}</span>
+                    <span className="badge border-border bg-bg-soft text-text-dim">{task.kind || 'Unknown'}</span>
+                  </div>
+                  {task.kind === 'notebook' && (task.notebook || task.objectVersion) && (
+                    <p className="mt-0.5 text-text-dim break-words">
+                      Notebook <span className="font-mono text-xs break-all">{task.notebook || '—'}</span>
+                      {' · '}version <span className="font-mono text-xs">{shortVersion(task.objectVersion)}</span>
+                    </p>
+                  )}
+                  {stored.length > 0 && (
+                    <dl className="mt-1 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-0.5 text-xs">
+                      {stored.map(([paramName, value]) => (
+                        <Fragment key={paramName}>
+                          <dt className="font-mono text-text-mute break-all">{paramName}</dt>
+                          <dd className="font-mono text-text-dim break-all">{value}</dd>
+                        </Fragment>
+                      ))}
+                    </dl>
+                  )}
+                </li>
+              )
+            })}
           </ul>
         )}
       </section>
