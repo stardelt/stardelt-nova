@@ -46,11 +46,11 @@ Browser
          ├─ GET  /api/connections/break-glass-log  who used break-glass and why (administrators only)
          ├─ GET  /api/pipelines        the pipelines of the caller's groups (administrators: all)
          ├─ GET  /api/pipelines/principals  each of the caller's groups and its pipeline principal
-         ├─ POST /api/pipelines        schedule a statement: a Nova-owned Pipeline for one of the caller's groups
+         ├─ POST /api/pipelines        schedule a statement or a published notebook: a Nova-owned Pipeline
          ├─ POST /api/pipelines/check  what the engine says about a statement (EXPLAIN, never runs it)
          ├─ POST /api/pipelines/preview-schedule  the next fire times of a cron in its zone
          ├─ GET  /api/pipelines/:namespace/:name  one pipeline: latest runs, params, options
-         ├─ PUT  /api/pipelines/:namespace/:name  change the statement, schedule, params and options of a Nova pipeline
+         ├─ PUT  /api/pipelines/:namespace/:name  change the statement or the notebook version, schedule, params and options
          ├─ DELETE /api/pipelines/:namespace/:name  delete a Nova pipeline (kubectl/GitOps ones are 409)
          ├─ POST /api/pipelines/:namespace/:name/runs  run now (409 paused/active/unloaded, 429 over 10 a minute)
          ├─ POST /api/pipelines/:namespace/:name/pause  pause (idempotent, answers the fresh view)
@@ -386,18 +386,45 @@ not ready, a `message` — the `Ready` condition's, or the `make sync-principal`
 without one. A create for a group without a ready principal answers `409` with that sentence; the
 resource carries `runAs: pipeline-<group>` next to `ownerGroup`.
 
+### Scheduled notebooks
+
+`POST /api/pipelines` also schedules a **published notebook version** instead of a statement
+(stardelt-nova#237): send `notebook: {"name", "objectVersion", "params"}` and no `sql`. A body gives
+exactly one of the two — both or neither is `400 give a statement or a notebook`. The resource then
+carries one task `{"name": "run", "kind": "notebook", "config": {"notebook", "objectVersion",
+"params"}}`, where `params` is a JSON object string with sorted keys: the shape the operator's
+`Pipeline` CRD and the loader accept (operator#130). Everything else — `runAs`, the schedule, the
+retries, the time limit, the run mode — is the statement shape's.
+
+Nova validates what the CRD and the loader would refuse: the notebook file name
+(`^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}\.ipynb$`), at most 32 parameters named
+`[A-Za-z_][A-Za-z0-9_]{0,63}` with values up to 256 characters, a `params` JSON text of at most 4096
+characters — and that the pinned version **exists** in the store. That last check is an S3 `HEAD`:
+`400 that notebook version does not exist in group <g>` for a version nobody published,
+`503 notebook storage is not configured` without `NOVA_S3_*`, `502` when S3 does not answer. A
+version is never a branch or a tag, and the loader reads `<ownerGroup>/<notebook>`, so a notebook of
+another group can never be named (and a hidden notebook pipeline is a `404`, like any other).
+
+A `PUT` on a notebook pipeline changes the notebook it runs (file name, version and parameters),
+its schedule and its options — never what it runs: a body with `sql` is `400 this pipeline runs a
+notebook`, and a notebook body on a statement pipeline is `400 this pipeline runs a statement`. The detail route carries the task's `notebook`,
+`objectVersion` and `notebookParams`, so the edit dialog can prefill; the list route leaves them out
+like `sql`.
+
 Only a pipeline labelled `app.kubernetes.io/managed-by: stardelt-nova` may be changed or deleted: a
 `kubectl` or GitOps manifest answers `409 this pipeline is managed outside Nova (kubectl or Git);
-change it there`, so Nova never rewrites somebody's file. `PUT` changes `spec.tasks[0].sql`,
-`spec.schedule`, `spec.params` and the options and nothing else — the body describes the whole editable
-state, so an omitted `schedule` or `params` removes it and an omitted option keeps its default — carrying
-the `resourceVersion` it read (a concurrent change is `409 the pipeline changed while you edited it:
-reload`); a task shape other than one `sql` task named `run` is `409`. At most ten pipelines may be
-created per person per hour (`429`, in memory). Airflow is not needed to create, change or delete one —
-the resource is the source of truth and the loader removes a deleted DAG from its default list after
-about 90 seconds, while the run history stays readable; the read routes keep answering `503` without
-Airflow. Each create, change and delete writes one `audit` line with the statement's **length** and the
-cron, never the statement.
+change it there`, so Nova never rewrites somebody's file. `PUT` changes `spec.tasks[0].sql` (a
+notebook task's `config` instead), `spec.schedule`, `spec.params` and the options and nothing else —
+the body describes the whole editable state, so an omitted `schedule` or `params` removes it and an
+omitted option keeps its default — carrying the `resourceVersion` it read (a concurrent change is
+`409 the pipeline changed while you edited it: reload`); a task shape other than one `run` task of
+kind `sql` or `notebook` is `409`. At most ten pipelines may be created per person per hour (`429`,
+in memory). Airflow is not needed to create, change or delete one — the resource is the source of
+truth and the loader removes a deleted DAG from its default list after about 90 seconds, while the
+run history stays readable; the read routes keep answering `503` without Airflow. Each create, change
+and delete writes one `audit` line with the statement's **length** and the cron — and, for a
+notebook, the group, the file name and the pinned version — never the statement and never a
+parameter value.
 
 Two helpers belong to the Schedule dialog. `POST /api/pipelines/check` fills the placeholders and sends
 `EXPLAIN <statement>` to the engine as the caller (never `EXPLAIN ANALYZE`, never the statement itself),
@@ -419,6 +446,7 @@ stardelt-platform (`make notebooks-bucket`); Nova only writes to it with the pla
 PUT /api/notebooks/{group}/{name}                body: the .ipynb (nbformat 4, at most 5 MiB)
 GET /api/notebooks                               the caller's groups, latest version, newest first
 GET /api/notebooks/{group}/{name}/versions       at most 50 versions, newest first
+GET /api/notebooks/{group}/{name}/parameters     one version's parameters (?version=<id>, latest when omitted)
 ```
 
 Publishing needs a signed-in person (browser session or `Authorization: Bearer`). `{group}` must be
@@ -437,6 +465,12 @@ administrator does not make someone a member of a tenant's group. Without `NOVA_
 other three `NOVA_S3_*` variables) the three routes answer
 `503 {"error":"notebook storage is not configured"}`; an S3 gateway that is down or refuses answers
 `502`, never `500`. Answers are `application/json` with `Cache-Control: no-store`.
+
+`GET …/parameters?version=<id>` answers the parameters of that exact version
+(`{"parameters": [{"name": "region", "default": "eu"}, …], "objectVersion": "<id>"}`); without
+`version` it reads the latest and names it. The Schedule dialog uses it to offer the form the bytes
+it will run declare. An unknown version is `404 no such notebook version` — never an empty list a
+schedule could pin.
 
 The hub token already carries audience `nova` (the `aud-nova` mapper, stardelt-platform#290), which is
 Nova's client id, so a notebook can call `PUT /api/notebooks/...` with the token it holds.
