@@ -1452,6 +1452,51 @@ test.describe('catalog switcher', () => {
     return { context, page, seen }
   }
 
+  test('switcher_groups_by_layer_in_order', async ({ browser }) => {
+    const { context, page } = await open(browser, {
+      body: {
+        catalogs: [
+          { name: 'bronze', id: 'wid-bronze', layer: 'bronze' },
+          { name: 'silver', id: 'wid-silver', layer: 'silver' },
+          { name: 'gold', id: 'wid-gold', layer: 'gold' },
+          { name: 'warehouse', id: 'wid-warehouse' },
+          { name: 'shared', id: 'wid-shared' },
+        ],
+        default: 'warehouse',
+      },
+    })
+    await page.goto('/catalog')
+    const select = page.getByRole('combobox', { name: 'Catalog' })
+    await expect(select).toBeVisible()
+
+    // The three medallion layers come first, in bronze → silver → gold order, and every
+    // catalog without a layer follows in the API's order under Other.
+    const groups = select.locator('optgroup')
+    await expect(groups).toHaveCount(4)
+    expect(await groups.evaluateAll((elements) => elements.map((group) => group.getAttribute('label'))))
+      .toEqual(['Bronze', 'Silver', 'Gold', 'Other'])
+    await expect(select.locator('option')).toHaveText(['bronze', 'silver', 'gold', 'warehouse', 'shared'])
+    await expect(select).toHaveValue('warehouse')
+
+    // A grouped option still selects and names the catalog, as the flat list does.
+    await select.selectOption('gold')
+    await expect(page).toHaveURL(/[?&]catalog=gold\b/)
+    await expect(page.getByRole('button', { name: /nyc_taxi/ })).toBeVisible()
+    judge('/catalog', await auditPage(page))
+    await context.close()
+  })
+
+  test('no_layer_no_group_headers', async ({ browser }) => {
+    const { context, page } = await open(browser, { body: TWO })
+    await page.goto('/catalog')
+    const select = page.getByRole('combobox', { name: 'Catalog' })
+    await expect(select).toBeVisible()
+    // No catalog has a layer: the switcher stays the flat list it was before layers.
+    await expect(select.locator('optgroup')).toHaveCount(0)
+    await expect(select.locator('option')).toHaveText(['finance', 'warehouse'])
+    await context.close()
+  })
+
   test('the second catalog is what every request then names', async ({ browser }) => {
     const { context, page, seen } = await open(browser, { body: TWO })
     await page.goto('/catalog')
@@ -3622,13 +3667,9 @@ test.describe('admin catalogs', () => {
     observedGeneration: 1, resourceVersion: '1', grants: [], conditions: [],
     ...fields,
   })
-  // The four catalogs of the rollout check, in an order the page has to sort itself.
+  // The four catalogs of the rollout check, in the API's order (bronze/silver/gold first,
+  // then alphabetical — stardelt-nova#109). The page keeps that order.
   const CATALOGS = [
-    row({
-      name: 'warehouse', displayName: 'Shared warehouse', owner: 'stardelt-admins',
-      grants: ['browse', 'select', 'write', 'create'].map((verb) => ({ group: 'stardelt-users', verb })),
-      conditions: READY,
-    }),
     row({
       name: 'finance', displayName: 'Finance', owner: 'stardelt-finops', managedAccess: true,
       grants: [
@@ -3645,6 +3686,11 @@ test.describe('admin catalogs', () => {
       ],
     }),
     row({ name: 'sandbox', displayName: 'Sandbox', owner: 'stardelt-sandbox', phase: 'Unknown' }),
+    row({
+      name: 'warehouse', displayName: 'Shared warehouse', owner: 'stardelt-admins',
+      grants: ['browse', 'select', 'write', 'create'].map((verb) => ({ group: 'stardelt-users', verb })),
+      conditions: READY,
+    }),
   ]
 
   /** The page with its one admin answer stubbed; `me` overrides `/api/me` when a role matters. */
@@ -3677,8 +3723,8 @@ test.describe('admin catalogs', () => {
 
     const table = page.getByRole('table', { name: 'All catalogs' })
     await expect(table).toBeVisible()
-    // The API answer arrives unsorted; the page sorts by name.
-    await expect(table.locator('tbody tr td:first-child > div:first-child'))
+    // The API's order is kept: bronze/silver/gold first, then alphabetical.
+    await expect(table.locator('tbody tr td:first-child > div:first-child > span:first-child'))
       .toHaveText(['finance', 'product', 'sandbox', 'warehouse'])
 
     const finance = table.locator('tbody tr').filter({ hasText: 'finance' })
@@ -3707,6 +3753,29 @@ test.describe('admin catalogs', () => {
     await expect(sandbox).toContainText('0 groups')
 
     await expect(table.locator('tbody tr').filter({ hasText: 'warehouse' })).toContainText('1 group')
+    await context.close()
+  })
+
+  test('admin_page_badge', async ({ browser }) => {
+    // The API sends the layers first and marks them; the admin table keeps that order and
+    // badges each catalog with its layer (stardelt-nova#109).
+    const catalogs = [
+      row({ name: 'bronze', layer: 'bronze', conditions: READY }),
+      row({ name: 'silver', layer: 'silver', conditions: READY }),
+      row({ name: 'gold', layer: 'gold', conditions: READY }),
+      row({ name: 'warehouse', conditions: READY }),
+    ]
+    const { context, page } = await open(browser, { catalogs })
+    await page.goto('/admin/catalogs')
+
+    const table = page.getByRole('table', { name: 'All catalogs' })
+    const rows = table.locator('tbody tr')
+    await expect(rows.locator('td:first-child > div:first-child > span:first-child'))
+      .toHaveText(['bronze', 'silver', 'gold', 'warehouse'])
+    await expect(rows.nth(0).locator('td').first().getByText('Bronze', { exact: true })).toBeVisible()
+    await expect(rows.nth(1).locator('td').first().getByText('Silver', { exact: true })).toBeVisible()
+    await expect(rows.nth(2).locator('td').first().getByText('Gold', { exact: true })).toBeVisible()
+    await expect(rows.nth(3).locator('td').first().getByText(/^(Bronze|Silver|Gold)$/)).toHaveCount(0)
     await context.close()
   })
 
@@ -3906,7 +3975,7 @@ test.describe('admin catalogs', () => {
   }
 
   const editedFinance = (fields: Record<string, unknown> = {}) => ({
-    ...CATALOGS[1],
+    ...CATALOGS.find((catalog) => catalog.name === 'finance')!,
     generation: 2,
     observedGeneration: 1,
     ...fields,
@@ -4230,6 +4299,57 @@ test.describe('overview metrics', () => {
     await expect(link).toHaveAttribute('href', '/catalog?catalog=gold')
     await link.click()
     await expect(page).toHaveURL(/\/catalog\?catalog=gold$/)
+    await context.close()
+  })
+
+  test('overview_rows_in_layer_order_with_badge', async ({ browser }) => {
+    // The API sends bronze/silver/gold first and marks their layer; the table keeps that
+    // order and names the layer beside the catalog (stardelt-nova#109).
+    const catalogs = [
+      { name: 'bronze', layer: 'bronze', schemas: 1, tables: 1, records: 0, sizeBytes: 0, lastCommitMs: null, truncated: false },
+      { name: 'silver', layer: 'silver', schemas: 1, tables: 2, records: 10, sizeBytes: 512, lastCommitMs: now, truncated: false },
+      { name: 'gold', layer: 'gold', schemas: 2, tables: 7, records: 1234, sizeBytes: 1536, lastCommitMs: now, truncated: false },
+      { name: 'warehouse', schemas: 3, tables: 9, records: 99, sizeBytes: 2048, lastCommitMs: now, truncated: false },
+    ]
+    const { context, page } = await open(browser, {
+      metrics: { catalogs, totals: { catalogs: 4, schemas: 7, tables: 19, records: 1343, sizeBytes: 4096 }, generatedAt: now },
+    })
+    await page.goto('/')
+
+    const table = page.getByRole('table', { name: 'Catalogs you can see' })
+    const rows = table.locator('tbody tr')
+    await expect(rows.locator('td:first-child a')).toHaveText(['bronze', 'silver', 'gold', 'warehouse'])
+    await expect(rows.nth(0).getByText('Bronze', { exact: true })).toBeVisible()
+    await expect(rows.nth(1).getByText('Silver', { exact: true })).toBeVisible()
+    await expect(rows.nth(2).getByText('Gold', { exact: true })).toBeVisible()
+    // Warehouse is not a medallion layer: no badge is invented for it.
+    await expect(rows.nth(3).getByText(/^(Bronze|Silver|Gold)$/)).toHaveCount(0)
+    await context.close()
+  })
+
+  test('hostile_layer_is_text', async ({ browser }) => {
+    const evil = '<img src=x onerror="window.__xss=1">'
+    const { context, page } = await open(browser, {
+      metrics: {
+        catalogs: [
+          { name: 'shared', layer: evil, schemas: 1, tables: 1, records: 1, sizeBytes: 1, lastCommitMs: now, truncated: false },
+        ],
+        totals: { catalogs: 1, schemas: 1, tables: 1, records: 1, sizeBytes: 1 },
+        generatedAt: now,
+      },
+      init: () => { (window as unknown as { __xss: number }).__xss = 0 },
+    })
+    await page.goto('/')
+    // The API validates the layer, but a value it would never send is still text: no
+    // element, no script, no widened page.
+    await expect(page.getByText(evil, { exact: true })).toBeVisible()
+    const s = await page.evaluate(() => ({
+      xss: (window as unknown as { __xss: number }).__xss,
+      imgs: document.querySelectorAll('img[src="x"]').length,
+      overflow: document.documentElement.scrollWidth - window.innerWidth,
+    }))
+    expect(s).toEqual({ xss: 0, imgs: 0, overflow: expect.any(Number) })
+    expect(s.overflow).toBeLessThanOrEqual(1)
     await context.close()
   })
 

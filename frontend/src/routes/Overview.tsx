@@ -4,6 +4,7 @@ import { ApiError, api, errorMessage, type CatalogStat } from '../api'
 import { formatBytes, formatCount, formatTime, relativeTime, rowsLabel, statusLabel } from '../format'
 import ErrorBox from '../components/ErrorBox'
 import { Icon } from '../components/Icon'
+import LayerBadge from '../components/LayerBadge'
 import { isAdmin } from '../roles'
 
 /** `1,234 rows`, and never the "1 rows" a plain template would print. */
@@ -174,12 +175,15 @@ function CatalogsCard({ metrics, error, denied }: {
                   return (
                     <tr key={catalog.name} className="border-t border-border/70">
                       <td className="td px-3">
-                        <Link
-                          to={`/catalog?catalog=${encodeURIComponent(catalog.name)}`}
-                          className="text-accent hover:underline break-words"
-                        >
-                          {catalog.name}
-                        </Link>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Link
+                            to={`/catalog?catalog=${encodeURIComponent(catalog.name)}`}
+                            className="text-accent hover:underline break-words"
+                          >
+                            {catalog.name}
+                          </Link>
+                          <LayerBadge layer={catalog.layer} />
+                        </div>
                         {catalog.error && (
                           <div role="status" className="text-xs text-bad mt-0.5 break-words">{catalog.error}</div>
                         )}
