@@ -1316,16 +1316,32 @@ impl AuthState {
     }
 }
 
+/// The state of [`require_auth`]: the identity provider, plus the app state the person
+/// directory (`people::touch`) writes through. One value because `from_fn_with_state`
+/// takes a single state type.
+#[derive(Clone)]
+pub struct AuthContext {
+    pub auth: Arc<AuthState>,
+    pub app: Arc<crate::AppState>,
+}
+
 /// `route_layer` middleware for every protected `/api/*` route in `oidc` mode.
 pub async fn require_auth(
-    State(auth): State<Arc<AuthState>>,
+    State(ctx): State<AuthContext>,
     mut req: Request,
     next: Next,
 ) -> Response {
-    match auth.authenticate(req.headers()).await {
+    match ctx.auth.authenticate(req.headers()).await {
         Ok((principal, facts)) => {
+            // The directory is best effort and must not add latency to the request: the
+            // token's identity is copied into a task and the request goes on.
+            let identity = principal.identity.clone();
             req.extensions_mut().insert(principal);
             req.extensions_mut().insert(facts);
+            let app = ctx.app.clone();
+            tokio::spawn(async move {
+                crate::people::touch(&app, &identity).await;
+            });
             next.run(req).await
         }
         Err(e) => {
@@ -2809,15 +2825,16 @@ mod tests {
     }
 
     fn app(auth: Arc<AuthState>) -> Router {
+        let context = AuthContext {
+            auth: auth.clone(),
+            app: crate::router_tests::test_state(),
+        };
         let protected = Router::new()
             .route(
                 "/me",
                 get(|axum::Extension(p): axum::Extension<Principal>| async move { p.identity.sub }),
             )
-            .route_layer(axum::middleware::from_fn_with_state(
-                auth.clone(),
-                require_auth,
-            ));
+            .route_layer(axum::middleware::from_fn_with_state(context, require_auth));
         let api = Router::new()
             .route("/health", get(|| async { "ok" }))
             .merge(protected)
@@ -2914,9 +2931,13 @@ mod tests {
 
     /// The real `/api/me` behind the real `require_auth`: what a browser gets.
     fn me_app(auth: Arc<AuthState>) -> Router {
+        let context = AuthContext {
+            auth,
+            app: crate::router_tests::test_state(),
+        };
         Router::new()
             .route("/api/me", get(crate::me))
-            .route_layer(axum::middleware::from_fn_with_state(auth, require_auth))
+            .route_layer(axum::middleware::from_fn_with_state(context, require_auth))
             .with_state(crate::router_tests::test_state())
     }
 

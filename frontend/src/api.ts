@@ -700,6 +700,8 @@ export type QueryLogItem = {
   /** QUEUED (in progress), FINISHED, FAILED or CANCELED. */
   state: string
   user: string
+  /** The person's display name; absent when Nova does not know the engine user. */
+  userName?: string | null
   source: string | null
   warehouse: string
   queryType: string | null
@@ -718,6 +720,8 @@ export type QueryLogDetail = {
   id: string
   state: string
   user: string
+  /** The person's display name; absent when Nova does not know the engine user. */
+  userName?: string | null
   source: string | null
   clientTags: string[]
   warehouse: string

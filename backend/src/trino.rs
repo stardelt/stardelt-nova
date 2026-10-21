@@ -599,6 +599,7 @@ mod tests {
             pipeline_creates: std::sync::Mutex::new(std::collections::HashMap::new()),
             airflow: None,
             table_locks: std::sync::Mutex::new(std::collections::HashMap::new()),
+            people_touched: std::sync::Mutex::new(std::collections::HashMap::new()),
             notebooks: None,
         }
     }
