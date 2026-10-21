@@ -279,6 +279,44 @@ export type AppDetail = {
 }
 
 /**
+ * One catalog as an administrator sees it (`GET /api/admin/catalogs`, stardelt-nova#251):
+ * the `Catalog` resource's identity, owner, managed access, storage key prefix, phase and
+ * what the access-sync job last wrote. Administrator-only — everyone else gets 403.
+ * The credential reference and the bucket never leave the cluster, so they are not here.
+ */
+export type AdminCatalog = {
+  /** `metadata.name`, also the name the SQL addresses and the warehouse name. */
+  name: string
+  displayName: string | null
+  description: string | null
+  /** The one owning group; ownership means `manage`, not `select`. */
+  owner: string | null
+  /** The owner cannot grant on this catalog. */
+  managedAccess: boolean
+  keyPrefix: string | null
+  /** `Ready` | `Invalid`, or `Unknown` when the access-sync job has not observed it. */
+  phase: string
+  warehouseId: string | null
+  generation: number | null
+  observedGeneration: number | null
+  resourceVersion: string | null
+  /** `spec.grants`, in the order the resource declares them: one verb per entry. */
+  grants: AdminCatalogGrant[]
+  conditions: AdminCatalogCondition[]
+}
+
+/** One declared grant: a group and one verb (`browse`, `select`, `write`, `create`, `manage`). */
+export type AdminCatalogGrant = { group: string; verb: string }
+
+/** One condition of a catalog's status, reduced to the four fields the page shows. */
+export type AdminCatalogCondition = {
+  type: 'CatalogReady' | 'GrantsReady' | 'Drift' | string
+  status: 'True' | 'False' | string
+  reason: string | null
+  message: string | null
+}
+
+/**
  * One row of `GET /api/connections` (stardelt-nova#171). A connection is a credential
  * for a system outside the platform; the page lists metadata only. `secretKeys` holds the
  * *names* of the secret fields — a value is never sent, by the store or by Nova, so the
@@ -870,6 +908,8 @@ export const api = {
   embeds:       ()                            => jget<EmbedApp[]>('/api/embeds'),
   links:        ()                            => jget<AppShortcut[]>('/api/apps/links'),
   app:          (id: string)                  => jget<AppDetail>(`/api/apps/${seg(id)}`),
+  /** Every catalog of the platform namespace with its grants (administrators only, #251). */
+  adminCatalogs: ()                           => jget<AdminCatalog[]>('/api/admin/catalogs'),
   workloads:    ()                            => jget<WorkloadSnapshot>('/api/workloads'),
   createNamespace: (namespace: string, catalog?: string) =>
     jpost<{ namespace: string }>(catalogPath('/api/catalog/namespaces', catalog), { namespace }),

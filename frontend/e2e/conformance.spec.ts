@@ -6,7 +6,7 @@ import { formatTime, setTimeDisplay, sqlTableRef } from '../src/format'
 // Rules U1–U13 are written down in stardelt-internal/design/ui-conformance.md.
 
 const ROUTES = ['/', '/catalog', '/query', '/data', '/connections', '/jobs', '/pipelines', '/queries',
-  '/apps', '/lineage', '/dashboards', '/notebooks', '/health', '/settings', '/preferences', '/profile',
+  '/apps', '/admin/catalogs', '/lineage', '/dashboards', '/notebooks', '/health', '/settings', '/preferences', '/profile',
   '/no-such-page']
 const VARIANTS = [
   { name: 'desktop-dark', viewport: { width: 1280, height: 800 }, theme: 'dark', keyboard: true },
@@ -3594,6 +3594,261 @@ test.describe('preferences', () => {
     const { context, page } = await open(browser)
     await page.goto('/preferences')
     expect((await auditPage(page)).filter((finding) => finding.rule === 'U5')).toEqual([])
+    await context.close()
+  })
+})
+
+test.describe('admin catalogs', () => {
+  // stardelt-nova#251: an administrator sees every Catalog and the permissions assigned
+  // on it, by catalog and transposed as a matrix. Both views read one API answer; the
+  // tests stub exactly that answer and let the rest of the shell use the dev backend.
+  const ADMIN = {
+    user: 'admin', auth_mode: 'oidc', demo: false, warehouse: 'warehouse',
+    is_admin: true, groups: ['stardelt-admins'],
+  }
+  const NON_ADMIN = {
+    user: 'outsider', auth_mode: 'oidc', demo: false, warehouse: 'warehouse',
+    is_admin: false, groups: ['analysts'],
+  }
+  const READY = [
+    { type: 'CatalogReady', status: 'True', reason: 'Ready', message: 'catalog and its grants are ready' },
+    { type: 'GrantsReady', status: 'True', reason: 'Ready', message: 'grants match the resource' },
+    { type: 'Drift', status: 'False', reason: 'Clean', message: 'no foreign grants' },
+  ]
+  /** One `AdminCatalog` row as the API sends it; each test overrides what it cares about. */
+  const row = (fields: Record<string, unknown>) => ({
+    displayName: null, description: null, owner: null, managedAccess: false,
+    keyPrefix: null, phase: 'Ready', warehouseId: null, generation: 1,
+    observedGeneration: 1, resourceVersion: '1', grants: [], conditions: [],
+    ...fields,
+  })
+  // The four catalogs of the rollout check, in an order the page has to sort itself.
+  const CATALOGS = [
+    row({
+      name: 'warehouse', displayName: 'Shared warehouse', owner: 'stardelt-admins',
+      grants: ['browse', 'select', 'write', 'create'].map((verb) => ({ group: 'stardelt-users', verb })),
+      conditions: READY,
+    }),
+    row({
+      name: 'finance', displayName: 'Finance', owner: 'stardelt-finops', managedAccess: true,
+      grants: [
+        { group: 'stardelt-finops', verb: 'browse' },
+        { group: 'stardelt-analytics', verb: 'select' },
+      ],
+      conditions: READY,
+    }),
+    row({
+      name: 'product', owner: 'stardelt-product', phase: 'Invalid',
+      conditions: [
+        { type: 'CatalogReady', status: 'False', reason: 'RoleConflict', message: 'role stardelt-product-rw already exists' },
+        { type: 'GrantsReady', status: 'False', reason: 'UnknownGroup', message: 'group stardelt-ghost does not exist in the realm' },
+      ],
+    }),
+    row({ name: 'sandbox', displayName: 'Sandbox', owner: 'stardelt-sandbox', phase: 'Unknown' }),
+  ]
+
+  /** The page with its one admin answer stubbed; `me` overrides `/api/me` when a role matters. */
+  async function open(
+    browser: Browser,
+    { catalogs = CATALOGS, me, viewport = { width: 1280, height: 800 }, init }: {
+      catalogs?: unknown
+      me?: Record<string, unknown>
+      viewport?: { width: number; height: number }
+      init?: () => void
+    } = {},
+  ) {
+    const context = await browser.newContext({ viewport })
+    const page = await context.newPage()
+    if (init) await page.addInitScript(init)
+    await page.route('**/api/admin/catalogs', (route) => json(route, catalogs))
+    if (me) await page.route('**/api/me', (route) => json(route, me))
+    return { context, page }
+  }
+
+  test('by_catalog_lists_owner_grants_and_conditions', async ({ browser }) => {
+    const { context, page } = await open(browser)
+    await page.goto('/admin/catalogs')
+
+    await expect(page.getByRole('heading', { level: 1, name: 'Catalogs' })).toBeVisible()
+    await expect(page.getByText(
+      'Platform administrators can do everything in every catalog; they are not listed. Permissions are catalog-wide today.',
+    )).toBeVisible()
+    await expect(page.getByRole('radio', { name: 'By catalog' })).toBeChecked()
+
+    const table = page.getByRole('table', { name: 'All catalogs' })
+    await expect(table).toBeVisible()
+    // The API answer arrives unsorted; the page sorts by name.
+    await expect(table.locator('tbody tr td:first-child > div:first-child'))
+      .toHaveText(['finance', 'product', 'sandbox', 'warehouse'])
+
+    const finance = table.locator('tbody tr').filter({ hasText: 'finance' })
+    await expect(finance).toContainText('Finance')                  // the muted displayName
+    await expect(finance).toContainText('stardelt-finops')
+    await expect(finance.getByTitle('Ready: catalog and its grants are ready')).toBeVisible()
+    await expect(finance).toContainText('2 groups')
+    await expect(finance.getByText('Managed access')).toBeVisible()
+    // The grants are text lines, one per group, revealed by the row's own details.
+    await finance.getByText('Grants', { exact: true }).click()
+    await expect(finance.getByText('stardelt-finops: browse')).toBeVisible()
+    await expect(finance.getByText('stardelt-analytics: select')).toBeVisible()
+    // All three conditions are badges; the reason is the text and the sentence is the title.
+    await expect(finance.getByText('CatalogReady: Ready')).toBeVisible()
+    await expect(finance.getByText('GrantsReady: Ready')).toBeVisible()
+    await expect(finance.getByText('Drift: Clean')).toBeVisible()
+    await expect(finance.getByRole('link', { name: 'Open catalog finance' }))
+      .toHaveAttribute('href', '/catalog?catalog=finance')
+
+    const product = table.locator('tbody tr').filter({ hasText: 'product' })
+    await expect(product.getByTitle('RoleConflict: role stardelt-product-rw already exists')).toBeVisible()
+    await expect(product.getByText('GrantsReady: UnknownGroup')).toBeVisible()
+
+    const sandbox = table.locator('tbody tr').filter({ hasText: 'sandbox' })
+    await expect(sandbox.getByTitle('The access-sync job has not observed this catalog yet.')).toBeVisible()
+    await expect(sandbox).toContainText('0 groups')
+
+    await expect(table.locator('tbody tr').filter({ hasText: 'warehouse' })).toContainText('1 group')
+    await context.close()
+  })
+
+  test('matrix_shows_groups_by_catalog_and_filters', async ({ browser }) => {
+    const { context, page } = await open(browser)
+    await page.goto('/admin/catalogs')
+    await page.getByRole('group', { name: 'View' }).getByText('Matrix', { exact: true }).click()
+    await expect(page.getByRole('radio', { name: 'Matrix' })).toBeChecked()
+
+    const table = page.getByRole('table', { name: 'Who holds what' })
+    await expect(table).toBeVisible()
+    // Rows are the union of owners and grant groups, sorted; columns are the catalogs.
+    await expect(table.getByRole('rowheader')).toHaveText([
+      'stardelt-admins', 'stardelt-analytics', 'stardelt-finops',
+      'stardelt-product', 'stardelt-sandbox', 'stardelt-users',
+    ])
+    await expect(table.getByRole('columnheader')).toHaveText([
+      'Group', 'finance', 'product', 'sandbox', 'warehouse',
+    ])
+
+    const offered = (group: string) =>
+      table.getByRole('row', { name: new RegExp(`^${group}`) }).locator('td')
+    // Ownership is prefixed, the verbs are text, and an empty cell is an em dash.
+    await expect(offered('stardelt-finops')).toHaveText(['owner, browse', '—', '—', '—'])
+    await expect(offered('stardelt-analytics')).toHaveText(['select', '—', '—', '—'])
+    await expect(offered('stardelt-admins')).toHaveText(['—', '—', '—', 'owner'])
+    await expect(offered('stardelt-users')).toHaveText(['—', '—', '—', 'browse, select, write, create'])
+
+    const filter = page.getByLabel('Filter groups or catalogs')
+    await filter.fill('fin')
+    await expect(table.getByRole('rowheader')).toHaveText(['stardelt-finops'])
+    await expect(table.getByRole('columnheader')).toHaveText(['Group', 'finance'])
+
+    // Naming a group narrows the rows; every catalog stays visible so its grants can be read.
+    await filter.fill('stardelt-users')
+    await expect(table.getByRole('rowheader')).toHaveText(['stardelt-users'])
+    await expect(table.getByRole('columnheader')).toHaveText([
+      'Group', 'finance', 'product', 'sandbox', 'warehouse',
+    ])
+
+    // Naming a catalog narrows the columns; the rows stay.
+    await filter.fill('warehouse')
+    await expect(table.getByRole('columnheader')).toHaveText(['Group', 'warehouse'])
+
+    await filter.fill('no-such-group-or-catalog')
+    await expect(page.getByText('No group or catalog matches that filter.')).toBeVisible()
+    await context.close()
+  })
+
+  test('unknown_group_condition_is_visible', async ({ browser }) => {
+    const { context, page } = await open(browser)
+    await page.goto('/admin/catalogs')
+
+    // `GrantsReady: False` is the API's own reason in words, not a colour; the sentence
+    // the access-sync job wrote stays available as the badge's title.
+    const badge = page.getByText('GrantsReady: UnknownGroup')
+    await expect(badge).toBeVisible()
+    await expect(badge).toHaveAttribute('title', 'group stardelt-ghost does not exist in the realm')
+    // The same reason explains the catalog's phase without the person opening anything.
+    await expect(page.locator('span.badge', { hasText: 'Invalid' })).toHaveAttribute(
+      'title',
+      'RoleConflict: role stardelt-product-rw already exists',
+    )
+    await context.close()
+  })
+
+  test('non_admin_is_refused', async ({ browser }) => {
+    const hits: string[] = []
+    const context = await browser.newContext({ viewport: { width: 1280, height: 800 } })
+    const page = await context.newPage()
+    await page.route('**/api/me', (route) => json(route, NON_ADMIN))
+    await page.route('**/api/admin/catalogs', (route) => {
+      hits.push(new URL(route.request().url()).pathname)
+      return json(route, { error: 'this view is for platform administrators' }, 403)
+    })
+
+    await page.goto('/admin/catalogs')
+    // The same explanation `/apps`, `/health` and `/settings` give: a refusal in words,
+    // and no request to the admin endpoint at all.
+    await expect(page.getByText(/for platform administrators/i)).toBeVisible()
+    const nav = await page.evaluate(() => [...document.querySelectorAll('nav a')].map((a) => a.textContent?.trim()))
+    expect(nav).not.toContain('Catalogs')
+    expect(hits).toEqual([])
+    await context.close()
+  })
+
+  test('hostile_names_are_text', async ({ browser }) => {
+    const evil = '<img src=x onerror="window.__xss=1">'
+    const long = 'x'.repeat(400)
+    const { context, page } = await open(browser, {
+      init: () => { (window as unknown as { __xss: number }).__xss = 0 },
+      catalogs: [
+        row({
+          name: evil, displayName: evil, owner: evil, managedAccess: true,
+          grants: [{ group: evil, verb: 'browse' }],
+          conditions: [
+            { type: 'GrantsReady', status: 'False', reason: 'UnknownGroup', message: evil },
+          ],
+        }),
+        row({ name: long, displayName: long, owner: long, grants: [{ group: long, verb: 'select' }] }),
+      ],
+    })
+    await page.goto('/admin/catalogs')
+
+    // Markup in a name is text: no element, no script, no widened page — in either view.
+    await expect(page.getByText(evil, { exact: true }).first()).toBeVisible()
+    for (const view of ['By catalog', 'Matrix']) {
+      if (view !== 'By catalog') {
+        await page.getByRole('group', { name: 'View' }).getByText(view, { exact: true }).click()
+        await expect(page.getByRole('radio', { name: view })).toBeChecked()
+      }
+      for (const width of [1280, 360]) {
+        await page.setViewportSize({ width, height: 800 })
+        const s = await page.evaluate(() => ({
+          xss: (window as unknown as { __xss: number }).__xss,
+          imgs: document.querySelectorAll('img[src="x"]').length,
+          overflow: document.documentElement.scrollWidth - window.innerWidth,
+        }))
+        expect(s, `${view} ${width}px`).toEqual({ xss: 0, imgs: 0, overflow: expect.any(Number) })
+        expect(s.overflow, `${view} ${width}px overflow`).toBeLessThanOrEqual(1)
+      }
+    }
+    await context.close()
+  })
+
+  test('U5 audit at 360 px for both views', async ({ browser }) => {
+    const { context, page } = await open(browser, {
+      me: ADMIN,
+      viewport: { width: 360, height: 740 },
+    })
+    await page.goto('/admin/catalogs')
+    await expect(page.getByRole('table', { name: 'All catalogs' })).toBeVisible()
+    expect((await auditPage(page)).filter((finding) => finding.rule === 'U5')).toEqual([])
+
+    // The segmented control and the matrix survive the phone width; the tables scroll in
+    // their card rather than widening the page (rule U4).
+    await page.getByRole('group', { name: 'View' }).getByText('Matrix', { exact: true }).click()
+    await expect(page.getByRole('radio', { name: 'Matrix' })).toBeChecked()
+    await expect(page.getByRole('table', { name: 'Who holds what' })).toBeVisible()
+    expect((await auditPage(page)).filter((finding) => finding.rule === 'U5')).toEqual([])
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
+    expect(overflow).toBeLessThanOrEqual(1)
     await context.close()
   })
 })
