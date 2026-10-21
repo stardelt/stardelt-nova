@@ -10,6 +10,50 @@
     "version": "0.1.0"
   },
   "paths": {
+    "/api/admin/catalogs": {
+      "get": {
+        "tags": [
+          "internal"
+        ],
+        "description": "Every `Catalog` of the platform namespace, sorted by name: identity, owner, managed access, the storage key prefix, phase and the grants and conditions the access-sync job last wrote. Administrator-only; a non-administrator answers 403 `this view is for platform administrators`. Read-only: Nova never writes a `Catalog`. A catalog the job has not observed yet answers `phase: \"Unknown\"` with no conditions. Without a cluster connection (demo mode, a local run) the answer is the one in-memory `warehouse` catalog. Answers `Cache-Control: no-store`.",
+        "operationId": "list",
+        "responses": {
+          "200": {
+            "description": "One row per catalog, sorted by name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AdminCatalog"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not a platform administrator",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The cluster did not answer, or Nova may not list catalogs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/catalog/catalogs": {
       "get": {
         "tags": [
@@ -3188,6 +3232,103 @@
   },
   "components": {
     "schemas": {
+      "AdminCatalog": {
+        "type": "object",
+        "description": "One catalog, as an administrator sees it.\n\n`displayName`, `description`, `owner`, `keyPrefix`, `warehouseId` and the two\ngeneration numbers are `null` when the resource does not carry them — never\nan empty string or a guessed value.",
+        "required": [
+          "name",
+          "managedAccess",
+          "phase",
+          "grants",
+          "conditions"
+        ],
+        "properties": {
+          "conditions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CatalogCondition"
+            },
+            "description": "`status.conditions`: what the access-sync job last reported."
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`spec.description`, or `null`."
+          },
+          "displayName": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`spec.displayName`, or `null`."
+          },
+          "generation": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "`metadata.generation`."
+          },
+          "grants": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CatalogGrant"
+            },
+            "description": "`spec.grants`, in the order the resource declares them."
+          },
+          "keyPrefix": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`spec.storage.keyPrefix`, or `null` when the catalog uses the lakehouse's defaults."
+          },
+          "managedAccess": {
+            "type": "boolean",
+            "description": "`spec.managedAccess`: the owner cannot grant on this catalog."
+          },
+          "name": {
+            "type": "string",
+            "description": "`metadata.name`: the name users type (`finance.orders`) and the warehouse name."
+          },
+          "observedGeneration": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "`status.observedGeneration`: the generation the last sync observed."
+          },
+          "owner": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`spec.owner`: exactly one group. Ownership means `manage`, not `select`."
+          },
+          "phase": {
+            "type": "string",
+            "description": "`status.phase` (`Ready` | `Invalid`), or `Unknown` when the resource has no status."
+          },
+          "resourceVersion": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`metadata.resourceVersion`: the version this row was read at."
+          },
+          "warehouseId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`status.warehouseId`: the Lakekeeper warehouse, as the access-sync job wrote it."
+          }
+        }
+      },
       "BreakGlassLogResponse": {
         "type": "object",
         "description": "`GET /api/connections/break-glass-log`: the last 200 reads and refusals, newest first. It has\nno values by construction (see [`audit::BreakGlassRecord`]).",
@@ -3287,6 +3428,55 @@
           },
           "readAt": {
             "type": "string"
+          }
+        }
+      },
+      "CatalogCondition": {
+        "type": "object",
+        "description": "One condition of a `Catalog`'s status, reduced to the four fields the page shows.",
+        "required": [
+          "type",
+          "status"
+        ],
+        "properties": {
+          "message": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The sentence the access-sync job wrote, or `null`."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`Ready`, `UnknownGroup`, `RoleConflict`, `RoleCreateFailed`, `AssigneesFailed`,\n`GrantsFailed`, `ForeignGrants` or `Clean`."
+          },
+          "status": {
+            "type": "string",
+            "description": "`\"True\"` or `\"False\"`."
+          },
+          "type": {
+            "type": "string",
+            "description": "`CatalogReady`, `GrantsReady` or `Drift`."
+          }
+        }
+      },
+      "CatalogGrant": {
+        "type": "object",
+        "description": "One declared grant: a group and one verb.",
+        "required": [
+          "group",
+          "verb"
+        ],
+        "properties": {
+          "group": {
+            "type": "string"
+          },
+          "verb": {
+            "type": "string",
+            "description": "One of `browse`, `select`, `write`, `create`, `manage`."
           }
         }
       },

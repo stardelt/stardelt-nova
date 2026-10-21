@@ -29,6 +29,7 @@
 //!   GET  /api/apps                          — installed apps, reachable URLs, live images
 //!   GET  /api/apps/:id                      — one app: workloads, facts, deep links
 //!   GET  /api/workloads                     — workloads in Nova's namespace + their images
+//!   GET  /api/admin/catalogs                — every catalog and its grants, administrators only
 //!   GET  /api/connections                   — the caller's connections (needs the secret store)
 //!   POST /api/connections                   — create one: values go to the store, never back
 //!   PUT  /api/connections/{scope}/…/secret  — rotate fields
@@ -63,6 +64,7 @@
 //! `NOVA_S3_NOTEBOOK_BUCKET` (all four or none) switch on published notebooks
 //! (`notebooks.rs`); unset, the routes answer 503.
 
+mod admin_catalogs;
 mod airflow;
 mod api_json;
 mod apps;
@@ -614,16 +616,20 @@ fn api_router() -> Router<Arc<AppState>> {
         .merge(notebooks::router())
 }
 
-/// The operator surfaces: the service inventory, the workload list and the engine
-/// details behind them. Separate from `api_router` because they are the one part of the
-/// API an ordinary user has no business reading — `main` puts the administrator check in
-/// front of them in `oidc` mode (see `auth::require_admin`).
+/// The operator surfaces: the service inventory, the workload list, the engine
+/// details and the catalog permissions view. Separate from `api_router` because
+/// they are the one part of the API an ordinary user has no business reading —
+/// `main` puts the administrator check in front of them in `oidc` mode (see
+/// `auth::require_admin`).
 fn admin_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/apps", get(apps::list))
         .route("/apps/{id}", get(apps::detail))
         .route("/workloads", get(cluster::list_handler))
         .route("/trino/cluster", get(trino_cluster))
+        // Every `Catalog` of the platform and the grants on it (stardelt-nova#251):
+        // the same administrator gate as the rest of this table, in `oidc` mode.
+        .route("/admin/catalogs", get(admin_catalogs::list))
 }
 
 #[tokio::main]
@@ -901,7 +907,27 @@ mod router_tests {
     }
 
     pub(crate) fn test_state_with_db(db: Option<sqlx::PgPool>) -> Arc<AppState> {
-        build_test_state(db, "http://127.0.0.1:1", "http://127.0.0.1:1", true, None)
+        build_test_state(
+            db,
+            "http://127.0.0.1:1",
+            "http://127.0.0.1:1",
+            true,
+            None,
+            None,
+        )
+    }
+
+    /// An `AppState` with a cluster client (`admin_catalogs.rs`): the `Catalog` rows come
+    /// from the API server the client points at, not from the demo branch.
+    pub(crate) fn test_state_with_kube(kube: kube::Client) -> Arc<AppState> {
+        build_test_state(
+            None,
+            "http://127.0.0.1:1",
+            "http://127.0.0.1:1",
+            false,
+            None,
+            Some(kube),
+        )
     }
 
     /// An `AppState` for the catalog-token tests (`catalog_token.rs`): not demo, so the
@@ -917,13 +943,14 @@ mod router_tests {
             lakekeeper_url,
             false,
             catalog_token,
+            None,
         )
     }
 
     /// An `AppState` for the catalog tests (`catalog.rs`): not demo, both upstreams are
     /// fakes, so `SHOW CATALOGS` and the warehouse list are answered by the test.
     pub(crate) fn catalog_scope_test_state(trino_url: &str, lakekeeper_url: &str) -> Arc<AppState> {
-        build_test_state(None, trino_url, lakekeeper_url, false, None)
+        build_test_state(None, trino_url, lakekeeper_url, false, None, None)
     }
 
     fn build_test_state(
@@ -932,6 +959,7 @@ mod router_tests {
         lakekeeper_url: &str,
         demo_mode: bool,
         catalog_token: Option<catalog_token::CatalogToken>,
+        kube: Option<kube::Client>,
     ) -> Arc<AppState> {
         Arc::new(AppState {
             dev_user: "test".into(),
@@ -948,7 +976,7 @@ mod router_tests {
             forward_identity: false,
             jobs: Mutex::new(Vec::new()),
             demo_state: RwLock::new(demo::DemoState::default()),
-            kube: None,
+            kube,
             workloads: cluster::WorkloadCache::default(),
             admin_console_url: admin_console_url("https://id.example.com/realms/stardelt"),
             db,
