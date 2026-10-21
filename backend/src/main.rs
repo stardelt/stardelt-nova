@@ -9,6 +9,7 @@
 //!   POST /api/auth/logout                   — sign out locally and at the IdP
 //!   GET  /api/trino/cluster                 — Trino /v1/info (or demo stub)
 //!   GET  /api/catalog/warehouse             — resolved warehouse id+name
+//!   GET  /api/catalog/catalogs              — the catalogs the caller may browse
 //!   GET  /api/catalog/namespaces            — list namespaces
 //!   POST /api/catalog/namespaces            — create a schema
 //!   GET  /api/catalog/namespaces/:ns/tables — list tables
@@ -95,7 +96,7 @@ mod secret_store;
 mod trino;
 mod user_settings;
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, RwLock};
 
 use axum::{
@@ -106,7 +107,6 @@ use axum::{
     routing::{delete, get, post, put},
 };
 use serde::Serialize;
-use tokio::sync::OnceCell;
 use tower_http::{services::ServeDir, trace::TraceLayer};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -125,7 +125,15 @@ pub struct AppState {
     pub superset_url: String,
     pub jupyterhub_url: String,
     pub warehouse_name: String,
-    pub warehouse_id: OnceCell<String>,
+    /// Lakekeeper warehouse ids by catalog name, filled from the warehouse list on the
+    /// first miss (`catalog::warehouse_id_for`). One catalog is one warehouse
+    /// (`design/multitenant-catalogs.md` §2); this replaces the single id Nova used to
+    /// cache, so any catalog can be addressed, not just the configured default.
+    pub catalog_ids: RwLock<HashMap<String, String>>,
+    /// Which catalogs a person may browse, in the engine's answer, cached for 30 s per
+    /// subject (`catalog::allowed_catalogs`). Nova is never the authority: it asks Trino
+    /// with the caller's own token and only fails **before** the person tries.
+    pub catalog_access: Mutex<HashMap<String, (std::time::Instant, BTreeSet<String>)>>,
     pub http: reqwest::Client,
     pub demo: bool,
     /// Forward the caller's own token to Trino, when the platform has configured it to
@@ -500,6 +508,7 @@ fn api_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/me", get(me))
         .route("/catalog/warehouse", get(catalog::warehouse_info))
+        .route("/catalog/catalogs", get(catalog::list_catalogs))
         .route(
             "/catalog/namespaces",
             get(catalog::list_namespaces).post(catalog::create_namespace),
@@ -752,7 +761,8 @@ async fn main() -> anyhow::Result<()> {
         jupyterhub_url: std::env::var("NOVA_JUPYTERHUB_URL")
             .unwrap_or_else(|_| "http://proxy-public:80".into()),
         warehouse_name: std::env::var("NOVA_WAREHOUSE_NAME").unwrap_or_else(|_| "warehouse".into()),
-        warehouse_id: OnceCell::new(),
+        catalog_ids: RwLock::new(HashMap::new()),
+        catalog_access: Mutex::new(HashMap::new()),
         http,
         demo: demo_mode,
         forward_identity: env_flag("NOVA_FORWARD_IDENTITY"),
@@ -881,7 +891,7 @@ mod router_tests {
     }
 
     fn test_state_with_db(db: Option<sqlx::PgPool>) -> Arc<AppState> {
-        build_test_state(db, "http://127.0.0.1:1", true, None)
+        build_test_state(db, "http://127.0.0.1:1", "http://127.0.0.1:1", true, None)
     }
 
     /// An `AppState` for the catalog-token tests (`catalog_token.rs`): not demo, so the
@@ -891,24 +901,38 @@ mod router_tests {
         lakekeeper_url: &str,
         catalog_token: Option<catalog_token::CatalogToken>,
     ) -> Arc<AppState> {
-        build_test_state(None, lakekeeper_url, false, catalog_token)
+        build_test_state(
+            None,
+            "http://127.0.0.1:1",
+            lakekeeper_url,
+            false,
+            catalog_token,
+        )
+    }
+
+    /// An `AppState` for the catalog tests (`catalog.rs`): not demo, both upstreams are
+    /// fakes, so `SHOW CATALOGS` and the warehouse list are answered by the test.
+    pub(crate) fn catalog_scope_test_state(trino_url: &str, lakekeeper_url: &str) -> Arc<AppState> {
+        build_test_state(None, trino_url, lakekeeper_url, false, None)
     }
 
     fn build_test_state(
         db: Option<sqlx::PgPool>,
+        trino_url: &str,
         lakekeeper_url: &str,
         demo_mode: bool,
         catalog_token: Option<catalog_token::CatalogToken>,
     ) -> Arc<AppState> {
         Arc::new(AppState {
             dev_user: "test".into(),
-            trino_url: "http://127.0.0.1:1".into(),
+            trino_url: trino_url.into(),
             lakekeeper_url: lakekeeper_url.into(),
             catalog_token,
             superset_url: "http://127.0.0.1:1".into(),
             jupyterhub_url: "http://127.0.0.1:1".into(),
             warehouse_name: "warehouse".into(),
-            warehouse_id: OnceCell::new(),
+            catalog_ids: RwLock::new(HashMap::new()),
+            catalog_access: Mutex::new(HashMap::new()),
             http: reqwest::Client::new(),
             demo: demo_mode,
             forward_identity: false,
@@ -1001,6 +1025,42 @@ mod router_tests {
             .headers()
             .get(name)
             .and_then(|value| value.to_str().ok())
+    }
+
+    /// `GET /api/catalog/catalogs` is wired next to `/catalog/warehouse` and answers the
+    /// shape the UI reads: the demo catalog, its id and the default, never cached.
+    #[tokio::test]
+    async fn the_catalog_list_route_answers_the_demo_catalog() {
+        let (app, _dir) = test_app("catalog-list");
+        let response = get(app, "/api/catalog/catalogs").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(header(&response, "cache-control"), Some("no-store"));
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(body["default"], "warehouse");
+        assert_eq!(
+            body["catalogs"],
+            serde_json::json!([{ "name": "warehouse", "id": "demo" }])
+        );
+    }
+
+    /// Demo mode has one catalog: a name it does not have is refused before any upstream
+    /// is called, and an engine catalog name is refused as invalid.
+    #[tokio::test]
+    async fn a_catalog_the_caller_may_not_browse_is_refused_before_the_catalog() {
+        let (app, _dir) = test_app("catalog-scope");
+        let response = get(app.clone(), "/api/catalog/namespaces?catalog=finance").await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let response = get(app.clone(), "/api/catalog/namespaces?catalog=System").await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let response = get(app, "/api/catalog/namespaces").await;
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "the default catalog still answers in demo mode"
+        );
     }
 
     /// `GET /api/openapi.json` is served outside sign-in and carries the

@@ -21,7 +21,8 @@ Browser
          ├─ GET  /api/auth/callback    OIDC redirect target (oidc mode)
          ├─ POST /api/auth/logout      sign out here and at the IdP
          ├─ GET  /api/trino/cluster    → Trino /v1/info
-         ├─ GET  /api/catalog/*        → Lakekeeper REST catalog
+         ├─ GET  /api/catalog/catalogs the catalogs the caller may browse (?catalog= names one)
+         ├─ GET  /api/catalog/*        → Lakekeeper REST catalog, in the catalog ?catalog= names
          ├─ POST /api/catalog/namespaces  create schema
          ├─ GET/PUT /api/catalog/tables/:ns/:tbl/documentation  description, tags, owner, domain
          ├─ PUT  /api/catalog/tables/:ns/:tbl/columns/:column/description  one column's description
@@ -107,6 +108,44 @@ the first editor must set the owner to one of their own groups. Everyone else ge
 Anyone who reaches Lakekeeper or Trino directly can still change these properties until
 the catalog enforces permissions. The lock covers one Nova replica; more than one replica
 needs a database lock (a later change). Demo mode answers 503.
+
+### Several catalogs
+
+The platform runs several catalogs (one Lakekeeper warehouse each, rendered into Trino as
+one catalog per warehouse). **A person sees only the catalogs they may browse**, and Nova
+does not decide that itself: it asks the engine.
+
+`GET /api/catalog/catalogs` answers the caller's catalogs, sorted by name, each with its
+warehouse id, plus the default:
+
+```json
+{"catalogs": [{"name": "finance", "id": "5e6c…"}, {"name": "warehouse", "id": "a1b2…"}],
+ "default": "warehouse"}
+```
+
+Every `/api/catalog/*` route takes an optional `?catalog=<name>`; omitted, the default is
+used — the configured `NOVA_WAREHOUSE_NAME` when the caller may browse it, otherwise the
+first catalog they may. What the list contains is what Trino's `SHOW CATALOGS` answers
+**for that person, through their own token** (the platform's permission bridge filters it);
+Nova only drops the engine's own catalogs — `system`, `information_schema`, `memory`,
+`tpch`, `tpcds`, `jmx`. The answer is cached for 30 s per person, so a grant change is
+visible within half a minute without a statement per click. Nova never proxies a catalog
+outside that list:
+
+| Request | Answer |
+|---|---|
+| `?catalog=finance`, allowed | the catalog's namespaces/tables |
+| `?catalog=product`, a catalog the caller may not browse | `403 {"error":"you cannot browse catalog 'product'"}` |
+| `?catalog=nope`, no catalog by that name | `404 {"error":"catalog 'nope' not found"}` |
+| `?catalog=System`, not a catalog name (1–40 chars, `[a-z][a-z0-9]*`) | `400 {"error":"catalog name must be lower-case letters and digits"}` |
+| no catalog is open to the caller and none was named | `403 {"error":"no catalog is open to you yet; ask an administrator for access"}` |
+
+Unreachable Trino or Lakekeeper stays `502`; a configured default warehouse Lakekeeper does
+not know is `404` on the catalog routes (`503` on `/api/catalog/warehouse`, which names the
+configured warehouse itself). In `dev` mode and in demo mode there is one catalog — the
+configured warehouse — and no permission bridge, so every request works exactly as before.
+Table documentation, history and rollback are scoped to the same catalog: the SQL they run
+names `"<catalog>".<ns>.<tbl>`, and the per-table edit lock keys on all three.
 
 ## Demo mode (no cluster)
 
@@ -261,7 +300,7 @@ The backend is configured entirely through environment variables:
 | `NOVA_CATALOG_TOKEN_URL` | — (empty) | The Keycloak token endpoint for Nova's own catalog client, e.g. `https://id.<domain>/realms/stardelt/protocol/openid-connect/token`. With the two below, every Lakekeeper call carries `Authorization: Bearer <token>`; unset, no header is sent (the catalog still answers `allowall`). All three `NOVA_CATALOG_*` variables or none — a partial set refuses to start rather than calling the catalog unauthenticated |
 | `NOVA_CATALOG_CLIENT_ID` | — (required with the URL) | Confidential client id `svc-catalog-nova` (audience `lakekeeper`, stardelt-platform#282) |
 | `NOVA_CATALOG_CLIENT_SECRET` | — (required with the id) | That client's secret, from the `svc-catalog-nova` Secret (key `client-secret`). Never logged, and no error or response ever carries it |
-| `NOVA_WAREHOUSE_NAME` | `warehouse` | Lakekeeper warehouse name to resolve on startup |
+| `NOVA_WAREHOUSE_NAME` | `warehouse` | The **default catalog**: the Lakekeeper warehouse the catalog routes work in when a request names none and the caller may browse it. `/api/catalog/warehouse` and the dashboard facts always describe this warehouse |
 | `NOVA_SUPERSET_URL` | `http://superset:8088` | Superset base URL (probe + embed check) |
 | `NOVA_JUPYTERHUB_URL` | `http://proxy-public:80` | JupyterHub public proxy base URL (probe + embed check) |
 | `NOVA_AIRFLOW_URL` | — (empty) | Airflow API server base URL, plain HTTP in-cluster (`http://airflow-api-server:8080`). Needs `NOVA_AIRFLOW_USER` and `NOVA_AIRFLOW_PASSWORD` too; unless all three are set the pipelines API is disabled and says so. Nova signs in once as that service user (built-in role `User`, enough to read, trigger, pause and mark a run failed), keeps the 24 h token until shortly before it expires, and decides itself who may see what — Airflow cannot scope the credential to owner groups |
@@ -273,7 +312,7 @@ The backend is configured entirely through environment variables:
 | `NOVA_S3_NOTEBOOK_BUCKET` | — (required with the URL) | Bucket for published notebooks (`notebooks`). Versioning must be enabled (`make notebooks-bucket` in stardelt-platform); a publish without a returned version is `502` rather than a Notebook that is not immutable |
 | `POD_NAMESPACE` | `stardelt` | Namespace whose workloads Nova reports (downward API in the manifests); `NOVA_NAMESPACE` overrides it for a local run |
 | `NOVA_BASE_DOMAIN` | — (empty) | Base domain for the app deep-links (`trino.<domain>`, …). Empty = the UI links nothing; the install sets it from a ConfigMap |
-| `NOVA_FORWARD_IDENTITY` | off | Send the caller's own token to Trino (`Authorization: Bearer`). Only useful once the platform configures the engine to validate it — the identity contract's phase 2. The catalog is not affected: Lakekeeper always sees Nova's own service token (above), never the caller's, until per-user catalog rights exist. `/api/me` reports whether forwarding is on (`identity_forwarding`) |
+| `NOVA_FORWARD_IDENTITY` | off | Send the caller's own token to Trino (`Authorization: Bearer`). Only useful once the platform configures the engine to validate it — the identity contract's phase 2. With it on, the engine can also filter `SHOW CATALOGS` per person, which is what Nova's catalog list reads (`GET /api/catalog/catalogs`); with it off the engine sees an unauthenticated request. Lakekeeper still sees Nova's own service token (above), never the caller's. `/api/me` reports whether forwarding is on (`identity_forwarding`) |
 | `NOVA_QUERY_TIMEOUT_SECS` | `300` | How long `POST /api/query` waits for Trino before cancelling the query server-side and answering `400 {"error":"query exceeded the Ns limit and was cancelled"}`. A client disconnect cancels the Trino query too. Results larger than 50,000 rows are cut to exactly that many and answered with `"truncated": true` |
 | `NOVA_DATABASE_URL` | — (empty) | PostgreSQL URL of the state store (`postgres://user:password@host:5432/nova`). Unset = disabled: Nova behaves as before and `/api/health` answers `{"status":"ok","db":"disabled"}`. Set = connect and apply the migrations at start-up, or refuse to start; the platform fills it from the `nova-pg-app` Secret. After start-up an unreachable database only turns `db` into `down` (the probe still answers 200) |
 | `NOVA_QUERY_LOG_RETENTION_DAYS` | `90` | How long query-log rows are kept; the backend purges hourly. `0` disables the purge; an unparsable value warns and uses the default |
@@ -510,7 +549,9 @@ either grants admin. When Entra reports a *group overage* (`_claim_names.groups`
 not call Graph) — use app roles or a group filter on the app registration. `/api/me`
 returns claims, never tokens, and `identity_forwarding: false`: Nova still queries
 Trino and Lakekeeper with its own service connection — and Lakekeeper with the
-`svc-catalog-nova` service token, never the caller's.
+`svc-catalog-nova` service token, never the caller's. Catalog *visibility* is the one
+question Nova asks with the caller's token (`SHOW CATALOGS`, see "Several catalogs"),
+which needs `NOVA_FORWARD_IDENTITY=1`.
 
 **The person behind the request.** In `oidc` mode `/api/me` adds three facts to the
 claim fields, so the Profile page can explain the caller's role and warn before a

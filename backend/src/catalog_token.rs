@@ -241,7 +241,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex as StdMutex};
 
-    use axum::extract::State;
+    use axum::extract::{Query, State};
     use axum::http::{HeaderMap, StatusCode};
     use axum::routing::{get, post};
     use axum::{Json, Router};
@@ -496,7 +496,8 @@ mod tests {
                 .is_none()
         );
 
-        let response = catalog::list_namespaces(State(state)).await;
+        let response =
+            catalog::list_namespaces(State(state), Query(Default::default()), None).await;
         assert_eq!(response.status(), StatusCode::OK);
         let seen = seen.authorizations();
         assert_eq!(seen.len(), 2, "warehouse first, then the proxy: {seen:?}");
@@ -523,7 +524,8 @@ mod tests {
             .await
             .expect("warehouse");
         assert_eq!(id, "wid-1");
-        let response = catalog::list_namespaces(State(state)).await;
+        let response =
+            catalog::list_namespaces(State(state), Query(Default::default()), None).await;
         assert_eq!(response.status(), StatusCode::OK);
 
         let requests = seen.authorizations();
@@ -590,7 +592,8 @@ mod tests {
             )),
         );
 
-        let response = catalog::list_namespaces(State(state)).await;
+        let response =
+            catalog::list_namespaces(State(state), Query(Default::default()), None).await;
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
 
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
