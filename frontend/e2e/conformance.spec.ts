@@ -2953,6 +2953,11 @@ test.describe('schedule notebook', () => {
   } = {}) {
     const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, timezoneId })
     const page = await context.newPage()
+    // Version labels show a full time; pin the display to UTC so the expected text does not
+    // depend on the zone the test runner itself happens to use.
+    await context.addInitScript(() => {
+      try { localStorage.setItem('stardelt-nova:time', 'utc') } catch { /* ignore */ }
+    })
     if (init) await page.addInitScript(init)
     const requests: Recorded[] = []
     page.on('request', (request) => requests.push({
@@ -3111,8 +3116,8 @@ test.describe('schedule notebook', () => {
     const version = dialog.getByRole('combobox', { name: 'Version', exact: true })
     // Newest first; each choice names the short id, when it was published and by whom.
     expect(await version.locator('option').allTextContents()).toEqual([
-      `${V3.slice(0, 8)} · ${formatTime(AT3)} · alice`,
-      `${V2.slice(0, 8)} · ${formatTime(AT2)} · bob`,
+      `${V3.slice(0, 8)} · ${formatTime(AT3, 'UTC')} · alice`,
+      `${V2.slice(0, 8)} · ${formatTime(AT2, 'UTC')} · bob`,
     ])
     await expect(version).toHaveValue(V3)
     await expect(dialog.getByText(PIN_HELPER, { exact: true })).toBeVisible()
