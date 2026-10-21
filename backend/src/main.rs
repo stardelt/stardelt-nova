@@ -81,6 +81,7 @@ mod embed;
 mod jobs;
 mod notebooks;
 mod openapi;
+mod people;
 mod pipelines;
 // Wired into the collector and the API by the follow-up query-log tickets (stardelt-nova#116).
 #[allow(dead_code)]
@@ -185,6 +186,10 @@ pub struct AppState {
     /// later ticket). Lakekeeper 0.12.2 deadlocks on concurrent commits to one table
     /// instead of answering 409, which is why this exists (stardelt-nova#189).
     pub table_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// When each subject was last written to the person directory (`people::touch`):
+    /// at most one write per person per ten minutes. In-process, like the other rate
+    /// limits; a restart writes once more per person.
+    pub people_touched: people::TouchLimiter,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -778,6 +783,7 @@ async fn main() -> anyhow::Result<()> {
         pipeline_creates: Mutex::new(std::collections::HashMap::new()),
         airflow,
         table_locks: Mutex::new(HashMap::new()),
+        people_touched: Mutex::new(HashMap::new()),
         notebooks,
     });
 
@@ -811,6 +817,10 @@ async fn main() -> anyhow::Result<()> {
     // one user, so both tables are served as they always were.
     let api = match &auth {
         Some(a) => {
+            let auth_context = auth::AuthContext {
+                auth: a.clone(),
+                app: state.clone(),
+            };
             // Each layer is applied to the routes already in the router: /health stays
             // outside them (the kubelet probe has no session) and /auth/* is nested after
             // them (sign-in must be reachable unauthenticated). Within the admin table,
@@ -824,7 +834,7 @@ async fn main() -> anyhow::Result<()> {
             let authed = protected
                 .route_layer(axum::middleware::from_fn(audit::record_mutations))
                 .route_layer(axum::middleware::from_fn_with_state(
-                    a.clone(),
+                    auth_context.clone(),
                     auth::require_auth,
                 ))
                 .merge(
@@ -832,7 +842,7 @@ async fn main() -> anyhow::Result<()> {
                         .route_layer(axum::middleware::from_fn(audit::record_mutations))
                         .route_layer(axum::middleware::from_fn(auth::require_admin))
                         .route_layer(axum::middleware::from_fn_with_state(
-                            a.clone(),
+                            auth_context.clone(),
                             auth::require_auth,
                         )),
                 );
@@ -890,7 +900,7 @@ mod router_tests {
         test_state_with_db(None)
     }
 
-    fn test_state_with_db(db: Option<sqlx::PgPool>) -> Arc<AppState> {
+    pub(crate) fn test_state_with_db(db: Option<sqlx::PgPool>) -> Arc<AppState> {
         build_test_state(db, "http://127.0.0.1:1", "http://127.0.0.1:1", true, None)
     }
 
@@ -948,6 +958,7 @@ mod router_tests {
             pipeline_creates: Mutex::new(std::collections::HashMap::new()),
             airflow: None,
             table_locks: Mutex::new(std::collections::HashMap::new()),
+            people_touched: Mutex::new(std::collections::HashMap::new()),
             notebooks: None,
         })
     }
@@ -1656,6 +1667,148 @@ mod router_tests {
         let (status, body) = call(&alice, "GET", "/api/query-log?limit=0", None).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(body["error"].as_str().unwrap().contains("limit"));
+    }
+
+    /// A fixture stored with an arbitrary engine user: the shape once authz 8/8 runs every
+    /// query as the person's `sub`.
+    async fn seed_query_log_as(pool: &sqlx::PgPool, principal: &str, fixture: &str) -> String {
+        let mut record = query_log_event::parse(fixture.as_bytes()).expect("a fixture");
+        record.principal = principal.to_string();
+        let id = record.query_id.clone();
+        query_log_store::upsert(
+            pool,
+            &query_log_collector::Accepted {
+                record,
+                warehouse: "default".into(),
+            },
+        )
+        .await
+        .expect("store a fixture");
+        id
+    }
+
+    fn signed_in_as(sub: &str, username: &str) -> auth::Principal {
+        let mut p = signed_in(sub);
+        p.identity.display_name = username.into();
+        p
+    }
+
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn query_log_mine_matches_the_subject_and_shows_the_directory_name() {
+        const ALICE_SUB: &str = "0b6b1f0e-4f0e-4d4e-8e3a-1f2a3b4c5d6e";
+        const BOB_SUB: &str = "1c7c2f1f-5a1f-4e5f-9f4b-2a3b4c5d6e7f";
+        const UNKNOWN_SUB: &str = "2d8d3a20-6b20-4f60-a05c-3b4c5d6e7f80";
+
+        let pool = db::test_support::migrated_pool().await;
+        // Alice is in the directory (name from the token's `name`); Bob and the third
+        // subject are not, so their rows must fall back to the raw engine user.
+        let directory = test_state_with_db(Some(pool.clone()));
+        people::touch(
+            &directory,
+            &auth::Identity {
+                sub: ALICE_SUB.into(),
+                display_name: "alice".into(),
+                email: Some("alice@example.com".into()),
+                name: Some("Alice Example".into()),
+                groups: vec![],
+                roles: vec![],
+                groups_overage: false,
+                is_admin: false,
+            },
+        )
+        .await;
+
+        let alice_query = seed_query_log_as(
+            &pool,
+            ALICE_SUB,
+            include_str!("testdata/query_log/completed_select.json"),
+        )
+        .await;
+        let bob_query = seed_query_log_as(
+            &pool,
+            BOB_SUB,
+            include_str!("testdata/query_log/completed_ctas.json"),
+        )
+        .await;
+        let unknown_query = seed_query_log_as(
+            &pool,
+            UNKNOWN_SUB,
+            include_str!("testdata/query_log/completed_failed.json"),
+        )
+        .await;
+
+        let dir = StaticDir::new("query-log-sub");
+        let alice = log_app(pool.clone(), Some(signed_in_as(ALICE_SUB, "alice")), &dir);
+
+        // "Mine" is the subject: the row the engine ran as Alice's sub is hers, Bob's is not.
+        let (status, list) = call(&alice, "GET", "/api/query-log", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(item_ids(&list), vec![alice_query.clone()]);
+        assert_eq!(list["items"][0]["user"], ALICE_SUB, "the raw engine user");
+        assert_eq!(
+            list["items"][0]["userName"], "Alice Example",
+            "the directory resolves the subject to a name"
+        );
+        assert!(
+            !list.to_string().contains(BOB_SUB),
+            "somebody else's query is not in the mine scope"
+        );
+
+        // The sign-in name in the same token is not a second scope: Bob's row stays out.
+        let bob = log_app(pool.clone(), Some(signed_in_as(BOB_SUB, "bob")), &dir);
+        let (_, bob_list) = call(&bob, "GET", "/api/query-log", None).await;
+        assert_eq!(item_ids(&bob_list), vec![bob_query.clone()]);
+        assert_eq!(bob_list["items"][0]["user"], BOB_SUB);
+        assert!(
+            bob_list["items"][0]["userName"].is_null(),
+            "an unknown subject falls back to the raw value"
+        );
+
+        // The administrator sees every row and still gets names only where a person exists.
+        let admin = log_app(pool.clone(), Some(signed_in_admin("root")), &dir);
+        let (_, all) = call(&admin, "GET", "/api/query-log?scope=all", None).await;
+        let by_id = |list: &serde_json::Value, id: &str| {
+            list["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|i| i["id"] == id)
+                .cloned()
+                .expect("the row")
+        };
+        assert_eq!(all["items"].as_array().unwrap().len(), 3);
+        assert_eq!(by_id(&all, &alice_query)["userName"], "Alice Example");
+        assert!(by_id(&all, &bob_query)["userName"].is_null());
+        assert!(by_id(&all, &unknown_query)["userName"].is_null());
+
+        // The detail carries the same name and the raw value, and a stranger cannot open it.
+        let (status, detail) = call(
+            &alice,
+            "GET",
+            &format!("/api/query-log/{alice_query}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(detail["user"], ALICE_SUB);
+        assert_eq!(detail["userName"], "Alice Example");
+        let (status, _) = call(&alice, "GET", &format!("/api/query-log/{bob_query}"), None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, bob_detail) =
+            call(&admin, "GET", &format!("/api/query-log/{bob_query}"), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(bob_detail["userName"].is_null());
+
+        // Nothing in either answer is a credential: no token field, no bearer, no session.
+        for body in [list.to_string(), detail.to_string(), bob_detail.to_string()] {
+            for word in ["token", "accessToken", "Bearer", "session"] {
+                assert!(
+                    !body.contains(word),
+                    "a query-log answer leaked {word}: {body}"
+                );
+            }
+        }
     }
 
     #[tokio::test]

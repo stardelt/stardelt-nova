@@ -1311,6 +1311,7 @@ mod tests {
             pipeline_creates: Mutex::new(std::collections::HashMap::new()),
             airflow: None,
             table_locks: Mutex::new(std::collections::HashMap::new()),
+            people_touched: Mutex::new(std::collections::HashMap::new()),
             notebooks: None,
         })
     }

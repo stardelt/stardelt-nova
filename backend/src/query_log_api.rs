@@ -22,6 +22,7 @@ use sqlx::{FromRow, Postgres, QueryBuilder};
 
 use crate::AppState;
 use crate::auth::Principal;
+use crate::people;
 use crate::query_log::{RowOwner, Scope, Viewer, in_scope, visible};
 use crate::saved_queries::{error, not_found, store_failed, unavailable};
 
@@ -62,6 +63,7 @@ impl Caller {
     fn viewer(&self) -> Viewer<'_> {
         Viewer {
             username: &self.username,
+            sub: &self.sub,
             groups: &self.groups,
             is_admin: self.is_admin,
         }
@@ -182,7 +184,11 @@ struct ListRow {
 struct ListItem {
     id: String,
     state: String,
+    /// The raw engine user (the `sub` once authz 8/8 is live).
     user: String,
+    /// The person's display name when Nova knows the engine user; `None` falls back to
+    /// `user` in the UI.
+    user_name: Option<String>,
     source: Option<String>,
     warehouse: String,
     query_type: Option<String>,
@@ -199,6 +205,7 @@ impl From<ListRow> for ListItem {
             id: r.query_id,
             state: r.state,
             user: r.principal,
+            user_name: None,
             source: r.source,
             warehouse: r.warehouse,
             query_type: r.query_type,
@@ -240,7 +247,13 @@ pub async fn list(
          wall_ms, output_rows, error_code FROM query_log WHERE true"
     ));
     if params.scope == Scope::Mine {
-        q.push(" AND principal = ").push_bind(who.username.clone());
+        // The engine user is the sub once authz 8/8 is live; rows written before it (or in a
+        // deployment that has not switched) still carry the sign-in name.
+        q.push(" AND (principal = ")
+            .push_bind(who.username.clone())
+            .push(" OR principal = ")
+            .push_bind(who.sub.clone())
+            .push(")");
     }
     if let Some(state) = &params.state {
         q.push(" AND state = ").push_bind(state.clone());
@@ -302,7 +315,22 @@ pub async fn list(
     } else {
         None
     };
-    let items: Vec<ListItem> = rows.into_iter().map(ListItem::from).collect();
+    let mut items: Vec<ListItem> = rows.into_iter().map(ListItem::from).collect();
+    // An engine user that is a UUID is a person's subject; the directory turns it into a
+    // name. Deduplicated, because a page is often the same person's queries.
+    let mut subs: Vec<String> = items
+        .iter()
+        .filter(|item| people::is_uuid(&item.user))
+        .map(|item| item.user.clone())
+        .collect();
+    subs.sort();
+    subs.dedup();
+    if !subs.is_empty() {
+        let display = people::names(pool, &subs).await;
+        for item in &mut items {
+            item.user_name = display.get(&item.user).cloned();
+        }
+    }
     Json(serde_json::json!({ "items": items, "nextCursor": next })).into_response()
 }
 
@@ -378,7 +406,7 @@ pub async fn detail(
     if !visible(&owner, &who.viewer()) {
         return not_found();
     }
-    if r.principal != who.username {
+    if r.principal != who.username && r.principal != who.sub {
         // An administrator opening somebody else's statement leaves a trace.
         tracing::info!(
             target: "audit",
@@ -390,10 +418,19 @@ pub async fn detail(
             "administrator opened another user's query"
         );
     }
+    let user_name = if people::is_uuid(&r.principal) {
+        people::names(pool, std::slice::from_ref(&r.principal))
+            .await
+            .get(&r.principal)
+            .cloned()
+    } else {
+        None
+    };
     Json(serde_json::json!({
         "id": r.query_id,
         "state": r.state,
         "user": r.principal,
+        "userName": user_name,
         "source": r.source,
         "clientTags": r.client_tags,
         "warehouse": r.warehouse,

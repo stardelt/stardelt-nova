@@ -1750,6 +1750,7 @@ mod tests {
             pipeline_creates: Mutex::new(HashMap::new()),
             airflow: None,
             table_locks: Mutex::new(HashMap::new()),
+            people_touched: Mutex::new(HashMap::new()),
             notebooks: store,
         })
     }
@@ -2523,10 +2524,14 @@ mod tests {
             Arc::new(Provider::new(reqwest::Client::new(), ISSUER.into())),
             Arc::new(validator),
         );
+        let context = crate::auth::AuthContext {
+            auth,
+            app: state.clone(),
+        };
         let app = Router::new()
             .merge(router())
             .route_layer(axum::middleware::from_fn_with_state(
-                auth,
+                context,
                 crate::auth::require_auth,
             ))
             .with_state(state);

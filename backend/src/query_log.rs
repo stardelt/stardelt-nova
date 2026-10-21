@@ -13,7 +13,12 @@ pub struct RowOwner<'a> {
 
 /// The signed-in person asking.
 pub struct Viewer<'a> {
+    /// The engine user Nova knows from sign-in (`preferred_username`).
     pub username: &'a str,
+    /// The OIDC subject. Once authz 8/8 is live (with Superset impersonation,
+    /// stardelt-platform#310) the engine user of a query is this opaque id; the query log
+    /// records it as `principal`, so "mine" must match either.
+    pub sub: &'a str,
     pub groups: &'a [String],
     pub is_admin: bool,
 }
@@ -32,7 +37,7 @@ pub enum Scope {
 /// Does `row` belong in `scope` for `viewer`? `Scope::All` is never granted to a non-administrator.
 pub fn in_scope(scope: Scope, row: &RowOwner<'_>, viewer: &Viewer<'_>) -> bool {
     match scope {
-        Scope::Mine => row.principal == viewer.username,
+        Scope::Mine => row.principal == viewer.username || row.principal == viewer.sub,
         Scope::Team => row
             .owner_group
             .is_some_and(|group| viewer.groups.iter().any(|g| g == group)),
@@ -75,6 +80,7 @@ mod tests {
         let g = groups(&["analysts"]);
         let alice = Viewer {
             username: "alice",
+            sub: "alice",
             groups: &g,
             is_admin: false,
         };
@@ -89,11 +95,13 @@ mod tests {
         let row = service_principal("airflow-etl", "data-eng");
         let member = Viewer {
             username: "carol",
+            sub: "carol",
             groups: &owners,
             is_admin: false,
         };
         let outsider = Viewer {
             username: "dave",
+            sub: "dave",
             groups: &others,
             is_admin: false,
         };
@@ -106,6 +114,7 @@ mod tests {
         let g = groups(&[]);
         let admin = Viewer {
             username: "root",
+            sub: "root",
             groups: &g,
             is_admin: true,
         };
@@ -121,6 +130,7 @@ mod tests {
         let g = groups(&["data-eng"]);
         let user = Viewer {
             username: "carol",
+            sub: "carol",
             groups: &g,
             is_admin: false,
         };
@@ -130,10 +140,33 @@ mod tests {
     }
 
     #[test]
+    fn the_mine_scope_matches_the_subject_when_the_engine_user_is_a_sub() {
+        let g = groups(&["analysts"]);
+        let alice = Viewer {
+            username: "alice",
+            sub: "0b6b1f0e-4f0e-4d4e-8e3a-1f2a3b4c5d6e",
+            groups: &g,
+            is_admin: false,
+        };
+        // With authz 8/8 the engine user is the opaque subject, not the sign-in name.
+        assert!(in_scope(Scope::Mine, &person(alice.sub), &alice));
+        // The sign-in name still matches, for rows the engine ran before the switch.
+        assert!(in_scope(Scope::Mine, &person("alice"), &alice));
+        // Somebody else's query is not mine, under either name.
+        assert!(!in_scope(Scope::Mine, &person("bob"), &alice));
+        assert!(!in_scope(
+            Scope::Mine,
+            &person("1c7c2f1f-5a1f-4e5f-9f4b-2a3b4c5d6e7f"),
+            &alice
+        ));
+    }
+
+    #[test]
     fn the_team_scope_does_not_include_a_persons_queries() {
         let g = groups(&["data-eng"]);
         let user = Viewer {
             username: "carol",
+            sub: "carol",
             groups: &g,
             is_admin: false,
         };
