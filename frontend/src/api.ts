@@ -317,6 +317,22 @@ export type AdminCatalogCondition = {
 }
 
 /**
+ * The body of `PUT /api/admin/catalogs/{name}/access` (stardelt-nova#253): the whole
+ * `spec.owner`, `spec.managedAccess` and `spec.grants` of one `Catalog`, plus the
+ * `resourceVersion` the page read. A concurrent change answers 409 and never overwrites.
+ */
+export type CatalogAccessUpdate = {
+  /** `metadata.resourceVersion` from the row the page holds. */
+  resourceVersion: string
+  /** Exactly one group name. */
+  owner: string
+  /** The owner cannot grant on this catalog; only administrators can. */
+  managedAccess: boolean
+  /** One `{group, verb}` per group and verb, in the order the dialog shows them. */
+  grants: AdminCatalogGrant[]
+}
+
+/**
  * One row of `GET /api/connections` (stardelt-nova#171). A connection is a credential
  * for a system outside the platform; the page lists metadata only. `secretKeys` holds the
  * *names* of the secret fields — a value is never sent, by the store or by Nova, so the
@@ -910,6 +926,9 @@ export const api = {
   app:          (id: string)                  => jget<AppDetail>(`/api/apps/${seg(id)}`),
   /** Every catalog of the platform namespace with its grants (administrators only, #251). */
   adminCatalogs: ()                           => jget<AdminCatalog[]>('/api/admin/catalogs'),
+  /** Change one catalog's owner, managed access and grants (#253); the resource stays the source. */
+  putCatalogAccess: (name: string, body: CatalogAccessUpdate) =>
+    jput<AdminCatalog>(`/api/admin/catalogs/${seg(name)}/access`, body),
   workloads:    ()                            => jget<WorkloadSnapshot>('/api/workloads'),
   createNamespace: (namespace: string, catalog?: string) =>
     jpost<{ namespace: string }>(catalogPath('/api/catalog/namespaces', catalog), { namespace }),

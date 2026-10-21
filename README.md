@@ -40,6 +40,7 @@ Browser
          ├─ GET  /api/apps/:id         one app: workloads, facts, links, embed check
          ├─ GET  /api/workloads        workloads in Nova's namespace + read state (ok/stale/unreachable)
          ├─ GET  /api/admin/catalogs   every Catalog and its grants (administrators only)
+         ├─ PUT  /api/admin/catalogs/:name/access  change owner, managed access and grants (administrators only)
          ├─ GET  /api/connections      the caller's connections (needs the secret store)
          ├─ POST /api/connections      create one: the values go to the store, never back
          ├─ PUT  /api/connections/…/secret  rotate fields of one connection
@@ -155,6 +156,59 @@ mode, a single-warehouse install — the switcher is not shown at all. Generated
 chosen catalog (`finance.seed.nation`), so a statement keeps working after it is pasted
 elsewhere; a catalog the person may not browse answers with the API's own refusal instead of
 an empty list.
+
+### Catalog permissions
+
+An administrator changes a catalog's owner, managed access and grants in **Admin →
+Catalogs**: **Edit** on a row opens a dialog with the owner, the managed-access switch and
+one line per group with the five verbs (`browse`, `select`, `write`, `create`, `manage`).
+**Save** writes the change; removing every grant, or removing `stardelt-users` from
+`warehouse`, asks for a second **Confirm** because those actions hide the catalog from
+people who are not administrators.
+
+The dialog writes a JSON merge patch on the `Catalog` resource (`spec.owner`,
+`spec.managedAccess` and the whole `spec.grants` array), carrying the `resourceVersion`
+the page read. A concurrent change is a `409` and the dialog says so instead of
+overwriting; more than 30 changes per administrator in an hour is a `429`. Nova never
+writes Lakekeeper: the resource is the only state, and the access-sync job applies the new
+spec to Lakekeeper every two minutes. The row says `Applying…` until the job reports
+`status.observedGeneration` equal to the generation the save answered, then `Applied`, or
+the sync's own verdict (a group that does not exist in the realm is `UnknownGroup`; it
+grants nothing for that group).
+
+The same change is one ordinary resource edit, so kubectl or Git works exactly as the
+dialog does:
+
+```yaml
+apiVersion: stardelt.io/v1alpha1
+kind: Catalog
+metadata:
+  name: sandbox
+  namespace: stardelt
+spec:
+  lakehouseRef:
+    name: default
+  owner: stardelt-finops
+  managedAccess: true
+  grants:
+    - group: stardelt-users
+      verb: browse
+    - group: stardelt-finops
+      verb: select
+```
+
+```bash
+kubectl -n stardelt apply -f sandbox-catalog.yaml
+# or a one-field change, the same merge patch the dialog sends:
+kubectl -n stardelt patch catalog sandbox --type merge \
+  -p '{"spec":{"grants":[{"group":"stardelt-users","verb":"browse"},{"group":"stardelt-finops","verb":"select"}]}}'
+```
+
+The resource stays the source of truth. A later GitOps source or `kubectl apply` of the
+same resource overwrites a change made in the dialog; keep the manifest as the record, or
+do not reconcile this resource from both places. Nova's ServiceAccount needs `patch` on
+`catalogs.stardelt.io` for the dialog (part of the platform's `nova-pipelines` Role);
+without a cluster connection the route answers `503` and demo mode changes memory.
 
 ## Demo mode (no cluster)
 

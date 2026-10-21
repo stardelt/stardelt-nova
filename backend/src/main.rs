@@ -30,6 +30,7 @@
 //!   GET  /api/apps/:id                      — one app: workloads, facts, deep links
 //!   GET  /api/workloads                     — workloads in Nova's namespace + their images
 //!   GET  /api/admin/catalogs                — every catalog and its grants, administrators only
+//!   PUT  /api/admin/catalogs/:name/access   — change owner, managed access and grants (administrators only)
 //!   GET  /api/connections                   — the caller's connections (needs the secret store)
 //!   POST /api/connections                   — create one: values go to the store, never back
 //!   PUT  /api/connections/{scope}/…/secret  — rotate fields
@@ -174,6 +175,10 @@ pub struct AppState {
     /// (stardelt-nova#210). A refusal before the limiter (bad name, foreign group, missing
     /// principal, bad body, name taken) never consumes a slot; only a restart forgets it.
     pub pipeline_creates: pipelines::CreateLimiter,
+    /// In-memory catalog-permission change limit: at most thirty changes per administrator in
+    /// an hour (stardelt-nova#253). A refused body or a missing catalog never consumes a slot;
+    /// only a restart forgets it.
+    pub catalog_access_changes: admin_catalogs::AccessChangesLimiter,
     /// Airflow's REST API (`airflow.rs`), for the pipeline views. `None` unless
     /// `NOVA_AIRFLOW_URL`, `NOVA_AIRFLOW_USER` and `NOVA_AIRFLOW_PASSWORD` are all set.
     /// Nova signs in as one service user (built-in role `User`) and decides itself who may
@@ -630,6 +635,11 @@ fn admin_router() -> Router<Arc<AppState>> {
         // Every `Catalog` of the platform and the grants on it (stardelt-nova#251):
         // the same administrator gate as the rest of this table, in `oidc` mode.
         .route("/admin/catalogs", get(admin_catalogs::list))
+        // ...and the one write: a merge patch on the resource, never Lakekeeper (#253).
+        .route(
+            "/admin/catalogs/{name}/access",
+            put(admin_catalogs::update_access),
+        )
 }
 
 #[tokio::main]
@@ -787,6 +797,7 @@ async fn main() -> anyhow::Result<()> {
         break_glass_reads: Mutex::new(std::collections::HashMap::new()),
         run_starts: Mutex::new(std::collections::HashMap::new()),
         pipeline_creates: Mutex::new(std::collections::HashMap::new()),
+        catalog_access_changes: Mutex::new(std::collections::HashMap::new()),
         airflow,
         table_locks: Mutex::new(HashMap::new()),
         people_touched: Mutex::new(HashMap::new()),
@@ -984,6 +995,7 @@ mod router_tests {
             break_glass_reads: Mutex::new(std::collections::HashMap::new()),
             run_starts: Mutex::new(std::collections::HashMap::new()),
             pipeline_creates: Mutex::new(std::collections::HashMap::new()),
+            catalog_access_changes: Mutex::new(std::collections::HashMap::new()),
             airflow: None,
             table_locks: Mutex::new(std::collections::HashMap::new()),
             people_touched: Mutex::new(std::collections::HashMap::new()),

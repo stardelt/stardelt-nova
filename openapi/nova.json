@@ -15,7 +15,7 @@
         "tags": [
           "internal"
         ],
-        "description": "Every `Catalog` of the platform namespace, sorted by name: identity, owner, managed access, the storage key prefix, phase and the grants and conditions the access-sync job last wrote. Administrator-only; a non-administrator answers 403 `this view is for platform administrators`. Read-only: Nova never writes a `Catalog`. A catalog the job has not observed yet answers `phase: \"Unknown\"` with no conditions. Without a cluster connection (demo mode, a local run) the answer is the one in-memory `warehouse` catalog. Answers `Cache-Control: no-store`.",
+        "description": "Every `Catalog` of the platform namespace, sorted by name: identity, owner, managed access, the storage key prefix, phase and the grants and conditions the access-sync job last wrote. Administrator-only; a non-administrator answers 403 `this view is for platform administrators`. The write is `PUT /api/admin/catalogs/{name}/access`; this route never changes anything. A catalog the job has not observed yet answers `phase: \"Unknown\"` with no conditions. Without a cluster connection (demo mode, a local run) the answer is the one in-memory `warehouse` catalog. Answers `Cache-Control: no-store`.",
         "operationId": "list",
         "responses": {
           "200": {
@@ -43,6 +43,107 @@
           },
           "502": {
             "description": "The cluster did not answer, or Nova may not list catalogs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/catalogs/{name}/access": {
+      "put": {
+        "tags": [
+          "internal"
+        ],
+        "description": "Change one catalog's `spec.owner`, `spec.managedAccess` and `spec.grants` as a JSON merge patch on the `Catalog` resource, carrying the `resourceVersion` the page read. Administrator-only; a non-administrator answers 403 `this view is for platform administrators`. A malformed owner, group name, verb or a duplicate grant is a 400 in the words the form shows; a catalog that changed meanwhile is a 409 `this catalog changed since you opened it; reload`; a name that is not a catalog or no longer exists is a 404; more than 30 changes per administrator in an hour is a 429. Without a cluster connection the answer is 503 `the cluster is not reachable from Nova` (demo mode changes memory instead). Answers the updated row, the same shape as the list, with the new `metadata.generation`; `status.observedGeneration` catches up when the access-sync job runs (about two minutes). Never carries a storage credential. `Cache-Control: no-store`.",
+        "operationId": "update_access",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CatalogAccessUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The updated row",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminCatalog"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The owner, a group name, a verb or the grant list is invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not a platform administrator",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such catalog",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The catalog changed since the page read it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "More than 30 changes this hour",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The cluster did not answer, or Nova may not patch catalogs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Nova has no cluster client",
             "content": {
               "application/json": {
                 "schema": {
@@ -3428,6 +3529,37 @@
           },
           "readAt": {
             "type": "string"
+          }
+        }
+      },
+      "CatalogAccessUpdate": {
+        "type": "object",
+        "description": "One `PUT /api/admin/catalogs/{name}/access` body.\n\n`resourceVersion` is the value the page read: the API server rejects the merge\npatch with `409` when the object changed meanwhile, so two administrators\nediting the same catalog cannot silently overwrite each other.",
+        "required": [
+          "resourceVersion",
+          "owner",
+          "managedAccess",
+          "grants"
+        ],
+        "properties": {
+          "grants": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CatalogGrant"
+            },
+            "description": "The whole `spec.grants` array, each `{group, verb}` once."
+          },
+          "managedAccess": {
+            "type": "boolean",
+            "description": "`spec.managedAccess`: the owner cannot grant on this catalog."
+          },
+          "owner": {
+            "type": "string",
+            "description": "`spec.owner`: exactly one group."
+          },
+          "resourceVersion": {
+            "type": "string",
+            "description": "`metadata.resourceVersion` from the row the page holds."
           }
         }
       },

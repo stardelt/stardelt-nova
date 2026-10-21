@@ -16,6 +16,9 @@ pub struct DemoTable {
 #[derive(Default)]
 pub struct DemoState {
     pub tables: Vec<DemoTable>,
+    /// The one catalog's administrator view after an edit through the dialog (#253).
+    /// `None` is the seeded `warehouse` row; there is no cluster and no sync in demo mode.
+    pub admin_catalog: Option<crate::admin_catalogs::AdminCatalog>,
 }
 
 fn col(name: &str, ty: &str) -> Column {
@@ -243,6 +246,7 @@ impl DemoState {
                     rows: daily_rows,
                 },
             ],
+            admin_catalog: None,
         }
     }
 

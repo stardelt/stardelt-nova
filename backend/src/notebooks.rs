@@ -1748,6 +1748,7 @@ mod tests {
             break_glass_reads: Mutex::new(HashMap::new()),
             run_starts: Mutex::new(HashMap::new()),
             pipeline_creates: Mutex::new(HashMap::new()),
+            catalog_access_changes: Mutex::new(HashMap::new()),
             airflow: None,
             table_locks: Mutex::new(HashMap::new()),
             people_touched: Mutex::new(HashMap::new()),
