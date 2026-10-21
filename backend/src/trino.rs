@@ -78,26 +78,29 @@ fn apply_row_cap(rows: &mut Vec<Vec<Value>>) -> bool {
 /// Headers that identify the caller to Trino; identical on the statement POST
 /// and every nextUri poll.
 ///
-/// `X-Trino-User` is what Trino records in its query events, so it should name
-/// the person who asked — the token identifies them for authentication, this
-/// identifies them to the audit trail. Falls back to the dev user when nobody
-/// is signed in.
+/// With a forwarded identity the token *is* the user: the platform switch sets
+/// `principal-field=sub`, so the engine principal is the person's sub. Sending
+/// `X-Trino-User: <preferred_username>` alongside the token would ask Trino to
+/// impersonate the username as the sub — refused by the file rules and the OPA
+/// bridge (platform#311). The header stays for dev mode, where no token is
+/// forwarded and Trino records it as the user.
 fn upstream_headers(
     dev_user: &str,
     forward: bool,
     caller: Option<&crate::auth::Principal>,
 ) -> Vec<(reqwest::header::HeaderName, String)> {
-    let user = caller
-        .map(|c| c.identity.display_name.as_str())
-        .unwrap_or(dev_user);
-    let mut h = vec![(
-        reqwest::header::HeaderName::from_static("x-trino-user"),
-        user.to_string(),
-    )];
-    if let Some(v) = crate::auth::upstream_authorization(forward, caller) {
-        h.push((reqwest::header::AUTHORIZATION, v));
+    match crate::auth::upstream_authorization(forward, caller) {
+        Some(v) => vec![(reqwest::header::AUTHORIZATION, v)],
+        None => {
+            let user = caller
+                .map(|c| c.identity.display_name.as_str())
+                .unwrap_or(dev_user);
+            vec![(
+                reqwest::header::HeaderName::from_static("x-trino-user"),
+                user.to_string(),
+            )]
+        }
     }
-    h
 }
 
 /// Attach the caller's identity to a Trino request: the initial POST, every
@@ -617,14 +620,16 @@ mod tests {
     #[test]
     fn headers_forward_the_token_only_when_asked() {
         let p = alice(Some("t"));
+        // With a forwarded token the sub is the engine user; an X-Trino-User header
+        // would be an impersonation request (platform#311), so it must not be sent.
         let on = upstream_headers("dev", true, Some(&p));
-        assert_eq!(on.len(), 2);
-        assert_eq!(on[0].1, "alice");
-        assert_eq!(on[1].0, reqwest::header::AUTHORIZATION);
-        assert_eq!(on[1].1, "Bearer t");
+        assert_eq!(on.len(), 1);
+        assert_eq!(on[0].0, reqwest::header::AUTHORIZATION);
+        assert_eq!(on[0].1, "Bearer t");
 
         let off = upstream_headers("dev", false, Some(&p));
         assert_eq!(off.len(), 1);
+        assert_eq!(off[0].0.as_str(), "x-trino-user");
         assert_eq!(off[0].1, "alice");
     }
 
@@ -642,7 +647,9 @@ mod tests {
             "nova-sql-editor"
         );
         assert_eq!(req.headers().get("x-trino-client-tags").unwrap(), "nova");
-        assert_eq!(req.headers().get("x-trino-user").unwrap(), "alice");
+        // A forwarded token is the identity; no impersonation header (platform#311).
+        assert!(req.headers().get("x-trino-user").is_none());
+        assert_eq!(req.headers().get("authorization").unwrap(), "Bearer t");
         assert_eq!(req.headers().get("content-type").unwrap(), "text/plain");
 
         // Polls and cancels carry the identity but not the source (the engine takes it from the POST).
@@ -663,10 +670,9 @@ mod tests {
         let req = trino_request(&state, Some(&p), state.http.get("http://example/"))
             .build()
             .unwrap();
-        assert_eq!(
-            req.headers().get("x-trino-user").unwrap(),
-            "alice",
-            "polls carry the caller, not the dev user"
+        assert!(
+            req.headers().get("x-trino-user").is_none(),
+            "a forwarded token must not be combined with an impersonation header"
         );
         assert_eq!(
             req.headers().get(reqwest::header::AUTHORIZATION).unwrap(),
