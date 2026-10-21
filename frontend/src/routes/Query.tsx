@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
 import { api, allTables, downloadCsv, errorMessage, formatCell, type QueryResult, type TableRef } from '../api'
+import CatalogSelect, { useCatalogs } from '../components/CatalogSelect'
 import { Icon } from '../components/Icon'
 import ScheduleDialog from '../components/ScheduleDialog'
 import { formatCount, sqlTableRef } from '../format'
@@ -9,11 +10,15 @@ import { formatCount, sqlTableRef } from '../format'
 const HISTORY_KEY = 'stardelt-nova:history'
 const HISTORY_LIMIT = 50
 
-/** A sample that exists: the NYC demo table if present, else the first table, else a constant query. */
-function pickSample(tables: TableRef[] | undefined): string {
+/**
+ * A sample that exists: the NYC demo table if present, else the first table, else a
+ * constant query. With a catalog, the statement names that catalog, so the person's
+ * chosen catalog is the one the editor opens in (stardelt-nova#234).
+ */
+function pickSample(tables: TableRef[] | undefined, catalog?: string): string {
   if (!tables || tables.length === 0) return 'SELECT 1'
   const t = tables.find(x => x.ns === 'nyc_taxi' && x.name === 'yellow_trips') ?? tables[0]
-  return `SELECT * FROM ${sqlTableRef(t.ns, t.name)} LIMIT 100`
+  return `SELECT * FROM ${sqlTableRef(t.ns, t.name, catalog)} LIMIT 100`
 }
 
 function loadHistory(): string[] {
@@ -36,8 +41,15 @@ function saveHistory(h: string[]) {
 
 export default function Query() {
   const [params] = useSearchParams()
-  const tables = useQuery({ queryKey: ['catalog', 'all'], queryFn: allTables })
-  const sample = pickSample(tables.data)
+  // The catalog the person works in. It names the catalogs the sample is generated from,
+  // and the Catalog page's "Query table" link carries it along (stardelt-nova#234).
+  const catalog = params.get('catalog') ?? undefined
+  const catalogs = useCatalogs()
+  const tables = useQuery({
+    queryKey: ['catalog', 'all', catalog],
+    queryFn: () => allTables(catalog),
+  })
+  const sample = pickSample(tables.data, catalog)
   // `null` = the user has not typed or picked anything: show the sample.
   const [typed, setTyped] = useState<string | null>(params.get('sql'))
   const sql = typed ?? sample
@@ -85,6 +97,17 @@ export default function Query() {
     <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_280px] gap-5 h-full min-h-0">
       <h1 className="sr-only">SQL editor</h1>
       <div className="flex flex-col gap-4 min-h-0 min-w-0">
+        {(catalogs.data?.catalogs?.length ?? 0) > 1 && (
+          <div>
+            <label className="grid gap-1.5">
+              <span className="label">Catalog</span>
+              <CatalogSelect />
+            </label>
+            {/* The choice scopes what Nova generates; it cannot change Trino's session
+                default, and a statement that names its catalog works wherever it is pasted. */}
+            <p className="text-xs text-text-mute mt-1">Samples and inserted table names use this catalog.</p>
+          </div>
+        )}
         <div className="card p-3 focus-within:border-accent/60">
           <textarea
             ref={taRef}

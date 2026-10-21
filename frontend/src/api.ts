@@ -44,6 +44,15 @@ export type Me = {
 
 export type Warehouse = { name: string; id: string }
 
+/**
+ * One catalog the caller may browse (`GET /api/catalog/catalogs`): the name the SQL
+ * addresses and the Lakekeeper warehouse id behind it. A catalog a person may not
+ * browse is not in the list at all — the engine's `SHOW CATALOGS` filters it.
+ */
+export type Catalog = { name: string; id: string }
+
+export type CatalogList = { catalogs: Catalog[]; default: string }
+
 export type NamespaceList = { namespaces: string[][] }
 
 export type TableIdentifier = { namespace: string[]; name: string }
@@ -676,6 +685,15 @@ async function jdel(path: string): Promise<void> {
 
 const seg = encodeURIComponent
 
+/**
+ * A catalog-scoped path. `?catalog=<name>` is appended only when a catalog is named, so a
+ * call without one works in the default catalog exactly as it always has. The name is
+ * encoded with `seg`: it comes from the API or the URL, never pasted into a request raw.
+ */
+function catalogPath(path: string, catalog?: string): string {
+  return catalog ? `${path}?catalog=${seg(catalog)}` : path
+}
+
 /** One row of the query log list (`GET /api/query-log`). Times are epoch milliseconds. */
 export type QueryLogItem = {
   id: string
@@ -789,16 +807,26 @@ export const api = {
     jpost<BreakGlassAnswer>(`/api/connections/group/${seg(group)}/${seg(name)}/break-glass`, { reason }),
   trinoCluster: ()                            => jget<unknown>('/api/trino/cluster'),
   warehouse:    ()                            => jget<Warehouse>('/api/catalog/warehouse'),
-  namespaces:   ()                            => jget<NamespaceList>('/api/catalog/namespaces'),
-  tables:       (ns: string)                  => jget<TableList>(`/api/catalog/namespaces/${seg(ns)}/tables`),
-  tableMeta:    (ns: string, tbl: string)     => jget<TableMetadata>(`/api/catalog/tables/${seg(ns)}/${seg(tbl)}`),
-  tableDocs:    (ns: string, tbl: string)     => jget<TableDocumentation>(`/api/catalog/tables/${seg(ns)}/${seg(tbl)}/documentation`),
-  putTableDocs: (ns: string, tbl: string, body: TableDocsUpdate) =>
-    jput<TableDocumentation>(`/api/catalog/tables/${seg(ns)}/${seg(tbl)}/documentation`, body),
-  putColumnDoc: (ns: string, tbl: string, column: string, description: string | null) =>
-    jput<TableDocumentation>(`/api/catalog/tables/${seg(ns)}/${seg(tbl)}/columns/${seg(column)}/description`, { description }),
-  tableHistory: (ns: string, tbl: string)     => jget<QueryResult>(`/api/catalog/tables/${seg(ns)}/${seg(tbl)}/history`),
-  rollback:     (ns: string, tbl: string, snapshotId: string) => jpost<QueryResult>(`/api/catalog/tables/${seg(ns)}/${seg(tbl)}/rollback`, { snapshot_id: snapshotId }),
+  /** The catalogs the caller may browse and the one a request without `?catalog=` uses. */
+  catalogs:     ()                            => jget<CatalogList>('/api/catalog/catalogs'),
+  namespaces:   (catalog?: string)            => jget<NamespaceList>(catalogPath('/api/catalog/namespaces', catalog)),
+  tables:       (ns: string, catalog?: string) =>
+    jget<TableList>(catalogPath(`/api/catalog/namespaces/${seg(ns)}/tables`, catalog)),
+  tableMeta:    (ns: string, tbl: string, catalog?: string) =>
+    jget<TableMetadata>(catalogPath(`/api/catalog/tables/${seg(ns)}/${seg(tbl)}`, catalog)),
+  tableDocs:    (ns: string, tbl: string, catalog?: string) =>
+    jget<TableDocumentation>(catalogPath(`/api/catalog/tables/${seg(ns)}/${seg(tbl)}/documentation`, catalog)),
+  putTableDocs: (ns: string, tbl: string, body: TableDocsUpdate, catalog?: string) =>
+    jput<TableDocumentation>(catalogPath(`/api/catalog/tables/${seg(ns)}/${seg(tbl)}/documentation`, catalog), body),
+  putColumnDoc: (ns: string, tbl: string, column: string, description: string | null, catalog?: string) =>
+    jput<TableDocumentation>(
+      catalogPath(`/api/catalog/tables/${seg(ns)}/${seg(tbl)}/columns/${seg(column)}/description`, catalog),
+      { description },
+    ),
+  tableHistory: (ns: string, tbl: string, catalog?: string) =>
+    jget<QueryResult>(catalogPath(`/api/catalog/tables/${seg(ns)}/${seg(tbl)}/history`, catalog)),
+  rollback:     (ns: string, tbl: string, snapshotId: string, catalog?: string) =>
+    jpost<QueryResult>(catalogPath(`/api/catalog/tables/${seg(ns)}/${seg(tbl)}/rollback`, catalog), { snapshot_id: snapshotId }),
   query:        (sql: string)                 => jpost<QueryResult>('/api/query', { sql }),
   jobs:         ()                            => jget<Job[]>('/api/jobs'),
   queryLog:     (p: QueryLogParams)           => jget<QueryLogPage>(queryLogUrl(p)),
@@ -839,19 +867,23 @@ export const api = {
   links:        ()                            => jget<AppShortcut[]>('/api/apps/links'),
   app:          (id: string)                  => jget<AppDetail>(`/api/apps/${seg(id)}`),
   workloads:    ()                            => jget<WorkloadSnapshot>('/api/workloads'),
-  createNamespace: (namespace: string)        => jpost<{ namespace: string }>('/api/catalog/namespaces', { namespace }),
+  createNamespace: (namespace: string, catalog?: string) =>
+    jpost<{ namespace: string }>(catalogPath('/api/catalog/namespaces', catalog), { namespace }),
   upload:       (req: UploadRequest)          => jpost<UploadResult>('/api/ingest/upload', req),
   transfer:     (req: TransferRequest)        => jpost<TransferResult>('/api/transfer', req),
 }
 
-/** Every table across every namespace (small catalogs; fine for the MVP). */
-export async function allTables(): Promise<TableRef[]> {
-  const { namespaces } = await api.namespaces()
+/**
+ * Every table across every namespace of one catalog (small catalogs; fine for the MVP).
+ * Without a catalog the API's default is used, exactly as before several catalogs existed.
+ */
+export async function allTables(catalog?: string): Promise<TableRef[]> {
+  const { namespaces } = await api.namespaces(catalog)
   const refs: TableRef[] = []
   await Promise.all(
     namespaces.map(async parts => {
       const ns = parts.join('.')
-      const { identifiers } = await api.tables(ns)
+      const { identifiers } = await api.tables(ns, catalog)
       for (const id of identifiers) refs.push({ ns, name: id.name })
     }),
   )

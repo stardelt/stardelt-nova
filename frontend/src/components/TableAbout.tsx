@@ -66,12 +66,15 @@ function sameList(a: string[], b: string[]): boolean {
 export default function TableAbout({
   ns,
   tbl,
+  catalog,
   me,
   docs,
   onSaved,
 }: {
   ns: string
   tbl: string
+  /** The catalog the table was browsed in; a write must land in the same one. */
+  catalog?: string
   me?: Me
   docs: DocsState
   onSaved: (doc: TableDocumentation) => void
@@ -207,7 +210,7 @@ export default function TableAbout({
     setSaving(true)
     setSaveError(null)
     try {
-      const answer = await api.putTableDocs(ns, tbl, body)
+      const answer = await api.putTableDocs(ns, tbl, body, catalog)
       onSaved(answer)
       setNotice('Saved.')
       returnFocus.current = true

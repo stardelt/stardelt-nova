@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
-import { api, errorMessage, formatCell, type IcebergField, type QueryResult, type TableDocumentation, type TableMetadata } from '../api'
+import { ApiError, api, errorMessage, formatCell, type IcebergField, type QueryResult, type TableDocumentation, type TableMetadata } from '../api'
+import CatalogSelect, { useCatalogs } from '../components/CatalogSelect'
 import ErrorBox from '../components/ErrorBox'
 import TableAbout, { type DocsState } from '../components/TableAbout'
 import { formatTime, sqlTableRef, rowsLabel } from '../format'
@@ -9,15 +10,25 @@ import { isAdmin } from '../roles'
 
 type Sel = { ns: string; tbl: string }
 
+/** A 403 says no: the person's grants do not change by asking again. */
+function forbidden(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 403
+}
+
 export default function Catalog() {
   const [params] = useSearchParams()
+  // The catalog the person chose. Absent means the API's default, which is what every
+  // request did before there were several catalogs.
+  const catalog = params.get('catalog') ?? undefined
   const [selected, setSelected] = useState<Sel | null>(null)
   const [filter, setFilter] = useState(params.get('q') ?? '')
 
+  // `?catalog=` and the two selection params arrive in one history entry, so the selection
+  // is read from the URL rather than kept beside it: switching catalogs clears it.
   useEffect(() => {
     const ns = params.get('ns')
     const tbl = params.get('tbl')
-    if (ns && tbl) setSelected({ ns, tbl })
+    setSelected(ns && tbl ? { ns, tbl } : null)
   }, [params])
 
   useEffect(() => {
@@ -25,14 +36,25 @@ export default function Catalog() {
     if (q) setFilter(q)
   }, [params])
 
-  const namespaces = useQuery({ queryKey: ['catalog', 'namespaces'], queryFn: api.namespaces })
+  const catalogs = useCatalogs()
+  // No catalog is open to this person: the API's own sentence, and no Retry — the list
+  // can only change when an administrator grants a catalog (stardelt-nova#234).
+  const denied = catalogs.isError && forbidden(catalogs.error)
+
+  const namespaces = useQuery({
+    queryKey: ['catalog', 'namespaces', catalog],
+    queryFn: () => api.namespaces(catalog),
+    enabled: !denied,
+  })
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-[300px_minmax(0,1fr)] gap-5 h-full min-h-0">
-      <h1 className="sr-only">Catalog</h1>
+      {/* A page has one h1: with a table open, that table's name is the heading below. */}
+      {!selected && <h1 className="sr-only">Catalog</h1>}
       <aside className="card p-3 flex flex-col min-h-0">
         <div className="px-1 pb-2">
           <div className="label mb-1.5">Catalog</div>
+          <CatalogSelect className="mb-2" />
           <input
             value={filter}
             onChange={e => setFilter(e.target.value)}
@@ -42,20 +64,45 @@ export default function Catalog() {
           />
         </div>
         <div className="overflow-auto flex-1">
-          {namespaces.isLoading && <div className="text-text-mute text-sm p-2">loading…</div>}
-          {namespaces.isError && <div className="p-2"><ErrorBox error={namespaces.error} onRetry={() => namespaces.refetch()} /></div>}
-          <ul className="space-y-1">
-            {namespaces.data?.namespaces.map(parts => {
-              const ns = parts.join('.')
-              return <NamespaceItem key={ns} ns={ns} filter={filter} onSelect={setSelected} selected={selected} />
-            })}
-          </ul>
+          {denied ? (
+            <div className="p-2"><ErrorBox error={catalogs.error} /></div>
+          ) : (
+            <>
+              {namespaces.isLoading && <div className="text-text-mute text-sm p-2">loading…</div>}
+              {namespaces.isError && (
+                <div className="p-2">
+                  <ErrorBox
+                    error={namespaces.error}
+                    onRetry={forbidden(namespaces.error) ? undefined : () => void namespaces.refetch()}
+                  />
+                </div>
+              )}
+              {namespaces.data && namespaces.data.namespaces.length === 0 && (
+                <p className="text-text-mute text-sm p-2">This catalog has no schemas yet.</p>
+              )}
+              <ul className="space-y-1">
+                {namespaces.data?.namespaces.map(parts => {
+                  const ns = parts.join('.')
+                  return (
+                    <NamespaceItem
+                      key={ns}
+                      ns={ns}
+                      catalog={catalog}
+                      filter={filter}
+                      onSelect={setSelected}
+                      selected={selected}
+                    />
+                  )
+                })}
+              </ul>
+            </>
+          )}
         </div>
       </aside>
 
       <section className="min-w-0 min-h-0 overflow-auto">
         {selected ? (
-          <TableDetail ns={selected.ns} tbl={selected.tbl} />
+          <TableDetail ns={selected.ns} tbl={selected.tbl} catalog={catalog} />
         ) : (
           <div className="card p-8 h-full grid place-items-center text-center">
             <div>
@@ -70,14 +117,19 @@ export default function Catalog() {
   )
 }
 
-function NamespaceItem({ ns, filter, onSelect, selected }: {
+function NamespaceItem({ ns, catalog, filter, onSelect, selected }: {
   ns: string
+  catalog?: string
   filter: string
   onSelect: (sel: Sel) => void
   selected: Sel | null
 }) {
   const [open, setOpen] = useState(true)
-  const tables = useQuery({ queryKey: ['catalog', 'tables', ns], queryFn: () => api.tables(ns), enabled: open })
+  const tables = useQuery({
+    queryKey: ['catalog', 'tables', catalog, ns],
+    queryFn: () => api.tables(ns, catalog),
+    enabled: open,
+  })
 
   const matches = (name: string) => {
     if (!filter.trim()) return true
@@ -122,26 +174,36 @@ function NamespaceItem({ ns, filter, onSelect, selected }: {
   )
 }
 
-function TableDetail({ ns, tbl }: Sel) {
+function TableDetail({ ns, tbl, catalog }: Sel & { catalog?: string }) {
   const [tab, setTab] = useState<'preview' | 'columns' | 'details' | 'history'>('preview')
   const qc = useQueryClient()
   const me = useQuery({ queryKey: ['me'], queryFn: api.me })
-  const meta = useQuery({ queryKey: ['catalog', 'table', ns, tbl], queryFn: () => api.tableMeta(ns, tbl) })
+  const meta = useQuery({
+    queryKey: ['catalog', 'table', catalog, ns, tbl],
+    queryFn: () => api.tableMeta(ns, tbl, catalog),
+  })
   const docs = useQuery({
-    queryKey: ['catalog', 'table-docs', ns, tbl],
-    queryFn: () => api.tableDocs(ns, tbl),
+    queryKey: ['catalog', 'table-docs', catalog, ns, tbl],
+    queryFn: () => api.tableDocs(ns, tbl, catalog),
   })
   const preview = useQuery({
-    queryKey: ['preview', ns, tbl],
-    queryFn: () => api.query(`SELECT * FROM ${sqlTableRef(ns, tbl)} LIMIT 50`),
+    queryKey: ['preview', catalog, ns, tbl],
+    queryFn: () => api.query(`SELECT * FROM ${sqlTableRef(ns, tbl, catalog)} LIMIT 50`),
     enabled: tab === 'preview',
   })
 
   /** A write answers the fresh documentation; it replaces the read's data for both halves. */
   const onDocsSaved = (answer: TableDocumentation) => {
-    qc.setQueryData(['catalog', 'table-docs', ns, tbl], answer)
+    qc.setQueryData(['catalog', 'table-docs', catalog, ns, tbl], answer)
     // The Details tab shows the same catalog properties; let it read them again.
-    void qc.invalidateQueries({ queryKey: ['catalog', 'table', ns, tbl] })
+    void qc.invalidateQueries({ queryKey: ['catalog', 'table', catalog, ns, tbl] })
+  }
+
+  /** The editor opens the table in the catalog it was browsed in, not the default one. */
+  const queryHref = (sql: string) => {
+    const query = new URLSearchParams({ sql })
+    if (catalog) query.set('catalog', catalog)
+    return `/query?${query.toString()}`
   }
 
   const m = meta.data?.metadata
@@ -160,14 +222,14 @@ function TableDetail({ ns, tbl }: Sel) {
           )}
         </div>
         <div className="flex gap-2">
-          <Link to={`/query?sql=${encodeURIComponent(`SELECT * FROM ${sqlTableRef(ns, tbl)} LIMIT 100`)}`} className="btn-primary">
+          <Link to={queryHref(`SELECT * FROM ${sqlTableRef(ns, tbl, catalog)} LIMIT 100`)} className="btn-primary">
             Query table
           </Link>
           <Link to="/data" className="btn-ghost">Load data</Link>
         </div>
       </header>
 
-      <TableAbout ns={ns} tbl={tbl} me={me.data} docs={docs} onSaved={onDocsSaved} />
+      <TableAbout ns={ns} tbl={tbl} catalog={catalog} me={me.data} docs={docs} onSaved={onDocsSaved} />
 
       <div className="flex gap-2">
         {(['preview', 'columns', 'details', 'history'] as const).map(t => (
@@ -195,6 +257,7 @@ function TableDetail({ ns, tbl }: Sel) {
         <ColumnsTab
           ns={ns}
           tbl={tbl}
+          catalog={catalog}
           fields={schema?.fields}
           docs={docs}
           onSaved={onDocsSaved}
@@ -203,14 +266,15 @@ function TableDetail({ ns, tbl }: Sel) {
 
       {tab === 'details' && meta.data && <Details meta={meta.data} partition={partSpec} />}
 
-      {tab === 'history' && <HistoryTab ns={ns} tbl={tbl} />}
+      {tab === 'history' && <HistoryTab ns={ns} tbl={tbl} catalog={catalog} />}
     </div>
   )
 }
 
-function ColumnsTab({ ns, tbl, fields, docs, onSaved }: {
+function ColumnsTab({ ns, tbl, catalog, fields, docs, onSaved }: {
   ns: string
   tbl: string
+  catalog?: string
   fields?: IcebergField[]
   docs: DocsState
   onSaved: (doc: TableDocumentation) => void
@@ -258,7 +322,7 @@ function ColumnsTab({ ns, tbl, fields, docs, onSaved }: {
     setSaving(editing)
     setError(null)
     try {
-      const answer = await api.putColumnDoc(ns, tbl, editing, next)
+      const answer = await api.putColumnDoc(ns, tbl, editing, next, catalog)
       onSaved(answer)
       setNotice('Saved.')
       pendingFocus.current = editing
@@ -391,12 +455,12 @@ function Preview({ q }: { q: { data?: QueryResult; isLoading: boolean; error: un
   )
 }
 
-function HistoryTab({ ns, tbl }: Sel) {
+function HistoryTab({ ns, tbl, catalog }: Sel & { catalog?: string }) {
   const qc = useQueryClient()
   const me = useQuery({ queryKey: ['me'], queryFn: api.me })
   const history = useQuery({
-    queryKey: ['catalog', 'history', ns, tbl],
-    queryFn: () => api.tableHistory(ns, tbl),
+    queryKey: ['catalog', 'history', catalog, ns, tbl],
+    queryFn: () => api.tableHistory(ns, tbl, catalog),
   })
   const [previewId, setPreviewId] = useState<string | null>(null)
   const [rollbackTarget, setRollbackTarget] = useState<string | null>(null)
@@ -404,21 +468,21 @@ function HistoryTab({ ns, tbl }: Sel) {
   const [rollbackOk, setRollbackOk] = useState<string | null>(null)
 
   const preview = useQuery({
-    queryKey: ['history-preview', ns, tbl, previewId],
+    queryKey: ['history-preview', catalog, ns, tbl, previewId],
     queryFn: () =>
-      api.query(`SELECT * FROM ${sqlTableRef(ns, tbl)} FOR VERSION AS OF ${previewId} LIMIT 100`),
+      api.query(`SELECT * FROM ${sqlTableRef(ns, tbl, catalog)} FOR VERSION AS OF ${previewId} LIMIT 100`),
     enabled: previewId !== null,
   })
 
   const rollback = useMutation({
-    mutationFn: (snapshotId: string) => api.rollback(ns, tbl, snapshotId),
+    mutationFn: (snapshotId: string) => api.rollback(ns, tbl, snapshotId, catalog),
     onSuccess: (_r, snapshotId) => {
       setRollbackOk(`Rolled back to snapshot ${snapshotId}.`)
       setRollbackTarget(null)
       setConfirmText('')
-      qc.invalidateQueries({ queryKey: ['catalog', 'history', ns, tbl] })
-      qc.invalidateQueries({ queryKey: ['preview', ns, tbl] })
-      if (previewId !== null) qc.invalidateQueries({ queryKey: ['history-preview', ns, tbl, previewId] })
+      qc.invalidateQueries({ queryKey: ['catalog', 'history', catalog, ns, tbl] })
+      qc.invalidateQueries({ queryKey: ['preview', catalog, ns, tbl] })
+      if (previewId !== null) qc.invalidateQueries({ queryKey: ['history-preview', catalog, ns, tbl, previewId] })
     },
   })
 
@@ -561,7 +625,7 @@ function HistoryTab({ ns, tbl }: Sel) {
       {previewId !== null && (
         <div className="space-y-2">
           <div className="text-xs text-text-mute font-mono">
-            Time travel: <span className="text-text-dim">SELECT * FROM {sqlTableRef(ns, tbl)} FOR VERSION AS OF {previewId} LIMIT 100</span>
+            Time travel: <span className="text-text-dim">SELECT * FROM {sqlTableRef(ns, tbl, catalog)} FOR VERSION AS OF {previewId} LIMIT 100</span>
             <button onClick={() => setPreviewId(null)} className="btn-ghost py-0.5 px-2 text-xs ml-3">Close</button>
           </div>
           <Preview q={preview} />

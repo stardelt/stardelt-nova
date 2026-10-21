@@ -9,7 +9,7 @@ import { rowsLabel, statusLabel } from '../format'
 
 export default function Overview() {
   const me = useQuery({ queryKey: ['me'], queryFn: api.me })
-  const tables = useQuery({ queryKey: ['catalog', 'all'], queryFn: allTables })
+  const tables = useQuery({ queryKey: ['catalog', 'all'], queryFn: () => allTables() })
   const jobs = useQuery({ queryKey: ['jobs'], queryFn: api.jobs, refetchInterval: 10_000 })
   // The engine and app cards are operator views: their endpoints answer 403 to everyone else,
   // so they are not fetched at all for a non-admin (an `enabled: false` query stays pending —

@@ -147,6 +147,14 @@ configured warehouse — and no permission bridge, so every request works exactl
 Table documentation, history and rollback are scoped to the same catalog: the SQL they run
 names `"<catalog>".<ns>.<tbl>`, and the per-table edit lock keys on all three.
 
+In the UI the **Catalog** page and the **SQL editor** carry the choice: a switcher above the
+table filter (and above the editor) lists the catalogs the API returned, writes
+`?catalog=` into the URL, and every request the pages make names it. With one catalog — demo
+mode, a single-warehouse install — the switcher is not shown at all. Generated SQL names the
+chosen catalog (`finance.seed.nation`), so a statement keeps working after it is pasted
+elsewhere; a catalog the person may not browse answers with the API's own refusal instead of
+an empty list.
+
 ## Demo mode (no cluster)
 
 `NOVA_DEMO=1` serves an in-memory lakehouse — a seeded Iceberg-shaped catalog
