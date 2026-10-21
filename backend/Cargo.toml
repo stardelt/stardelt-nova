@@ -33,6 +33,7 @@ futures.workspace = true
 rusty-s3.workspace = true
 instant-xml.workspace = true
 jiff.workspace = true
+hmac.workspace = true
 percent-encoding.workspace = true
 
 [dev-dependencies]
