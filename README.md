@@ -22,6 +22,7 @@ Browser
          ├─ POST /api/auth/logout      sign out here and at the IdP
          ├─ GET  /api/trino/cluster    → Trino /v1/info
          ├─ GET  /api/catalog/catalogs the catalogs the caller may browse (?catalog= names one)
+         ├─ GET  /api/catalog/metrics  what is in each of them: schemas, tables, rows, bytes, last change
          ├─ GET  /api/catalog/*        → Lakekeeper REST catalog, in the catalog ?catalog= names
          ├─ POST /api/catalog/namespaces  create schema
          ├─ GET/PUT /api/catalog/tables/:ns/:tbl/documentation  description, tags, owner, domain
@@ -156,6 +157,28 @@ mode, a single-warehouse install — the switcher is not shown at all. Generated
 chosen catalog (`finance.seed.nation`), so a statement keeps working after it is pasted
 elsewhere; a catalog the person may not browse answers with the API's own refusal instead of
 an empty list.
+
+### Overview numbers
+
+`GET /api/catalog/metrics` answers what is in the lakehouse for the catalogs the caller may
+browse — the tile on the Overview page instead of a static "Format: Iceberg":
+
+```json
+{"catalogs": [{"name": "finance", "schemas": 1, "tables": 4, "records": 1200,
+               "sizeBytes": 524288, "lastCommitMs": 1761000000000, "truncated": false}],
+ "totals": {"catalogs": 1, "schemas": 1, "tables": 4, "records": 1200, "sizeBytes": 524288},
+ "generatedAt": 1761000001234}
+```
+
+The list is the caller's own (`GET /api/catalog/catalogs`): a catalog they may not browse is
+never read and never appears. The numbers come from each table's Iceberg metadata — the
+current snapshot's `total-records`, `total-files-size` and `timestamp-ms` — so the endpoint
+runs no query over the data. They are cached per catalog for 60 s (they describe the
+catalog, not the person), and at most 200 tables per catalog are loaded: `tables` stays
+exact, `truncated: true` says `records` and `sizeBytes` are a sample. A catalog that cannot
+be read is listed with zeros and an `error` sentence rather than failing the page; only an
+unreachable engine or catalog is `502`, and no catalog open to the caller is `403` with the
+sentence above. Demo mode derives the numbers from its seeded tables.
 
 ### Catalog permissions
 

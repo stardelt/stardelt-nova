@@ -10,6 +10,7 @@
 //!   GET  /api/trino/cluster                 — Trino /v1/info (or demo stub)
 //!   GET  /api/catalog/warehouse             — resolved warehouse id+name
 //!   GET  /api/catalog/catalogs              — the catalogs the caller may browse
+//!   GET  /api/catalog/metrics               — schemas, tables, rows, bytes, last change per catalog
 //!   GET  /api/catalog/namespaces            — list namespaces
 //!   POST /api/catalog/namespaces            — create a schema
 //!   GET  /api/catalog/namespaces/:ns/tables — list tables
@@ -73,6 +74,7 @@ mod audit;
 mod auth;
 mod catalog;
 mod catalog_docs;
+mod catalog_metrics;
 mod catalog_token;
 mod cluster;
 mod connection_routes;
@@ -138,6 +140,11 @@ pub struct AppState {
     /// subject (`catalog::allowed_catalogs`). Nova is never the authority: it asks Trino
     /// with the caller's own token and only fails **before** the person tries.
     pub catalog_access: Mutex<HashMap<String, (std::time::Instant, BTreeSet<String>)>>,
+    /// What one catalog holds — schemas, tables, rows, bytes, newest commit — cached for
+    /// 60 s per catalog (`catalog_metrics.rs`). Caller independent: the numbers describe
+    /// the catalog, the caller only decides which catalogs are listed.
+    pub catalog_metrics:
+        Mutex<HashMap<String, (std::time::Instant, catalog_metrics::CatalogStats)>>,
     pub http: reqwest::Client,
     pub demo: bool,
     /// Forward the caller's own token to Trino, when the platform has configured it to
@@ -521,6 +528,8 @@ fn api_router() -> Router<Arc<AppState>> {
         .route("/me", get(me))
         .route("/catalog/warehouse", get(catalog::warehouse_info))
         .route("/catalog/catalogs", get(catalog::list_catalogs))
+        // What is in each of them (stardelt-nova#249): one row per catalog, cached 60 s.
+        .route("/catalog/metrics", get(catalog_metrics::get))
         .route(
             "/catalog/namespaces",
             get(catalog::list_namespaces).post(catalog::create_namespace),
@@ -784,6 +793,7 @@ async fn main() -> anyhow::Result<()> {
         warehouse_name: std::env::var("NOVA_WAREHOUSE_NAME").unwrap_or_else(|_| "warehouse".into()),
         catalog_ids: RwLock::new(HashMap::new()),
         catalog_access: Mutex::new(HashMap::new()),
+        catalog_metrics: Mutex::new(HashMap::new()),
         http,
         demo: demo_mode,
         forward_identity: env_flag("NOVA_FORWARD_IDENTITY"),
@@ -982,6 +992,7 @@ mod router_tests {
             warehouse_name: "warehouse".into(),
             catalog_ids: RwLock::new(HashMap::new()),
             catalog_access: Mutex::new(HashMap::new()),
+            catalog_metrics: Mutex::new(HashMap::new()),
             http: reqwest::Client::new(),
             demo: demo_mode,
             forward_identity: false,

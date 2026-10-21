@@ -49,6 +49,11 @@ pub const HIDDEN_CATALOGS: [&str; 6] = [
 /// How long one person's catalog visibility is trusted before Trino is asked again.
 const ACCESS_TTL: Duration = Duration::from_secs(30);
 
+/// The refusal when no catalog is open to a person. One sentence, shared with every route
+/// that has to say it (`catalog_scope`, `catalog_metrics`), so the UI can match on it.
+pub(crate) const NO_CATALOG_SENTENCE: &str =
+    "no catalog is open to you yet; ask an administrator for access";
+
 /// The `?catalog=` of every catalog route. Omitted means the default catalog: the
 /// configured `NOVA_WAREHOUSE_NAME` when the caller may browse it, else the first one
 /// they may.
@@ -388,10 +393,7 @@ pub async fn catalog_scope(
     let name = match requested {
         Some(name) => name.to_string(),
         None if allowed.is_empty() => {
-            return Err(sentence(
-                StatusCode::FORBIDDEN,
-                "no catalog is open to you yet; ask an administrator for access",
-            ));
+            return Err(sentence(StatusCode::FORBIDDEN, NO_CATALOG_SENTENCE));
         }
         None if !allowed.contains(&state.warehouse_name) => {
             // The configured default is not open to this person: the first one that is.
