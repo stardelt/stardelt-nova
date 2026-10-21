@@ -86,6 +86,7 @@ pub struct ErrorResponse {
         crate::notebooks::list,
         crate::notebooks::versions,
         crate::admin_catalogs::list,
+        crate::admin_catalogs::update_access,
     ),
     components(schemas(
         crate::Me,
@@ -142,6 +143,7 @@ pub struct ErrorResponse {
         crate::admin_catalogs::AdminCatalog,
         crate::admin_catalogs::CatalogGrant,
         crate::admin_catalogs::CatalogCondition,
+        crate::admin_catalogs::CatalogAccessUpdate,
         ErrorResponse,
     )),
     tags(

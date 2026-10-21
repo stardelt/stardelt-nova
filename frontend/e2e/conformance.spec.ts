@@ -3851,6 +3851,309 @@ test.describe('admin catalogs', () => {
     expect(overflow).toBeLessThanOrEqual(1)
     await context.close()
   })
+
+  // ---------------------------------------------------------------------------
+  // stardelt-nova#253: the Edit dialog and the write. The API is stubbed; the tests
+  // assert the exact PUT body, the confirm step, the poll and the API's own sentences.
+  // ---------------------------------------------------------------------------
+
+  type RecordedWrite = { method: string; path: string; body: string | null }
+
+  /** The page with GET and PUT of the catalog API stubbed; `onPut` answers the write. */
+  async function openEditable(
+    browser: Browser,
+    {
+      catalogs = CATALOGS,
+      onPut,
+      viewport = { width: 1280, height: 800 },
+      init,
+    }: {
+      catalogs?: unknown | (() => unknown)
+      onPut: (route: Route, body: string | null) => void | Promise<void>
+      viewport?: { width: number; height: number }
+      init?: () => void
+    },
+  ) {
+    const context = await browser.newContext({ viewport })
+    const page = await context.newPage()
+    if (init) await page.addInitScript(init)
+    const writes: RecordedWrite[] = []
+    await page.route('**/api/admin/catalogs**', async (route) => {
+      const request = route.request()
+      const path = new URL(request.url()).pathname
+      const method = request.method()
+      if (method === 'GET' && path === '/api/admin/catalogs') {
+        const list = typeof catalogs === 'function' ? (catalogs as () => unknown)() : catalogs
+        return json(route, list)
+      }
+      if (method === 'PUT' && /^\/api\/admin\/catalogs\/[^/]+\/access$/.test(path)) {
+        const body = request.postData()
+        writes.push({ method, path, body })
+        return onPut(route, body)
+      }
+      return json(route, { error: 'not stubbed' }, 404)
+    })
+    return { context, page, writes }
+  }
+
+  /** Open one catalog's Edit dialog and return it. */
+  async function openEdit(page: Page, name = 'finance') {
+    await page.goto('/admin/catalogs')
+    await page.getByRole('button', { name: `Edit permissions for ${name}` }).click()
+    const dialog = page.getByRole('dialog')
+    await expect(dialog).toBeVisible()
+    return dialog
+  }
+
+  const editedFinance = (fields: Record<string, unknown> = {}) => ({
+    ...CATALOGS[1],
+    generation: 2,
+    observedGeneration: 1,
+    ...fields,
+  })
+
+  test('edit_dialog_prefills_owner_and_grants', async ({ browser }) => {
+    const { context, page } = await openEditable(browser, {
+      onPut: (route) => json(route, editedFinance()),
+    })
+    const dialog = await openEdit(page)
+
+    await expect(dialog.getByRole('heading', { name: 'Edit finance' })).toBeVisible()
+    await expect(dialog.getByLabel('Owner')).toHaveValue('stardelt-finops')
+    await expect(dialog.getByRole('checkbox', { name: 'Managed access' })).toBeChecked()
+
+    await expect(dialog.getByRole('checkbox', { name: 'browse for stardelt-finops' })).toBeChecked()
+    await expect(dialog.getByRole('checkbox', { name: 'select for stardelt-finops' })).not.toBeChecked()
+    await expect(dialog.getByRole('checkbox', { name: 'select for stardelt-analytics' })).toBeChecked()
+    await expect(dialog.getByRole('checkbox', { name: 'write for stardelt-analytics' })).not.toBeChecked()
+    await expect(dialog.getByText('grant and revoke on this catalog')).toHaveCount(2)
+
+    // Both datalists carry every group the page sees, not just this catalog's.
+    const offered = await page.locator('datalist option').evaluateAll((options) =>
+      options.map((option) => (option as HTMLOptionElement).value),
+    )
+    for (const group of ['stardelt-admins', 'stardelt-analytics', 'stardelt-finops', 'stardelt-users']) {
+      expect(offered, group).toContain(group)
+    }
+
+    // Escape closes the dialog and returns focus to the button that opened it.
+    await page.keyboard.press('Escape')
+    await expect(dialog).toBeHidden()
+    await expect(page.getByRole('button', { name: 'Edit permissions for finance' })).toBeFocused()
+    await context.close()
+  })
+
+  test('save_sends_exact_body_with_resource_version', async ({ browser }) => {
+    const { context, page, writes } = await openEditable(browser, {
+      onPut: (route) => json(route, editedFinance()),
+    })
+    const dialog = await openEdit(page)
+
+    await dialog.getByRole('checkbox', { name: 'select for stardelt-analytics' }).uncheck()
+    await dialog.getByRole('checkbox', { name: 'write for stardelt-analytics' }).check()
+    await dialog.getByLabel('Add group').fill('stardelt-qa')
+    await dialog.getByRole('button', { name: 'Add group' }).click()
+    await dialog.getByRole('checkbox', { name: 'browse for stardelt-qa' }).check()
+    await dialog.getByRole('button', { name: 'Save' }).click()
+
+    await expect.poll(() => writes.length).toBe(1)
+    const write = writes[0]
+    expect(write.method).toBe('PUT')
+    expect(write.path).toBe('/api/admin/catalogs/finance/access')
+    expect(JSON.parse(write.body ?? 'null')).toEqual({
+      resourceVersion: '1',
+      owner: 'stardelt-finops',
+      managedAccess: true,
+      grants: [
+        { group: 'stardelt-finops', verb: 'browse' },
+        { group: 'stardelt-analytics', verb: 'write' },
+        { group: 'stardelt-qa', verb: 'browse' },
+      ],
+    })
+    await expect(dialog).toBeHidden()
+    await context.close()
+  })
+
+  test('conflict_409_message', async ({ browser }) => {
+    const { context, page, writes } = await openEditable(browser, {
+      onPut: (route) =>
+        json(route, { error: 'this catalog changed since you opened it; reload' }, 409),
+    })
+    const dialog = await openEdit(page)
+
+    await dialog.getByLabel('Owner').fill('stardelt-fintax')
+    await dialog.getByRole('button', { name: 'Save' }).click()
+
+    await expect(dialog.getByRole('alert')).toHaveText(
+      'this catalog changed since you opened it; reload',
+    )
+    await expect(dialog).toBeVisible()
+    await expect(dialog.getByLabel('Owner')).toHaveValue('stardelt-fintax')
+    expect(writes).toHaveLength(1)
+    await context.close()
+  })
+
+  test('confirm_step_for_removing_all_grants', async ({ browser }) => {
+    const { context, page, writes } = await openEditable(browser, {
+      onPut: (route) => json(route, editedFinance({ grants: [] })),
+    })
+    const dialog = await openEdit(page)
+
+    await dialog.getByRole('button', { name: 'Remove stardelt-finops' }).click()
+    await dialog.getByRole('button', { name: 'Remove stardelt-analytics' }).click()
+    await dialog.getByRole('button', { name: 'Save' }).click()
+
+    // Nothing is sent on the first click; the consequence is the second sentence.
+    expect(writes).toHaveLength(0)
+    await expect(
+      dialog.getByText('This hides the catalog from people who are not administrators.'),
+    ).toBeVisible()
+    const confirm = dialog.getByRole('button', { name: 'Confirm' })
+    await expect(confirm).toBeVisible()
+    await confirm.click()
+
+    await expect.poll(() => writes.length).toBe(1)
+    expect(JSON.parse(writes[0].body ?? 'null').grants).toEqual([])
+    await context.close()
+  })
+
+  test('applying_then_applied_poll', async ({ browser }) => {
+    let saved = false
+    const applied = () =>
+      CATALOGS.map((catalog) =>
+        catalog.name === 'finance'
+          ? { ...catalog, generation: 2, observedGeneration: 2, conditions: READY }
+          : catalog,
+      )
+    const { context, page } = await openEditable(browser, {
+      catalogs: () => (saved ? applied() : CATALOGS),
+      onPut: (route) => {
+        saved = true
+        json(route, editedFinance())
+      },
+    })
+    const dialog = await openEdit(page)
+
+    await dialog.getByLabel('Owner').fill('stardelt-fintax')
+    await dialog.getByRole('button', { name: 'Save' }).click()
+
+    // The row says what is happening until the sync reports the generation it processed.
+    await expect(page.getByText('Applying…')).toBeVisible()
+    await expect(page.getByText('Applied', { exact: true })).toBeVisible({ timeout: 20_000 })
+    await context.close()
+  })
+
+  test('unknown_group_condition_shown', async ({ browser }) => {
+    let saved = false
+    const unresolved = () =>
+      CATALOGS.map((catalog) =>
+        catalog.name === 'finance'
+          ? {
+              ...catalog,
+              generation: 2,
+              observedGeneration: 2,
+              conditions: [
+                READY[0],
+                {
+                  type: 'GrantsReady',
+                  status: 'False',
+                  reason: 'UnknownGroup',
+                  message: 'the realm has no group `ghost`',
+                },
+                READY[2],
+              ],
+            }
+          : catalog,
+      )
+    const { context, page } = await openEditable(browser, {
+      catalogs: () => (saved ? unresolved() : CATALOGS),
+      onPut: (route) => {
+        saved = true
+        json(route, editedFinance())
+      },
+    })
+    const dialog = await openEdit(page)
+
+    await dialog.getByLabel('Owner').fill('stardelt-fintax')
+    await dialog.getByRole('button', { name: 'Save' }).click()
+
+    await expect(
+      page.getByText('One of the groups does not exist in the realm; nothing is granted for it.'),
+    ).toBeVisible({ timeout: 20_000 })
+    await expect(page.getByText('Applying…')).toBeHidden()
+    await context.close()
+  })
+
+  test('validation_sentences_inline', async ({ browser }) => {
+    const { context, page, writes } = await openEditable(browser, {
+      onPut: (route) => json(route, editedFinance()),
+    })
+    const dialog = await openEdit(page)
+    const owner = dialog.getByLabel('Owner')
+
+    await owner.fill('')
+    await expect(dialog.getByText('the owner is one group name')).toBeVisible()
+    await expect(dialog.getByRole('button', { name: 'Save' })).toBeDisabled()
+
+    await owner.fill('bad group')
+    await expect(
+      dialog.getByText('a group name is letters, digits, dots, dashes and underscores (up to 64)'),
+    ).toBeVisible()
+
+    await owner.fill('stardelt-finops')
+    await dialog.getByLabel('Add group').fill('<img src=x onerror="window.__xss=1">')
+    await dialog.getByRole('button', { name: 'Add group' }).click()
+    await expect(
+      dialog.getByText('a group name is letters, digits, dots, dashes and underscores (up to 64)'),
+    ).toBeVisible()
+    expect(writes).toHaveLength(0)
+    await context.close()
+  })
+
+  test('hostile_group_name_is_text', async ({ browser }) => {
+    const evil = '<img src=x onerror="window.__xss=1">'
+    const { context, page } = await openEditable(browser, {
+      catalogs: [
+        row({
+          name: 'finance',
+          displayName: evil,
+          owner: evil,
+          managedAccess: true,
+          grants: [{ group: evil, verb: 'browse' }],
+        }),
+      ],
+      onPut: (route) => json(route, editedFinance()),
+      init: () => { (window as unknown as { __xss: number }).__xss = 0 },
+    })
+    const dialog = await openEdit(page)
+
+    await expect(dialog.getByLabel('Owner')).toHaveValue(evil)
+    await expect(dialog.getByText(evil, { exact: true }).first()).toBeVisible()
+    for (const width of [1280, 360]) {
+      await page.setViewportSize({ width, height: 800 })
+      const s = await page.evaluate(() => ({
+        xss: (window as unknown as { __xss: number }).__xss,
+        imgs: document.querySelectorAll('img[src="x"]').length,
+        overflow: document.documentElement.scrollWidth - window.innerWidth,
+      }))
+      expect(s, `${width}px`).toEqual({ xss: 0, imgs: 0, overflow: expect.any(Number) })
+      expect(s.overflow, `${width}px overflow`).toBeLessThanOrEqual(1)
+    }
+    await context.close()
+  })
+
+  test('U5 audit with the dialog open at 360 px', async ({ browser }) => {
+    const { context, page } = await openEditable(browser, {
+      onPut: (route) => json(route, editedFinance()),
+      viewport: { width: 360, height: 740 },
+    })
+    const dialog = await openEdit(page)
+    await expect(dialog).toBeVisible()
+    expect((await auditPage(page)).filter((finding) => finding.rule === 'U5')).toEqual([])
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
+    expect(overflow).toBeLessThanOrEqual(1)
+    await context.close()
+  })
 })
 
 test.describe('format', () => {
