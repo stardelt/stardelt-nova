@@ -4,16 +4,18 @@ import {
   api,
   errorMessage,
   type CheckStatementView,
+  type NotebookVersion,
   type PipelineDetail,
   type PipelineOptions,
   type PipelineOptionsView,
   type PipelineView,
 } from '../api'
-import { formatTime } from '../format'
+import { formatTime, shortVersion } from '../format'
 import {
   BACKOFF_CHOICES,
   DEFAULT_OPTIONS,
   MAX_PARAMS,
+  MAX_PARAM_VALUE,
   PARAM_NAME_RE,
   RETRY_CHOICES,
   TIMEOUT_CHOICES,
@@ -56,6 +58,11 @@ import {
  * five fire times of the chosen cadence, and the advanced options under a closed `<details>`.
  * The check and the preview never make Create wait: a refusal is the engine's sentence, a
  * preview that fails says so and the person may still schedule.
+ *
+ * A schedule runs either a statement or a published notebook (stardelt-nova#238). In Notebook
+ * mode the statement is replaced by the notebook of the chosen group, the version to pin and
+ * the parameters of that version; the request carries `notebook: {name, objectVersion, params}`
+ * instead of `sql`. A pipeline never changes kind, so the mode control is disabled when editing.
  */
 
 /** The name rule of the `Pipeline` CRD: 1–40, a leading letter, no trailing dash. */
@@ -74,6 +81,18 @@ const PLACEHOLDER_HINT = 'Filled in when the run starts.'
 const NO_SCHEDULED_RUNS = 'On demand: no scheduled runs'
 const CHECK_ACCEPTED = 'Checked: the engine accepts it'
 const CHECK_UNCHECKED = 'This kind of statement cannot be checked here'
+/** What a schedule can run (stardelt-nova#238): the shared dialog serves both. */
+type RunKind = 'sql' | 'notebook'
+const RUN_KINDS: ReadonlyArray<{ id: RunKind; label: string }> = [
+  { id: 'sql', label: 'SQL statement' },
+  { id: 'notebook', label: 'Notebook' },
+]
+const NO_NOTEBOOK_IN_GROUP =
+  'No notebook is published in this group yet. Publish one from JupyterLab with stardelt.publish("file.ipynb").'
+const NO_VERSION_FOUND = 'No published version of this notebook was found. Publish it again to schedule it.'
+const PIN_HELPER = 'The schedule runs exactly this version. Publishing again does not change it.'
+const USE_NEWEST = 'Use newest version'
+const NOTEBOOK_VALUE_PROBLEM = `a parameter value is at most ${MAX_PARAM_VALUE} characters`
 /** How long the dialog waits after a change before asking for the next runs (ms). */
 const PREVIEW_DEBOUNCE = 400
 const PREVIEW_COUNT = 5
@@ -176,6 +195,31 @@ function statementFrom(pipeline: PipelineDetail | undefined): { sql: string; sen
   return { sql: typeof task?.sql === 'string' ? task.sql : '', sent: typeof task?.sql === 'string' }
 }
 
+/** The notebook a stored pipeline pins, as the detail route reports it (#237). */
+function notebookFrom(pipeline: PipelineDetail | undefined): {
+  name: string
+  objectVersion: string
+  params: Record<string, string>
+} | null {
+  const task = pipeline?.tasks.find((candidate) => candidate.kind === 'notebook')
+  if (!task) return null
+  return {
+    name: typeof task.notebook === 'string' ? task.notebook : '',
+    objectVersion: typeof task.objectVersion === 'string' ? task.objectVersion : '',
+    params: task.notebookParams ?? {},
+  }
+}
+
+/** What a stored pipeline runs; create mode starts from the control that opened the dialog. */
+function runKindFrom(pipeline: PipelineDetail | undefined): RunKind {
+  return pipeline?.tasks.some((candidate) => candidate.kind === 'notebook') ? 'notebook' : 'sql'
+}
+
+/** A version choice as a person reads it: short id, when it was published, by whom. */
+function versionText(version: NotebookVersion): string {
+  return `${shortVersion(version.objectVersion)} · ${formatTime(version.uploadedAt)} · ${version.uploadedBy}`
+}
+
 /** The advanced options the dialog edits; `Forbid` is one run at a time. */
 type OptionState = {
   retries: number
@@ -220,6 +264,7 @@ export default function ScheduleDialog({
   mode,
   sql,
   pipeline,
+  initialKind = 'sql',
   onClose,
   onScheduled,
 }: {
@@ -228,6 +273,8 @@ export default function ScheduleDialog({
   sql?: string
   /** Edit mode: the pipeline whose statement and schedule change. */
   pipeline?: PipelineDetail
+  /** Create mode: the Pipelines page opens a Notebook schedule (#238). */
+  initialKind?: RunKind
   onClose: () => void
   onScheduled: (view: PipelineView) => void
 }) {
@@ -238,6 +285,11 @@ export default function ScheduleDialog({
   const nameId = `${prefix}-name`
   const groupId = `${prefix}-group`
   const whenName = `${prefix}-when`
+  const runKindName = `${prefix}-run-kind`
+  const notebookId = `${prefix}-notebook`
+  const versionId = `${prefix}-version`
+  const versionHintId = `${prefix}-version-hint`
+  const notebookParamsHintId = `${prefix}-notebook-params-hint`
   const timeId = `${prefix}-time`
   const weekdayId = `${prefix}-weekday`
   const customId = `${prefix}-custom`
@@ -262,6 +314,7 @@ export default function ScheduleDialog({
     () => (editing ? statementFrom(pipeline) : { sql: sql ?? '', sent: true }),
     [editing, pipeline, sql],
   )
+  const storedNotebook = useMemo(() => notebookFrom(pipeline), [pipeline])
   /** The caret the last edit left in the statement; a chip inserts there. */
   const caret = useRef({ start: initialStatement.sql.length, end: initialStatement.sql.length })
 
@@ -269,6 +322,10 @@ export default function ScheduleDialog({
   const [nameTouched, setNameTouched] = useState(editing)
   const [group, setGroup] = useState(() => (editing ? pipeline?.ownerGroup ?? '' : ''))
   const [hoveredGroup, setHoveredGroup] = useState<string | null>(null)
+  const [runKind, setRunKind] = useState<RunKind>(() => (editing ? runKindFrom(pipeline) : initialKind))
+  const [notebookName, setNotebookName] = useState(() => storedNotebook?.name ?? '')
+  const [version, setVersion] = useState(() => storedNotebook?.objectVersion ?? '')
+  const [notebookValues, setNotebookValues] = useState<Record<string, string>>({})
   const [when, setWhen] = useState<WhenPreset>(seed.preset)
   const [time, setTime] = useState(seed.time)
   const [weekday, setWeekday] = useState(seed.weekday)
@@ -286,6 +343,8 @@ export default function ScheduleDialog({
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  const notebookMode = runKind === 'notebook'
+
   const principalsQuery = useQuery({
     queryKey: ['pipeline-principals'],
     queryFn: api.pipelinePrincipals,
@@ -293,6 +352,46 @@ export default function ScheduleDialog({
     staleTime: 30_000,
   })
   const groups = useMemo(() => principalsQuery.data?.groups ?? [], [principalsQuery.data])
+
+  // The published notebooks of every group the caller may use; the dialog shows the chosen
+  // group's ones. Only asked for in Notebook mode, so the statement dialog is unchanged.
+  const notebooksQuery = useQuery({
+    queryKey: ['notebooks'],
+    queryFn: api.notebooks,
+    enabled: notebookMode,
+    staleTime: 30_000,
+  })
+  const groupNotebooks = useMemo(
+    () => (Array.isArray(notebooksQuery.data) ? notebooksQuery.data : []).filter((row) => row.group === group),
+    [notebooksQuery.data, group],
+  )
+
+  const versionsQuery = useQuery({
+    queryKey: ['notebook-versions', group, notebookName],
+    queryFn: () => api.notebookVersions(group, notebookName),
+    enabled: notebookMode && group !== '' && notebookName !== '',
+    staleTime: 30_000,
+  })
+  const versions = useMemo(
+    () => (Array.isArray(versionsQuery.data) ? versionsQuery.data : []),
+    [versionsQuery.data],
+  )
+
+  // `version === ''` in edit mode is the "Use newest version" choice: the parameters route then
+  // reads the latest and names it, so the pin is still a concrete id and never "latest at run
+  // time". In create mode the newest version is selected as soon as the list arrives.
+  const paramsVersion = version === '' ? undefined : version
+  const paramsQuery = useQuery({
+    queryKey: ['notebook-parameters', group, notebookName, paramsVersion ?? 'newest'],
+    queryFn: () => api.notebookParameters(group, notebookName, paramsVersion),
+    enabled: notebookMode && group !== '' && notebookName !== '' && (version !== '' || editing),
+    staleTime: 30_000,
+  })
+  const paramsAnswer = paramsQuery.data
+  const notebookParameters = useMemo(
+    () => (Array.isArray(paramsAnswer?.parameters) ? paramsAnswer.parameters : []),
+    [paramsAnswer],
+  )
 
   // The first group whose principal is ready is the default, so the common case schedules
   // without a detour. When none is ready the first group is shown to explain why.
@@ -302,8 +401,55 @@ export default function ScheduleDialog({
     if (first) setGroup(first.group)
   }, [editing, group, groups])
 
-  // While the name is untouched it follows the statement's first words.
-  const suggested = useMemo(() => suggestName(statement), [statement])
+  // Create mode: the first notebook of the group and the newest version are the defaults. A
+  // group change that leaves the chosen name behind (or has no notebook at all) falls back
+  // instead of keeping a name that group does not have.
+  useEffect(() => {
+    if (editing || !notebookMode || !notebooksQuery.isSuccess) return
+    if (groupNotebooks.length === 0) {
+      if (notebookName !== '') {
+        setNotebookName('')
+        setVersion('')
+      }
+      return
+    }
+    if (!groupNotebooks.some((candidate) => candidate.name === notebookName)) {
+      setNotebookName(groupNotebooks[0].name)
+      setVersion('')
+    }
+  }, [editing, groupNotebooks, notebookMode, notebookName, notebooksQuery.isSuccess])
+
+  useEffect(() => {
+    if (editing || !notebookMode || !versionsQuery.isSuccess) return
+    if (versions.length === 0) {
+      if (version !== '') setVersion('')
+      return
+    }
+    if (!versions.some((candidate) => candidate.objectVersion === version)) {
+      setVersion(versions[0].objectVersion)
+    }
+  }, [editing, notebookMode, version, versions, versionsQuery.isSuccess])
+
+  // The values start as the tagged cell's defaults; in edit mode the stored values win for the
+  // pinned version. A version or notebook change reseeds from that version's defaults.
+  const seedKey = useRef<string | null>(null)
+  const paramsKey = paramsAnswer ? `${group}\u0000${notebookName}\u0000${paramsAnswer.objectVersion}` : ''
+  useEffect(() => {
+    if (!paramsAnswer || seedKey.current === paramsKey) return
+    seedKey.current = paramsKey
+    const stored = editing && storedNotebook && paramsAnswer.objectVersion === storedNotebook.objectVersion
+      ? storedNotebook.params
+      : {}
+    setNotebookValues(Object.fromEntries(
+      paramsAnswer.parameters.map((parameter) => [parameter.name, stored[parameter.name] ?? parameter.default]),
+    ))
+  }, [editing, paramsAnswer, paramsKey, storedNotebook])
+
+  // While the name is untouched it follows the statement's first words, or the notebook's name.
+  const suggested = useMemo(
+    () => (notebookMode ? suggestName(notebookName.replace(/\.ipynb$/i, '')) : suggestName(statement)),
+    [notebookMode, notebookName, statement],
+  )
   useEffect(() => {
     if (editing || nameTouched) return
     setName(suggested)
@@ -350,6 +496,36 @@ export default function ScheduleDialog({
   const table = parameterTable(params)
   const unknown = unknownPlaceholders(statement, definedNames)
 
+  // Notebook mode (#238): the values are the tagged cell's parameters, the pin is the exact
+  // version the parameters route answered. A version the route has not answered for yet blocks
+  // Create, so nothing is ever sent as "latest at run time".
+  const notebookParamTable = useMemo(
+    () => Object.fromEntries(
+      notebookParameters.map((parameter) => [parameter.name, notebookValues[parameter.name] ?? parameter.default]),
+    ),
+    [notebookParameters, notebookValues],
+  )
+  const notebookValuesOk = Object.values(notebookParamTable)
+    .every((value) => value.length <= MAX_PARAM_VALUE && !value.includes('\0'))
+  const paramsSettled = paramsQuery.isSuccess && paramsAnswer !== undefined
+    && (version === '' || paramsAnswer.objectVersion === version)
+  const pinnedVersion = paramsSettled ? paramsAnswer.objectVersion : ''
+  const notebookOptions = useMemo(() => {
+    const names = groupNotebooks.map((row) => row.name)
+    if (editing && notebookName !== '' && !names.includes(notebookName)) names.unshift(notebookName)
+    return names
+  }, [editing, groupNotebooks, notebookName])
+  const versionOptions = useMemo(() => {
+    const choices = versions.map((candidate) => ({
+      objectVersion: candidate.objectVersion,
+      text: versionText(candidate),
+    }))
+    if (version !== '' && !choices.some((candidate) => candidate.objectVersion === version)) {
+      choices.unshift({ objectVersion: version, text: shortVersion(version) })
+    }
+    return choices
+  }, [version, versions])
+
   // A verdict is about one statement with one parameter table; changing either drops it.
   const checkSignature = JSON.stringify([statementText, table])
   useEffect(() => {
@@ -392,6 +568,10 @@ export default function ScheduleDialog({
 
   function removeParameter(key: number) {
     setParams((rows) => rows.filter((row) => row.key !== key))
+  }
+
+  function updateNotebookValue(paramName: string, value: string) {
+    setNotebookValues((current) => ({ ...current, [paramName]: value }))
   }
 
   /** Remember where the caret is, so a chip inserts there rather than at the end. */
@@ -438,11 +618,11 @@ export default function ScheduleDialog({
     !nameOk ||
     !principalsUsable ||
     !groupReady ||
-    statementText === '' ||
     (editing && !group) ||
     !scheduleOk ||
-    !parametersOk ||
-    unknown.length > 0
+    (notebookMode
+      ? notebookName === '' || pinnedVersion === '' || !notebookValuesOk
+      : statementText === '' || !parametersOk || unknown.length > 0)
 
   async function submit(event: FormEvent) {
     event.preventDefault()
@@ -461,22 +641,20 @@ export default function ScheduleDialog({
       timeoutMinutes: options.timeoutMinutes,
       concurrency: options.concurrency,
     }
+    // Exactly one of the statement and the notebook (#237): the API refuses both or neither.
+    const notebookBody = {
+      name: notebookName,
+      objectVersion: pinnedVersion,
+      params: notebookParamTable,
+    }
     try {
       const view = editing && pipeline
-        ? await api.updatePipeline(pipeline.namespace, pipeline.name, {
-            sql: statementText,
-            schedule,
-            params: table,
-            options: optionsBody,
-          })
-        : await api.createPipeline({
-            name,
-            ownerGroup: group,
-            sql: statementText,
-            schedule,
-            params: table,
-            options: optionsBody,
-          })
+        ? await api.updatePipeline(pipeline.namespace, pipeline.name, notebookMode
+            ? { notebook: notebookBody, schedule, options: optionsBody }
+            : { sql: statementText, schedule, params: table, options: optionsBody })
+        : await api.createPipeline(notebookMode
+            ? { name, ownerGroup: group, notebook: notebookBody, schedule, options: optionsBody }
+            : { name, ownerGroup: group, sql: statementText, schedule, params: table, options: optionsBody })
       onScheduled(view)
     } catch (e: unknown) {
       // The API's own sentence, kept beside the fields it is about.
@@ -486,7 +664,11 @@ export default function ScheduleDialog({
     }
   }
 
-  const title = editing ? 'Edit the schedule' : 'Schedule this statement'
+  const title = editing
+    ? 'Edit the schedule'
+    : notebookMode
+      ? 'Schedule this notebook'
+      : 'Schedule this statement'
   const submitLabel = editing ? 'Save schedule' : 'Create schedule'
 
   return (
@@ -699,6 +881,30 @@ export default function ScheduleDialog({
           )}
         </section>
 
+        <fieldset>
+          <legend className="label mb-2">What to run</legend>
+          <div className="inline-flex max-w-full flex-wrap rounded-[10px] border border-border bg-bg-soft/40 p-0.5">
+            {RUN_KINDS.map((kind) => (
+              <label key={kind.id} className="relative">
+                <input
+                  type="radio"
+                  className="peer sr-only"
+                  name={runKindName}
+                  value={kind.id}
+                  checked={runKind === kind.id}
+                  disabled={editing}
+                  onChange={() => setRunKind(kind.id)}
+                />
+                <span className="inline-flex cursor-pointer items-center rounded-[8px] px-3 py-1.5 text-sm text-text-dim peer-checked:bg-accent/15 peer-checked:text-text peer-checked:shadow-sm peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-accent peer-disabled:cursor-not-allowed peer-disabled:opacity-60">
+                  {kind.label}
+                </span>
+              </label>
+            ))}
+          </div>
+        </fieldset>
+
+        {!notebookMode && (
+          <>
         <div>
           <div className="flex flex-wrap items-center justify-between gap-2">
             <label htmlFor={statementId} className="label">Statement</label>
@@ -856,6 +1062,124 @@ export default function ScheduleDialog({
             </ul>
           )}
         </fieldset>
+          </>
+        )}
+
+        {notebookMode && (
+          <div className="space-y-4">
+            {notebooksQuery.isLoading ? (
+              <p className="text-sm text-text-mute">Reading the published notebooks…</p>
+            ) : notebooksQuery.isError ? (
+              <p role="alert" className="text-sm text-bad break-words">{errorMessage(notebooksQuery.error)}</p>
+            ) : notebookOptions.length === 0 ? (
+              <p className="text-sm text-text-mute break-words">{NO_NOTEBOOK_IN_GROUP}</p>
+            ) : (
+              <>
+                <label htmlFor={notebookId} className="block">
+                  <span className="label block mb-1.5">Notebook</span>
+                  <select
+                    id={notebookId}
+                    className="input font-mono"
+                    value={notebookName}
+                    data-autofocus={editing ? '' : undefined}
+                    onChange={(event) => {
+                      setNotebookName(event.target.value)
+                      setVersion('')
+                    }}
+                  >
+                    {notebookOptions.map((option) => (
+                      <option key={option} value={option}>{option}</option>
+                    ))}
+                  </select>
+                </label>
+
+                {versionsQuery.isError ? (
+                  <p role="alert" className="text-sm text-bad break-words">
+                    {errorMessage(versionsQuery.error)}
+                  </p>
+                ) : null}
+
+                {versionOptions.length === 0 ? (
+                  <div>
+                    <span className="label block mb-1.5">Version</span>
+                    <p className="text-sm text-text-mute">
+                      {versionsQuery.isLoading ? 'Reading the versions…' : NO_VERSION_FOUND}
+                    </p>
+                  </div>
+                ) : (
+                  <div>
+                    <label htmlFor={versionId} className="block">
+                      <span className="label block mb-1.5">Version</span>
+                      <select
+                        id={versionId}
+                        className="input font-mono text-xs"
+                        value={version}
+                        aria-describedby={versionHintId}
+                        onChange={(event) => setVersion(event.target.value)}
+                      >
+                        {editing && <option value="">{USE_NEWEST}</option>}
+                        {versionOptions.map((option) => (
+                          <option key={option.objectVersion} value={option.objectVersion}>{option.text}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <p id={versionHintId} className="mt-1 text-xs text-text-mute break-words">{PIN_HELPER}</p>
+                  </div>
+                )}
+
+                <fieldset className="min-w-0">
+                  <legend className="label mb-2">Parameters</legend>
+                  {paramsQuery.isError ? (
+                    <p role="alert" className="text-sm text-bad break-words">
+                      {errorMessage(paramsQuery.error)}
+                    </p>
+                  ) : notebookParameters.length === 0 ? (
+                    <p className="text-sm text-text-mute">
+                      {paramsQuery.isLoading ? 'Reading the parameters…' : 'This notebook has no parameters.'}
+                    </p>
+                  ) : (
+                    <div className="space-y-2">
+                      {notebookParameters.map((parameter, index) => (
+                        <div
+                          key={parameter.name}
+                          className="grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,12rem)_minmax(0,1fr)] sm:items-center"
+                        >
+                          <input
+                            className="input font-mono"
+                            aria-label={`Parameter ${index + 1} name`}
+                            value={parameter.name}
+                            readOnly
+                            aria-describedby={notebookParamsHintId}
+                          />
+                          <input
+                            className="input font-mono"
+                            aria-label={`Parameter ${index + 1} value`}
+                            value={notebookValues[parameter.name] ?? parameter.default}
+                            maxLength={MAX_PARAM_VALUE}
+                            placeholder={parameter.default}
+                            autoComplete="off"
+                            spellCheck={false}
+                            aria-describedby={notebookParamsHintId}
+                            onChange={(event) => updateNotebookValue(parameter.name, event.target.value)}
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {notebookValuesOk ? (
+                    <p id={notebookParamsHintId} className="mt-2 text-xs text-text-mute">
+                      The values the run passes to the notebook.
+                    </p>
+                  ) : (
+                    <p id={notebookParamsHintId} role="alert" className="mt-2 text-xs text-bad break-words">
+                      {NOTEBOOK_VALUE_PROBLEM}
+                    </p>
+                  )}
+                </fieldset>
+              </>
+            )}
+          </div>
+        )}
 
         <details className="rounded-[10px] border border-border bg-bg-soft/30">
           <summary className="cursor-pointer select-none px-3 py-2 text-sm font-medium">Advanced</summary>
@@ -936,7 +1260,7 @@ export default function ScheduleDialog({
 
         {group !== '' && (
           <p className="text-sm text-text-dim break-words">
-            The statement runs as the principal of the group{' '}
+            The {notebookMode ? 'notebook' : 'statement'} runs as the principal of the group{' '}
             <span className="font-mono">{group}</span>, so it can only reach what the group may.
           </p>
         )}

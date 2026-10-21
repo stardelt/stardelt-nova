@@ -17,6 +17,14 @@ export function shortImage(ref: string): string {
 }
 
 /**
+ * An immutable object version as a person compares two of them: the first eight characters.
+ * The full id is never useful in a sentence, but a truncated one distinguishes versions.
+ */
+export function shortVersion(id: string | null | undefined): string {
+  return (id ?? '').slice(0, 8)
+}
+
+/**
  * Returns `raw` only if it parses as an absolute http(s) URL, else `undefined`.
  *
  * App links come from the API (derived from `NOVA_BASE_DOMAIN`). They end up in

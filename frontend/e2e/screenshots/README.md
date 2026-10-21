@@ -12,3 +12,9 @@ three groups) so every card is populated.
 the next runs and Advanced open (stardelt-nova#224) at 1280 and 360 px, dark, from the
 built UI with stubbed principals, preview and check calls. The dialog is drawn at full
 height in the image so every option is visible; the page itself still scrolls the body.
+
+`schedule-notebook-*.png` — the Schedule dialog in Notebook mode (stardelt-nova#238) at
+1280 and 360 px, dark and light, from the built UI with stubbed principals, notebooks,
+versions and parameters. It shows the mode control, the pinned version with its helper,
+the tagged parameters and Advanced closed; the dialog is drawn at full height so the
+whole form is visible. The viewport is taller than 800/740 px for the same reason.

@@ -2879,6 +2879,429 @@ test.describe('schedule options', () => {
   })
 })
 
+test.describe('schedule notebook', () => {
+  // The Schedule dialog's Notebook mode (stardelt-nova#238): a published notebook, the exact
+  // version it pins and the parameters of that version. The notebook routes are the ones of
+  // stardelt-nova#237, stubbed here; every other `/api/**` call is stubbed too.
+  const NS = 'stardelt'
+  const ME = {
+    user: 'alice', auth_mode: 'oidc', demo: false, warehouse: 'warehouse',
+    is_admin: true, groups: ['analytics', 'finance'],
+  }
+  const READY = { group: 'analytics', principal: 'pipeline-analytics', ready: true, message: null }
+  const READY_2 = { group: 'finance', principal: 'pipeline-finance', ready: true, message: null }
+  const EVIL = '<img src=x onerror="window.__xss=1">'
+  /** Long, opaque S3 version ids; the dialog shows their first eight characters. */
+  const V3 = '4f9c2a1b7e6d5c4b3a29180706050403020100ffaa'
+  const V2 = '9b8a7c6d5e4f30211203f4e5d6c7b8a990817263'
+  const V1 = '1a2b3c4d5e6f708192a3b4c5d6e7f809a1b2c3d4'
+  const AT3 = '2026-10-20T08:00:00Z'
+  const AT2 = '2026-10-19T09:30:00Z'
+  const AT1 = '2026-10-18T10:00:00Z'
+  const NO_NOTEBOOK =
+    'No notebook is published in this group yet. Publish one from JupyterLab with stardelt.publish("file.ipynb").'
+  const PIN_HELPER = 'The schedule runs exactly this version. Publishing again does not change it.'
+
+  const ANALYTICS_NOTEBOOK = {
+    group: 'analytics', name: 'smoke.ipynb', objectVersion: V3, size: 2048, uploadedAt: AT3, uploadedBy: 'alice',
+  }
+  const FINANCE_NOTEBOOK = {
+    group: 'finance', name: 'finance.ipynb', objectVersion: V1, size: 1024, uploadedAt: AT1, uploadedBy: 'bob',
+  }
+  const SMOKE_VERSIONS = [
+    { objectVersion: V3, size: 2048, uploadedAt: AT3, uploadedBy: 'alice', sha256: 'aaa' },
+    { objectVersion: V2, size: 2000, uploadedAt: AT2, uploadedBy: 'bob', sha256: 'bbb' },
+  ]
+  const FINANCE_VERSIONS = [
+    { objectVersion: V1, size: 1024, uploadedAt: AT1, uploadedBy: 'bob', sha256: 'ccc' },
+  ]
+  const SMOKE_PARAMS: Record<string, unknown> = {
+    [V3]: {
+      parameters: [{ name: 'days', default: '1' }, { name: 'region', default: 'eu' }],
+      objectVersion: V3,
+    },
+    [V2]: { parameters: [{ name: 'days', default: '7' }], objectVersion: V2 },
+  }
+  const FINANCE_PARAMS = {
+    parameters: [{ name: 'month', default: '2026-09' }],
+    objectVersion: V1,
+  }
+
+  type Recorded = { method: string; url: string; body: string | null }
+  type Write = (route: Route, path: string, method: string, body: string | null) => boolean
+
+  /** A Pipelines page or detail page with every `/api/**` call stubbed; notebook routes included. */
+  async function open(browser: Browser, {
+    start = '/pipelines',
+    notebooks = [ANALYTICS_NOTEBOOK, FINANCE_NOTEBOOK] as unknown[],
+    versionsOf = (name: string) => (name === 'smoke.ipynb' ? SMOKE_VERSIONS : name === 'finance.ipynb' ? FINANCE_VERSIONS : []),
+    parametersOf = (version: string | null) =>
+      version === V2 ? SMOKE_PARAMS[V2] : version === V1 ? FINANCE_PARAMS : SMOKE_PARAMS[V3],
+    detail,
+    write,
+    init,
+    timezoneId = 'Europe/Berlin',
+  }: {
+    start?: string
+    notebooks?: unknown[]
+    versionsOf?: (name: string) => unknown[]
+    parametersOf?: (version: string | null) => unknown
+    detail?: Record<string, unknown>
+    write?: Write
+    init?: () => void
+    timezoneId?: string
+  } = {}) {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, timezoneId })
+    const page = await context.newPage()
+    if (init) await page.addInitScript(init)
+    const requests: Recorded[] = []
+    page.on('request', (request) => requests.push({
+      method: request.method(),
+      url: request.url(),
+      body: request.postData(),
+    }))
+    await page.route('**/api/**', (route) => {
+      const request = route.request()
+      const url = new URL(request.url())
+      const path = url.pathname
+      const method = request.method()
+      if (path === '/api/me' && method === 'GET') return json(route, ME)
+      if (path === '/api/catalog/namespaces' && method === 'GET') return json(route, { namespaces: [] })
+      if (path === '/api/pipelines/principals' && method === 'GET') return json(route, { groups: [READY, READY_2] })
+      if (path === '/api/pipelines' && method === 'GET') return json(route, { pipelines: [] })
+      if (path === '/api/notebooks' && method === 'GET') return json(route, notebooks)
+      const notebookRoute = /^\/api\/notebooks\/([^/]+)\/(.+)\/(versions|parameters)$/.exec(path)
+      if (notebookRoute && method === 'GET') {
+        const name = decodeURIComponent(notebookRoute[2])
+        if (notebookRoute[3] === 'versions') return json(route, versionsOf(name))
+        return json(route, parametersOf(url.searchParams.get('version')))
+      }
+      if (method !== 'GET' && write?.(route, path, method, request.postData())) return
+      if (path === '/api/pipelines/check' && method === 'POST') return json(route, { checked: true, ok: true })
+      if (path === '/api/pipelines/preview-schedule' && method === 'POST') return json(route, { runs: [] })
+      if (method === 'GET' && detail
+        && path === `/api/pipelines/${NS}/${encodeURIComponent(String(detail.name))}`) {
+        return json(route, detail)
+      }
+      return json(route, [])
+    })
+    await page.goto(start)
+    return { context, page, requests }
+  }
+
+  async function openFromPipelines(page: Page): Promise<Locator> {
+    await page.getByRole('button', { name: 'Schedule a notebook' }).click()
+    const dialog = page.getByRole('dialog', { name: 'Schedule this notebook' })
+    await expect(dialog).toBeVisible()
+    return dialog
+  }
+
+  /**
+   * Choose what the schedule runs. The radios are native but visually hidden inside their
+   * labels (a segmented control), so a person clicks the word — the label forwards it.
+   */
+  async function pickKind(dialog: Locator, label: string) {
+    await dialog.getByRole('group', { name: 'What to run' }).getByText(label, { exact: true }).click()
+  }
+
+  /** The JSON bodies of one route's requests, oldest first. */
+  function bodies(requests: Recorded[], path: string, method = 'POST'): Array<Record<string, unknown>> {
+    return requests
+      .filter((request) => request.method === method && new URL(request.url).pathname === path)
+      .map((request) => JSON.parse(request.body ?? '{}') as Record<string, unknown>)
+  }
+
+  /** What a create answers: only the name and namespace are used by the list it returns to. */
+  function created(name: string) {
+    return {
+      name, namespace: NS, ownerGroup: 'analytics', schedule: null, paused: false, loaded: false,
+      nextRun: null, state: 'loading', lastRun: null, tasks: [], runAs: null, concurrency: 'Forbid',
+      createdAt: null,
+    }
+  }
+
+  function pipeline(overrides: Record<string, unknown> = {}) {
+    return {
+      name: 'nightly',
+      namespace: NS,
+      ownerGroup: 'analytics',
+      schedule: '0 3 * * * (Europe/Berlin)',
+      paused: false,
+      loaded: true,
+      nextRun: null,
+      state: 'idle',
+      lastRun: null,
+      tasks: [{ name: 'run', kind: 'notebook', notebook: 'smoke.ipynb', objectVersion: V2, notebookParams: { days: '9' } }],
+      runAs: 'pipeline-analytics',
+      concurrency: 'Forbid',
+      createdAt: '2026-10-19T10:00:00Z',
+      runs: [],
+      params: {},
+      retries: null,
+      options: { retries: 1, backoffMinutes: 5, timeoutMinutes: 120, concurrency: 'Forbid' },
+      ...overrides,
+    }
+  }
+
+  test('mode_switch_shows_notebook_fields', async ({ browser }) => {
+    const { context, page } = await open(browser, { start: '/query' })
+    await page.getByLabel('SQL query').fill('select 1')
+    await page.getByRole('button', { name: 'Schedule this statement' }).click()
+    const sqlDialog = page.getByRole('dialog', { name: 'Schedule this statement' })
+    await expect(sqlDialog.getByRole('textbox', { name: 'Statement', exact: true })).toBeVisible()
+    await expect(sqlDialog.getByRole('combobox', { name: 'Notebook', exact: true })).toHaveCount(0)
+    const choices = sqlDialog.getByRole('group', { name: 'What to run' })
+    await expect(choices.getByRole('radio', { name: 'SQL statement', exact: true })).toBeChecked()
+    await pickKind(sqlDialog, 'Notebook')
+
+    // The title follows the choice; the statement and its table give way to the notebook fields.
+    const dialog = page.getByRole('dialog', { name: 'Schedule this notebook' })
+    await expect(dialog.getByRole('radio', { name: 'Notebook', exact: true })).toBeChecked()
+    await expect(dialog.getByRole('textbox', { name: 'Statement', exact: true })).toHaveCount(0)
+    await expect(dialog.getByText('Add parameter', { exact: true })).toHaveCount(0)
+    await expect(dialog.getByRole('combobox', { name: 'Notebook', exact: true })).toHaveValue('smoke.ipynb')
+    await expect(dialog.getByRole('combobox', { name: 'Version', exact: true })).toHaveValue(V3)
+    await expect(dialog.getByText(PIN_HELPER, { exact: true })).toBeVisible()
+    await expect(dialog.getByRole('textbox', { name: 'Parameter 1 name' })).toHaveValue('days')
+    await expect(dialog.getByRole('textbox', { name: 'Parameter 1 value' })).toHaveValue('1')
+    await expect(dialog.getByRole('textbox', { name: 'Parameter 2 name' })).toHaveValue('region')
+    // The statement was not thrown away by the switch.
+    await pickKind(dialog, 'SQL statement')
+    const back = page.getByRole('dialog', { name: 'Schedule this statement' })
+    await expect(back.getByRole('textbox', { name: 'Statement', exact: true })).toHaveValue('select 1')
+    await expect(back.getByRole('group', { name: 'What to run' })).toBeVisible()
+    await context.close()
+  })
+
+  test('no_published_notebook_message_blocks_create', async ({ browser }) => {
+    const { context, page } = await open(browser, { notebooks: [FINANCE_NOTEBOOK] })
+    const dialog = await openFromPipelines(page)
+    // The chosen group (analytics) has none: the sentence says how to publish one, and Create waits.
+    await expect(dialog.getByText(NO_NOTEBOOK, { exact: true })).toBeVisible()
+    await expect(dialog.getByRole('combobox', { name: 'Notebook', exact: true })).toHaveCount(0)
+    await expect(dialog.getByRole('button', { name: 'Create schedule' })).toBeDisabled()
+
+    // Another group's notebook is offered when that group is chosen, with its own version and values.
+    await dialog.getByRole('combobox', { name: 'Group', exact: true }).selectOption('finance')
+    const notebook = dialog.getByRole('combobox', { name: 'Notebook', exact: true })
+    await expect(notebook).toHaveValue('finance.ipynb')
+    await expect(dialog.getByRole('combobox', { name: 'Version', exact: true })).toHaveValue(V1)
+    await expect(dialog.getByRole('textbox', { name: 'Parameter 1 name' })).toHaveValue('month')
+    await expect(dialog.getByRole('textbox', { name: 'Parameter 1 value' })).toHaveValue('2026-09')
+    await expect(dialog.getByText(NO_NOTEBOOK, { exact: true })).toHaveCount(0)
+    await expect(dialog.getByRole('button', { name: 'Create schedule' })).toBeEnabled()
+
+    await dialog.getByRole('combobox', { name: 'Group', exact: true }).selectOption('analytics')
+    await expect(dialog.getByText(NO_NOTEBOOK, { exact: true })).toBeVisible()
+    await expect(dialog.getByRole('button', { name: 'Create schedule' })).toBeDisabled()
+    await context.close()
+  })
+
+  test('version_select_and_pin_helper', async ({ browser }) => {
+    let posted: Record<string, unknown> | null = null
+    const { context, page, requests } = await open(browser, {
+      write: (route, path, method, requestBody) => {
+        if (path !== '/api/pipelines' || method !== 'POST') return false
+        posted = JSON.parse(requestBody ?? '{}') as Record<string, unknown>
+        json(route, created(String((posted as Record<string, unknown>).name)), 201)
+        return true
+      },
+    })
+    const dialog = await openFromPipelines(page)
+    const version = dialog.getByRole('combobox', { name: 'Version', exact: true })
+    // Newest first; each choice names the short id, when it was published and by whom.
+    expect(await version.locator('option').allTextContents()).toEqual([
+      `${V3.slice(0, 8)} · ${formatTime(AT3)} · alice`,
+      `${V2.slice(0, 8)} · ${formatTime(AT2)} · bob`,
+    ])
+    await expect(version).toHaveValue(V3)
+    await expect(dialog.getByText(PIN_HELPER, { exact: true })).toBeVisible()
+
+    // The parameter table belongs to the chosen version, not to the notebook's newest one.
+    await version.selectOption(V2)
+    await expect(dialog.getByRole('textbox', { name: 'Parameter 1 name' })).toHaveValue('days')
+    await expect(dialog.getByRole('textbox', { name: 'Parameter 1 value' })).toHaveValue('7')
+    await expect(dialog.getByRole('textbox', { name: 'Parameter 2 name' })).toHaveCount(0)
+
+    await dialog.getByRole('textbox', { name: 'Name', exact: true }).fill('pinned-run')
+    await dialog.getByRole('button', { name: 'Create schedule' }).click()
+    expect(posted).not.toBeNull()
+    expect((posted as Record<string, unknown>).notebook).toEqual({
+      name: 'smoke.ipynb', objectVersion: V2, params: { days: '7' },
+    })
+    expect(bodies(requests, '/api/pipelines')).toHaveLength(1)
+    await context.close()
+  })
+
+  test('parameters_prefilled_and_sent_exactly', async ({ browser }) => {
+    let posted: Record<string, unknown> | null = null
+    const { context, page } = await open(browser, {
+      write: (route, path, method, requestBody) => {
+        if (path !== '/api/pipelines' || method !== 'POST') return false
+        posted = JSON.parse(requestBody ?? '{}') as Record<string, unknown>
+        json(route, created('notebook-run'), 201)
+        return true
+      },
+    })
+    const dialog = await openFromPipelines(page)
+    const days = dialog.getByRole('textbox', { name: 'Parameter 1 value' })
+    const region = dialog.getByRole('textbox', { name: 'Parameter 2 value' })
+    // The default is both the initial value and the placeholder; the name itself is read-only.
+    await expect(days).toHaveValue('1')
+    await expect(days).toHaveAttribute('placeholder', '1')
+    await expect(region).toHaveValue('eu')
+    await expect(dialog.getByRole('textbox', { name: 'Parameter 1 name' })).toHaveAttribute('readonly', '')
+    await expect(days).toHaveAttribute('maxlength', '256')
+    await days.fill('2026-10-20')
+    await region.fill('us')
+    await dialog.getByRole('textbox', { name: 'Name', exact: true }).fill('notebook-run')
+    await dialog.getByRole('button', { name: 'Create schedule' }).click()
+
+    expect(posted).toEqual({
+      name: 'notebook-run',
+      ownerGroup: 'analytics',
+      notebook: { name: 'smoke.ipynb', objectVersion: V3, params: { days: '2026-10-20', region: 'us' } },
+      schedule: { cron: '0 3 * * *', timezone: 'Europe/Berlin' },
+      options: { retries: 1, backoffMinutes: 5, timeoutMinutes: 120, concurrency: 'Forbid' },
+    })
+    // Exactly one of the two: the notebook, and no statement at all.
+    expect(Object.keys(posted as Record<string, unknown>).sort())
+      .toEqual(['name', 'notebook', 'options', 'ownerGroup', 'schedule'])
+    await context.close()
+  })
+
+  test('edit_mode_prefills_and_locks_kind', async ({ browser }) => {
+    const stored = pipeline()
+    const { context, page, requests } = await open(browser, {
+      start: `/pipelines/${NS}/nightly`,
+      detail: stored,
+      write: (route, path, method) => {
+        if (path !== `/api/pipelines/${NS}/nightly` || method !== 'PUT') return false
+        json(route, stored)
+        return true
+      },
+    })
+    await page.getByRole('button', { name: 'Edit schedule' }).click()
+    const dialog = page.getByRole('dialog', { name: 'Edit the schedule' })
+    // A pipeline keeps its kind: both choices are present, neither can be changed.
+    await expect(dialog.getByRole('radio', { name: 'Notebook', exact: true })).toBeChecked()
+    await expect(dialog.getByRole('radio', { name: 'Notebook', exact: true })).toBeDisabled()
+    await expect(dialog.getByRole('radio', { name: 'SQL statement', exact: true })).toBeDisabled()
+    await expect(dialog.getByRole('textbox', { name: 'Statement', exact: true })).toHaveCount(0)
+
+    const version = dialog.getByRole('combobox', { name: 'Version', exact: true })
+    await expect(version).toHaveValue(V2)
+    expect(await version.locator('option').first().textContent()).toBe('Use newest version')
+    // The stored values win over the tagged cell's defaults; the defaults stay as the placeholder.
+    await expect(dialog.getByRole('textbox', { name: 'Parameter 1 value' })).toHaveValue('9')
+    await expect(dialog.getByRole('textbox', { name: 'Parameter 1 value' })).toHaveAttribute('placeholder', '7')
+
+    await dialog.getByRole('button', { name: 'Save schedule' }).click()
+    const first = bodies(requests, `/api/pipelines/${NS}/nightly`, 'PUT')
+    expect(first).toEqual([{
+      notebook: { name: 'smoke.ipynb', objectVersion: V2, params: { days: '9' } },
+      schedule: { cron: '0 3 * * *', timezone: 'Europe/Berlin' },
+      options: { retries: 1, backoffMinutes: 5, timeoutMinutes: 120, concurrency: 'Forbid' },
+    }])
+    expect(first[0]).not.toHaveProperty('sql')
+
+    // "Use newest version" still pins a concrete id: the parameters route names the version it read.
+    await page.getByRole('button', { name: 'Edit schedule' }).click()
+    const again = page.getByRole('dialog', { name: 'Edit the schedule' })
+    await again.getByRole('combobox', { name: 'Version', exact: true }).selectOption('')
+    await expect(again.getByRole('textbox', { name: 'Parameter 1 value' })).toHaveValue('1')
+    await again.getByRole('button', { name: 'Save schedule' }).click()
+    await expect.poll(() => bodies(requests, `/api/pipelines/${NS}/nightly`, 'PUT').length).toBe(2)
+    const second = bodies(requests, `/api/pipelines/${NS}/nightly`, 'PUT')[1]
+    expect(second.notebook).toEqual({
+      name: 'smoke.ipynb', objectVersion: V3, params: { days: '1', region: 'eu' },
+    })
+    expect(second).not.toHaveProperty('sql')
+    await context.close()
+  })
+
+  test('hostile_names_and_values_are_text', async ({ browser }) => {
+    const evilVersion = 'deadbeefcafebabe0123456789abcdef01234567'
+    const evilNotebook = {
+      group: 'analytics', name: `${EVIL}.ipynb`, objectVersion: evilVersion, size: 10,
+      uploadedAt: AT3, uploadedBy: EVIL,
+    }
+    const { context, page } = await open(browser, {
+      notebooks: [evilNotebook],
+      versionsOf: () => [{
+        objectVersion: evilVersion, size: 10, uploadedAt: AT3, uploadedBy: EVIL, sha256: 'x',
+      }],
+      parametersOf: (version) => ({
+        parameters: [{ name: 'note', default: EVIL }], objectVersion: version ?? evilVersion,
+      }),
+      init: () => { (window as unknown as { __xss: number }).__xss = 0 },
+    })
+    const dialog = await openFromPipelines(page)
+    await expect(dialog.getByRole('combobox', { name: 'Notebook', exact: true })).toHaveValue(`${EVIL}.ipynb`)
+    const value = dialog.getByRole('textbox', { name: 'Parameter 1 value' })
+    await expect(value).toHaveValue(EVIL)
+    expect(await value.getAttribute('placeholder')).toBe(EVIL)
+    // The option's label is text, not markup; the uploaded-by name is rendered the same way.
+    expect(await dialog.getByRole('combobox', { name: 'Version', exact: true }).locator('option').first().textContent())
+      .toContain(EVIL)
+    expect(await page.evaluate(() => ({
+      xss: (window as unknown as { __xss?: number }).__xss ?? 0,
+      imgs: document.querySelectorAll('img[src="x"]').length,
+      overflow: document.documentElement.scrollWidth - window.innerWidth,
+    }))).toEqual({ xss: 0, imgs: 0, overflow: expect.any(Number) })
+    expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth))
+      .toBeLessThanOrEqual(1)
+
+    // The detail page repeats the notebook, its pinned version and the values as text.
+    const detail = pipeline({
+      name: 'evil-pipeline',
+      tasks: [{
+        name: 'run', kind: 'notebook', notebook: `${EVIL}.ipynb`,
+        objectVersion: evilVersion, notebookParams: { note: EVIL },
+      }],
+    })
+    const second = await open(browser, {
+      start: `/pipelines/${NS}/evil-pipeline`,
+      detail,
+      init: () => { (window as unknown as { __xss: number }).__xss = 0 },
+    })
+    const task = second.page.locator('section', { hasText: 'Tasks' }).locator('li')
+    await expect(task).toContainText(`Notebook ${EVIL}.ipynb · version ${evilVersion.slice(0, 8)}`)
+    await expect(task).toContainText(EVIL)
+    expect(await second.page.evaluate(() => ({
+      xss: (window as unknown as { __xss?: number }).__xss ?? 0,
+      imgs: document.querySelectorAll('img[src="x"]').length,
+    }))).toEqual({ xss: 0, imgs: 0 })
+    await context.close()
+    await second.context.close()
+  })
+
+  test('U5 audit over the open dialog in both modes', async ({ browser }) => {
+    const { context, page } = await open(browser)
+    await page.setViewportSize({ width: 360, height: 740 })
+    const notebook = await openFromPipelines(page)
+    await expect(notebook.getByRole('combobox', { name: 'Version', exact: true })).toBeVisible()
+    expect((await auditPage(page)).filter((finding) => finding.rule === 'U5')).toEqual([])
+    expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth))
+      .toBeLessThanOrEqual(1)
+    const notebookBox = await notebook.boundingBox()
+    expect(notebookBox).not.toBeNull()
+    expect(notebookBox!.x).toBeGreaterThanOrEqual(0)
+    expect(notebookBox!.x + notebookBox!.width).toBeLessThanOrEqual(361)
+
+    await pickKind(notebook, 'SQL statement')
+    const statement = page.getByRole('dialog', { name: 'Schedule this statement' })
+    expect((await auditPage(page)).filter((finding) => finding.rule === 'U5')).toEqual([])
+    expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth))
+      .toBeLessThanOrEqual(1)
+    const statementBox = await statement.boundingBox()
+    expect(statementBox).not.toBeNull()
+    expect(statementBox!.x).toBeGreaterThanOrEqual(0)
+    expect(statementBox!.x + statementBox!.width).toBeLessThanOrEqual(361)
+    await context.close()
+  })
+})
+
 test.describe('preferences', () => {
   const ME = {
     user: 'alice', auth_mode: 'oidc', demo: false, warehouse: 'warehouse',
