@@ -22,7 +22,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 thiserror = "2"
 # OIDC (auth.rs). jsonwebtoken 9 verifies with `ring`, which rustls already brings in.
-jsonwebtoken = { version = "9.3", default-features = false }
+jsonwebtoken = { version = "11.1", default-features = false }
 axum-extra = { version = "0.12", default-features = false, features = ["cookie-signed", "cookie-key-expansion"] }
 base64 = "0.23"
 getrandom = "0.4"
