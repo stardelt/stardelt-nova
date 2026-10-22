@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
+import { useRef, useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { ApiError, api, errorMessage, type CatalogStat } from '../api'
 import { formatBytes, formatCount, formatTime, relativeTime, rowsLabel, statusLabel } from '../format'
@@ -12,9 +13,34 @@ function countRows(n: number): string {
   return `${formatCount(n)} ${n === 1 ? 'row' : 'rows'}`
 }
 
+/** When the newest numbers of the card were read, or `null` while nothing has been read. */
+function newestUpdate(catalogs: CatalogStat[] | undefined): number | null {
+  let newest: number | null = null
+  for (const catalog of catalogs ?? []) {
+    const at = catalog.updatedAt
+    if (typeof at === 'number' && (newest === null || at > newest)) newest = at
+  }
+  return newest
+}
+
 export default function Overview() {
   const me = useQuery({ queryKey: ['me'], queryFn: api.me })
-  const metrics = useQuery({ queryKey: ['catalog', 'metrics'], queryFn: api.catalogMetrics })
+  // The numbers are read in the background (#263), so the first answer is already there.
+  // A catalog that has none yet is `pending`: re-ask every 5 s until it has numbers, and
+  // stop after a minute — a scan that never finishes must not turn this page into a poller.
+  const pendingSince = useRef<number | null>(null)
+  const metrics = useQuery({
+    queryKey: ['catalog', 'metrics'],
+    queryFn: api.catalogMetrics,
+    refetchInterval: (query) => {
+      if (!query.state.data?.catalogs.some(catalog => catalog.pending)) {
+        pendingSince.current = null
+        return false
+      }
+      pendingSince.current ??= Date.now()
+      return Date.now() - pendingSince.current < 60_000 ? 5_000 : false
+    },
+  })
   const jobs = useQuery({ queryKey: ['jobs'], queryFn: api.jobs, refetchInterval: 10_000 })
   // The engine and app cards are operator views: their endpoints answer 403 to everyone else,
   // so they are not fetched at all for a non-admin (an `enabled: false` query stays pending —
@@ -22,6 +48,25 @@ export default function Overview() {
   const admin = me.data ? isAdmin(me.data) : false
   const cluster = useQuery({ queryKey: ['trino', 'cluster'], queryFn: api.trinoCluster, retry: false, enabled: admin })
   const apps = useQuery({ queryKey: ['apps'], queryFn: api.apps, refetchInterval: 15_000, enabled: admin })
+
+  // An administrator's Refresh starts a round in the background; the numbers follow with
+  // the next read, which is why the page asks again five seconds later (a scan takes a
+  // few). The button is disabled while anything is pending: no second round.
+  const [refreshing, setRefreshing] = useState(false)
+  const [refreshError, setRefreshError] = useState('')
+  const pending = metrics.data?.catalogs.some(catalog => catalog.pending) ?? false
+  async function refreshNow() {
+    setRefreshing(true)
+    setRefreshError('')
+    try {
+      await api.refreshCatalogMetrics()
+      window.setTimeout(() => { void metrics.refetch() }, 5_000)
+    } catch (e) {
+      setRefreshError(errorMessage(e))
+    } finally {
+      setRefreshing(false)
+    }
+  }
 
   const totals = metrics.data?.totals
   // A 403 is the API saying no catalog is open to this person: an answer, not a failure
@@ -67,7 +112,16 @@ export default function Overview() {
         <Stat label="Jobs" value={jobs.data ? String(jobs.data.length) : jobs.isError ? '—' : '…'} hint="recent activity" icon="clock" />
       </section>
 
-      <CatalogsCard metrics={metrics.data?.catalogs} error={metrics.error} denied={denied} />
+      <CatalogsCard
+        metrics={metrics.data?.catalogs}
+        error={metrics.error}
+        denied={denied}
+        admin={admin}
+        pending={pending}
+        refreshing={refreshing}
+        refreshError={refreshError}
+        onRefresh={refreshNow}
+      />
 
       <section className="grid lg:grid-cols-3 gap-4">
         <div className={`card p-5 ${admin ? 'lg:col-span-2' : 'lg:col-span-3'}`}>
@@ -130,18 +184,43 @@ export default function Overview() {
  * The catalogs the person may see, one table row each (stardelt-nova#250). Every number is
  * the API's: a catalog whose scan failed keeps its row with the sentence, and a shortened
  * scan says so under the table instead of pretending the sample is the whole catalog.
+ *
+ * The numbers are read in the background (#263), so the card says how fresh they are and
+ * an administrator can ask for a round now; a catalog with no numbers yet says
+ * "calculating…" instead of zero, which would be a wrong number rather than none.
  */
-function CatalogsCard({ metrics, error, denied }: {
+function CatalogsCard({ metrics, error, denied, admin, pending, refreshing, refreshError, onRefresh }: {
   metrics: CatalogStat[] | undefined
   error: unknown
   denied: boolean
+  admin: boolean
+  pending: boolean
+  refreshing: boolean
+  refreshError: string
+  onRefresh: () => void
 }) {
+  const updated = newestUpdate(metrics)
   return (
     <section className="card p-5 min-w-0">
-      <div className="flex items-center justify-between mb-3">
-        <h2 className="text-sm font-semibold">Catalogs</h2>
-        <Link to="/catalog" className="text-xs text-text-dim hover:text-text">Browse all →</Link>
+      <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
+        <div className="flex items-baseline gap-3 flex-wrap">
+          <h2 className="text-sm font-semibold">Catalogs</h2>
+          {updated !== null && (
+            <span className="text-xs text-text-mute" title={formatTime(updated)}>
+              Updated {relativeTime(updated)}
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-3">
+          {admin && (
+            <button type="button" className="btn-ghost" onClick={onRefresh} disabled={pending || refreshing}>
+              {refreshing ? 'Refreshing…' : 'Refresh'}
+            </button>
+          )}
+          <Link to="/catalog" className="text-xs text-text-dim hover:text-text">Browse all →</Link>
+        </div>
       </div>
+      {refreshError && <p role="status" className="text-xs text-bad mb-2 break-words">{refreshError}</p>}
       {!metrics && !error && <div className="text-text-mute text-sm">loading…</div>}
       {denied && (
         <div className="space-y-1">
@@ -188,15 +267,15 @@ function CatalogsCard({ metrics, error, denied }: {
                           <div role="status" className="text-xs text-bad mt-0.5 break-words">{catalog.error}</div>
                         )}
                       </td>
-                      <td className="td px-3 text-right tabular-nums">{formatCount(catalog.schemas)}</td>
-                      <td className="td px-3 text-right tabular-nums">{formatCount(catalog.tables)}</td>
-                      <td className="td px-3 text-right tabular-nums whitespace-nowrap">{formatBytes(catalog.sizeBytes)}</td>
-                      <td className="td px-3 text-right tabular-nums">{formatCount(catalog.records)}</td>
+                      <td className="td px-3 text-right tabular-nums"><CellNumber pending={catalog.pending}>{formatCount(catalog.schemas)}</CellNumber></td>
+                      <td className="td px-3 text-right tabular-nums"><CellNumber pending={catalog.pending}>{formatCount(catalog.tables)}</CellNumber></td>
+                      <td className="td px-3 text-right tabular-nums whitespace-nowrap"><CellNumber pending={catalog.pending}>{formatBytes(catalog.sizeBytes)}</CellNumber></td>
+                      <td className="td px-3 text-right tabular-nums"><CellNumber pending={catalog.pending}>{formatCount(catalog.records)}</CellNumber></td>
                       <td
                         className="td px-3 text-right whitespace-nowrap text-text-dim"
                         title={changed !== null ? formatTime(changed) : undefined}
                       >
-                        {changed !== null ? relativeTime(changed) : '—'}
+                        <CellNumber pending={catalog.pending}>{changed !== null ? relativeTime(changed) : '—'}</CellNumber>
                       </td>
                     </tr>
                   )
@@ -211,6 +290,14 @@ function CatalogsCard({ metrics, error, denied }: {
       )}
     </section>
   )
+}
+
+/**
+ * One number cell: the value, or "calculating…" while the catalog has no numbers yet. Muted
+ * text, never a zero — a zero is a claim, and nothing has been read.
+ */
+function CellNumber({ pending, children }: { pending: boolean; children: ReactNode }) {
+  return pending ? <span className="text-text-mute">calculating…</span> : <>{children}</>
 }
 
 function Stat({ label, value, hint, icon, tone }: {

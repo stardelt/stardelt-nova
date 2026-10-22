@@ -10,11 +10,15 @@
 //! Which catalogs appear is the caller's own answer from the engine
 //! ([`crate::catalog::allowed_catalogs`]), so one group's catalog never leaks into another
 //! group's Overview. The numbers themselves are caller independent — they describe the
-//! catalog, not the person — so they are cached per catalog for [`METRICS_TTL`] and
-//! filtered per caller afterwards. A catalog whose scan fails is still listed, with zeros
-//! and the sentence: one unreachable catalog must not blank the page. Only a failure of the
-//! *visibility* question (an unreachable engine) is a 502, as everywhere else in the
-//! catalog routes.
+//! catalog, not the person — so they live in one cache keyed by catalog, filled by a
+//! background refresher ([`spawn_refresher`], stardelt-nova#263) that reads every catalog
+//! every five minutes with Nova's own service token. A request never scans: it answers
+//! from the last numbers at once, and a catalog with no numbers yet is answered as
+//! `pending` while one background scan reads it (single-flight). A catalog whose scan
+//! failed keeps its last good numbers and says why; one that never answered is listed
+//! with zeros and the sentence: one unreachable catalog must not blank the page. Only a
+//! failure of the *visibility* question (an unreachable engine) is a 502, as everywhere
+//! else in the catalog routes.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -29,14 +33,14 @@ use axum::{
 use futures::stream::{self, StreamExt};
 use serde::Serialize;
 use serde_json::Value;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::{
     AppState,
     auth::Principal,
     catalog::{
-        NO_CATALOG_SENTENCE, WarehouseError, allowed_catalogs, lakekeeper_authorization,
-        path_segment, warehouse_id_for,
+        HIDDEN_CATALOGS, NO_CATALOG_SENTENCE, WarehouseError, allowed_catalogs,
+        lakekeeper_authorization, path_segment, warehouse_id_for, warehouse_list,
     },
     trino::error_status,
 };
@@ -50,12 +54,31 @@ pub const MAX_TABLES_PER_CATALOG: usize = 200;
 /// How many table metadata reads one scan keeps in flight.
 pub const CONCURRENCY: usize = 8;
 
-/// How many catalogs one request scans at once (the rest wait for a slot).
-const SCAN_CONCURRENCY: usize = 4;
+/// How many catalogs one refresher round scans at once. Two, not four: the round runs for
+/// minutes in the background and must never look like load on the catalog.
+const REFRESH_CONCURRENCY: usize = 2;
 
-/// How long one catalog's numbers are trusted. Caller independent on purpose: the numbers
-/// are a property of the catalog, the *list* of catalogs is the person's.
-const METRICS_TTL: Duration = Duration::from_secs(60);
+/// How long the refresher waits after start-up before its first round: long enough for the
+/// listener, the catalog client and the first page load to settle.
+const REFRESH_FIRST_DELAY: Duration = Duration::from_secs(10);
+
+/// The environment variable that overrides [`DEFAULT_REFRESH`].
+pub const REFRESH_ENV: &str = "NOVA_METRICS_REFRESH_SECS";
+
+/// How often the background refresher reads every catalog.
+pub const DEFAULT_REFRESH: Duration = Duration::from_secs(300);
+
+/// The bounds of the override: a round every few seconds would keep the catalog busy for
+/// no fresher a page, and anything above an hour is a different product decision.
+pub const MIN_REFRESH: Duration = Duration::from_secs(30);
+pub const MAX_REFRESH: Duration = Duration::from_secs(3600);
+
+/// At most one administrator-triggered round per minute: the button must not become a way
+/// to scan the warehouse on demand.
+pub const REFRESH_LIMIT: Duration = Duration::from_secs(60);
+
+/// The sentence a refused refresh answers with.
+pub const REFRESH_TOO_SOON: &str = "the numbers were refreshed less than a minute ago";
 
 // ---------------------------------------------------------------------------
 // Pure part: one table's numbers, and how they add up per catalog
@@ -316,49 +339,263 @@ pub async fn scan_catalog(state: &AppState, name: &str) -> Result<CatalogStats, 
     Ok(stats)
 }
 
-/// One catalog's numbers, from the cache when they are younger than [`METRICS_TTL`],
-/// otherwise scanned (and cached). A failed scan is never cached: the next request tries
-/// again instead of serving zeros for a minute.
-pub async fn cached_or_scan(state: &AppState, name: &str) -> Result<CatalogStats, WarehouseError> {
-    cached_or_scan_within(state, name, METRICS_TTL).await
+// ---------------------------------------------------------------------------
+// The cache: one entry per catalog, filled in the background (stardelt-nova#263)
+// ---------------------------------------------------------------------------
+
+/// One catalog's numbers in the cache, and when they were read.
+///
+/// `updated` is the monotonic clock (ages, staleness); `updated_ms` is the same moment as
+/// Unix milliseconds, which is what the answer carries as `updatedAt` — a person reads a
+/// time, not an uptime. `error` survives a failed round on purpose: the numbers of the
+/// last good scan stay, and the row says why they are old.
+#[derive(Debug, Clone)]
+pub struct MetricsEntry {
+    /// The catalog's numbers, from the last successful scan.
+    pub stats: CatalogStats,
+    /// When those numbers were read, on the monotonic clock.
+    pub updated: Instant,
+    /// The same moment in Unix milliseconds: what `updatedAt` answers.
+    pub updated_ms: i64,
+    /// Why the last scan failed; `None` after a good one. A sentence, never a URL or token.
+    pub error: Option<String>,
 }
 
-/// [`cached_or_scan`] with an explicit TTL. The tests use it instead of waiting a minute;
-/// production always passes [`METRICS_TTL`].
-async fn cached_or_scan_within(
-    state: &AppState,
-    name: &str,
-    ttl: Duration,
-) -> Result<CatalogStats, WarehouseError> {
-    let cached = {
-        let cache = state
-            .catalog_metrics
-            .lock()
-            .expect("catalog metrics poisoned");
-        cache
-            .get(name)
-            .filter(|(at, _)| at.elapsed() < ttl)
-            .map(|(_, stats)| stats.clone())
-    };
-    if let Some(stats) = cached {
-        return Ok(stats);
+/// The refresh period from [`REFRESH_ENV`], clamped to [`MIN_REFRESH`]–[`MAX_REFRESH`].
+/// A value that is not a number is the default: a typo must not stop the refresher.
+pub fn refresh_interval_from_env() -> Duration {
+    interval_from(std::env::var(REFRESH_ENV).ok().as_deref())
+}
+
+/// [`refresh_interval_from_env`] for an explicit value: the tests use this, production
+/// always reads the environment.
+fn interval_from(raw: Option<&str>) -> Duration {
+    let secs = raw
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_REFRESH);
+    secs.clamp(MIN_REFRESH, MAX_REFRESH)
+}
+
+/// Whether this state gets a background refresher at all: never in demo mode (the numbers
+/// are the seeded tables) and never without a catalog to ask.
+pub fn refresher_wanted(state: &AppState) -> bool {
+    !state.demo && !state.lakekeeper_url.trim().is_empty()
+}
+
+/// Start the background refresher: after [`REFRESH_FIRST_DELAY`], one round per
+/// [`refresh_interval_from_env`] for as long as the process runs.
+///
+/// Answers whether a task was started: demo mode and an unconfigured catalog have none, and
+/// a request then starts one scan per unknown catalog itself, at the first sight of it.
+/// Called from `main` after the state exists, once.
+pub fn spawn_refresher(state: Arc<AppState>) -> bool {
+    if !refresher_wanted(&state) {
+        info!(
+            demo = state.demo,
+            "catalog metrics refresher off — the endpoint answers from what a request scans"
+        );
+        return false;
     }
-    let stats = scan_catalog(state, name).await?;
+    let interval = refresh_interval_from_env();
+    info!(
+        interval_secs = interval.as_secs(),
+        first_delay_secs = REFRESH_FIRST_DELAY.as_secs(),
+        "catalog metrics refresher started"
+    );
+    tokio::spawn(async move {
+        refresher_loop(state, REFRESH_FIRST_DELAY, interval).await;
+    });
+    true
+}
+
+/// Wait, round, wait: the loop itself, with both waits injected so a test can drive it on
+/// a paused clock instead of sleeping.
+async fn refresher_loop(state: Arc<AppState>, first_delay: Duration, interval: Duration) {
+    tokio::time::sleep(first_delay).await;
+    loop {
+        run_round(&state).await;
+        tokio::time::sleep(interval).await;
+    }
+}
+
+/// One full round: every catalog the warehouse list names (minus the engine's own), two
+/// scans at a time, one entry each. Answers `false` when another round holds the lock —
+/// the loop and an administrator's Refresh never scan the warehouse at the same time.
+async fn run_round(state: &Arc<AppState>) -> bool {
+    if state.demo {
+        return false;
+    }
+    // One round at a time. `try_lock` rather than `lock`: a refresh that is already
+    // running covers this one, and waiting would only queue another full scan.
+    let Ok(_round) = state.metrics_round.try_lock() else {
+        info!("catalog metrics: a refresh is already running — this round was skipped");
+        return false;
+    };
+    let started = Instant::now();
+
+    let warehouses = match warehouse_list(state).await {
+        Ok(warehouses) => warehouses,
+        Err(e) => {
+            // The list is the shape of the warehouse, not one catalog's numbers: keep every
+            // entry as it is and try again next round.
+            warn!(error = %e, "catalog metrics: the warehouse list failed — keeping the last numbers");
+            return false;
+        }
+    };
+    // The round just learned every id: the scans need not ask again.
+    {
+        let mut ids = state.catalog_ids.write().expect("catalog ids poisoned");
+        for warehouse in &warehouses {
+            ids.insert(warehouse.name.clone(), warehouse.id.clone());
+        }
+    }
+    let names: Vec<String> = warehouses
+        .into_iter()
+        .map(|warehouse| warehouse.name)
+        .filter(|name| !HIDDEN_CATALOGS.contains(&name.as_str()))
+        .collect();
+
+    let results: Vec<(String, Option<Result<CatalogStats, WarehouseError>>)> = stream::iter(names)
+        .map(|name| {
+            let state = Arc::clone(state);
+            async move {
+                let result = scan_and_store(&state, &name).await;
+                (name, result)
+            }
+        })
+        .buffer_unordered(REFRESH_CONCURRENCY)
+        .collect()
+        .await;
+
+    let mut catalogs = 0usize;
+    let mut failed = 0usize;
+    let mut tables = 0u64;
+    for (name, result) in results {
+        match result {
+            // `None`: another scan held the catalog, and that one stores the answer.
+            None => continue,
+            Some(Ok(stats)) => {
+                catalogs += 1;
+                tables = tables.saturating_add(u64::from(stats.tables));
+            }
+            Some(Err(e)) => {
+                failed += 1;
+                warn!(catalog = %name, error = %e, "catalog metrics: refresh failed, the last numbers stay");
+            }
+        }
+    }
+    // One line per round, counts only: never a table name, never a token.
+    info!(
+        catalogs,
+        failed,
+        tables,
+        duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        "catalog metrics refreshed"
+    );
+    true
+}
+
+/// Scan one catalog unless another scan already holds it, and store the entry.
+/// `None` means "somebody else is reading it" — not an error.
+async fn scan_and_store(
+    state: &Arc<AppState>,
+    name: &str,
+) -> Option<Result<CatalogStats, WarehouseError>> {
+    if !claim(state, name) {
+        return None;
+    }
+    let result = scan_catalog(state, name).await;
+    store(state, name, &result);
+    release(state, name);
+    Some(result)
+}
+
+/// Start one background scan for `name` unless one is running. The caller never waits:
+/// the row answers as `pending` and the numbers appear with the next request.
+fn start_background_scan(state: &Arc<AppState>, name: &str) {
+    if !claim(state, name) {
+        return;
+    }
+    let state = Arc::clone(state);
+    let name = name.to_string();
+    tokio::spawn(async move {
+        let result = scan_catalog(&state, &name).await;
+        store(&state, &name, &result);
+        release(&state, &name);
+    });
+}
+
+/// Take the one slot a catalog has for a scan; `false` when it is taken already.
+fn claim(state: &AppState, name: &str) -> bool {
     state
+        .metrics_in_flight
+        .lock()
+        .expect("catalog metrics in flight poisoned")
+        .insert(name.to_string())
+}
+
+/// Give the slot back, whatever the scan did.
+fn release(state: &AppState, name: &str) {
+    state
+        .metrics_in_flight
+        .lock()
+        .expect("catalog metrics in flight poisoned")
+        .remove(name);
+}
+
+/// Put one scan's result in the cache.
+///
+/// A good scan replaces the numbers and clears the error. A failed one keeps the numbers
+/// and their timestamp — they are the last good ones, and the page says how old — and
+/// only adds the sentence; a catalog that never answered gets zeros with the sentence, so
+/// it is listed (a page that drops it says "you have no such catalog").
+fn store(state: &AppState, name: &str, result: &Result<CatalogStats, WarehouseError>) {
+    let mut cache = state
         .catalog_metrics
         .lock()
-        .expect("catalog metrics poisoned")
-        .insert(name.to_string(), (Instant::now(), stats.clone()));
-    Ok(stats)
+        .expect("catalog metrics poisoned");
+    let now = i64::try_from(crate::jobs::now_ms()).unwrap_or(i64::MAX);
+    match result {
+        Ok(stats) => {
+            cache.insert(
+                name.to_string(),
+                MetricsEntry {
+                    stats: stats.clone(),
+                    updated: Instant::now(),
+                    updated_ms: now,
+                    error: None,
+                },
+            );
+        }
+        Err(e) => match cache.get_mut(name) {
+            Some(entry) => entry.error = Some(e.to_string()),
+            None => {
+                cache.insert(
+                    name.to_string(),
+                    MetricsEntry {
+                        stats: CatalogStats {
+                            name: name.to_string(),
+                            ..CatalogStats::default()
+                        },
+                        updated: Instant::now(),
+                        updated_ms: now,
+                        error: Some(e.to_string()),
+                    },
+                );
+            }
+        },
+    }
 }
 
 // ---------------------------------------------------------------------------
 // The answer
 // ---------------------------------------------------------------------------
 
-/// One catalog in the answer: the numbers, plus the sentence when the scan failed. A
-/// failed catalog is zeros, never omitted — a page that silently drops a catalog says
-/// "you have none", which is not what happened.
+/// One catalog in the answer: the numbers, plus the sentence when the last scan failed. A
+/// failed catalog is zeros only when it never answered — a catalog that answered once
+/// keeps those numbers — never omitted: a page that silently drops a catalog says "you
+/// have none", which is not what happened.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CatalogMetricsView {
@@ -368,31 +605,56 @@ pub struct CatalogMetricsView {
     /// never URL, token or stack trace.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-}
-
-impl From<CatalogStats> for CatalogMetricsView {
-    fn from(stats: CatalogStats) -> Self {
-        Self { stats, error: None }
-    }
+    /// When these numbers were read (Unix ms), so the page can say "Updated 4 minutes
+    /// ago". `null` while `pending`: there are no numbers yet.
+    pub updated_at: Option<i64>,
+    /// No numbers yet — the catalog appeared after the last round (or before the first),
+    /// and one scan is reading it now. Its numbers are zeros and the totals leave it out.
+    pub pending: bool,
 }
 
 impl CatalogMetricsView {
-    fn failed(name: String, error: String) -> Self {
+    /// A catalog whose numbers were read: nothing pending, nothing failed.
+    fn read(stats: CatalogStats, updated_ms: i64, error: Option<String>) -> Self {
+        Self {
+            stats,
+            error,
+            updated_at: Some(updated_ms),
+            pending: false,
+        }
+    }
+
+    /// A catalog with no numbers yet: listed, zeros, and the scan is on its way.
+    fn pending(name: String) -> Self {
         Self {
             stats: CatalogStats {
                 name,
                 ..CatalogStats::default()
             },
-            error: Some(error),
+            error: None,
+            updated_at: None,
+            pending: true,
         }
     }
 }
 
-/// The sums over every catalog in the answer. Failed catalogs contribute their zeros.
+impl From<CatalogStats> for CatalogMetricsView {
+    fn from(stats: CatalogStats) -> Self {
+        Self {
+            stats,
+            error: None,
+            updated_at: None,
+            pending: false,
+        }
+    }
+}
+
+/// The sums over every catalog in the answer. Pending catalogs contribute nothing: their
+/// zeros are not numbers, and a tile must not read "0 tables" while the scan runs.
 #[derive(Debug, Default, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MetricsTotals {
-    /// How many catalogs are listed.
+    /// How many catalogs with numbers are listed.
     pub catalogs: u32,
     /// Schemas across them.
     pub schemas: u64,
@@ -411,11 +673,20 @@ pub struct MetricsResponse {
     /// One entry per catalog the caller may browse: bronze, silver, gold first, then the
     /// rest by name.
     pub catalogs: Vec<CatalogMetricsView>,
-    /// The sums over `catalogs`.
+    /// The sums over `catalogs`, leaving out the `pending` ones.
     pub totals: MetricsTotals,
-    /// When this answer was built (Unix ms). Per-catalog numbers may be up to a minute
-    /// older (they are cached).
+    /// When this answer was built (Unix ms). The numbers themselves are from the last
+    /// background round, which `updatedAt` on each row names.
     pub generated_at: u64,
+}
+
+/// The answer to an accepted `POST /api/catalog/metrics/refresh`: the round runs in the
+/// background, and the page reads the new numbers with its next request.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RefreshAccepted {
+    /// Always `true`: a `202` is the acceptance, and the round has already started.
+    pub accepted: bool,
 }
 
 /// Demo mode has no catalog behind it: the numbers are the seeded in-memory tables. There
@@ -448,7 +719,7 @@ fn demo_numbers(state: &AppState) -> CatalogStats {
     get,
     path = "/api/catalog/metrics",
     tag = "public",
-    description = "What is in each catalog the caller may browse: schemas, tables, rows, bytes on the object store and the newest commit, plus the sums. Rows are ordered bronze, silver, gold first, then by name, and carry `layer` when the catalog is one of the three (the `stardelt.io/layer` label, else the catalog's own name). The catalog list is the caller's own `SHOW CATALOGS` (`GET /api/catalog/catalogs`); a catalog the caller may not browse is never read and never appears. The numbers come from the catalog's Iceberg metadata (the current snapshot's `total-records` and `total-files-size`), so the endpoint runs no query. They are cached per catalog for 60 s — they describe the catalog, not the person — and at most 200 tables per catalog are loaded: `truncated` says the rows and bytes are a sample while `tables` stays exact. A catalog that cannot be read is listed with zeros and an `error` sentence; only an unreachable engine or catalog fails the request with 502. 403 when no catalog is open to the caller. Never cached by the client.",
+    description = "What is in each catalog the caller may browse: schemas, tables, rows, bytes on the object store and the newest commit, plus the sums. Rows are ordered bronze, silver, gold first, then by name, and carry `layer` when the catalog is one of the three (the `stardelt.io/layer` label, else the catalog's own name). The catalog list is the caller's own `SHOW CATALOGS` (`GET /api/catalog/catalogs`); a catalog the caller may not browse is never read and never appears. The numbers come from the catalog's Iceberg metadata (the current snapshot's `total-records` and `total-files-size`), so the endpoint runs no query, and they are read in the background every five minutes (`NOVA_METRICS_REFRESH_SECS`): a request answers from the last numbers at once, whatever their age, and `updatedAt` says when they were read. A catalog with no numbers yet is answered with zeros and `pending: true` while one background scan reads it; `totals` leave pending rows out. At most 200 tables per catalog are loaded: `truncated` says the rows and bytes are a sample while `tables` stays exact. A catalog whose scan failed keeps its last numbers and carries an `error` sentence (zeros for one that never answered); only an unreachable engine or catalog fails the request with 502. 403 when no catalog is open to the caller. Never cached by the client.",
     responses(
         (status = 200, description = "One entry per browsable catalog, medallion layers first, then by name, with the totals", body = MetricsResponse),
         (status = 403, description = "No catalog is open to the caller", body = crate::openapi::ErrorResponse),
@@ -473,27 +744,33 @@ pub async fn get(State(s): State<Arc<AppState>>, caller: Option<Extension<Princi
 
     let mut catalogs: Vec<CatalogMetricsView> = Vec::with_capacity(allowed.len());
     if s.demo {
-        catalogs.push(demo_numbers(&s).into());
+        // The seeded tables are the numbers: there is nothing to scan and nothing to wait
+        // for, so the row is as fresh as the answer.
+        let mut view = CatalogMetricsView::from(demo_numbers(&s));
+        view.updated_at = Some(i64::try_from(crate::jobs::now_ms()).unwrap_or(i64::MAX));
+        catalogs.push(view);
     } else {
-        let scans: Vec<(String, Result<CatalogStats, WarehouseError>)> = stream::iter(allowed)
-            .map(|name| {
-                let state = Arc::clone(&s);
-                async move {
-                    let stats = cached_or_scan(&state, &name).await;
-                    (name, stats)
-                }
-            })
-            .buffer_unordered(SCAN_CONCURRENCY)
-            .collect()
-            .await;
-        for (name, stats) in scans {
-            match stats {
-                Ok(stats) => catalogs.push(stats.into()),
-                Err(e) => {
-                    warn!(catalog = %name, error = %e, "catalog metrics: scan failed");
-                    catalogs.push(CatalogMetricsView::failed(name, e.to_string()));
+        // The request path never scans: whatever the cache holds is the answer, however
+        // old it is (`updatedAt` says how old), and a missing entry is `pending` while one
+        // background scan reads it.
+        let mut missing: Vec<String> = Vec::new();
+        {
+            let cache = s.catalog_metrics.lock().expect("catalog metrics poisoned");
+            for name in &allowed {
+                match cache.get(name) {
+                    Some(entry) => catalogs.push(CatalogMetricsView::read(
+                        entry.stats.clone(),
+                        entry.updated_ms,
+                        entry.error.clone(),
+                    )),
+                    None => missing.push(name.clone()),
                 }
             }
+        }
+        for name in missing {
+            catalogs.push(CatalogMetricsView::pending(name.clone()));
+            // Single-flight: two requests for the same new catalog start one scan.
+            start_background_scan(&s, &name);
         }
     }
 
@@ -510,11 +787,9 @@ pub async fn get(State(s): State<Arc<AppState>>, caller: Option<Extension<Princi
         |catalog| catalog.stats.name.as_str(),
     );
 
-    let mut totals = MetricsTotals {
-        catalogs: u32::try_from(catalogs.len()).unwrap_or(u32::MAX),
-        ..MetricsTotals::default()
-    };
-    for catalog in &catalogs {
+    let mut totals = MetricsTotals::default();
+    for catalog in catalogs.iter().filter(|catalog| !catalog.pending) {
+        totals.catalogs = totals.catalogs.saturating_add(1);
         totals.schemas = totals.schemas.saturating_add(catalog.stats.schemas as u64);
         totals.tables = totals.tables.saturating_add(catalog.stats.tables as u64);
         totals.records = totals.records.saturating_add(catalog.stats.records);
@@ -528,6 +803,47 @@ pub async fn get(State(s): State<Arc<AppState>>, caller: Option<Extension<Princi
             totals,
             generated_at: crate::jobs::now_ms(),
         }),
+    )
+        .into_response()
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/catalog/metrics/refresh",
+    tag = "public",
+    description = "Read every catalog again now, instead of waiting for the next background round (every five minutes). Administrator only: it is an operator action on the whole warehouse, and `main` puts the same `require_admin` in front of it as `/api/apps`, so a non-administrator answers 403. Answers 202 — the round runs in the background, one at a time, and the page reads the new numbers with its next `GET /api/catalog/metrics`. At most one per minute: a second call answers 429 with the sentence `the numbers were refreshed less than a minute ago`.",
+    responses(
+        (status = 202, description = "The round is running; the numbers follow on the next read", body = RefreshAccepted),
+        (status = 403, description = "Not an administrator", body = crate::openapi::ErrorResponse),
+        (status = 429, description = "The numbers were refreshed less than a minute ago", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub async fn refresh(State(s): State<Arc<AppState>>) -> Response {
+    {
+        let mut last = s
+            .metrics_refresh
+            .lock()
+            .expect("catalog metrics refresh poisoned");
+        if let Some(at) = *last
+            && at.elapsed() < REFRESH_LIMIT
+        {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({ "error": REFRESH_TOO_SOON })),
+            )
+                .into_response();
+        }
+        // Refusals never reach here, and a refusal must not consume the minute.
+        *last = Some(Instant::now());
+    }
+    let state = Arc::clone(&s);
+    tokio::spawn(async move {
+        // One round at a time; a round that is already running covers this request.
+        run_round(&state).await;
+    });
+    (
+        StatusCode::ACCEPTED,
+        Json(RefreshAccepted { accepted: true }),
     )
         .into_response()
 }
@@ -784,6 +1100,25 @@ mod tests {
         broken: Vec<String>,
         namespace_requests: usize,
         load_requests: usize,
+        /// When set, a namespace list waits here: the single-flight and "no scan on the
+        /// request path" tests hold a scan mid-request instead of sleeping.
+        gate: Option<Arc<Gate>>,
+    }
+
+    /// A held door: a request announces itself and waits until the test lets it through.
+    /// Zero permits at the start, so every request waits.
+    struct Gate {
+        release: tokio::sync::Semaphore,
+        arrived: tokio::sync::Notify,
+    }
+
+    impl Gate {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                release: tokio::sync::Semaphore::new(0),
+                arrived: tokio::sync::Notify::new(),
+            })
+        }
     }
 
     #[derive(Clone, Default)]
@@ -829,8 +1164,20 @@ mod tests {
             self.0.lock().unwrap().broken.push(id.into());
         }
 
+        /// Hold every namespace list until the test releases it; answers the door so the
+        /// test can wait for a request to arrive.
+        fn hold(&self) -> Arc<Gate> {
+            let gate = Gate::new();
+            self.0.lock().unwrap().gate = Some(Arc::clone(&gate));
+            gate
+        }
+
         fn load_requests(&self) -> usize {
             self.0.lock().unwrap().load_requests
+        }
+
+        fn namespace_requests(&self) -> usize {
+            self.0.lock().unwrap().namespace_requests
         }
 
         async fn serve(&self) -> String {
@@ -869,16 +1216,35 @@ mod tests {
         State(fake): State<FakeLakekeeper>,
         Path(wh): Path<String>,
     ) -> Response {
-        let mut lakekeeper = fake.0.lock().unwrap();
-        lakekeeper.namespace_requests += 1;
-        if lakekeeper.broken.contains(&wh) {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": { "message": "boom" } })),
-            )
-                .into_response();
+        let gate = {
+            let mut lakekeeper = fake.0.lock().unwrap();
+            lakekeeper.namespace_requests += 1;
+            if lakekeeper.broken.contains(&wh) {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": { "message": "boom" } })),
+                )
+                    .into_response();
+            }
+            lakekeeper.gate.clone()
+        };
+        if let Some(gate) = gate {
+            // Announce, then wait: the test decides when this scan may continue.
+            gate.arrived.notify_one();
+            let _permit = gate
+                .release
+                .acquire()
+                .await
+                .expect("the gate is not closed");
         }
-        let namespaces = lakekeeper.namespaces.get(&wh).cloned().unwrap_or_default();
+        let namespaces = fake
+            .0
+            .lock()
+            .unwrap()
+            .namespaces
+            .get(&wh)
+            .cloned()
+            .unwrap_or_default();
         Json(json!({
             "namespaces": namespaces.into_iter().map(|ns| vec![ns]).collect::<Vec<_>>()
         }))
@@ -954,9 +1320,12 @@ mod tests {
         assert_eq!(stats.name, "warehouse");
     }
 
-    #[tokio::test]
-    async fn cache_serves_within_60s_and_refreshes_after() {
-        let fake = FakeLakekeeper::new();
+    // -----------------------------------------------------------------------
+    // The background refresh (stardelt-nova#263)
+    // -----------------------------------------------------------------------
+
+    /// A fake catalog with one table: 42 rows, 4096 bytes, committed once.
+    async fn catalog_with_one_table(fake: &FakeLakekeeper) -> String {
         fake.warehouse("warehouse", "wid-warehouse");
         fake.namespaces("wid-warehouse", &["demo"]);
         fake.tables("wid-warehouse", "demo", &["taxi".to_string()]);
@@ -970,37 +1339,110 @@ mod tests {
                 None,
             ),
         );
-        let url = fake.serve().await;
+        fake.serve().await
+    }
+
+    /// The cache's entry for one catalog, cloned.
+    fn entry(state: &AppState, name: &str) -> Option<MetricsEntry> {
+        state.catalog_metrics.lock().unwrap().get(name).cloned()
+    }
+
+    /// Wait until the cache says what the test expects — a bounded poll on the paused
+    /// clock, never a fixed sleep: the work under test is a background task whose moment
+    /// the test does not choose.
+    async fn wait_for_entry(
+        state: &AppState,
+        name: &str,
+        matches: impl Fn(&MetricsEntry) -> bool,
+    ) -> MetricsEntry {
+        for _ in 0..2_000 {
+            if let Some(entry) = entry(state, name)
+                && matches(&entry)
+            {
+                return entry;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        panic!("the cache never held what the test waited for: {name}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn refresher_fills_the_cache_on_schedule() {
+        let fake = FakeLakekeeper::new();
+        let url = catalog_with_one_table(&fake).await;
         let state = crate::router_tests::catalog_scope_test_state("http://127.0.0.1:1", &url);
 
-        let first = cached_or_scan_within(&state, "warehouse", METRICS_TTL)
-            .await
-            .expect("the scan");
-        assert_eq!(first.records, 42);
+        let task = tokio::spawn(refresher_loop(
+            Arc::clone(&state),
+            Duration::from_millis(10),
+            Duration::from_millis(50),
+        ));
+
+        // Not before the first delay: the loop's very first act is to wait.
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        assert!(entry(&state, "warehouse").is_none());
+        assert_eq!(fake.load_requests(), 0, "no scan before the first round");
+
+        // After it, the round fills the cache without anyone asking.
+        let first = wait_for_entry(&state, "warehouse", |e| e.stats.records == 42).await;
+        assert_eq!(first.stats.tables, 1);
+        assert_eq!(first.error, None);
+        assert!(
+            first.updated_ms > 0,
+            "the numbers carry when they were read"
+        );
         assert_eq!(fake.load_requests(), 1);
 
-        // Within the minute the cached numbers are served; nobody is asked again.
-        let second = cached_or_scan_within(&state, "warehouse", METRICS_TTL)
-            .await
-            .expect("the cached answer");
-        assert_eq!(second, first);
-        assert_eq!(
-            fake.load_requests(),
-            1,
-            "a second call within 60 s must not read the catalog again"
+        // The catalog changes; the next round — not a request — picks the new numbers up.
+        fake.load(
+            "wid-warehouse",
+            "demo",
+            "taxi",
+            metadata_with(
+                json!([snapshot(4, "99", "8192", 1_700_000_200_000)]),
+                json!(4),
+                None,
+            ),
         );
+        let second = wait_for_entry(&state, "warehouse", |e| e.stats.records == 99).await;
+        assert!(second.updated >= first.updated, "the entry moved forward");
+        assert_eq!(second.stats.size_bytes, 8192);
+        task.abort();
+    }
 
-        // After it — a zero TTL is "already expired", so the test does not wait a minute —
-        // the catalog is read again and the cache refreshed.
-        let third = cached_or_scan_within(&state, "warehouse", Duration::ZERO)
-            .await
-            .expect("the refresh");
-        assert_eq!(third, first);
-        assert_eq!(
-            fake.load_requests(),
-            2,
-            "an entry older than the TTL is read again"
-        );
+    #[test]
+    fn interval_clamped() {
+        // The default when nothing (or nonsense) is configured.
+        for raw in [None, Some(""), Some("soon"), Some("-5")] {
+            assert_eq!(interval_from(raw), DEFAULT_REFRESH, "{raw:?}");
+        }
+        // Clamped to 30 s … 1 h, and a real value passes through.
+        assert_eq!(interval_from(Some("0")), MIN_REFRESH);
+        assert_eq!(interval_from(Some("1")), MIN_REFRESH);
+        assert_eq!(interval_from(Some("30")), MIN_REFRESH);
+        assert_eq!(interval_from(Some("300")), DEFAULT_REFRESH);
+        assert_eq!(interval_from(Some("3601")), MAX_REFRESH);
+        assert_eq!(interval_from(Some("999999")), MAX_REFRESH);
+        // Whitespace is not a typo.
+        assert_eq!(interval_from(Some(" 120 ")), Duration::from_secs(120));
+    }
+
+    #[test]
+    fn demo_mode_has_no_refresher() {
+        // Demo mode's numbers are the seeded tables; a background scan of a catalog that
+        // does not exist would only log errors.
+        let demo = crate::router_tests::test_state();
+        assert!(demo.demo, "the test state is the demo one");
+        assert!(!refresher_wanted(&demo));
+        assert!(!spawn_refresher(Arc::clone(&demo)), "nothing was spawned");
+        assert!(demo.catalog_metrics.lock().unwrap().is_empty());
+
+        // A real install with a catalog gets one; an empty URL does not.
+        let real = crate::router_tests::catalog_scope_test_state("http://127.0.0.1:1", "http://x");
+        assert!(refresher_wanted(&real));
+        let unconfigured =
+            crate::router_tests::catalog_scope_test_state("http://127.0.0.1:1", "  ");
+        assert!(!refresher_wanted(&unconfigured));
     }
 
     // -----------------------------------------------------------------------
@@ -1127,6 +1569,8 @@ mod tests {
         );
         let lakekeeper = fake.serve().await;
         let state = crate::router_tests::catalog_scope_test_state(&trino, &lakekeeper);
+        // The background refresher's work, done here explicitly: the request only reads.
+        assert!(run_round(&state).await);
 
         let response = get(State(Arc::clone(&state)), Some(Extension(person("ada")))).await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -1138,30 +1582,33 @@ mod tests {
             Some("no-store")
         );
         let body = body_of(response).await;
+        let rows = body["catalogs"].as_array().expect("rows");
         assert_eq!(
-            body["catalogs"],
-            json!([
-                {
-                    "name": "finance",
-                    "schemas": 1,
-                    "tables": 1,
-                    "records": 25,
-                    "sizeBytes": 1024,
-                    "lastCommitMs": 1_700_000_200_000_i64,
-                    "truncated": false,
-                },
-                {
-                    "name": "warehouse",
-                    "schemas": 1,
-                    "tables": 1,
-                    "records": 12,
-                    "sizeBytes": 4096,
-                    "lastCommitMs": 1_700_000_100_000_i64,
-                    "truncated": false,
-                },
-            ]),
+            rows.iter()
+                .map(|row| row["name"].as_str().unwrap_or_default())
+                .collect::<Vec<_>>(),
+            ["finance", "warehouse"],
             "product is not hers, the engine's own catalogs are never listed"
         );
+        assert_eq!(
+            rows[0]["schemas"],
+            1,
+            "finance: {}",
+            serde_json::to_string(&rows[0]).unwrap()
+        );
+        assert_eq!(rows[0]["tables"], 1);
+        assert_eq!(rows[0]["records"], 25);
+        assert_eq!(rows[0]["sizeBytes"], 1024);
+        assert_eq!(rows[0]["lastCommitMs"], 1_700_000_200_000_i64);
+        assert_eq!(rows[0]["truncated"], false);
+        assert_eq!(rows[0]["pending"], false);
+        assert!(
+            rows[0]["updatedAt"].as_u64().is_some_and(|ms| ms > 0),
+            "a read catalog says when its numbers were read"
+        );
+        assert_eq!(rows[1]["tables"], 1);
+        assert_eq!(rows[1]["records"], 12);
+        assert_eq!(rows[1]["lastCommitMs"], 1_700_000_100_000_i64);
         assert_eq!(
             body["totals"],
             json!({
@@ -1210,6 +1657,7 @@ mod tests {
         fake.break_namespaces("wid-finance");
         let lakekeeper = fake.serve().await;
         let state = crate::router_tests::catalog_scope_test_state(&trino, &lakekeeper);
+        assert!(run_round(&state).await);
 
         let response = get(State(Arc::clone(&state)), Some(Extension(person("ada")))).await;
         assert_eq!(
@@ -1228,6 +1676,10 @@ mod tests {
             body["catalogs"][0]["error"], "the catalog returned an unexpected response",
             "a sentence, never a stack trace"
         );
+        assert_eq!(
+            body["catalogs"][0]["pending"], false,
+            "the scan answered — with the sentence, not with a promise"
+        );
         assert_eq!(body["catalogs"][1]["name"], "warehouse");
         assert_eq!(body["catalogs"][1]["tables"], 1);
         assert_eq!(body["catalogs"][1]["records"], 5);
@@ -1235,6 +1687,306 @@ mod tests {
             body["catalogs"][1].get("error"),
             None,
             "a catalog that was read carries no error"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_does_not_scan_when_an_entry_exists() {
+        // The request path answers from the cache, whatever its age: a scan is the
+        // refresher's job, never the page's.
+        let trino = fake_trino(&[("ada", &["warehouse"])]).await;
+        let fake = FakeLakekeeper::new();
+        let lakekeeper = catalog_with_one_table(&fake).await;
+        let state = crate::router_tests::catalog_scope_test_state(&trino, &lakekeeper);
+        {
+            let mut cache = state.catalog_metrics.lock().unwrap();
+            cache.insert(
+                "warehouse".into(),
+                MetricsEntry {
+                    stats: CatalogStats {
+                        name: "warehouse".into(),
+                        schemas: 3,
+                        tables: 7,
+                        records: 1_234,
+                        size_bytes: 5_120,
+                        last_commit_ms: Some(1_700_000_123_000),
+                        truncated: false,
+                        layer: None,
+                    },
+                    updated: Instant::now() - Duration::from_secs(600),
+                    updated_ms: 1_700_000_123_456,
+                    error: None,
+                },
+            );
+        }
+
+        let response = get(State(Arc::clone(&state)), Some(Extension(person("ada")))).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_of(response).await;
+        assert_eq!(body["catalogs"][0]["tables"], 7);
+        assert_eq!(body["catalogs"][0]["records"], 1_234);
+        assert_eq!(body["catalogs"][0]["pending"], false);
+        assert_eq!(body["catalogs"][0]["updatedAt"], 1_700_000_123_456_i64);
+        assert_eq!(
+            fake.load_requests(),
+            0,
+            "the answer came from the cache: the catalog was not read"
+        );
+        assert_eq!(fake.namespace_requests(), 0);
+    }
+
+    #[tokio::test]
+    async fn stale_entry_is_served_and_flagged() {
+        // Ten minutes old — twice a refresh period — is still the answer: it is served at
+        // once, and `updatedAt` says how old it is (the page's "Updated 10 minutes ago").
+        let trino = fake_trino(&[("ada", &["warehouse"])]).await;
+        let fake = FakeLakekeeper::new();
+        let lakekeeper = catalog_with_one_table(&fake).await;
+        let state = crate::router_tests::catalog_scope_test_state(&trino, &lakekeeper);
+        let ten_minutes_ago = crate::jobs::now_ms().saturating_sub(600_000) as i64;
+        state.catalog_metrics.lock().unwrap().insert(
+            "warehouse".into(),
+            MetricsEntry {
+                stats: CatalogStats {
+                    name: "warehouse".into(),
+                    schemas: 1,
+                    tables: 1,
+                    records: 42,
+                    size_bytes: 4096,
+                    last_commit_ms: Some(1_700_000_000_000),
+                    truncated: false,
+                    layer: None,
+                },
+                updated: Instant::now() - Duration::from_secs(600),
+                updated_ms: ten_minutes_ago,
+                error: None,
+            },
+        );
+
+        let response = get(State(Arc::clone(&state)), Some(Extension(person("ada")))).await;
+        let body = body_of(response).await;
+        assert_eq!(body["catalogs"][0]["records"], 42);
+        assert_eq!(body["catalogs"][0]["updatedAt"], ten_minutes_ago);
+        assert_eq!(body["catalogs"][0]["pending"], false);
+        assert_eq!(body["totals"]["records"], 42);
+        assert_eq!(
+            fake.load_requests(),
+            0,
+            "a stale entry is served, not rescanned on the request path"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_catalog_is_pending_and_scanned_once_in_background() {
+        let trino = fake_trino(&[("ada", &["warehouse"])]).await;
+        let fake = FakeLakekeeper::new();
+        let lakekeeper = catalog_with_one_table(&fake).await;
+        let state = crate::router_tests::catalog_scope_test_state(&trino, &lakekeeper);
+
+        // No entry yet: the row is listed as pending, and the request does not wait.
+        let response = get(State(Arc::clone(&state)), Some(Extension(person("ada")))).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_of(response).await;
+        assert_eq!(body["catalogs"][0]["name"], "warehouse");
+        assert_eq!(body["catalogs"][0]["pending"], true);
+        assert_eq!(body["catalogs"][0]["tables"], 0);
+        assert_eq!(body["catalogs"][0]["updatedAt"], Value::Null);
+        assert_eq!(
+            body["totals"]["catalogs"], 0,
+            "pending rows are not counted"
+        );
+
+        // One background scan, no second: it stores the numbers.
+        let entry = wait_for_entry(&state, "warehouse", |entry| entry.stats.records == 42).await;
+        assert_eq!(entry.error, None);
+        let response = get(State(Arc::clone(&state)), Some(Extension(person("ada")))).await;
+        let body = body_of(response).await;
+        assert_eq!(body["catalogs"][0]["pending"], false);
+        assert_eq!(body["catalogs"][0]["records"], 42);
+        assert_eq!(fake.namespace_requests(), 1);
+        assert_eq!(fake.load_requests(), 1);
+    }
+
+    #[tokio::test]
+    async fn single_flight_two_requests_one_scan() {
+        let trino = fake_trino(&[("ada", &["warehouse"])]).await;
+        let fake = FakeLakekeeper::new();
+        let lakekeeper = catalog_with_one_table(&fake).await;
+        let state = crate::router_tests::catalog_scope_test_state(&trino, &lakekeeper);
+
+        // Hold the scan inside the catalog, then send two requests for the same new
+        // catalog: both answer pending, exactly one scan is on its way.
+        let gate = fake.hold();
+        for _ in 0..2 {
+            let response = get(State(Arc::clone(&state)), Some(Extension(person("ada")))).await;
+            let body = body_of(response).await;
+            assert_eq!(body["catalogs"][0]["pending"], true);
+        }
+        gate.arrived.notified().await;
+        assert_eq!(fake.namespace_requests(), 1, "one scan, not two");
+
+        gate.release.add_permits(1);
+        wait_for_entry(&state, "warehouse", |entry| entry.stats.records == 42).await;
+        assert_eq!(fake.namespace_requests(), 1);
+        assert_eq!(fake.load_requests(), 1);
+    }
+
+    #[tokio::test]
+    async fn failed_scan_keeps_old_numbers_and_sets_error() {
+        let fake = FakeLakekeeper::new();
+        let lakekeeper = catalog_with_one_table(&fake).await;
+        let state =
+            crate::router_tests::catalog_scope_test_state("http://127.0.0.1:1", &lakekeeper);
+        assert!(run_round(&state).await);
+        let good = entry(&state, "warehouse").expect("the first round stores the numbers");
+        assert_eq!(good.stats.records, 42);
+        assert_eq!(good.error, None);
+
+        // The catalog breaks; the round keeps the numbers, adds the sentence, and leaves
+        // the timestamp alone — the numbers really are from that moment.
+        fake.break_namespaces("wid-warehouse");
+        assert!(run_round(&state).await);
+        let after = entry(&state, "warehouse").expect("still an entry");
+        assert_eq!(after.stats.records, 42, "a failed refresh wipes nothing");
+        assert_eq!(
+            after.updated_ms, good.updated_ms,
+            "the numbers' age is honest"
+        );
+        assert_eq!(
+            after.error.as_deref(),
+            Some("the catalog returned an unexpected response")
+        );
+    }
+
+    #[tokio::test]
+    async fn totals_exclude_pending() {
+        let trino = fake_trino(&[("ada", &["warehouse", "finance"])]).await;
+        let fake = FakeLakekeeper::new();
+        fake.warehouse("warehouse", "wid-warehouse");
+        fake.warehouse("finance", "wid-finance");
+        let state = crate::router_tests::catalog_scope_test_state(&trino, &fake.serve().await);
+        // Only one of the two has numbers.
+        state.catalog_metrics.lock().unwrap().insert(
+            "warehouse".into(),
+            MetricsEntry {
+                stats: CatalogStats {
+                    name: "warehouse".into(),
+                    schemas: 2,
+                    tables: 3,
+                    records: 40,
+                    size_bytes: 1_024,
+                    last_commit_ms: None,
+                    truncated: false,
+                    layer: None,
+                },
+                updated: Instant::now(),
+                updated_ms: 1_700_000_000_000,
+                error: None,
+            },
+        );
+
+        let response = get(State(Arc::clone(&state)), Some(Extension(person("ada")))).await;
+        let body = body_of(response).await;
+        assert_eq!(
+            body["catalogs"].as_array().unwrap().len(),
+            2,
+            "both are listed"
+        );
+        assert_eq!(
+            body["totals"],
+            json!({
+                "catalogs": 1,
+                "schemas": 2,
+                "tables": 3,
+                "records": 40,
+                "sizeBytes": 1024,
+            }),
+            "a pending catalog's zeros are not numbers"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_endpoint_admin_only_and_rate_limited() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        fn identity(admin: bool) -> Identity {
+            Identity {
+                sub: "s".into(),
+                display_name: "u".into(),
+                email: None,
+                name: None,
+                groups: Vec::new(),
+                roles: Vec::new(),
+                groups_overage: false,
+                is_admin: admin,
+            }
+        }
+
+        async fn call(state: Arc<AppState>, identity: Option<Identity>) -> (StatusCode, Value) {
+            // The same order `main` builds: require_admin inner, the principal outer.
+            let app = crate::admin_router()
+                .route_layer(axum::middleware::from_fn(crate::auth::require_admin))
+                .layer(axum::middleware::from_fn(
+                    move |mut req: Request<Body>, next: axum::middleware::Next| {
+                        let identity = identity.clone();
+                        async move {
+                            if let Some(identity) = identity {
+                                req.extensions_mut().insert(Principal {
+                                    identity,
+                                    via: "session",
+                                    access_token: None,
+                                });
+                            }
+                            next.run(req).await
+                        }
+                    },
+                ))
+                .with_state(state);
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/catalog/metrics/refresh")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            (status, body_of(response).await)
+        }
+
+        let state = crate::router_tests::catalog_scope_test_state(
+            "http://127.0.0.1:1",
+            "http://127.0.0.1:1",
+        );
+
+        // The same refusal `/api/apps` answers: a refresh is an operator action.
+        let (status, body) = call(Arc::clone(&state), Some(identity(false))).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            body["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("platform administrators"),
+            "{body}"
+        );
+
+        // The refusal consumed nothing, so an administrator right after is accepted; the
+        // round runs in the background and the numbers follow on the next read.
+        let (status, body) = call(Arc::clone(&state), Some(identity(true))).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(body["accepted"], true);
+
+        // At most one per minute: a second call is refused with the sentence.
+        let (status, body) = call(Arc::clone(&state), Some(identity(true))).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body["error"], REFRESH_TOO_SOON);
+        assert_eq!(
+            body["error"],
+            "the numbers were refreshed less than a minute ago"
         );
     }
 
@@ -1274,6 +2026,14 @@ mod tests {
         assert_eq!(
             body["totals"]["sizeBytes"], body["catalogs"][0]["sizeBytes"],
             "one catalog: the totals are its numbers"
+        );
+        // Demo mode has nothing to scan, so nothing waits: the row is as fresh as the answer.
+        assert_eq!(body["catalogs"][0]["pending"], false);
+        assert!(
+            body["catalogs"][0]["updatedAt"]
+                .as_u64()
+                .is_some_and(|ms| ms > 0),
+            "the demo numbers are read now"
         );
     }
 }

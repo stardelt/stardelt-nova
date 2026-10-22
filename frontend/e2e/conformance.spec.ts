@@ -4242,9 +4242,9 @@ test.describe('overview metrics', () => {
   // stubbed; the rest of the shell uses the dev backend, as the other suites do.
   const now = Date.now()
   const CATALOGS = [
-    { name: 'gold', schemas: 2, tables: 7, records: 1234, sizeBytes: 1536, lastCommitMs: now - 5 * 60_000, truncated: false },
-    { name: 'silver', schemas: 1, tables: 1, records: 1, sizeBytes: 512, lastCommitMs: now - 2 * 3600_000, truncated: false },
-    { name: 'bronze', schemas: 2, tables: 1, records: 0, sizeBytes: 0, lastCommitMs: null, truncated: false },
+    { name: 'gold', schemas: 2, tables: 7, records: 1234, sizeBytes: 1536, lastCommitMs: now - 5 * 60_000, truncated: false, pending: false, updatedAt: now },
+    { name: 'silver', schemas: 1, tables: 1, records: 1, sizeBytes: 512, lastCommitMs: now - 2 * 3600_000, truncated: false, pending: false, updatedAt: now },
+    { name: 'bronze', schemas: 2, tables: 1, records: 0, sizeBytes: 0, lastCommitMs: null, truncated: false, pending: false, updatedAt: now },
   ]
   const TOTALS = { catalogs: 3, schemas: 5, tables: 9, records: 1235, sizeBytes: 2048 }
   const METRICS = { catalogs: CATALOGS, totals: TOTALS, generatedAt: now }
@@ -4439,6 +4439,120 @@ test.describe('overview metrics', () => {
     expect((await auditPage(page)).filter((finding) => finding.rule === 'U5')).toEqual([])
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
     expect(overflow).toBeLessThanOrEqual(1)
+    await context.close()
+  })
+
+  // stardelt-nova#263: the numbers are read in the background every five minutes, so the
+  // page never waits for a scan. A catalog with none yet says so; the card says how fresh
+  // the numbers are; an administrator can ask for a round now.
+  test('pending_rows_then_numbers', async ({ browser }) => {
+    const pending = {
+      catalogs: [
+        { name: 'gold', schemas: 0, tables: 0, records: 0, sizeBytes: 0, lastCommitMs: null, truncated: false, pending: true, updatedAt: null },
+        { ...CATALOGS[2], name: 'bronze' },
+      ],
+      // A pending row is not counted: its zeros are not numbers.
+      totals: { catalogs: 1, schemas: 2, tables: 1, records: 0, sizeBytes: 0 },
+      generatedAt: now,
+    }
+    const context = await browser.newContext({ viewport: { width: 1280, height: 800 } })
+    const page = await context.newPage()
+    let reads = 0
+    await page.route('**/api/catalog/metrics', (route) => {
+      reads += 1
+      return json(route, reads === 1 ? pending : METRICS)
+    })
+
+    await page.goto('/')
+    const table = page.getByRole('table', { name: 'Catalogs you can see' })
+    const gold = table.locator('tbody tr').filter({ hasText: 'gold' })
+    // No numbers yet: "calculating…" in muted text, never a zero and never a spinner.
+    await expect(gold.getByText('calculating…')).toHaveCount(5)
+    await expect(gold.getByText('calculating…').first()).toHaveClass(/text-text-mute/)
+    // The tiles answer at once with the totals the API sent, pending row left out.
+    await expect(tile(page, 'Catalogs')).toContainText('1')
+    await expect(tile(page, 'Tables')).toContainText('1')
+    await expect(tile(page, 'Tables')).toContainText('0 rows')
+
+    // The page asks again five seconds later (the interval only runs while something is
+    // pending) and the numbers replace the placeholders.
+    await expect(gold).toContainText('1,234', { timeout: 20_000 })
+    await expect(gold.getByText('calculating…')).toHaveCount(0)
+    await expect(tile(page, 'Tables')).toContainText('9')
+    await context.close()
+  })
+
+  test('updated_caption_and_admin_refresh_button', async ({ browser }) => {
+    const updatedAt = now - 4 * 60_000
+    const metrics = { catalogs: CATALOGS.map(catalog => ({ ...catalog, updatedAt })), totals: TOTALS, generatedAt: now }
+    const context = await browser.newContext({ viewport: { width: 1280, height: 800 } })
+    const page = await context.newPage()
+    let refreshes = 0
+    let reads = 0
+    await page.route('**/api/catalog/metrics', (route) => {
+      reads += 1
+      return json(route, metrics)
+    })
+    await page.route('**/api/catalog/metrics/refresh', (route) => {
+      refreshes += 1
+      return json(route, { accepted: true }, 202)
+    })
+
+    await page.goto('/')
+    // The card says how fresh the numbers are, and the tooltip has the exact moment.
+    const caption = page.getByText(`Updated ${relativeTime(updatedAt)}`)
+    await expect(caption).toBeVisible()
+    await expect(caption).toHaveAttribute('title', formatTime(updatedAt))
+
+    // dev mode is the administrator: the button is there, and the round is a POST.
+    const refresh = page.getByRole('button', { name: 'Refresh' })
+    await expect(refresh).toBeVisible()
+    const before = reads
+    await refresh.click()
+    await expect.poll(() => refreshes).toBe(1)
+    // ...and the numbers follow: the page asks again a few seconds after the round starts.
+    await expect.poll(() => reads, { timeout: 20_000 }).toBeGreaterThan(before)
+    await context.close()
+  })
+
+  test('non_admin_has_no_refresh', async ({ browser }) => {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 800 } })
+    const page = await context.newPage()
+    await page.route('**/api/me', (route) =>
+      json(route, { user: 'alice', auth_mode: 'oidc', demo: false, warehouse: 'warehouse', is_admin: false, groups: ['analysts'] }))
+    await page.route('**/api/catalog/metrics', (route) => json(route, METRICS))
+
+    await page.goto('/')
+    await expect(page.getByRole('table', { name: 'Catalogs you can see' })).toBeVisible()
+    // The numbers are shared and the freshness is everyone's; the round is an operator's.
+    await expect(page.getByText(/^Updated /)).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Refresh' })).toHaveCount(0)
+    await context.close()
+  })
+
+  test('error_row_keeps_old_numbers', async ({ browser }) => {
+    const error = 'the catalog is not reachable'
+    const catalogs = [
+      CATALOGS[0],
+      {
+        name: 'broken', schemas: 4, tables: 9, records: 77, sizeBytes: 2048,
+        lastCommitMs: now - 3600_000, truncated: false, pending: false,
+        updatedAt: now - 600_000, error,
+      },
+    ]
+    const { context, page } = await open(browser, {
+      metrics: { catalogs, totals: TOTALS, generatedAt: now },
+    })
+    await page.goto('/')
+
+    // A failed refresh keeps the last good numbers and adds the sentence: the page does
+    // not blank a catalog it could read ten minutes ago.
+    const broken = page.getByRole('table', { name: 'Catalogs you can see' }).locator('tbody tr').filter({ hasText: 'broken' })
+    await expect(broken.getByRole('status')).toHaveText(error)
+    await expect(broken).toContainText('9')
+    await expect(broken).toContainText('77')
+    await expect(broken).toContainText('2.0 KiB')
+    await expect(broken.getByText('calculating…')).toHaveCount(0)
     await context.close()
   })
 })
