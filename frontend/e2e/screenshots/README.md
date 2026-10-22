@@ -41,3 +41,10 @@ holds nothing.
 tiles show the totals, the Catalogs card lists `warehouse` with its schemas, tables, size,
 rows and last change, and the static Iceberg tile is gone. The phone width shows the
 catalog table scrolling inside its card while the page itself does not widen.
+
+`project-footer-*.png` — the project footer (stardelt-nova#268) at 1280×800 and 360×740,
+dark and light, from the built demo UI. At the bottom of the sidebar, under the person
+block, the version that is running (`stardelt v0.1.0`, the frontend package's version,
+baked into the build) and the two links out of the product — Documentation and Source.
+The phone width shows the drawer open, because that is where the footer lives.
+

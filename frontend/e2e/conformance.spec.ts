@@ -90,6 +90,82 @@ test.describe('keyboard', () => {
   })
 })
 
+test.describe('project footer', () => {
+  // The project names itself at the bottom of the sidebar (stardelt-nova#268): the version
+  // that is running, and where to read more or report a problem. The version is the build's
+  // own — the frontend package's version, baked in by `vite.config.ts` — so nothing is
+  // asked of the network to show it.
+  const DOCS = 'https://stardelt.io'
+  const SOURCE = 'https://github.com/stardelt/stardelt'
+  const LINKS = [['Documentation', DOCS], ['Source', SOURCE]] as const
+
+  test('the footer names the project, its version and the two places to read more', async ({ browser }) => {
+    const page = await (await browser.newContext({ viewport: { width: 1280, height: 800 } })).newPage()
+    const outbound: string[] = []
+    page.on('request', (request) => {
+      const url = request.url()
+      if (url.startsWith('https://stardelt.io') || url.startsWith('https://github.com')) outbound.push(url)
+    })
+    await page.goto('/')
+
+    const footer = page.locator('#primary-nav footer')
+    await expect(footer).toBeVisible()
+    // The version of the frontend package (frontend/package.json), read at build time.
+    await expect(footer).toContainText('stardelt v0.1.0')
+
+    for (const [name, href] of LINKS) {
+      const link = footer.getByRole('link', { name })
+      await expect(link).toBeVisible()
+      await expect(link).toHaveAttribute('href', href)
+      await expect(link).toHaveAttribute('target', '_blank')
+      await expect(link).toHaveAttribute('rel', 'noopener noreferrer')
+    }
+    // Nothing left the browser: the links are anchors, and the version is in the build.
+    expect(outbound).toEqual([])
+    await page.context().close()
+  })
+
+  test('both links are reachable with the keyboard at 360 px', async ({ browser }) => {
+    const page = await (await browser.newContext({ viewport: { width: 360, height: 740 } })).newPage()
+    await page.goto('/')
+    // On a phone the sidebar is a drawer; open it so the links are where a person can see them.
+    await page.getByRole('button', { name: 'Open menu' }).click()
+    await expect(page.getByRole('button', { name: 'Close menu' })).toBeVisible()
+
+    for (const [name] of LINKS) {
+      await expect(page.locator('#primary-nav footer').getByRole('link', { name })).toBeVisible()
+    }
+
+    // Walk the tab order from the top of the document: the navigation comes first, the
+    // footer links last.
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur())
+    const reached: string[] = []
+    for (let i = 0; i < 60 && reached.length < LINKS.length; i++) {
+      await page.keyboard.press('Tab')
+      const focused = await page.evaluate(() => {
+        const el = document.activeElement as HTMLElement | null
+        if (!el || el.tagName !== 'A') return null
+        const style = getComputedStyle(el)
+        return {
+          text: (el.textContent ?? '').trim(),
+          // U6: the focused link shows where the keyboard is.
+          indicator: (style.outlineStyle !== 'none' && parseFloat(style.outlineWidth) > 0) || style.boxShadow !== 'none',
+        }
+      })
+      if (!focused || !LINKS.some(([name]) => name === focused.text)) continue
+      reached.push(focused.text)
+      expect(focused.indicator, `${focused.text} has no focus indicator`).toBe(true)
+      // The focused link is on the screen, inside the 360 px phone.
+      const box = await page.getByRole('link', { name: focused.text }).boundingBox()
+      expect(box).not.toBeNull()
+      expect(box!.x).toBeGreaterThanOrEqual(0)
+      expect(box!.x + box!.width).toBeLessThanOrEqual(360)
+    }
+    expect(reached).toEqual(['Documentation', 'Source'])
+    await page.context().close()
+  })
+})
+
 test.describe('roles', () => {
   test('U13 a signed-in non-admin sees no admin surface and calls no admin endpoint', async ({ browser }) => {
     const page = await (await browser.newContext({ viewport: { width: 1280, height: 800 } })).newPage()
