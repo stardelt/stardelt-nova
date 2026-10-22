@@ -201,7 +201,7 @@
         "tags": [
           "public"
         ],
-        "description": "What is in each catalog the caller may browse: schemas, tables, rows, bytes on the object store and the newest commit, plus the sums. Rows are ordered bronze, silver, gold first, then by name, and carry `layer` when the catalog is one of the three (the `stardelt.io/layer` label, else the catalog's own name). The catalog list is the caller's own `SHOW CATALOGS` (`GET /api/catalog/catalogs`); a catalog the caller may not browse is never read and never appears. The numbers come from the catalog's Iceberg metadata (the current snapshot's `total-records` and `total-files-size`), so the endpoint runs no query. They are cached per catalog for 60 s — they describe the catalog, not the person — and at most 200 tables per catalog are loaded: `truncated` says the rows and bytes are a sample while `tables` stays exact. A catalog that cannot be read is listed with zeros and an `error` sentence; only an unreachable engine or catalog fails the request with 502. 403 when no catalog is open to the caller. Never cached by the client.",
+        "description": "What is in each catalog the caller may browse: schemas, tables, rows, bytes on the object store and the newest commit, plus the sums. Rows are ordered bronze, silver, gold first, then by name, and carry `layer` when the catalog is one of the three (the `stardelt.io/layer` label, else the catalog's own name). The catalog list is the caller's own `SHOW CATALOGS` (`GET /api/catalog/catalogs`); a catalog the caller may not browse is never read and never appears. The numbers come from the catalog's Iceberg metadata (the current snapshot's `total-records` and `total-files-size`), so the endpoint runs no query, and they are read in the background every five minutes (`NOVA_METRICS_REFRESH_SECS`): a request answers from the last numbers at once, whatever their age, and `updatedAt` says when they were read. A catalog with no numbers yet is answered with zeros and `pending: true` while one background scan reads it; `totals` leave pending rows out. At most 200 tables per catalog are loaded: `truncated` says the rows and bytes are a sample while `tables` stays exact. A catalog whose scan failed keeps its last numbers and carries an `error` sentence (zeros for one that never answered); only an unreachable engine or catalog fails the request with 502. 403 when no catalog is open to the caller. Never cached by the client.",
         "operationId": "get",
         "responses": {
           "200": {
@@ -226,6 +226,47 @@
           },
           "502": {
             "description": "The query engine is not reachable, so the catalogs cannot be named",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/catalog/metrics/refresh": {
+      "post": {
+        "tags": [
+          "public"
+        ],
+        "description": "Read every catalog again now, instead of waiting for the next background round (every five minutes). Administrator only: it is an operator action on the whole warehouse, and `main` puts the same `require_admin` in front of it as `/api/apps`, so a non-administrator answers 403. Answers 202 — the round runs in the background, one at a time, and the page reads the new numbers with its next `GET /api/catalog/metrics`. At most one per minute: a second call answers 429 with the sentence `the numbers were refreshed less than a minute ago`.",
+        "operationId": "refresh",
+        "responses": {
+          "202": {
+            "description": "The round is running; the numbers follow on the next read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RefreshAccepted"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not an administrator",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The numbers were refreshed less than a minute ago",
             "content": {
               "application/json": {
                 "schema": {
@@ -3737,6 +3778,9 @@
           },
           {
             "type": "object",
+            "required": [
+              "pending"
+            ],
             "properties": {
               "error": {
                 "type": [
@@ -3744,11 +3788,23 @@
                   "null"
                 ],
                 "description": "Why this catalog could not be read — absent for a catalog that was. A sentence,\nnever URL, token or stack trace."
+              },
+              "pending": {
+                "type": "boolean",
+                "description": "No numbers yet — the catalog appeared after the last round (or before the first),\nand one scan is reading it now. Its numbers are zeros and the totals leave it out."
+              },
+              "updatedAt": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "description": "When these numbers were read (Unix ms), so the page can say \"Updated 4 minutes\nago\". `null` while `pending`: there are no numbers yet."
               }
             }
           }
         ],
-        "description": "One catalog in the answer: the numbers, plus the sentence when the scan failed. A\nfailed catalog is zeros, never omitted — a page that silently drops a catalog says\n\"you have none\", which is not what happened."
+        "description": "One catalog in the answer: the numbers, plus the sentence when the last scan failed. A\nfailed catalog is zeros only when it never answered — a catalog that answered once\nkeeps those numbers — never omitted: a page that silently drops a catalog says \"you\nhave none\", which is not what happened."
       },
       "CatalogStats": {
         "type": "object",
@@ -4255,18 +4311,18 @@
           "generatedAt": {
             "type": "integer",
             "format": "int64",
-            "description": "When this answer was built (Unix ms). Per-catalog numbers may be up to a minute\nolder (they are cached).",
+            "description": "When this answer was built (Unix ms). The numbers themselves are from the last\nbackground round, which `updatedAt` on each row names.",
             "minimum": 0
           },
           "totals": {
             "$ref": "#/components/schemas/MetricsTotals",
-            "description": "The sums over `catalogs`."
+            "description": "The sums over `catalogs`, leaving out the `pending` ones."
           }
         }
       },
       "MetricsTotals": {
         "type": "object",
-        "description": "The sums over every catalog in the answer. Failed catalogs contribute their zeros.",
+        "description": "The sums over every catalog in the answer. Pending catalogs contribute nothing: their\nzeros are not numbers, and a tile must not read \"0 tables\" while the scan runs.",
         "required": [
           "catalogs",
           "schemas",
@@ -4278,7 +4334,7 @@
           "catalogs": {
             "type": "integer",
             "format": "int32",
-            "description": "How many catalogs are listed.",
+            "description": "How many catalogs with numbers are listed.",
             "minimum": 0
           },
           "records": {
@@ -4926,6 +4982,19 @@
             "type": "integer",
             "format": "int64",
             "minimum": 0
+          }
+        }
+      },
+      "RefreshAccepted": {
+        "type": "object",
+        "description": "The answer to an accepted `POST /api/catalog/metrics/refresh`: the round runs in the\nbackground, and the page reads the new numbers with its next request.",
+        "required": [
+          "accepted"
+        ],
+        "properties": {
+          "accepted": {
+            "type": "boolean",
+            "description": "Always `true`: a `202` is the acceptance, and the round has already started."
           }
         }
       },

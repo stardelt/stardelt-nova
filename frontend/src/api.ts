@@ -87,11 +87,13 @@ export type Catalog = { name: string; id: string; layer?: string | null }
 export type CatalogList = { catalogs: Catalog[]; default: string }
 
 /**
- * One catalog's numbers (`GET /api/catalog/metrics`, stardelt-nova#249), read from the
- * catalog's Iceberg metadata rather than counted by a query. `lastCommitMs` is the newest
- * commit among the loaded tables (null when none has one). `truncated` means `records`
- * and `sizeBytes` cover the first 200 tables while `tables` stays exact. `error` is the
- * sentence for a catalog whose scan failed; its numbers are then zeros, never omitted.
+ * One catalog's numbers (`GET /api/catalog/metrics`, stardelt-nova#249, #263), read from
+ * the catalog's Iceberg metadata rather than counted by a query. `lastCommitMs` is the
+ * newest commit among the loaded tables (null when none has one). `truncated` means
+ * `records` and `sizeBytes` cover the first 200 tables while `tables` stays exact. `error`
+ * is the sentence for a catalog whose last scan failed; its numbers are then the last good
+ * ones, or zeros for a catalog that never answered, never omitted. `updatedAt` is when
+ * those numbers were read (null while `pending`: no numbers yet, one scan is reading it).
  * `layer` and the row order are the catalog layers of stardelt-nova#109.
  */
 export type CatalogStat = {
@@ -104,9 +106,11 @@ export type CatalogStat = {
   lastCommitMs: number | null
   truncated: boolean
   error?: string
+  updatedAt: number | null
+  pending: boolean
 }
 
-/** The sums over the catalogs the caller may see; a failed catalog contributes its zeros. */
+/** The sums over the catalogs the caller may see; pending catalogs are left out. */
 export type CatalogMetricsTotals = {
   catalogs: number
   schemas: number
@@ -942,6 +946,8 @@ export const api = {
   catalogs:     ()                            => jget<CatalogList>('/api/catalog/catalogs'),
   /** Schemas, tables, rows, bytes and the newest commit per catalog, plus the totals (#249). */
   catalogMetrics: ()                          => jget<CatalogMetrics>('/api/catalog/metrics'),
+  /** Read every catalog again now (administrators; 429 when a minute has not passed). */
+  refreshCatalogMetrics: ()                   => jpost<{ accepted: boolean }>('/api/catalog/metrics/refresh', {}),
   namespaces:   (catalog?: string)            => jget<NamespaceList>(catalogPath('/api/catalog/namespaces', catalog)),
   tables:       (ns: string, catalog?: string) =>
     jget<TableList>(catalogPath(`/api/catalog/namespaces/${seg(ns)}/tables`, catalog)),

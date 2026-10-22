@@ -160,9 +160,9 @@ pub struct CatalogsResponse {
 }
 
 #[derive(Deserialize)]
-struct WarehouseListItem {
-    id: String,
-    name: String,
+pub(crate) struct WarehouseListItem {
+    pub(crate) id: String,
+    pub(crate) name: String,
 }
 
 #[derive(Deserialize)]
@@ -234,7 +234,12 @@ pub fn valid_catalog(name: &str) -> bool {
 }
 
 /// List every Lakekeeper warehouse, with Nova's own service token (`catalog_token.rs`).
-async fn warehouse_list(state: &AppState) -> Result<Vec<WarehouseListItem>, WarehouseError> {
+///
+/// `crate`-wide because the catalog-metrics refresher lists the same warehouses to decide
+/// what to scan (`catalog_metrics.rs`, stardelt-nova#263).
+pub(crate) async fn warehouse_list(
+    state: &AppState,
+) -> Result<Vec<WarehouseListItem>, WarehouseError> {
     let url = format!("{}/management/v1/warehouse", state.lakekeeper_url);
     let mut request = state.http.get(&url);
     if let Some(authorization) = lakekeeper_authorization(state)

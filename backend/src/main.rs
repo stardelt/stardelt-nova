@@ -104,7 +104,7 @@ mod trino;
 mod user_settings;
 mod warehouses;
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
 
 use axum::{
@@ -142,11 +142,19 @@ pub struct AppState {
     /// subject (`catalog::allowed_catalogs`). Nova is never the authority: it asks Trino
     /// with the caller's own token and only fails **before** the person tries.
     pub catalog_access: Mutex<HashMap<String, (std::time::Instant, BTreeSet<String>)>>,
-    /// What one catalog holds — schemas, tables, rows, bytes, newest commit — cached for
-    /// 60 s per catalog (`catalog_metrics.rs`). Caller independent: the numbers describe
-    /// the catalog, the caller only decides which catalogs are listed.
-    pub catalog_metrics:
-        Mutex<HashMap<String, (std::time::Instant, catalog_metrics::CatalogStats)>>,
+    /// What one catalog holds — schemas, tables, rows, bytes, newest commit — one entry per
+    /// catalog, filled by the background refresher (`catalog_metrics.rs`, stardelt-nova#263)
+    /// and read by every request. Caller independent: the numbers describe the catalog, the
+    /// caller only decides which catalogs are listed.
+    pub catalog_metrics: Mutex<HashMap<String, catalog_metrics::MetricsEntry>>,
+    /// Catalogs a scan holds right now: one scan per catalog at a time, whether the
+    /// refresher or a request's background scan started it (single-flight, #263).
+    pub metrics_in_flight: Mutex<HashSet<String>>,
+    /// One refresh round at a time: the five-minute loop and an administrator's Refresh
+    /// never scan the warehouse together (#263).
+    pub metrics_round: tokio::sync::Mutex<()>,
+    /// When an administrator last asked for a refresh: at most one per minute (#263).
+    pub metrics_refresh: Mutex<Option<std::time::Instant>>,
     /// Which medallion layer each catalog carries (`bronze`, `silver`, `gold`), from the
     /// `stardelt.io/layer` label on the `Catalog` resources and cached for 60 s
     /// (`catalog::catalog_layers`). Caller independent: a layer describes the catalog, the
@@ -538,7 +546,8 @@ fn api_router() -> Router<Arc<AppState>> {
         // The SQL compute classes and the one this caller lands in (stardelt-nova#236): read
         // from the `SqlWarehouse` objects, non-authoritative — the engine selects by identity.
         .route("/warehouses", get(warehouses::list))
-        // What is in each of them (stardelt-nova#249): one row per catalog, cached 60 s.
+        // What is in each of them (stardelt-nova#249): one row per catalog, read in the
+        // background every five minutes by the refresher (#263).
         .route("/catalog/metrics", get(catalog_metrics::get))
         .route(
             "/catalog/namespaces",
@@ -659,6 +668,10 @@ fn admin_router() -> Router<Arc<AppState>> {
             "/admin/catalogs/{name}/access",
             put(admin_catalogs::update_access),
         )
+        // Read every catalog's numbers again now, rather than wait for the five-minute
+        // round (#263). The same administrator gate as `/api/apps` above; a non-admin
+        // answers its 403 sentence.
+        .route("/catalog/metrics/refresh", post(catalog_metrics::refresh))
 }
 
 #[tokio::main]
@@ -804,6 +817,9 @@ async fn main() -> anyhow::Result<()> {
         catalog_ids: RwLock::new(HashMap::new()),
         catalog_access: Mutex::new(HashMap::new()),
         catalog_metrics: Mutex::new(HashMap::new()),
+        metrics_in_flight: Mutex::new(HashSet::new()),
+        metrics_round: tokio::sync::Mutex::new(()),
+        metrics_refresh: Mutex::new(None),
         catalog_layers: Mutex::new(None),
         http,
         demo: demo_mode,
@@ -824,6 +840,11 @@ async fn main() -> anyhow::Result<()> {
         people_touched: Mutex::new(HashMap::new()),
         notebooks,
     });
+
+    // The Overview's numbers are read in the background, never on a request: every five
+    // minutes, with Nova's own service token, one round at a time (stardelt-nova#263).
+    // Not in demo mode (the seeded tables are the numbers) and not without a catalog.
+    catalog_metrics::spawn_refresher(Arc::clone(&state));
 
     let auth = match auth_mode {
         auth::AuthMode::Dev => None,
@@ -1004,6 +1025,9 @@ mod router_tests {
             catalog_ids: RwLock::new(HashMap::new()),
             catalog_access: Mutex::new(HashMap::new()),
             catalog_metrics: Mutex::new(HashMap::new()),
+            metrics_in_flight: Mutex::new(HashSet::new()),
+            metrics_round: tokio::sync::Mutex::new(()),
+            metrics_refresh: Mutex::new(None),
             catalog_layers: Mutex::new(None),
             http: reqwest::Client::new(),
             demo: demo_mode,
