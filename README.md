@@ -28,6 +28,7 @@ Browser
          ├─ GET/PUT /api/catalog/tables/:ns/:tbl/documentation  description, tags, owner, domain
          ├─ PUT  /api/catalog/tables/:ns/:tbl/columns/:column/description  one column's description
          ├─ POST /api/query            → Trino query engine
+         ├─ GET  /api/warehouses       the SQL compute classes; the one the caller uses
          ├─ GET  /api/jobs             recent activity
          ├─ GET  /api/saved-queries    the caller's saved queries (needs the state store)
          ├─ POST /api/saved-queries    save one: {title, sql, warehouse?}
@@ -243,6 +244,35 @@ same resource overwrites a change made in the dialog; keep the manifest as the r
 do not reconcile this resource from both places. Nova's ServiceAccount needs `patch` on
 `catalogs.stardelt.io` for the dialog (part of the platform's `nova-pipelines` Role);
 without a cluster connection the route answers `503` and demo mode changes memory.
+
+### SQL warehouses
+
+`GET /api/warehouses` answers the `SqlWarehouse` objects of the platform namespace — the
+compute classes the platform renders into Trino resource groups — largest class first
+(`large`, `medium`, `small`, `xs`, name order inside one size):
+
+```json
+[{"name": "large", "displayName": "Large", "size": "large", "running": 6, "queued": 70,
+  "memoryShare": "70%", "default": false, "canUse": true, "yours": true}]
+```
+
+`running`, `queued` and `memoryShare` are the class defaults (xs 2/10/10 %, small
+10/100/20 %, medium 5/50/40 %, large 6/70/70 %) with each field overridden by
+`spec.concurrency`. `canUse` says one of the caller's groups is in `spec.grants`, matched by
+the exact group name. `yours` is the first usable row — the class the engine's first matching
+selector picks — or the one `default: true` class when nothing is granted. An administrator
+gets one synthetic row first (`admin` / `Administrators`, 50 running, 100 queued, 100 % of the
+memory, no size: the `admin` root group), with `yours` on it and `false` on every other row.
+
+Nova is not the authority: the engine picks the class from the authenticated identity, so
+bypassing Nova and calling Trino directly changes nothing, and a warehouse grant is scheduler
+placement rather than an admission decision. The SQL editor shows
+`Warehouse: <displayName or name> (<size>)` next to **Run**, and the Profile page shows the
+same line as `SQL warehouse`; the `title` tooltip carries the three numbers. This is not
+`me.warehouse`, which is the default **catalog** a query addresses. Without a cluster
+connection (demo mode, a local run) the answer is the one `small` class. Nova's
+ServiceAccount needs `get`/`list` on `sqlwarehouses.stardelt.io` (part of the platform's
+`nova-pipelines` Role); a cluster that refuses or fails is a `502`, never an empty list.
 
 ## Demo mode (no cluster)
 

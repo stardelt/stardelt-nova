@@ -3370,6 +3370,51 @@
           }
         }
       }
+    },
+    "/api/warehouses": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`GET /api/warehouses`: the compute classes of the platform, which one this caller may use\nand which one a query will land in.",
+        "description": "Every `SqlWarehouse` of the platform namespace, largest class first (`large`, `medium`, `small`, `xs`; name order inside one size), each row carrying the class `size`, the numbers the resource group is rendered with (`running`, `queued`, `memoryShare`: the class defaults, overridden by `spec.concurrency`), `default`, `canUse` (one of the caller's groups is in `spec.grants`) and `yours` (the first usable row — the class the engine's first matching selector picks — or the default class when nothing is granted). An administrator gets one synthetic row first (`name: \"admin\"`, `displayName: \"Administrators\"`, `size: null`, 50/100/100 %: the `admin` root group access-sync renders) with `yours` on it and `yours: false` on every other row. Non-authoritative: the engine selects by identity, Nova only shows it. Without a cluster connection (demo mode, a local run) the answer is the one `small` class. A cluster that refuses or fails is a 502. Answers `Cache-Control: no-store`.",
+        "operationId": "list",
+        "responses": {
+          "200": {
+            "description": "One row per class, largest first, the administrator's row first of all",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SqlWarehouse"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The cluster did not answer, or Nova may not list sqlwarehouses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -5023,6 +5068,67 @@
           "group",
           "managed"
         ]
+      },
+      "SqlWarehouse": {
+        "type": "object",
+        "description": "One warehouse a caller may use, as the UI shows it.",
+        "required": [
+          "name",
+          "running",
+          "queued",
+          "memoryShare",
+          "default",
+          "canUse",
+          "yours"
+        ],
+        "properties": {
+          "canUse": {
+            "type": "boolean",
+            "description": "One of the caller's groups is granted this class (`spec.grants`). Non-authoritative:\nthe engine decides, this only fails before the person tries."
+          },
+          "default": {
+            "type": "boolean",
+            "description": "`spec.default`: the class a query lands in when no selector matches."
+          },
+          "displayName": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`spec.displayName`, or `null` when the object carries none. The UI falls back to\n`name`; Nova never invents a label."
+          },
+          "memoryShare": {
+            "type": "string",
+            "description": "Share of the engine's memory the class may use, for example `20%`."
+          },
+          "name": {
+            "type": "string",
+            "description": "`metadata.name`: the `SqlWarehouse` object, and the `wh-<name>` resource group."
+          },
+          "queued": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Queries that may wait (the resource group's queue limit).",
+            "minimum": 0
+          },
+          "running": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Queries that run at the same time (the resource group's hard concurrency limit).",
+            "minimum": 0
+          },
+          "size": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`spec.size` (`xs`, `small`, `medium`, `large`). `null` for the synthetic administrator\nrow, which is not a class of its own."
+          },
+          "yours": {
+            "type": "boolean",
+            "description": "The row this caller will land in: the largest usable class, or the default one."
+          }
+        }
       },
       "SyncView": {
         "type": "object",
