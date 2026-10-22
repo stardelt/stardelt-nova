@@ -4457,6 +4457,67 @@ test.describe('format', () => {
   })
 })
 
+test.describe('warehouses', () => {
+  // `GET /api/warehouses` (stardelt-nova#236): the class a person uses is the `yours` row,
+  // shown next to the Run button and on the Profile page.
+  const SMALL = {
+    name: 'small', displayName: 'Small', size: 'small', running: 10, queued: 100,
+    memoryShare: '20%', default: true, canUse: true, yours: false,
+  }
+  const LARGE = {
+    name: 'large', displayName: 'Large', size: 'large', running: 6, queued: 70,
+    memoryShare: '70%', default: false, canUse: true, yours: true,
+  }
+  const ME = {
+    user: 'alice', auth_mode: 'oidc', demo: false, warehouse: 'warehouse',
+    is_admin: false, groups: ['analysts'], via: 'session',
+  }
+
+  /** One page with `/api/warehouses` answered by `warehouses`; the caller closes the context. */
+  async function open(browser: Browser, route: string, warehouses: unknown[]) {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 800 } })
+    const page = await context.newPage()
+    await page.route('**/api/**', (r) => {
+      const path = new URL(r.request().url()).pathname
+      if (path === '/api/warehouses') return json(r, warehouses)
+      if (path === '/api/me') return json(r, ME)
+      if (path === '/api/settings') return json(r, {})
+      if (path === '/api/apps/links') return json(r, [])
+      return json(r, [])
+    })
+    await page.goto(route)
+    return { context, page }
+  }
+
+  test('the class in use is named next to Run and on the Profile', async ({ browser }) => {
+    const { context, page } = await open(browser, '/query', [SMALL, LARGE])
+    // The `yours` row, not the default one; the title carries the three numbers.
+    const note = page.getByTitle('6 running, 70 queued, 70% memory')
+    await expect(note).toHaveText('Warehouse: Large (large)')
+    await expect(page.getByTitle('10 running, 100 queued, 20% memory')).toHaveCount(0)
+
+    await page.goto('/profile')
+    await expect(page.getByText('SQL warehouse', { exact: true })).toBeVisible()
+    await expect(page.getByTitle('6 running, 70 queued, 70% memory')).toHaveText('Warehouse: Large (large)')
+    await context.close()
+  })
+
+  test('an administrator row has no size and an empty list shows no line', async ({ browser }) => {
+    const admin = {
+      name: 'admin', displayName: 'Administrators', size: null, running: 50, queued: 100,
+      memoryShare: '100%', default: false, canUse: true, yours: true,
+    }
+    const { context, page } = await open(browser, '/profile', [admin])
+    await expect(page.getByTitle('50 running, 100 queued, 100% memory')).toHaveText('Warehouse: Administrators')
+    await expect(page.locator('body')).not.toContainText('(null)')
+    await context.close()
+
+    const empty = await open(browser, '/query', [])
+    await expect(empty.page.getByText(/^Warehouse:/)).toHaveCount(0)
+    await empty.context.close()
+  })
+})
+
 test.describe('profile', () => {
   const ME = {
     user: 'alice', auth_mode: 'oidc', demo: false, warehouse: 'warehouse',

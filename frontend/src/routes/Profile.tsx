@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { api } from '../api'
 import ErrorBox from '../components/ErrorBox'
+import { useYourWarehouse, warehouseHint, warehouseText } from '../components/WarehouseNote'
 import { formatTime } from '../format'
 import { isAdmin } from '../roles'
 
@@ -94,6 +95,8 @@ export default function Profile() {
   const admin = isAdmin(data)
   const dev = data?.auth_mode === 'static-dev'
   const groups = data?.groups ?? []
+  // The SQL compute class this person lands in (#236); `undefined` while it is unknown.
+  const warehouse = useYourWarehouse()
 
   return (
     <div className="max-w-3xl space-y-6">
@@ -210,6 +213,15 @@ export default function Profile() {
                 </Link>
               </li>
             </ul>
+            {warehouse && (
+              <dl className="mt-3 space-y-2">
+                <Row label="SQL warehouse">
+                  {/* The class the engine schedules this person's queries into (#236). Not
+                      `me.warehouse` above: that one is the default catalog. */}
+                  <span title={warehouseHint(warehouse)}>Warehouse: {warehouseText(warehouse)}</span>
+                </Row>
+              </dl>
+            )}
           </Card>
 
           <Card title="Where this comes from">

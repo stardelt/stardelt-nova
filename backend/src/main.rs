@@ -9,6 +9,7 @@
 //!   POST /api/auth/logout                   — sign out locally and at the IdP
 //!   GET  /api/trino/cluster                 — Trino /v1/info (or demo stub)
 //!   GET  /api/catalog/warehouse             — resolved warehouse id+name
+//!   GET  /api/warehouses                    — the SQL compute classes, which the caller uses
 //!   GET  /api/catalog/catalogs              — the catalogs the caller may browse
 //!   GET  /api/catalog/metrics               — schemas, tables, rows, bytes, last change per catalog
 //!   GET  /api/catalog/namespaces            — list namespaces
@@ -101,6 +102,7 @@ mod saved_queries;
 mod secret_store;
 mod trino;
 mod user_settings;
+mod warehouses;
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, RwLock};
@@ -533,6 +535,9 @@ fn api_router() -> Router<Arc<AppState>> {
         .route("/me", get(me))
         .route("/catalog/warehouse", get(catalog::warehouse_info))
         .route("/catalog/catalogs", get(catalog::list_catalogs))
+        // The SQL compute classes and the one this caller lands in (stardelt-nova#236): read
+        // from the `SqlWarehouse` objects, non-authoritative — the engine selects by identity.
+        .route("/warehouses", get(warehouses::list))
         // What is in each of them (stardelt-nova#249): one row per catalog, cached 60 s.
         .route("/catalog/metrics", get(catalog_metrics::get))
         .route(

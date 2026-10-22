@@ -48,6 +48,7 @@ pub struct ErrorResponse {
     paths(
         crate::me,
         crate::catalog::warehouse_info,
+        crate::warehouses::list,
         crate::catalog::list_catalogs,
         crate::catalog_metrics::get,
         crate::catalog::list_namespaces,
@@ -93,6 +94,7 @@ pub struct ErrorResponse {
         crate::Me,
         crate::OidcMe,
         crate::catalog::WarehouseInfo,
+        crate::warehouses::SqlWarehouse,
         crate::catalog::CatalogInfo,
         crate::catalog::CatalogsResponse,
         crate::catalog_metrics::CatalogStats,

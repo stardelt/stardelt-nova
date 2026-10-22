@@ -5,6 +5,7 @@ import { api, allTables, downloadCsv, errorMessage, formatCell, type QueryResult
 import CatalogSelect, { useCatalogs } from '../components/CatalogSelect'
 import { Icon } from '../components/Icon'
 import ScheduleDialog from '../components/ScheduleDialog'
+import WarehouseNote from '../components/WarehouseNote'
 import { formatCount, sqlTableRef } from '../format'
 
 const HISTORY_KEY = 'stardelt-nova:history'
@@ -119,7 +120,7 @@ export default function Query() {
             spellCheck={false}
             placeholder="SELECT ..."
           />
-          <div className="flex items-center gap-2 mt-2">
+          <div className="flex flex-wrap items-center gap-2 mt-2">
             <div className="text-xs text-text-mute">⌘/Ctrl+Enter to run</div>
             <button onClick={() => setTyped(null)} className="btn-ghost ml-auto py-1.5">Sample</button>
             <button
@@ -137,6 +138,10 @@ export default function Query() {
               <Icon name="terminal" className="w-4 h-4" />
               {running ? 'Running…' : 'Run'}
             </button>
+            {/* The class the engine will schedule this statement into (#236): the same
+                line the Profile page shows. Nothing while the answer is on its way or the
+                platform has no warehouse to name. */}
+            <WarehouseNote className="text-xs text-text-mute" />
           </div>
         </div>
 

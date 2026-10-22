@@ -45,6 +45,34 @@ export type Me = {
 export type Warehouse = { name: string; id: string }
 
 /**
+ * One SQL compute class (`GET /api/warehouses`, stardelt-nova#236): the Trino resource
+ * group a query lands in. Not the catalog warehouse of `Warehouse` above — that is the
+ * Iceberg REST catalog the SQL addresses (`me.warehouse`), this is the class the engine
+ * schedules the query into.
+ *
+ * `size` is `xs`, `small`, `medium` or `large`; `null` for the synthetic administrator row,
+ * which is not a class of its own. `running`, `queued` and `memoryShare` are the numbers
+ * the class is rendered with (the class defaults, overridden by `spec.concurrency`).
+ * `canUse` is non-authoritative: one of the caller's groups is granted the class. `yours`
+ * is the class a query will land in — the largest usable one, or the default class.
+ */
+export type SqlWarehouse = {
+  name: string
+  /** `spec.displayName`; `null` when the object carries none — show `name` then. */
+  displayName: string | null
+  size: string | null
+  running: number
+  queued: number
+  memoryShare: string
+  /** The class a query lands in when no selector matches. */
+  default: boolean
+  /** One of the caller's groups is granted this class (the engine decides, not Nova). */
+  canUse: boolean
+  /** The class this caller lands in: the largest usable one, or the default class. */
+  yours: boolean
+}
+
+/**
  * One catalog the caller may browse (`GET /api/catalog/catalogs`): the name the SQL
  * addresses and the Lakekeeper warehouse id behind it. A catalog a person may not
  * browse is not in the list at all — the engine's `SHOW CATALOGS` filters it.
@@ -908,6 +936,8 @@ export const api = {
     jpost<BreakGlassAnswer>(`/api/connections/group/${seg(group)}/${seg(name)}/break-glass`, { reason }),
   trinoCluster: ()                            => jget<unknown>('/api/trino/cluster'),
   warehouse:    ()                            => jget<Warehouse>('/api/catalog/warehouse'),
+  /** The SQL compute classes and the one the caller lands in (#236). */
+  warehouses:   ()                            => jget<SqlWarehouse[]>('/api/warehouses'),
   /** The catalogs the caller may browse and the one a request without `?catalog=` uses. */
   catalogs:     ()                            => jget<CatalogList>('/api/catalog/catalogs'),
   /** Schemas, tables, rows, bytes and the newest commit per catalog, plus the totals (#249). */
