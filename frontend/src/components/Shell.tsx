@@ -314,6 +314,30 @@ export default function Shell() {
             </div>
           </div>
         </div>
+
+        {/* The project names itself: the version that is running, and where to read more
+            or report a problem. A person should not have to leave Nova to find them. */}
+        <footer className="px-3 pb-3 pt-2 border-t border-border">
+          <div className="px-2 text-[11px] text-text-mute">stardelt v{__APP_VERSION__}</div>
+          <div className="px-2 mt-1 flex flex-wrap gap-x-3 gap-y-1">
+            <a
+              href="https://stardelt.io"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-[11px] text-text-dim hover:text-text underline underline-offset-2 rounded-[4px] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+            >
+              Documentation
+            </a>
+            <a
+              href="https://github.com/stardelt/stardelt"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-[11px] text-text-dim hover:text-text underline underline-offset-2 rounded-[4px] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+            >
+              Source
+            </a>
+          </div>
+        </footer>
       </aside>
 
       <div className="flex flex-col min-w-0 min-h-0">
