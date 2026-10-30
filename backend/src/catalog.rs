@@ -907,9 +907,12 @@ where
     deserializer.deserialize_any(Visit)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct RollbackRequest {
+    /// The snapshot to return to, as a string of digits (an Iceberg id has 64 bits; a JSON
+    /// number is accepted too but a browser rounds it).
     #[serde(deserialize_with = "deserialize_snapshot_id")]
+    #[schema(value_type = String)]
     pub snapshot_id: i64,
 }
 
@@ -941,6 +944,25 @@ fn stringify_snapshot_ids(mut r: crate::trino::QueryResult) -> crate::trino::Que
     r
 }
 
+#[utoipa::path(
+    get,
+    operation_id = "table_history",
+    path = "/api/catalog/tables/{ns}/{tbl}/history",
+    tag = "public",
+    description = "The table's last 100 snapshots, newest first: `committed_at`, `snapshot_id`, `parent_id`, `operation`, `summary`. Snapshot and parent ids are strings so that all 64 bits survive JSON in a browser.",
+    params(
+        ("ns" = String, Path, description = "Namespace (schema) name"),
+        ("tbl" = String, Path, description = "Table name"),
+        CatalogParam,
+    ),
+    responses(
+        (status = 200, description = "One row per snapshot", body = crate::trino::QueryResult),
+        (status = 400, description = "A name is not a single path segment, or the engine refused the statement", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller may not browse that catalog", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such catalog", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The catalog or the engine is not reachable", body = crate::openapi::ErrorResponse),
+    )
+)]
 pub async fn table_history(
     State(s): State<Arc<AppState>>,
     Path((ns, tbl)): Path<(String, String)>,
@@ -964,6 +986,26 @@ pub async fn table_history(
     }
 }
 
+#[utoipa::path(
+    post,
+    operation_id = "table_rollback",
+    path = "/api/catalog/tables/{ns}/{tbl}/rollback",
+    tag = "public",
+    description = "Move the table's current pointer back to an earlier snapshot (`ALTER TABLE … EXECUTE rollback_to_snapshot`), run as the caller, so the engine's permissions decide. Nothing is deleted: the newer snapshots stay until they are expired.",
+    params(
+        ("ns" = String, Path, description = "Namespace (schema) name"),
+        ("tbl" = String, Path, description = "Table name"),
+        CatalogParam,
+    ),
+    request_body = RollbackRequest,
+    responses(
+        (status = 200, description = "The engine's answer to the statement", body = crate::trino::QueryResult),
+        (status = 400, description = "A name or the body is not valid, the snapshot is unknown, or the engine refused the statement", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller may not browse that catalog", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such catalog", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The catalog or the engine is not reachable", body = crate::openapi::ErrorResponse),
+    )
+)]
 pub async fn table_rollback(
     State(s): State<Arc<AppState>>,
     Path((ns, tbl)): Path<(String, String)>,

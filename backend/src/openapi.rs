@@ -56,6 +56,8 @@ pub struct ErrorResponse {
         crate::catalog::create_namespace,
         crate::catalog::list_tables,
         crate::catalog::table_metadata,
+        crate::catalog::table_history,
+        crate::catalog::table_rollback,
         crate::catalog_docs::read,
         crate::catalog_docs::update,
         crate::catalog_docs::update_column,
@@ -107,6 +109,7 @@ pub struct ErrorResponse {
         crate::warehouses::SqlWarehouse,
         crate::catalog::CatalogInfo,
         crate::catalog::CatalogsResponse,
+        crate::catalog::RollbackRequest,
         crate::catalog_metrics::CatalogStats,
         crate::catalog_metrics::CatalogMetricsView,
         crate::catalog_metrics::MetricsTotals,
@@ -276,8 +279,6 @@ mod tests {
         "/api/apps",
         "/api/apps/links",
         "/api/apps/{id}",
-        "/api/catalog/tables/{ns}/{tbl}/history",
-        "/api/catalog/tables/{ns}/{tbl}/rollback",
         "/api/embeds",
         "/api/health",
         "/api/ingest/upload",
@@ -411,6 +412,16 @@ mod tests {
             stored.get("type").is_none(),
             "the stored value is typed: {stored}"
         );
+    }
+
+    /// A cell of a query result is any JSON scalar, array or object, so the row
+    /// schema must not say `object`: a generated client would refuse the numbers.
+    #[test]
+    fn a_result_cell_is_any_json() {
+        let value = serde_json::to_value(document()).expect("the document is JSON");
+        let cell =
+            &value["components"]["schemas"]["QueryResult"]["properties"]["rows"]["items"]["items"];
+        assert!(cell.get("type").is_none(), "a result cell is typed: {cell}");
     }
 
     /// The document endpoint answers without a session and carries no data:

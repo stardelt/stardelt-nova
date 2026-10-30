@@ -30,7 +30,7 @@ pub struct QueryRequest {
 pub struct QueryResult {
     pub columns: Vec<Column>,
     /// One array per row, in column order; values are JSON scalars, arrays or objects.
-    #[schema(value_type = Vec<Vec<Object>>)]
+    #[schema(value_type = Vec<Vec<Value>>)]
     pub rows: Vec<Vec<Value>>,
     pub row_count: usize,
     pub query_id: Option<String>,
