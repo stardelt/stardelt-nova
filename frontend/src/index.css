@@ -5,8 +5,9 @@
    root, respects .gitignore), which is why the old `content` globs — index.html and
    src — need no replacement. */
 
-/* Brand tokens. Dark is the default (stardelt brand); light is opt-in via
-   <html data-theme="light">, toggled from the top bar.
+/* Brand tokens. Dark is the default (stardelt brand); Graphite, Light and Silver are
+   opt-in via <html data-theme="…">, chosen in Preferences or from the top bar
+   (`frontend/src/theme.ts` holds the four ids and their labels).
 
    `inline` is what keeps the toggle working: it makes every utility emit the variable
    itself — `background-color: rgb(var(--c-bg))` — instead of baking the value into the
@@ -61,6 +62,53 @@
     --glow-1: rgba(91, 108, 255, 0.18);
     --glow-2: rgba(30, 42, 120, 0.35);
     color-scheme: dark;
+  }
+
+  /* Graphite (stardelt-nova#221): the dark theme with no blue cast — a neutral
+     anthracite. The accent stays the brand's, a little lighter so it reads on gray. */
+  [data-theme='graphite'] {
+    --c-bg: 24 25 27;
+    --c-bg-elev: 31 33 36;
+    --c-bg-soft: 40 42 46;
+    --c-border: 62 65 71;
+    --c-text: 232 234 237;
+    --c-text-dim: 176 181 189;
+    --c-text-mute: 142 148 158;
+    --c-accent: 122 138 255;
+    --c-accent-solid: 79 95 240;
+    --c-accent-deep: 52 56 92;
+    --c-success: 94 230 168;
+    --c-ok: 110 231 183;
+    --c-info: 125 211 252;
+    --c-xfer: 196 181 253;
+    --c-warn: 252 211 77;
+    --c-bad: 248 113 113;
+    --glow-1: rgba(255, 255, 255, 0.035);
+    --glow-2: rgba(0, 0, 0, 0);
+    color-scheme: dark;
+  }
+
+  /* Silver (stardelt-nova#221): the light theme with no blue tint, on neutral gray. */
+  [data-theme='silver'] {
+    --c-bg: 240 241 242;
+    --c-bg-elev: 255 255 255;
+    --c-bg-soft: 230 232 234;
+    --c-border: 208 211 215;
+    --c-text: 24 26 29;
+    --c-text-dim: 72 77 85;
+    --c-text-mute: 96 102 111;
+    --c-accent: 66 82 225;
+    --c-accent-solid: 66 82 225;
+    --c-accent-deep: 43 58 168;
+    --c-success: 16 114 72;
+    --c-ok: 3 106 77;
+    --c-info: 3 105 161;
+    --c-xfer: 109 40 217;
+    --c-warn: 146 64 14;
+    --c-bad: 185 28 28;
+    --glow-1: rgba(0, 0, 0, 0);
+    --glow-2: rgba(0, 0, 0, 0);
+    color-scheme: light;
   }
 
   [data-theme='light'] {
