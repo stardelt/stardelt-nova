@@ -5617,8 +5617,30 @@
           }
         }
       }
+    },
+    "securitySchemes": {
+      "bearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "An access token from the platform's identity provider, sent in the `Authorization` header. In `dev` mode no credential is needed."
+      },
+      "session": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "nova_session",
+        "description": "The signed session cookie the browser sign-in sets. Same rules as the bearer token."
+      }
     }
   },
+  "security": [
+    {
+      "bearer": []
+    },
+    {
+      "session": []
+    }
+  ],
   "tags": [
     {
       "name": "public",

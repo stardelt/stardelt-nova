@@ -169,8 +169,37 @@ pub struct ApiDoc;
 /// The served document. The version is stamped from the crate version at
 /// compile time (see the module docs for the semver promise).
 pub fn document() -> utoipa::openapi::OpenApi {
+    use utoipa::openapi::security::{
+        ApiKey, ApiKeyValue, HttpAuthScheme, HttpBuilder, SecurityRequirement, SecurityScheme,
+    };
     let mut doc = ApiDoc::openapi();
     doc.info.version = env!("CARGO_PKG_VERSION").to_string();
+    // How a client proves who it is (see auth.rs): either credential works on every
+    // route below; generated clients, the CLI and the MCP server read this.
+    let components = doc.components.get_or_insert_with(Default::default);
+    components.add_security_scheme(
+        "bearer",
+        SecurityScheme::Http(
+            HttpBuilder::new()
+                .scheme(HttpAuthScheme::Bearer)
+                .bearer_format("JWT")
+                .description(Some(
+                    "An access token from the platform's identity provider, sent in the `Authorization` header. In `dev` mode no credential is needed.",
+                ))
+                .build(),
+        ),
+    );
+    components.add_security_scheme(
+        "session",
+        SecurityScheme::ApiKey(ApiKey::Cookie(ApiKeyValue::with_description(
+            "nova_session",
+            "The signed session cookie the browser sign-in sets. Same rules as the bearer token.",
+        ))),
+    );
+    doc.security = Some(vec![
+        SecurityRequirement::new("bearer", Vec::<String>::new()),
+        SecurityRequirement::new("session", Vec::<String>::new()),
+    ]);
     doc
 }
 
@@ -319,20 +348,29 @@ mod tests {
         );
     }
 
+    /// A client can tell from the document how to authenticate: two schemes
+    /// (bearer token, session cookie) and a global requirement naming both.
+    #[test]
+    fn security_schemes_are_documented() {
+        let value = serde_json::to_value(document()).expect("the document is JSON");
+        let schemes = &value["components"]["securitySchemes"];
+        assert_eq!(schemes["bearer"]["type"], "http");
+        assert_eq!(schemes["bearer"]["scheme"], "bearer");
+        assert_eq!(schemes["session"]["type"], "apiKey");
+        assert_eq!(schemes["session"]["in"], "cookie");
+        assert_eq!(schemes["session"]["name"], "nova_session");
+        let required = value["security"]
+            .as_array()
+            .expect("a global security list");
+        assert_eq!(required.len(), 2, "bearer or session");
+    }
+
     /// The document endpoint answers without a session and carries no data:
     /// no tokens, no cookies, no secrets — only paths, schemas and prose.
     #[test]
     fn document_carries_no_secrets() {
         let json = document_json();
-        for word in [
-            "access_token",
-            "refresh_token",
-            "id_token",
-            "cookie",
-            "Secret",
-            "Bearer",
-            "authorization",
-        ] {
+        for word in ["access_token", "refresh_token", "id_token", "Secret"] {
             assert!(
                 !json.contains(word),
                 "the public document must not mention {word:?}"
