@@ -91,6 +91,9 @@ pub struct ErrorResponse {
         crate::saved_queries::remove,
         crate::query_log_api::list,
         crate::query_log_api::detail,
+        crate::user_settings::list,
+        crate::user_settings::put,
+        crate::user_settings::remove,
         crate::notebooks::publish,
         crate::notebooks::list,
         crate::notebooks::versions,
@@ -162,6 +165,7 @@ pub struct ErrorResponse {
         crate::query_log_api::QueryTiming,
         crate::query_log_api::QueryData,
         crate::query_log_api::QueryFailure,
+        crate::user_settings::StoredSetting,
         crate::notebooks::PublishedNotebook,
         crate::notebooks::NotebookSummary,
         crate::notebooks::NotebookVersion,
@@ -280,8 +284,6 @@ mod tests {
         "/api/jobs",
         "/api/notebooks/{group}/{name}/parameters",
         "/api/openapi.json",
-        "/api/settings",
-        "/api/settings/{key}",
         "/api/transfer",
         "/api/trino/cluster",
         "/api/workloads",
@@ -394,6 +396,21 @@ mod tests {
             }
         }
         assert!(clashes.is_empty(), "duplicate operationIds: {clashes:#?}");
+    }
+
+    /// A setting's value is any JSON (a string, a number, a list), so the schema
+    /// must not say `object`: a generated client would refuse the rest.
+    #[test]
+    fn a_setting_value_is_any_json() {
+        let value = serde_json::to_value(document()).expect("the document is JSON");
+        let body = &value["paths"]["/api/settings/{key}"]["put"]["requestBody"]["content"]["application/json"]
+            ["schema"];
+        assert!(body.get("type").is_none(), "the PUT body is typed: {body}");
+        let stored = &value["components"]["schemas"]["StoredSetting"]["properties"]["value"];
+        assert!(
+            stored.get("type").is_none(),
+            "the stored value is typed: {stored}"
+        );
     }
 
     /// The document endpoint answers without a session and carries no data:

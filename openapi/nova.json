@@ -3777,6 +3777,144 @@
         }
       }
     },
+    "/api/settings": {
+      "get": {
+        "tags": [
+          "internal"
+        ],
+        "summary": "`GET /api/settings` — the caller's settings as one JSON object (`{}` when none).",
+        "description": "The caller's personal settings as one JSON object, key to value (`{}` when there are none). The UI decides what a key means; Nova only stores them.",
+        "operationId": "settings_list",
+        "responses": {
+          "200": {
+            "description": "Key to value",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The state store is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/settings/{key}": {
+      "put": {
+        "tags": [
+          "internal"
+        ],
+        "summary": "`PUT /api/settings/{key}` — the body is the value (any JSON); creates or replaces.\nAnswers `200 {\"key\":…,\"value\":…}`.",
+        "description": "Create or replace one of the caller's settings. The body is the value itself, any JSON, at most 16 KiB of JSON text. A key is 1 to 64 characters: a-z, 0-9, '.', '_' or '-', starting with a letter or digit.",
+        "operationId": "settings_put",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "description": "The setting's key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "The value: any JSON",
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The key and the value as stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StoredSetting"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The key or the value is not valid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The state store is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "internal"
+        ],
+        "summary": "`DELETE /api/settings/{key}` — `204`, or `404` when the caller has no such key.",
+        "description": "Remove one of the caller's settings.",
+        "operationId": "settings_remove",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "description": "The setting's key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Removed"
+          },
+          "404": {
+            "description": "The caller has no such setting",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The state store is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/warehouses": {
       "get": {
         "tags": [
@@ -6021,6 +6159,22 @@
           "yours": {
             "type": "boolean",
             "description": "The row this caller will land in: the largest usable class, or the default one."
+          }
+        }
+      },
+      "StoredSetting": {
+        "type": "object",
+        "description": "What `PUT /api/settings/{key}` answers: the key and the value as stored.",
+        "required": [
+          "key",
+          "value"
+        ],
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "value": {
+            "description": "Any JSON value."
           }
         }
       },
