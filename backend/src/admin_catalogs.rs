@@ -136,6 +136,7 @@ pub struct CatalogAccessUpdate {
 
 #[utoipa::path(
     get,
+    operation_id = "admin_catalogs_list",
     path = "/api/admin/catalogs",
     tag = "internal",
     description = "Every `Catalog` of the platform namespace, ordered bronze, silver, gold, then the rest alphabetically (`layer`: the `stardelt.io/layer` label, else the catalog's own name): identity, owner, managed access, the storage key prefix, phase and the grants and conditions the access-sync job last wrote. Administrator-only; a non-administrator answers 403 `this view is for platform administrators`. The write is `PUT /api/admin/catalogs/{name}/access`; this route never changes anything. A catalog the job has not observed yet answers `phase: \"Unknown\"` with no conditions. Without a cluster connection (demo mode, a local run) the answer is the one in-memory `warehouse` catalog. Answers `Cache-Control: no-store`.",

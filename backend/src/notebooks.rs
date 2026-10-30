@@ -1197,6 +1197,7 @@ pub(crate) async fn publish(
 /// newest first. Administrators see their own groups only.
 #[utoipa::path(
     get,
+    operation_id = "notebooks_list",
     path = "/api/notebooks",
     tag = "public",
     description = "The latest published version of every notebook in the caller's groups, newest first. Each row carries the group, the name, the latest `objectVersion`, its size, `uploadedAt` as an RFC 3339 timestamp in UTC (SeaweedFS's RFC 1123 `LastModified` normalised) and the publisher's `uploadedBy` display name. An administrator gets no wider view than their own groups. Unset `NOVA_S3_*` is 503; an S3 that is down or refuses is 502. Answers `Cache-Control: no-store`.",
