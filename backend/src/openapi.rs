@@ -368,6 +368,28 @@ mod tests {
         assert_eq!(required.len(), 2, "bearer or session");
     }
 
+    /// A generated client names its methods after the `operationId`, so two
+    /// operations may not share one. A handler whose function name is generic
+    /// (`list`, `create`, `update`, `remove`) sets `operation_id = "<resource>_<verb>"`
+    /// in its `#[utoipa::path]`.
+    #[test]
+    fn operation_ids_are_unique() {
+        let value = serde_json::to_value(document()).expect("the document is JSON");
+        let mut seen = std::collections::BTreeMap::new();
+        let mut clashes = Vec::new();
+        for (path, item) in value["paths"].as_object().expect("paths is an object") {
+            for (method, op) in item.as_object().expect("a path item is an object") {
+                let Some(id) = op["operationId"].as_str() else {
+                    continue;
+                };
+                if let Some(first) = seen.insert(id.to_string(), format!("{method} {path}")) {
+                    clashes.push(format!("{id}: {first} and {method} {path}"));
+                }
+            }
+        }
+        assert!(clashes.is_empty(), "duplicate operationIds: {clashes:#?}");
+    }
+
     /// The document endpoint answers without a session and carries no data:
     /// no tokens, no cookies, no secrets — only paths, schemas and prose.
     #[test]

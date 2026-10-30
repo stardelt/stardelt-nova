@@ -1261,6 +1261,7 @@ fn resources(state: &AppState) -> Option<Resources> {
 
 #[utoipa::path(
     get,
+    operation_id = "connections_list",
     path = "/api/connections",
     tag = "public",
     description = "The caller's connections: their own, their groups', and — for administrators — the managed ones. Values are never part of an answer, only the field names.",
@@ -1467,6 +1468,7 @@ pub(crate) async fn break_glass_log(
 
 #[utoipa::path(
     post,
+    operation_id = "connections_create",
     path = "/api/connections",
     tag = "public",
     description = "Create a connection. The values in `secret` are written to the platform's secret store with the caller's own token and are never returned by any route.",
