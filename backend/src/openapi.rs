@@ -449,6 +449,41 @@ mod tests {
         );
     }
 
+    /// A generated client builds the URL from the declared path parameters, so the
+    /// `{name}` parts of a path and its `in: path` parameters must be the same set:
+    /// a query parameter documented as a path one becomes a required argument.
+    #[test]
+    fn path_parameters_match_the_path_template() {
+        let value = serde_json::to_value(document()).expect("the document is JSON");
+        let mut bad = Vec::new();
+        for (path, item) in value["paths"].as_object().expect("paths is an object") {
+            let mut in_path: Vec<&str> = path
+                .split('/')
+                .filter_map(|part| part.strip_prefix('{')?.strip_suffix('}'))
+                .collect();
+            in_path.sort_unstable();
+            for (method, op) in item.as_object().expect("a path item is an object") {
+                let mut declared: Vec<&str> = op["parameters"]
+                    .as_array()
+                    .map(|all| all.iter().filter(|p| p["in"] == "path"))
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|p| p["name"].as_str())
+                    .collect();
+                declared.sort_unstable();
+                if declared != in_path {
+                    bad.push(format!(
+                        "{method} {path}: declared {declared:?}, template {in_path:?}"
+                    ));
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "path parameters differ from the path: {bad:#?}"
+        );
+    }
+
     /// A setting's value is any JSON (a string, a number, a list), so the schema
     /// must not say `object`: a generated client would refuse the rest.
     #[test]
