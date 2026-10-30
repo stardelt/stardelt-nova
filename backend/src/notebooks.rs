@@ -829,6 +829,7 @@ pub struct NotebookParameters {
 
 /// The `?version=` of the parameters route: omitted means the latest version.
 #[derive(Debug, Clone, Default, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ParametersQuery {
     pub version: Option<String>,
 }
