@@ -14,6 +14,9 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
+use serde::Serialize;
+use utoipa::ToSchema;
+
 use crate::AppState;
 use crate::api_json::ApiJson;
 use crate::auth::Principal;
@@ -38,7 +41,27 @@ fn valid_key(key: &str) -> bool {
 const BAD_KEY: &str =
     "key must be 1 to 64 characters: a-z, 0-9, '.', '_' or '-', starting with a letter or digit";
 
+/// What `PUT /api/settings/{key}` answers: the key and the value as stored.
+#[derive(Serialize, ToSchema)]
+pub struct StoredSetting {
+    key: String,
+    /// Any JSON value.
+    #[schema(value_type = Value)]
+    value: serde_json::Value,
+}
+
 /// `GET /api/settings` — the caller's settings as one JSON object (`{}` when none).
+#[utoipa::path(
+    get,
+    operation_id = "settings_list",
+    path = "/api/settings",
+    tag = "internal",
+    description = "The caller's personal settings as one JSON object, key to value (`{}` when there are none). The UI decides what a key means; Nova only stores them.",
+    responses(
+        (status = 200, description = "Key to value", body = Object),
+        (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
 pub async fn list(
     State(s): State<Arc<AppState>>,
     caller: Option<Extension<Principal>>,
@@ -61,6 +84,20 @@ pub async fn list(
 
 /// `PUT /api/settings/{key}` — the body is the value (any JSON); creates or replaces.
 /// Answers `200 {"key":…,"value":…}`.
+#[utoipa::path(
+    put,
+    operation_id = "settings_put",
+    path = "/api/settings/{key}",
+    tag = "internal",
+    description = "Create or replace one of the caller's settings. The body is the value itself, any JSON, at most 16 KiB of JSON text. A key is 1 to 64 characters: a-z, 0-9, '.', '_' or '-', starting with a letter or digit.",
+    params(("key" = String, Path, description = "The setting's key")),
+    request_body(content = Value, description = "The value: any JSON"),
+    responses(
+        (status = 200, description = "The key and the value as stored", body = StoredSetting),
+        (status = 400, description = "The key or the value is not valid", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
 pub async fn put(
     State(s): State<Arc<AppState>>,
     caller: Option<Extension<Principal>>,
@@ -97,6 +134,19 @@ pub async fn put(
 }
 
 /// `DELETE /api/settings/{key}` — `204`, or `404` when the caller has no such key.
+#[utoipa::path(
+    delete,
+    operation_id = "settings_remove",
+    path = "/api/settings/{key}",
+    tag = "internal",
+    description = "Remove one of the caller's settings.",
+    params(("key" = String, Path, description = "The setting's key")),
+    responses(
+        (status = 204, description = "Removed"),
+        (status = 404, description = "The caller has no such setting", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
 pub async fn remove(
     State(s): State<Arc<AppState>>,
     caller: Option<Extension<Principal>>,
