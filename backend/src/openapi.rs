@@ -412,6 +412,43 @@ mod tests {
         assert!(clashes.is_empty(), "duplicate operationIds: {clashes:#?}");
     }
 
+    /// The SDKs, the CLI and the MCP server name their methods and tools after the
+    /// operation ids, so an id must read as `<resource>_<action>` (`pipelines_get`,
+    /// `table_history`), never as a bare verb (`get`, `run`, `logs`) that says nothing
+    /// outside its file. `me` and `health` are the two single-word ids.
+    #[test]
+    fn operation_ids_are_resource_first_snake_case() {
+        const BARE_VERBS: &[&str] = &[
+            "list", "get", "read", "create", "update", "delete", "remove", "run", "stop", "rotate",
+            "break", "trigger", "publish", "check", "preview", "pause", "resume", "refresh",
+        ];
+        let value = serde_json::to_value(document()).expect("the document is JSON");
+        let mut bad = Vec::new();
+        for (path, item) in value["paths"].as_object().expect("paths is an object") {
+            for (method, op) in item.as_object().expect("a path item is an object") {
+                let Some(id) = op["operationId"].as_str() else {
+                    continue;
+                };
+                let words: Vec<&str> = id.split('_').collect();
+                let snake = words.iter().all(|w| {
+                    !w.is_empty()
+                        && w.chars()
+                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+                });
+                let ok = id == "me"
+                    || id == "health"
+                    || (snake && words.len() >= 2 && !BARE_VERBS.contains(&words[0]));
+                if !ok {
+                    bad.push(format!("{id} ({method} {path})"));
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "operation ids must be <resource>_<action> in snake case: {bad:#?}"
+        );
+    }
+
     /// A setting's value is any JSON (a string, a number, a list), so the schema
     /// must not say `object`: a generated client would refuse the rest.
     #[test]

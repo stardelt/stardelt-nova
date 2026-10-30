@@ -1087,6 +1087,7 @@ async fn no_store(request: Request, next: Next) -> Response {
 /// `PUT /api/notebooks/{group}/{name}`: validate, strip, store one immutable version.
 #[utoipa::path(
     put,
+    operation_id = "notebooks_publish",
     path = "/api/notebooks/{group}/{name}",
     tag = "public",
     description = "Publish a notebook as a new immutable object version in the `notebooks` bucket. Needs a signed-in person whose groups include `{group}` (403 `you are not a member of the group <g>`; administrators are not exempt). `{name}` must match `^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}\\.ipynb$` and the body must be an nbformat 4 notebook of at most 5 MiB. Every cell's `outputs` and `execution_count` and the notebook's widget metadata are removed before storing — no cell output reaches the object store. `sha256` is of the stored (stripped) bytes. `parameters` are the `name = literal` lines of the first cell tagged `parameters`, at most 32; defaults are text and are never evaluated. A 61st publish by one person in an hour is 429. Unset `NOVA_S3_*` is 503 `notebook storage is not configured`; an S3 that is down or refuses is 502. Each publish writes one audit line with group, name, version and size, never content.",
@@ -1235,6 +1236,7 @@ pub(crate) async fn list(
 /// first, at most 50.
 #[utoipa::path(
     get,
+    operation_id = "notebooks_versions",
     path = "/api/notebooks/{group}/{name}/versions",
     tag = "public",
     description = "The published versions of one notebook, newest first, at most 50. Needs a member of `{group}` (403 `you are not a member of the group <g>`; administrators are not exempt). Each row carries the immutable `objectVersion`, its size, `uploadedAt` as an RFC 3339 timestamp in UTC (SeaweedFS's RFC 1123 `LastModified` normalised), the publisher's `uploadedBy` and the `sha256` of the stored bytes. A group with no such notebook answers an empty list. Unset `NOVA_S3_*` is 503; an S3 that is down or refuses is 502. Answers `Cache-Control: no-store`.",

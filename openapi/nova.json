@@ -60,7 +60,7 @@
           "internal"
         ],
         "description": "Change one catalog's `spec.owner`, `spec.managedAccess` and `spec.grants` as a JSON merge patch on the `Catalog` resource, carrying the `resourceVersion` the page read. Administrator-only; a non-administrator answers 403 `this view is for platform administrators`. A malformed owner, group name, verb or a duplicate grant is a 400 in the words the form shows; a catalog that changed meanwhile is a 409 `this catalog changed since you opened it; reload`; a name that is not a catalog or no longer exists is a 404; more than 30 changes per administrator in an hour is a 429. Without a cluster connection the answer is 503 `the cluster is not reachable from Nova` (demo mode changes memory instead). Answers the updated row, the same shape as the list, with the new `metadata.generation`; `status.observedGeneration` catches up when the access-sync job runs (about two minutes). Never carries a storage credential. `Cache-Control: no-store`.",
-        "operationId": "update_access",
+        "operationId": "admin_catalogs_access_update",
         "requestBody": {
           "content": {
             "application/json": {
@@ -161,7 +161,7 @@
           "public"
         ],
         "description": "The catalogs the caller may browse, each with its Lakekeeper warehouse id and its medallion layer when it has one, plus the catalog a request without `?catalog=` uses. The order is bronze, silver, gold first (in that order), then the rest alphabetically; `layer` is `stardelt.io/layer` from the catalog's `Catalog` resource, else the catalog's own name when that is `bronze`, `silver` or `gold`, and absent otherwise. The list is what the engine's `SHOW CATALOGS` shows the caller (through the caller's own token), minus the engine's own catalogs (`system`, `information_schema`, `memory`, `tpch`, `tpcds`, `jmx`); it is cached for 30 s (the layer for 60 s). Every other `/api/catalog/*` route takes the same `?catalog=`; a catalog the caller may not browse answers 403 there and is never proxied. Empty when no catalog is open to the caller. `demo` in demo mode.",
-        "operationId": "list_catalogs",
+        "operationId": "catalogs_list",
         "responses": {
           "200": {
             "description": "The browsable catalogs and the default one",
@@ -202,7 +202,7 @@
           "public"
         ],
         "description": "What is in each catalog the caller may browse: schemas, tables, rows, bytes on the object store and the newest commit, plus the sums. Rows are ordered bronze, silver, gold first, then by name, and carry `layer` when the catalog is one of the three (the `stardelt.io/layer` label, else the catalog's own name). The catalog list is the caller's own `SHOW CATALOGS` (`GET /api/catalog/catalogs`); a catalog the caller may not browse is never read and never appears. The numbers come from the catalog's Iceberg metadata (the current snapshot's `total-records` and `total-files-size`), so the endpoint runs no query, and they are read in the background every five minutes (`NOVA_METRICS_REFRESH_SECS`): a request answers from the last numbers at once, whatever their age, and `updatedAt` says when they were read. A catalog with no numbers yet is answered with zeros and `pending: true` while one background scan reads it; `totals` leave pending rows out. At most 200 tables per catalog are loaded: `truncated` says the rows and bytes are a sample while `tables` stays exact. A catalog whose scan failed keeps its last numbers and carries an `error` sentence (zeros for one that never answered); only an unreachable engine or catalog fails the request with 502. 403 when no catalog is open to the caller. Never cached by the client.",
-        "operationId": "get",
+        "operationId": "catalog_metrics_get",
         "responses": {
           "200": {
             "description": "One entry per browsable catalog, medallion layers first, then by name, with the totals",
@@ -243,7 +243,7 @@
           "public"
         ],
         "description": "Read every catalog again now, instead of waiting for the next background round (every five minutes). Administrator only: it is an operator action on the whole warehouse, and `main` puts the same `require_admin` in front of it as `/api/apps`, so a non-administrator answers 403. Answers 202 — the round runs in the background, one at a time, and the page reads the new numbers with its next `GET /api/catalog/metrics`. At most one per minute: a second call answers 429 with the sentence `the numbers were refreshed less than a minute ago`.",
-        "operationId": "refresh",
+        "operationId": "catalog_metrics_refresh",
         "responses": {
           "202": {
             "description": "The round is running; the numbers follow on the next read",
@@ -284,7 +284,7 @@
           "public"
         ],
         "description": "List one catalog's namespaces (schemas). Each namespace is a list of levels. `?catalog=` picks the catalog; omitted, the default one is used. A catalog the caller may not browse answers 403, a name no catalog knows 404.",
-        "operationId": "list_namespaces",
+        "operationId": "namespaces_list",
         "parameters": [
           {
             "name": "catalog",
@@ -364,7 +364,7 @@
           "internal"
         ],
         "description": "Create a schema in one catalog via Trino (`CREATE SCHEMA IF NOT EXISTS`). `?catalog=` picks the catalog; omitted, the default one is used. UI-only for now: not promised stable.",
-        "operationId": "create_namespace",
+        "operationId": "namespaces_create",
         "parameters": [
           {
             "name": "catalog",
@@ -446,7 +446,7 @@
           "public"
         ],
         "description": "List tables in one namespace of one catalog. `?catalog=` picks the catalog; omitted, the default one is used.",
-        "operationId": "list_tables",
+        "operationId": "tables_list",
         "parameters": [
           {
             "name": "ns",
@@ -617,7 +617,7 @@
           "public"
         ],
         "description": "Set or remove one column's description. The column must be a field of the current schema, matched exactly. Nova runs `COMMENT ON COLUMN <catalog>.<ns>.<tbl>.<column>` through Trino **as the caller** (source `nova-catalog`), because a column description lives in a new Iceberg schema and only the engine writes it. `?catalog=` picks the catalog. Same 4,000-character limit and null rule as the table description. The interim rule is enforced by Nova; the catalog does not enforce it yet. Demo mode answers 503.",
-        "operationId": "update_column",
+        "operationId": "column_description_update",
         "parameters": [
           {
             "name": "ns",
@@ -736,7 +736,7 @@
           "public"
         ],
         "description": "A table's documentation: the Iceberg `comment` as `description`, the `stardelt.tags`/`stardelt.owner`/`stardelt.domain` custom properties, and the description and type of every column of the **current** schema. `?catalog=` picks the catalog. `canEdit`/`editRule` apply Nova's interim rule: until the catalog enforces permissions, Nova decides who may edit, and anyone who reaches Lakekeeper or Trino directly can still change these properties. Demo mode answers 503.",
-        "operationId": "read",
+        "operationId": "table_documentation_get",
         "parameters": [
           {
             "name": "ns",
@@ -834,7 +834,7 @@
           "public"
         ],
         "description": "Set or remove a table's description, tags, owner and domain in one Lakekeeper commit. `?catalog=` picks the catalog. Every key is optional: absent changes nothing, `null` (or an empty tag list, or a blank description) removes the property, and a write with nothing to change sends no commit. Description at most 4,000 characters; at most 20 unique tags `^[a-z0-9][a-z0-9_-]{0,31}$`; owner a group name; domain `^[a-z0-9][a-z0-9_-]{0,39}$`. An ownerless table may be edited by anybody, but the request must then set `owner` to one of the caller's own groups. **The interim rule is enforced by Nova; the catalog does not enforce it yet** — anyone who reaches Lakekeeper or Trino directly can still change these properties. Edits of one table are serialised by Nova and a contended commit is retried; a catalog that stays busy answers 502 `the catalog is busy, try again`. Demo mode answers 503.",
-        "operationId": "catalog_docs_update",
+        "operationId": "table_documentation_update",
         "parameters": [
           {
             "name": "ns",
@@ -1315,7 +1315,7 @@
           "public"
         ],
         "description": "The last 200 break-glass reads and refusals, newest first, for administrators. The rows carry the administrator, group, connection, reason and outcome — never a value. `Cache-Control: no-store`.",
-        "operationId": "break_glass_log",
+        "operationId": "connections_break_glass_log",
         "responses": {
           "200": {
             "description": "The most recent events, newest first",
@@ -1356,7 +1356,7 @@
           "public"
         ],
         "description": "Delete one of a group's connections. The value goes first, then the resource; if the resource delete fails the entry stays visible as not-ready and the delete can be retried.",
-        "operationId": "delete_group",
+        "operationId": "connections_group_delete",
         "parameters": [
           {
             "name": "group",
@@ -1440,7 +1440,7 @@
           "public"
         ],
         "description": "Emergency read of a group connection by an administrator: a written reason, a notice on the Connection for the owner group, an audit row, and the values returned **once**. The answer is never stored and carries `Cache-Control: no-store` and `Pragma: no-cache`. Personal and managed connections are never readable.",
-        "operationId": "break_glass_group",
+        "operationId": "connections_group_break_glass",
         "parameters": [
           {
             "name": "group",
@@ -1561,7 +1561,7 @@
           "public"
         ],
         "description": "Rotate some fields of one of a group's connections. Asked to write the fields that are sent; the others keep their value.",
-        "operationId": "rotate_group",
+        "operationId": "connections_group_rotate",
         "parameters": [
           {
             "name": "group",
@@ -1672,7 +1672,7 @@
           "public"
         ],
         "description": "Delete an administrator-managed connection. The value goes first, then the resource; if the resource delete fails the entry stays visible as not-ready and the delete can be retried.",
-        "operationId": "delete_managed",
+        "operationId": "connections_managed_delete",
         "parameters": [
           {
             "name": "name",
@@ -1747,7 +1747,7 @@
           "public"
         ],
         "description": "Always refused: break-glass covers group connections only. An administrator gets a 403 and an audit row; nothing is read.",
-        "operationId": "break_glass_managed",
+        "operationId": "connections_managed_break_glass",
         "parameters": [
           {
             "name": "name",
@@ -1809,7 +1809,7 @@
           "public"
         ],
         "description": "Rotate an administrator-managed connection. Nobody can read it back, so every field must be sent.",
-        "operationId": "rotate_managed",
+        "operationId": "connections_managed_rotate",
         "parameters": [
           {
             "name": "name",
@@ -1911,7 +1911,7 @@
           "public"
         ],
         "description": "Delete one of the caller's own connections.",
-        "operationId": "delete_personal",
+        "operationId": "connections_personal_delete",
         "parameters": [
           {
             "name": "name",
@@ -1976,7 +1976,7 @@
           "public"
         ],
         "description": "Always refused: break-glass covers group connections only. An administrator gets a 403 and an audit row; nothing is read.",
-        "operationId": "break_glass_personal",
+        "operationId": "connections_personal_break_glass",
         "parameters": [
           {
             "name": "name",
@@ -2038,7 +2038,7 @@
           "public"
         ],
         "description": "Rotate some fields of one of the caller's own connections; the fields that are not sent keep their value.",
-        "operationId": "rotate_personal",
+        "operationId": "connections_personal_rotate",
         "parameters": [
           {
             "name": "name",
@@ -2229,7 +2229,7 @@
         ],
         "summary": "`PUT /api/notebooks/{group}/{name}`: validate, strip, store one immutable version.",
         "description": "Publish a notebook as a new immutable object version in the `notebooks` bucket. Needs a signed-in person whose groups include `{group}` (403 `you are not a member of the group <g>`; administrators are not exempt). `{name}` must match `^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}\\.ipynb$` and the body must be an nbformat 4 notebook of at most 5 MiB. Every cell's `outputs` and `execution_count` and the notebook's widget metadata are removed before storing — no cell output reaches the object store. `sha256` is of the stored (stripped) bytes. `parameters` are the `name = literal` lines of the first cell tagged `parameters`, at most 32; defaults are text and are never evaluated. A 61st publish by one person in an hour is 429. Unset `NOVA_S3_*` is 503 `notebook storage is not configured`; an S3 that is down or refuses is 502. Each publish writes one audit line with group, name, version and size, never content.",
-        "operationId": "publish",
+        "operationId": "notebooks_publish",
         "parameters": [
           {
             "name": "group",
@@ -2462,7 +2462,7 @@
         ],
         "summary": "`GET /api/notebooks/{group}/{name}/versions`: the versions of one notebook, newest\nfirst, at most 50.",
         "description": "The published versions of one notebook, newest first, at most 50. Needs a member of `{group}` (403 `you are not a member of the group <g>`; administrators are not exempt). Each row carries the immutable `objectVersion`, its size, `uploadedAt` as an RFC 3339 timestamp in UTC (SeaweedFS's RFC 1123 `LastModified` normalised), the publisher's `uploadedBy` and the `sha256` of the stored bytes. A group with no such notebook answers an empty list. Unset `NOVA_S3_*` is 503; an S3 that is down or refuses is 502. Answers `Cache-Control: no-store`.",
-        "operationId": "versions",
+        "operationId": "notebooks_versions",
         "parameters": [
           {
             "name": "group",
@@ -2728,7 +2728,7 @@
           "public"
         ],
         "description": "What the engine says about a statement, without running it: Nova fills the statement's `${run.date}` (today, UTC), `${run.id}` (`check`) and `${params.<name>}` placeholders and sends `EXPLAIN <statement>` to the engine as the caller, under the source `nova-schedule-check`. It never sends `EXPLAIN ANALYZE` and never the statement itself. `checked: false` means this kind of statement cannot be checked here (only `select`, `with`, `insert`, `merge`, `delete`, `update`, `values` and `create … as …` are). A refused statement answers 200 with `ok: false` and the engine's sentence; an engine that does not answer is 502. Refusals before the engine: an empty, over-20,000-character or NUL-carrying statement 400, a parameter table or a placeholder as on create 400. Answers `Cache-Control: no-store`.",
-        "operationId": "check",
+        "operationId": "pipelines_check",
         "requestBody": {
           "content": {
             "application/json": {
@@ -2789,7 +2789,7 @@
           "public"
         ],
         "description": "The next fire times of a cron in its zone, RFC 3339 with that zone's offset (for example `2026-10-21T03:00:00+02:00`), so the Schedule dialog can show what a cadence means before it is saved. A field or a zone as on create (400 with the same sentences); `count` is 1 to 10, 5 when omitted. Like croniter, a day matches when both day fields are restricted and either matches, and when one is unrestricted and the other matches. A wall-clock time the zone skips at a DST jump is not a run; a time that happens twice is answered with its first occurrence. A cron that can never fire answers fewer runs (at most 366 days are searched), not an error. Answers `Cache-Control: no-store`.",
-        "operationId": "preview",
+        "operationId": "pipelines_preview_schedule",
         "requestBody": {
           "content": {
             "application/json": {
@@ -2840,7 +2840,7 @@
           "public"
         ],
         "description": "The caller's own groups and the pipeline principal of each. `principal` is `pipeline-<group>` when a `ServicePrincipal` of that name with `spec.ownerGroup` equal to the group exists; `ready` is its `status.ready`. `message` is `null` when it is ready, otherwise the `Ready` condition's message (or `no status yet`), and for a group without a principal the `make sync-principal NAME=pipeline-<group> GROUP=<group>` command that creates one. A group without a ready principal cannot schedule. Answers `Cache-Control: no-store`.",
-        "operationId": "principals",
+        "operationId": "pipelines_principals",
         "responses": {
           "200": {
             "description": "One entry per group of the caller, sorted by group",
@@ -2891,7 +2891,7 @@
           "public"
         ],
         "description": "One pipeline: the list fields, the latest 20 runs, and the resource's `params`, `retries` and `options` (defaults filled in when a field is absent, so the edit dialog can prefill). A pipeline whose DAG does not exist yet answers 200 with `loaded: false` and `state: \"loading\"`. A pipeline of another group answers 404. History of a deleted pipeline is not offered in this version: without the resource the answer is 404.",
-        "operationId": "detail",
+        "operationId": "pipelines_get",
         "parameters": [
           {
             "name": "namespace",
@@ -3079,7 +3079,7 @@
           "public"
         ],
         "description": "Delete a pipeline Nova created. Only a pipeline the caller may act on and that carries `app.kubernetes.io/managed-by: stardelt-nova` may be deleted: a `kubectl` or GitOps pipeline answers 409 instead. Airflow is not called — the resource is the source of truth; the DAG leaves the scheduler's default list after about 90 seconds while its history stays readable. Answers 204 with `Cache-Control: no-store`; the attempt is audited.",
-        "operationId": "remove",
+        "operationId": "pipelines_delete",
         "parameters": [
           {
             "name": "namespace",
@@ -3163,7 +3163,7 @@
           "public"
         ],
         "description": "Pause a pipeline. Idempotent: pausing a paused pipeline answers 200. A pipeline the scheduler has not loaded answers 409. Answers the fresh `PipelineView` — the DAG as Airflow returned it after the patch — and `Cache-Control: no-store`. The attempt is audited, including a refusal.",
-        "operationId": "pause",
+        "operationId": "pipelines_pause",
         "parameters": [
           {
             "name": "namespace",
@@ -3254,7 +3254,7 @@
           "public"
         ],
         "description": "Resume a pipeline. Idempotent: resuming a running pipeline answers 200. A pipeline the scheduler has not loaded answers 409. Answers the fresh `PipelineView` — the DAG as Airflow returned it after the patch — and `Cache-Control: no-store`. The attempt is audited, including a refusal.",
-        "operationId": "resume",
+        "operationId": "pipelines_resume",
         "parameters": [
           {
             "name": "namespace",
@@ -3345,7 +3345,7 @@
           "public"
         ],
         "description": "Start a run now. Nova refuses instead of passing Airflow's silent behaviour on: a pipeline the scheduler has not loaded yet answers 409, a paused pipeline 409 (Airflow would create a run that waits `queued` until someone resumes), more than ten starts per user per minute 429, and a `Forbid` or `Replace` pipeline whose latest five runs include a queued or running one 409 (`Allow` skips that check). `logicalDate` is always now, UTC, whole seconds, so the run has tasks; the note is `Started from Nova by <display name>`. Every attempt, including a refusal, writes one audit line without note text. Answers `Cache-Control: no-store`.",
-        "operationId": "trigger_run",
+        "operationId": "pipelines_run_trigger",
         "parameters": [
           {
             "name": "namespace",
@@ -3446,7 +3446,7 @@
           "public"
         ],
         "description": "One run of a pipeline with its task instances. The run id is looked up through this pipeline's DAG id, so a run id of another pipeline answers 404. Answers `Cache-Control: no-store`.",
-        "operationId": "run",
+        "operationId": "pipelines_run_get",
         "parameters": [
           {
             "name": "namespace",
@@ -3536,7 +3536,7 @@
           "public"
         ],
         "description": "Stop a run: mark it failed. This is **not a cancel** — work already in flight can finish and commit its side effects (stardelt-nova#255), so the answer promises only that the run is marked failed. The run id is looked up through this pipeline's DAG id first: a run id of another pipeline answers 404 and is never patched. A run that is not `queued` or `running` answers 409 and is not patched. Answers the fresh `RunView` and `Cache-Control: no-store`. The attempt is audited, including a refusal.",
-        "operationId": "stop",
+        "operationId": "pipelines_run_stop",
         "parameters": [
           {
             "name": "namespace",
@@ -3636,7 +3636,7 @@
           "public"
         ],
         "description": "One page of a task's log: at most 2000 lines and 512 KiB, ANSI escapes removed, the `::group::` source marker dropped (it names internal object-store paths and is never returned). `try` defaults to the task's last attempt; `token` is the `nextToken` of the previous answer. Every read writes one audit line with user, pipeline, run and task — never the content. Answers `Cache-Control: no-store`.",
-        "operationId": "logs",
+        "operationId": "pipelines_run_task_logs",
         "parameters": [
           {
             "name": "namespace",
@@ -3765,7 +3765,7 @@
           "public"
         ],
         "description": "Run one SQL statement as the caller and return the whole result. Synchronous: the call returns when the query ends. At most 50 000 rows are returned; past that `truncated` is true and the rows are a prefix.",
-        "operationId": "run_query",
+        "operationId": "query_run",
         "requestBody": {
           "content": {
             "application/json": {

@@ -403,6 +403,7 @@ fn scrub_internal(message: &str) -> String {
 
 #[utoipa::path(
     post,
+    operation_id = "query_run",
     path = "/api/query",
     tag = "public",
     description = "Run one SQL statement as the caller and return the whole result. Synchronous: the call returns when the query ends. At most 50 000 rows are returned; past that `truncated` is true and the rows are a prefix.",
