@@ -47,6 +47,8 @@ pub struct ErrorResponse {
     ),
     paths(
         crate::me,
+        crate::health,
+        crate::openapi::serve,
         crate::catalog::warehouse_info,
         crate::warehouses::list,
         crate::catalog::list_catalogs,
@@ -99,12 +101,15 @@ pub struct ErrorResponse {
         crate::notebooks::publish,
         crate::notebooks::list,
         crate::notebooks::versions,
+        crate::notebooks::parameters,
         crate::admin_catalogs::list,
         crate::admin_catalogs::update_access,
     ),
     components(schemas(
         crate::Me,
         crate::OidcMe,
+        crate::Health,
+        crate::db::DbStatus,
         crate::catalog::WarehouseInfo,
         crate::warehouses::SqlWarehouse,
         crate::catalog::CatalogInfo,
@@ -173,6 +178,7 @@ pub struct ErrorResponse {
         crate::notebooks::NotebookSummary,
         crate::notebooks::NotebookVersion,
         crate::notebooks::NotebookParameter,
+        crate::notebooks::NotebookParameters,
         crate::admin_catalogs::AdminCatalog,
         crate::admin_catalogs::CatalogGrant,
         crate::admin_catalogs::CatalogCondition,
@@ -231,6 +237,16 @@ pub fn document_json() -> String {
 
 /// Serve the document. Deliberately outside sign-in (wired next to
 /// `/api/health` in `main`): it carries shapes, not data.
+#[utoipa::path(
+    get,
+    operation_id = "openapi_document",
+    path = "/api/openapi.json",
+    tag = "public",
+    description = "This document. It answers without sign-in and carries shapes, not data.",
+    responses(
+        (status = 200, description = "The OpenAPI 3.1 document", body = Object),
+    )
+)]
 pub async fn serve() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "application/json")],
@@ -280,11 +296,8 @@ mod tests {
         "/api/apps/links",
         "/api/apps/{id}",
         "/api/embeds",
-        "/api/health",
         "/api/ingest/upload",
         "/api/jobs",
-        "/api/notebooks/{group}/{name}/parameters",
-        "/api/openapi.json",
         "/api/transfer",
         "/api/trino/cluster",
         "/api/workloads",
