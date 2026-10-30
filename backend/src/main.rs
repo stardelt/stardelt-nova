@@ -316,13 +316,31 @@ pub(crate) async fn me(
     }
 }
 
+/// What the readiness probe answers.
+#[derive(Serialize, utoipa::ToSchema)]
+struct Health {
+    /// Always `ok`.
+    status: &'static str,
+    db: db::DbStatus,
+}
+
 /// Always `200`: the kubelet's readiness probe must not take Trino queries offline because
 /// the state store is down. The body says what is wrong: `db` is `up`, `down` or `disabled`.
-async fn health(State(s): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "status": "ok",
-        "db": db::status(s.db.as_ref()).await,
-    }))
+#[utoipa::path(
+    get,
+    operation_id = "health",
+    path = "/api/health",
+    tag = "public",
+    description = "The readiness probe. It answers 200 without sign-in whenever the process is up, so a state store that is down never takes Trino queries offline; `db` says what is wrong.",
+    responses(
+        (status = 200, description = "The process is up; `db` is the state store's state", body = Health),
+    )
+)]
+async fn health(State(s): State<Arc<AppState>>) -> Json<Health> {
+    Json(Health {
+        status: "ok",
+        db: db::status(s.db.as_ref()).await,
+    })
 }
 
 async fn trino_cluster(State(s): State<Arc<AppState>>) -> Response {

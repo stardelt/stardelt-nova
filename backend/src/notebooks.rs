@@ -1286,6 +1286,7 @@ pub(crate) async fn versions(
 /// Schedule dialog can offer the form the notebook declares (stardelt-nova#237).
 #[utoipa::path(
     get,
+    operation_id = "notebooks_parameters",
     path = "/api/notebooks/{group}/{name}/parameters",
     tag = "public",
     description = "The parameters of one published version of a notebook, read from the stored bytes: the `name = literal` lines of the first cell tagged `parameters`, in order, at most 32, defaults as text and never evaluated. `?version=<id>` names the immutable version; omitted, the latest is read and its id answered. Needs a member of `{group}` (403 `you are not a member of the group <g>`; administrators are not exempt). An unknown version is 404 `no such notebook version`. The answer carries `parameters` and the `objectVersion` it describes — a schedule pins that id. Unset `NOVA_S3_*` is 503 `notebook storage is not configured`; an S3 that is down or refuses is 502. Answers `Cache-Control: no-store`.",

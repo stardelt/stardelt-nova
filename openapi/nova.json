@@ -2124,6 +2124,28 @@
         }
       }
     },
+    "/api/health": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "summary": "Always `200`: the kubelet's readiness probe must not take Trino queries offline because\nthe state store is down. The body says what is wrong: `db` is `up`, `down` or `disabled`.",
+        "description": "The readiness probe. It answers 200 without sign-in whenever the process is up, so a state store that is down never takes Trino queries offline; `db` says what is wrong.",
+        "operationId": "health",
+        "responses": {
+          "200": {
+            "description": "The process is up; `db` is the state store's state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/me": {
       "get": {
         "tags": [
@@ -2320,6 +2342,119 @@
         }
       }
     },
+    "/api/notebooks/{group}/{name}/parameters": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`GET /api/notebooks/{group}/{name}/parameters`: the parameters of one version, so the\nSchedule dialog can offer the form the notebook declares (stardelt-nova#237).",
+        "description": "The parameters of one published version of a notebook, read from the stored bytes: the `name = literal` lines of the first cell tagged `parameters`, in order, at most 32, defaults as text and never evaluated. `?version=<id>` names the immutable version; omitted, the latest is read and its id answered. Needs a member of `{group}` (403 `you are not a member of the group <g>`; administrators are not exempt). An unknown version is 404 `no such notebook version`. The answer carries `parameters` and the `objectVersion` it describes — a schedule pins that id. Unset `NOVA_S3_*` is 503 `notebook storage is not configured`; an S3 that is down or refuses is 502. Answers `Cache-Control: no-store`.",
+        "operationId": "notebooks_parameters",
+        "parameters": [
+          {
+            "name": "group",
+            "in": "path",
+            "description": "One of the caller's groups",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Notebook file name, ending in .ipynb",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "version",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The parameters and the version they belong to",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotebookParameters"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a member of the group",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such notebook version",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The notebook store did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Notebook storage is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/notebooks/{group}/{name}/versions": {
       "get": {
         "tags": [
@@ -2408,6 +2543,28 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/openapi.json": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "summary": "Serve the document. Deliberately outside sign-in (wired next to\n`/api/health` in `main`): it carries shapes, not data.",
+        "description": "This document. It answers without sign-in and carries shapes, not data.",
+        "operationId": "openapi_document",
+        "responses": {
+          "200": {
+            "description": "The OpenAPI 3.1 document",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
                 }
               }
             }
@@ -4872,6 +5029,15 @@
           }
         }
       },
+      "DbStatus": {
+        "type": "string",
+        "description": "What `/api/health` reports about the state store.",
+        "enum": [
+          "up",
+          "down",
+          "disabled"
+        ]
+      },
       "DocumentationUpdate": {
         "type": "object",
         "description": "`PUT /api/catalog/tables/{ns}/{tbl}/documentation` body.\n\nEvery key is optional. Absent changes nothing; `null` removes the property; an empty tag\nlist and a blank description also remove. A field whose value equals what the table\nalready stores is not a change.",
@@ -4919,6 +5085,23 @@
           "error": {
             "type": "string",
             "description": "Human-readable sentence. Never contains tokens, URLs or stack traces."
+          }
+        }
+      },
+      "Health": {
+        "type": "object",
+        "description": "What the readiness probe answers.",
+        "required": [
+          "status",
+          "db"
+        ],
+        "properties": {
+          "db": {
+            "$ref": "#/components/schemas/DbStatus"
+          },
+          "status": {
+            "type": "string",
+            "description": "Always `ok`."
           }
         }
       },
@@ -5183,6 +5366,27 @@
           },
           "name": {
             "type": "string"
+          }
+        }
+      },
+      "NotebookParameters": {
+        "type": "object",
+        "description": "`GET /api/notebooks/{group}/{name}/parameters`: the parameters of one pinned version\n(stardelt-nova#237).",
+        "required": [
+          "parameters",
+          "objectVersion"
+        ],
+        "properties": {
+          "objectVersion": {
+            "type": "string",
+            "description": "The version the answer describes — the one asked for, or the latest when the query\nnamed none. A schedule pins this exact id."
+          },
+          "parameters": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NotebookParameter"
+            },
+            "description": "The `name = literal` lines of the first cell tagged `parameters`, in order, at most\n32; empty when no cell carries the tag."
           }
         }
       },
