@@ -255,7 +255,7 @@ export default function Shell() {
           </div>
         </div>
 
-        <nav className="px-3 pb-4 overflow-auto flex-1">
+        <nav className="px-3 pb-4 flex-1">
           {groups
             .filter(group => !group.admin || admin)
             .map(group => (
