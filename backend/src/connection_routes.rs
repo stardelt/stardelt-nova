@@ -1289,6 +1289,7 @@ pub(crate) async fn list(signed: SignedIn) -> Response {
 
 #[utoipa::path(
     post,
+    operation_id = "connections_group_break_glass",
     path = "/api/connections/group/{group}/{name}/break-glass",
     tag = "public",
     description = "Emergency read of a group connection by an administrator: a written reason, a notice on the Connection for the owner group, an audit row, and the values returned **once**. The answer is never stored and carries `Cache-Control: no-store` and `Pragma: no-cache`. Personal and managed connections are never readable.",
@@ -1335,6 +1336,7 @@ pub(crate) async fn break_glass_group(
 
 #[utoipa::path(
     post,
+    operation_id = "connections_personal_break_glass",
     path = "/api/connections/personal/{name}/break-glass",
     tag = "public",
     description = "Always refused: break-glass covers group connections only. An administrator gets a 403 and an audit row; nothing is read.",
@@ -1370,6 +1372,7 @@ pub(crate) async fn break_glass_personal(
 
 #[utoipa::path(
     post,
+    operation_id = "connections_managed_break_glass",
     path = "/api/connections/managed/{name}/break-glass",
     tag = "public",
     description = "Always refused: break-glass covers group connections only. An administrator gets a 403 and an audit row; nothing is read.",
@@ -1405,6 +1408,7 @@ pub(crate) async fn break_glass_managed(
 
 #[utoipa::path(
     get,
+    operation_id = "connections_break_glass_log",
     path = "/api/connections/break-glass-log",
     tag = "public",
     description = "The last 200 break-glass reads and refusals, newest first, for administrators. The rows carry the administrator, group, connection, reason and outcome — never a value. `Cache-Control: no-store`.",
@@ -1504,6 +1508,7 @@ pub(crate) async fn create(
 
 #[utoipa::path(
     put,
+    operation_id = "connections_personal_rotate",
     path = "/api/connections/personal/{name}/secret",
     tag = "public",
     description = "Rotate some fields of one of the caller's own connections; the fields that are not sent keep their value.",
@@ -1538,6 +1543,7 @@ pub(crate) async fn rotate_personal(
 
 #[utoipa::path(
     put,
+    operation_id = "connections_group_rotate",
     path = "/api/connections/group/{group}/{name}/secret",
     tag = "public",
     description = "Rotate some fields of one of a group's connections. Asked to write the fields that are sent; the others keep their value.",
@@ -1566,6 +1572,7 @@ pub(crate) async fn rotate_group(
 
 #[utoipa::path(
     put,
+    operation_id = "connections_managed_rotate",
     path = "/api/connections/managed/{name}/secret",
     tag = "public",
     description = "Rotate an administrator-managed connection. Nobody can read it back, so every field must be sent.",
@@ -1617,6 +1624,7 @@ async fn rotate_at(
 
 #[utoipa::path(
     delete,
+    operation_id = "connections_personal_delete",
     path = "/api/connections/personal/{name}",
     tag = "public",
     description = "Delete one of the caller's own connections.",
@@ -1644,6 +1652,7 @@ pub(crate) async fn delete_personal(signed: SignedIn, Path(name): Path<String>) 
 
 #[utoipa::path(
     delete,
+    operation_id = "connections_group_delete",
     path = "/api/connections/group/{group}/{name}",
     tag = "public",
     description = "Delete one of a group's connections. The value goes first, then the resource; if the resource delete fails the entry stays visible as not-ready and the delete can be retried.",
@@ -1669,6 +1678,7 @@ pub(crate) async fn delete_group(
 
 #[utoipa::path(
     delete,
+    operation_id = "connections_managed_delete",
     path = "/api/connections/managed/{name}",
     tag = "public",
     description = "Delete an administrator-managed connection. The value goes first, then the resource; if the resource delete fails the entry stays visible as not-ready and the delete can be retried.",

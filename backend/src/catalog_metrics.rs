@@ -717,6 +717,7 @@ fn demo_numbers(state: &AppState) -> CatalogStats {
 
 #[utoipa::path(
     get,
+    operation_id = "catalog_metrics_get",
     path = "/api/catalog/metrics",
     tag = "public",
     description = "What is in each catalog the caller may browse: schemas, tables, rows, bytes on the object store and the newest commit, plus the sums. Rows are ordered bronze, silver, gold first, then by name, and carry `layer` when the catalog is one of the three (the `stardelt.io/layer` label, else the catalog's own name). The catalog list is the caller's own `SHOW CATALOGS` (`GET /api/catalog/catalogs`); a catalog the caller may not browse is never read and never appears. The numbers come from the catalog's Iceberg metadata (the current snapshot's `total-records` and `total-files-size`), so the endpoint runs no query, and they are read in the background every five minutes (`NOVA_METRICS_REFRESH_SECS`): a request answers from the last numbers at once, whatever their age, and `updatedAt` says when they were read. A catalog with no numbers yet is answered with zeros and `pending: true` while one background scan reads it; `totals` leave pending rows out. At most 200 tables per catalog are loaded: `truncated` says the rows and bytes are a sample while `tables` stays exact. A catalog whose scan failed keeps its last numbers and carries an `error` sentence (zeros for one that never answered); only an unreachable engine or catalog fails the request with 502. 403 when no catalog is open to the caller. Never cached by the client.",
@@ -809,6 +810,7 @@ pub async fn get(State(s): State<Arc<AppState>>, caller: Option<Extension<Princi
 
 #[utoipa::path(
     post,
+    operation_id = "catalog_metrics_refresh",
     path = "/api/catalog/metrics/refresh",
     tag = "public",
     description = "Read every catalog again now, instead of waiting for the next background round (every five minutes). Administrator only: it is an operator action on the whole warehouse, and `main` puts the same `require_admin` in front of it as `/api/apps`, so a non-administrator answers 403. Answers 202 — the round runs in the background, one at a time, and the page reads the new numbers with its next `GET /api/catalog/metrics`. At most one per minute: a second call answers 429 with the sentence `the numbers were refreshed less than a minute ago`.",
