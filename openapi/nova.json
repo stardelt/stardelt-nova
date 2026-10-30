@@ -3463,6 +3463,138 @@
         }
       }
     },
+    "/api/saved-queries": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`GET /api/saved-queries` — the caller's own, newest first.",
+        "description": "The caller's own saved queries, most recently changed first. Times are epoch milliseconds.",
+        "operationId": "saved_queries_list",
+        "responses": {
+          "200": {
+            "description": "The caller's saved queries",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SavedQuery"
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The state store is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`POST /api/saved-queries` — `201` with the stored row.",
+        "description": "Save a query for the caller. The title is at most 200 characters and the SQL at most 100 000.",
+        "operationId": "saved_queries_create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewSavedQuery"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The stored row",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SavedQuery"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The title or the SQL is empty or too long",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The state store is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/saved-queries/{id}": {
+      "delete": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`DELETE /api/saved-queries/{id}` — `204`; `404` when the id is not the caller's.",
+        "description": "Delete one of the caller's saved queries.",
+        "operationId": "saved_queries_remove",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The saved query's id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "404": {
+            "description": "No such saved query, or it is not the caller's",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The state store is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/warehouses": {
       "get": {
         "tags": [
@@ -4508,6 +4640,26 @@
           }
         }
       },
+      "NewSavedQuery": {
+        "type": "object",
+        "description": "`POST /api/saved-queries` body.",
+        "required": [
+          "title",
+          "sql"
+        ],
+        "properties": {
+          "sql": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "warehouse": {
+            "type": "string",
+            "description": "The warehouse the query was written for; free text, may be empty."
+          }
+        }
+      },
       "NotebookParameter": {
         "type": "object",
         "required": [
@@ -5237,6 +5389,41 @@
             ]
           },
           "type": {
+            "type": "string"
+          }
+        }
+      },
+      "SavedQuery": {
+        "type": "object",
+        "description": "A row as the API returns it. Times are epoch milliseconds, like `Job.started_at`.",
+        "required": [
+          "id",
+          "title",
+          "sql",
+          "warehouse",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "sql": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "warehouse": {
             "type": "string"
           }
         }

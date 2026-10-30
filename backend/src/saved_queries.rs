@@ -28,7 +28,7 @@ const MAX_TITLE_CHARS: usize = 200;
 const MAX_SQL_CHARS: usize = 100_000;
 
 /// A row as the API returns it. Times are epoch milliseconds, like `Job.started_at`.
-#[derive(Serialize, FromRow, Debug, PartialEq)]
+#[derive(Serialize, FromRow, Debug, PartialEq, utoipa::ToSchema)]
 pub struct SavedQuery {
     pub id: i64,
     pub title: String,
@@ -39,7 +39,7 @@ pub struct SavedQuery {
 }
 
 /// `POST /api/saved-queries` body.
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, utoipa::ToSchema)]
 pub struct NewSavedQuery {
     pub title: String,
     pub sql: String,
@@ -109,6 +109,17 @@ const COLUMNS: &str = "id, title, sql, warehouse, \
     (extract(epoch FROM updated_at) * 1000)::bigint AS updated_at";
 
 /// `GET /api/saved-queries` — the caller's own, newest first.
+#[utoipa::path(
+    get,
+    operation_id = "saved_queries_list",
+    path = "/api/saved-queries",
+    tag = "public",
+    description = "The caller's own saved queries, most recently changed first. Times are epoch milliseconds.",
+    responses(
+        (status = 200, description = "The caller's saved queries", body = Vec<SavedQuery>),
+        (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
 pub async fn list(
     State(s): State<Arc<AppState>>,
     caller: Option<Extension<Principal>>,
@@ -132,6 +143,19 @@ pub async fn list(
 }
 
 /// `POST /api/saved-queries` — `201` with the stored row.
+#[utoipa::path(
+    post,
+    operation_id = "saved_queries_create",
+    path = "/api/saved-queries",
+    tag = "public",
+    description = "Save a query for the caller. The title is at most 200 characters and the SQL at most 100 000.",
+    request_body = NewSavedQuery,
+    responses(
+        (status = 201, description = "The stored row", body = SavedQuery),
+        (status = 400, description = "The title or the SQL is empty or too long", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
 pub async fn create(
     State(s): State<Arc<AppState>>,
     caller: Option<Extension<Principal>>,
@@ -167,6 +191,19 @@ pub async fn create(
 ///
 /// The id is taken as a string and parsed here: axum's own `Path<i64>` rejection is
 /// plain text, and every error under `/api/` is JSON.
+#[utoipa::path(
+    delete,
+    operation_id = "saved_queries_remove",
+    path = "/api/saved-queries/{id}",
+    tag = "public",
+    description = "Delete one of the caller's saved queries.",
+    params(("id" = i64, Path, description = "The saved query's id")),
+    responses(
+        (status = 204, description = "Deleted"),
+        (status = 404, description = "No such saved query, or it is not the caller's", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
 pub async fn remove(
     State(s): State<Arc<AppState>>,
     caller: Option<Extension<Principal>>,
