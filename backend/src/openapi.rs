@@ -219,6 +219,103 @@ mod tests {
         );
     }
 
+    /// Routes that are served but not in the document yet. This list only
+    /// shrinks: document a route (add its `#[utoipa::path]`) and delete its
+    /// line here. Adding a route without either fails the test below.
+    const UNDOCUMENTED: &[&str] = &[
+        "/api/apps",
+        "/api/apps/links",
+        "/api/apps/{id}",
+        "/api/catalog/tables/{ns}/{tbl}/history",
+        "/api/catalog/tables/{ns}/{tbl}/rollback",
+        "/api/embeds",
+        "/api/health",
+        "/api/ingest/upload",
+        "/api/jobs",
+        "/api/notebooks/{group}/{name}/parameters",
+        "/api/openapi.json",
+        "/api/query",
+        "/api/query-log",
+        "/api/query-log/{id}",
+        "/api/saved-queries",
+        "/api/saved-queries/{id}",
+        "/api/settings",
+        "/api/settings/{key}",
+        "/api/transfer",
+        "/api/trino/cluster",
+        "/api/workloads",
+    ];
+
+    /// The `.route("<path>"` literals inside the router function that starts
+    /// at `marker` in `src`, each prefixed with `/api` (where every router is
+    /// mounted). The function body ends at the first closing brace in column 0.
+    fn routes_in(src: &str, marker: &str) -> Vec<String> {
+        let start = src
+            .find(marker)
+            .unwrap_or_else(|| panic!("{marker} not found"));
+        let body = &src[start..];
+        let body = &body[..body.find("\n}\n").expect("end of the router function")];
+        let mut paths = Vec::new();
+        let mut rest = body;
+        while let Some(i) = rest.find(".route(") {
+            rest = rest[i + ".route(".len()..].trim_start();
+            if let Some(quoted) = rest.strip_prefix('"')
+                && let Some(end) = quoted.find('"')
+            {
+                paths.push(format!("/api{}", &quoted[..end]));
+            }
+        }
+        paths
+    }
+
+    /// Every route Nova serves under `/api` must be in the OpenAPI document or
+    /// in `UNDOCUMENTED`, and `UNDOCUMENTED` may not list a documented or
+    /// vanished route. One contract is what the SDKs, the CLI and the MCP
+    /// server are generated from (stardelt-nova#229).
+    #[test]
+    fn every_api_route_is_documented_or_listed() {
+        let main_rs = include_str!("main.rs");
+        let mut served = Vec::new();
+        for marker in ["fn public_router()", "fn api_router()", "fn admin_router()"] {
+            served.extend(routes_in(main_rs, marker));
+        }
+        served.extend(routes_in(include_str!("pipelines.rs"), "fn router()"));
+        served.extend(routes_in(include_str!("notebooks.rs"), "fn router()"));
+        assert!(
+            served.len() > 40,
+            "the scan found only {} routes",
+            served.len()
+        );
+
+        let value = serde_json::to_value(document()).expect("the document is JSON");
+        let documented: Vec<String> = value["paths"]
+            .as_object()
+            .expect("paths is an object")
+            .keys()
+            .cloned()
+            .collect();
+
+        let mut missing: Vec<&String> = served
+            .iter()
+            .filter(|p| !documented.contains(p) && !UNDOCUMENTED.contains(&p.as_str()))
+            .collect();
+        missing.sort();
+        missing.dedup();
+        assert!(
+            missing.is_empty(),
+            "served but neither documented nor listed in UNDOCUMENTED: {missing:#?}"
+        );
+
+        let stale: Vec<&&str> = UNDOCUMENTED
+            .iter()
+            .filter(|p| documented.iter().any(|d| d == **p) || !served.iter().any(|s| s == **p))
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "UNDOCUMENTED lists a route that is now documented or no longer served: {stale:#?}"
+        );
+    }
+
     /// The document endpoint answers without a session and carries no data:
     /// no tokens, no cookies, no secrets — only paths, schemas and prose.
     #[test]
