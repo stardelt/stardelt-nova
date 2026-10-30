@@ -3463,6 +3463,188 @@
         }
       }
     },
+    "/api/query-log": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`GET /api/query-log?scope=mine|team|all&state=&warehouse=&q=&from=&to=&limit=&cursor=`",
+        "description": "The statements run on the engine, newest first, a page at a time. A person sees their own; an administrator may ask for everyone's with scope=all. Times are epoch milliseconds.",
+        "operationId": "query_log_list",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "query",
+            "description": "mine (default), team or all. all is for administrators; team stays empty until ownership is recorded",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "description": "QUEUED, FINISHED, FAILED or CANCELED, in any case",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "warehouse",
+            "in": "query",
+            "description": "Only queries that ran on this warehouse",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Text inside the statement, or an exact query id; at most 200 characters",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Created at or after this time",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Created at or before this time",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size from 1 to 200; 50 by default",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "The nextCursor of the previous page",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of the log",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueryLogPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A parameter is not valid; the message names it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "scope=all by somebody who is not an administrator",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The state store is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/query-log/{id}": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`GET /api/query-log/{id}` — everything stored about one query the caller may see.",
+        "description": "One query with its whole statement. Somebody else's query answers 404, exactly like a missing one; an administrator who opens another person's query is audited.",
+        "operationId": "query_log_detail",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The engine's query id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The stored query",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueryLogDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such query, or it is not the caller's to see",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The state store is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/saved-queries": {
       "get": {
         "tags": [
@@ -5204,6 +5386,294 @@
           }
         }
       },
+      "QueryData": {
+        "type": "object",
+        "description": "How much data the query read, wrote and held in memory.",
+        "properties": {
+          "inputBytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "inputRows": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "outputBytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "outputRows": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "peakMemoryBytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "writtenBytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "writtenRows": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          }
+        }
+      },
+      "QueryFailure": {
+        "type": "object",
+        "description": "Why a query failed.",
+        "required": [
+          "code"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "QueryLogDetail": {
+        "type": "object",
+        "description": "Everything stored about one query: the whole statement, timing, data volumes, tables.",
+        "required": [
+          "id",
+          "state",
+          "user",
+          "clientTags",
+          "warehouse",
+          "sql",
+          "sqlHash",
+          "createdAt",
+          "timing",
+          "data",
+          "tablesRead",
+          "tablesWritten"
+        ],
+        "properties": {
+          "catalog": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "clientTags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "createdAt": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "data": {
+            "$ref": "#/components/schemas/QueryData"
+          },
+          "endedAt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "error": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/QueryFailure"
+              }
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "queryType": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "schema": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sql": {
+            "type": "string"
+          },
+          "sqlHash": {
+            "type": "string"
+          },
+          "startedAt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "state": {
+            "type": "string"
+          },
+          "tablesRead": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "tablesWritten": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "timing": {
+            "$ref": "#/components/schemas/QueryTiming"
+          },
+          "user": {
+            "type": "string",
+            "description": "The raw engine user (the `sub` once authz 8/8 is live)."
+          },
+          "userName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "warehouse": {
+            "type": "string"
+          }
+        }
+      },
+      "QueryLogItem": {
+        "type": "object",
+        "description": "One row of the query log list; the statement is cut to a preview.",
+        "required": [
+          "id",
+          "state",
+          "user",
+          "warehouse",
+          "sql",
+          "createdAt"
+        ],
+        "properties": {
+          "createdAt": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "errorCode": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "outputRows": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "queryType": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sql": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "user": {
+            "type": "string",
+            "description": "The raw engine user (the `sub` once authz 8/8 is live)."
+          },
+          "userName": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The person's display name when Nova knows the engine user; `None` falls back to\n`user` in the UI."
+          },
+          "wallMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "warehouse": {
+            "type": "string"
+          }
+        }
+      },
+      "QueryLogPage": {
+        "type": "object",
+        "description": "One page of the query log; `nextCursor` is null on the last page.",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/QueryLogItem"
+            }
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "QueryRequest": {
         "type": "object",
         "required": [
@@ -5261,6 +5731,47 @@
           "truncated": {
             "type": "boolean",
             "description": "True when rows were cut at [`MAX_ROWS`]: the result is a prefix, not the\nwhole answer. The UI says so instead of showing a silent partial table."
+          }
+        }
+      },
+      "QueryTiming": {
+        "type": "object",
+        "description": "How long the query waited, planned and ran, in milliseconds.",
+        "properties": {
+          "cpuMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "executionMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "planningMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "queuedMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "wallMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
           }
         }
       },
