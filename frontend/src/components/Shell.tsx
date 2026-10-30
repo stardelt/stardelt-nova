@@ -4,8 +4,9 @@ import { useQuery } from '@tanstack/react-query'
 import { api } from '../api'
 import { Icon, type IconName } from './Icon'
 import { applyTheme, useTheme, type Theme } from '../theme'
-import { isAdmin, roleLabel } from '../roles'
+import { isAdmin } from '../roles'
 import ErrorBoundary from './ErrorBoundary'
+import UserMenu from './UserMenu'
 
 type NavItem = { to: string; label: string; icon: IconName; end?: boolean }
 /** `admin: true` hides the whole group from non-admins (see `roles.ts`). */
@@ -190,7 +191,6 @@ export default function Shell() {
   const theme = useTheme()
   const title = titleFor(location.pathname)
   const admin = isAdmin(me.data)
-  const role = roleLabel(me.data)
   const [navOpen, setNavOpen] = useState(false)
   useEffect(() => { setNavOpen(false) }, [location.pathname])
 
@@ -289,31 +289,7 @@ export default function Shell() {
             ))}
         </nav>
 
-        <div className="p-3 border-t border-border">
-          <div className="flex items-center gap-2.5 px-2 py-1.5">
-            <div className="w-7 h-7 rounded-full bg-accent/20 border border-accent/30 grid place-items-center text-xs font-semibold text-accent">
-              {(me.data?.user ?? '?').slice(0, 1).toUpperCase()}
-            </div>
-            <div className="min-w-0">
-              <div className="text-sm truncate">{me.data?.user ?? (me.isError ? 'unknown user' : 'loading…')}</div>
-              <div className="text-[11px] text-text-mute flex items-center gap-1.5">
-                {role && (
-                  <span
-                    className={[
-                      'badge px-1.5 py-0 text-[10px]',
-                      admin
-                        ? 'border-accent/40 bg-accent/10 text-accent'
-                        : 'border-border bg-bg-soft text-text-mute',
-                    ].join(' ')}
-                  >
-                    {role}
-                  </span>
-                )}
-                {me.data?.auth_mode ?? ''}
-              </div>
-            </div>
-          </div>
-        </div>
+
 
         {/* The project names itself: the version that is running, and where to read more
             or report a problem. A person should not have to leave Nova to find them. */}
@@ -368,26 +344,7 @@ export default function Shell() {
             />
           </form>
           <AppSwitcher />
-          {me.data?.auth_mode === 'oidc' && (
-            <div className="flex items-center gap-2 pl-2 border-l border-border">
-              <div className="text-right leading-tight min-w-0 hidden sm:block" title={me.data.email ?? ''}>
-                <div className="text-sm truncate max-w-[12rem]">{me.data.user}</div>
-                {role && <div className="text-[11px] text-text-mute truncate max-w-[12rem]">{role}</div>}
-              </div>
-              {/* A plain form POST: the backend clears the session and 303s to the IdP's logout,
-                  ending the shared Keycloak session for Nova and all connected apps. */}
-              <form method="post" action="/api/auth/logout">
-                <button
-                  type="submit"
-                  className="btn-ghost px-2.5 py-1.5 text-sm"
-                  title="Sign out of Nova and all connected apps"
-                  aria-label="Sign out of Nova and all connected apps"
-                >
-                  Sign out
-                </button>
-              </form>
-            </div>
-          )}
+          <UserMenu me={me.data} />
           <button
             onClick={toggleTheme}
             title={theme === 'dark' ? 'Switch to light' : 'Switch to dark'}

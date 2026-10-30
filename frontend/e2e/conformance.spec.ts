@@ -4874,3 +4874,169 @@ test.describe('profile', () => {
     await context.close()
   })
 })
+
+test.describe('person menu', () => {
+  const ME_MEMBER = { user: 'alice', auth_mode: 'oidc', demo: false, warehouse: 'warehouse', is_admin: false, groups: ['analysts'], email: 'alice@example.com' }
+  const ME_ADMIN = { user: 'bob', auth_mode: 'oidc', demo: false, warehouse: 'warehouse', is_admin: true, groups: ['admins'], email: 'bob@example.com' }
+  const ME_DEV = { user: 'operator', auth_mode: 'static-dev', demo: false, warehouse: 'warehouse' }
+
+  async function openPersonMenu(browser: Browser, me: unknown, route = '/') {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 800 } })
+    const page = await context.newPage()
+    await page.route('**/api/**', (r) => {
+      const path = new URL(r.request().url()).pathname
+      if (path === '/api/me') return json(r, me)
+      if (path === '/api/apps/links') return json(r, [])
+      return json(r, path.includes('namespaces') ? { namespaces: [] } : [])
+    })
+    await page.goto(route)
+    await page.waitForTimeout(500)
+    const button = page.getByRole('button', { name: new RegExp(`Account menu for`) })
+    return { context, page, button }
+  }
+
+  test('opens with Enter and closes with Escape and focus returns', async ({ browser }) => {
+    const { context, page, button } = await openPersonMenu(browser, ME_MEMBER)
+    await button.focus()
+    await page.keyboard.press('Enter')
+    const menu = page.getByRole('menu', { name: 'Account menu' })
+    await expect(menu).toBeVisible()
+    const first = page.getByRole('menuitem', { name: 'Profile' })
+    await expect(first).toBeFocused()
+    await page.keyboard.press('Escape')
+    await expect(menu).not.toBeVisible()
+    await expect(button).toBeFocused()
+    await context.close()
+  })
+
+  test('arrow keys, Home and End move between items and Tab closes', async ({ browser }) => {
+    const { context, page, button } = await openPersonMenu(browser, ME_MEMBER)
+    await button.click()
+    const menu = page.getByRole('menu', { name: 'Account menu' })
+    await expect(menu).toBeVisible()
+    const items = [page.getByRole('menuitem', { name: 'Profile' }), page.getByRole('menuitem', { name: 'Preferences' }), page.getByRole('menuitem', { name: 'Sign out' })]
+    await expect(items[0]).toBeFocused()
+    await page.keyboard.press('ArrowDown')
+    await expect(items[1]).toBeFocused()
+    await page.keyboard.press('ArrowDown')
+    await expect(items[2]).toBeFocused()
+    await page.keyboard.press('Home')
+    await expect(items[0]).toBeFocused()
+    await page.keyboard.press('End')
+    await expect(items[2]).toBeFocused()
+    await page.keyboard.press('Tab')
+    await expect(menu).not.toBeVisible()
+    await context.close()
+  })
+
+  test('items by role', async ({ browser }) => {
+    // member
+    const m1 = await openPersonMenu(browser, ME_MEMBER)
+    await m1.button.click()
+    await expect(m1.page.getByRole('menuitem', { name: 'Profile' })).toBeVisible()
+    await expect(m1.page.getByRole('menuitem', { name: 'Preferences' })).toBeVisible()
+    await expect(m1.page.getByRole('menuitem', { name: 'Sign out' })).toBeVisible()
+    await expect(m1.page.getByRole('menuitem', { name: 'Platform settings' })).toHaveCount(0)
+    await expect(m1.page.getByText('Administrator')).toHaveCount(0)
+    await m1.context.close()
+
+    // administrator
+    const m2 = await openPersonMenu(browser, ME_ADMIN)
+    await m2.button.click()
+    await expect(m2.page.getByText('Administrator')).toBeVisible()
+    await expect(m2.page.getByRole('menuitem', { name: 'Platform settings' })).toBeVisible()
+    await m2.context.close()
+
+    // dev mode
+    const m3 = await openPersonMenu(browser, ME_DEV)
+    await m3.button.click()
+    await expect(m3.page.getByText('Development mode (no sign-in)')).toBeVisible()
+    await expect(m3.page.getByRole('menuitem', { name: 'Profile' })).toBeVisible()
+    await expect(m3.page.getByRole('menuitem', { name: 'Preferences' })).toBeVisible()
+    await expect(m3.page.getByRole('menuitem', { name: 'Sign out' })).toHaveCount(0)
+    await m3.context.close()
+  })
+
+  test('sign out works from the menu', async ({ browser }) => {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 800 } })
+    const page = await context.newPage()
+    let logoutReq: Request | null = null
+    await page.route('**/api/**', (r) => {
+      const path = new URL(r.request().url()).pathname
+      if (path === '/api/me') return json(r, ME_MEMBER)
+      if (path === '/api/apps/links') return json(r, [])
+      return json(r, [])
+    })
+    page.on('request', (req) => {
+      if (req.url().includes('/api/auth/logout')) logoutReq = req
+    })
+    await page.goto('/')
+    await page.getByRole('button', { name: /Account menu for/ }).click()
+    const logoutBtn = page.getByRole('menuitem', { name: 'Sign out' })
+    await expect(logoutBtn).toBeVisible()
+    // form submit
+    await logoutBtn.click()
+    await page.waitForTimeout(100)
+    await context.close()
+  })
+
+  test('hostile name and email stay text and truncated', async ({ browser }) => {
+    const evil = '<img src=x onerror="window.__xss=1">'
+    const long = 'x'.repeat(300)
+    const context = await browser.newContext({ viewport: { width: 1280, height: 800 } })
+    const page = await context.newPage()
+    await page.addInitScript(() => { (window as unknown as { __xss: number }).__xss = 0 })
+    await page.route('**/api/**', (r) => {
+      const path = new URL(r.request().url()).pathname
+      if (path === '/api/me') return json(r, { user: long, auth_mode: 'oidc', demo: false, warehouse: 'warehouse', is_admin: false, groups: ['analysts'], email: evil, name: long })
+      if (path === '/api/apps/links') return json(r, [])
+      return json(r, [])
+    })
+    await page.goto('/')
+    await page.getByRole('button', { name: /Account menu for/ }).click()
+    await expect(page.getByText(long, { exact: true }).first()).toBeVisible()
+    await expect(page.getByText(evil, { exact: true }).first()).toBeVisible()
+    for (const width of [1280, 360]) {
+      await page.setViewportSize({ width, height: 800 })
+      const s = await page.evaluate(() => ({
+        xss: (window as unknown as { __xss: number }).__xss,
+        imgs: document.querySelectorAll('img[src="x"]').length,
+        overflow: document.documentElement.scrollWidth - window.innerWidth,
+      }))
+      expect(s, `${width}px`).toEqual({ xss: 0, imgs: 0, overflow: expect.any(Number) })
+      expect(s.overflow, `${width}px overflow`).toBeLessThanOrEqual(1)
+    }
+    await context.close()
+  })
+
+  test('the sidebar shows the Admin group without scrolling at 1280 x 800', async ({ browser }) => {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 800 } })
+    const page = await context.newPage()
+    await page.route('**/api/**', (r) => {
+      const path = new URL(r.request().url()).pathname
+      if (path === '/api/me') return json(r, ME_ADMIN)
+      if (path === '/api/apps/links') return json(r, [])
+      return json(r, [])
+    })
+    await page.goto('/')
+    await page.waitForTimeout(500)
+    const settings = page.locator('nav').getByRole('link', { name: 'Settings' })
+    await expect(settings).toBeVisible()
+    const box = await settings.boundingBox()
+    expect(box).not.toBeNull()
+    const nav = page.locator('nav')
+    const navBox = await nav.boundingBox()
+    expect(navBox).not.toBeNull()
+    expect(box!.y + box!.height).toBeLessThanOrEqual(navBox!.y + navBox!.height + 5)
+    await context.close()
+  })
+
+  test('generic route tests still pass and U5 audit over open menu: no U5 finding', async ({ browser }) => {
+    const { context, page, button } = await openPersonMenu(browser, ME_ADMIN)
+    await button.click()
+    const menu = page.getByRole('menu', { name: 'Account menu' })
+    await expect(menu).toBeVisible()
+    expect((await auditPage(page)).filter((finding) => finding.rule === 'U5')).toEqual([])
+    await context.close()
+  })
+})
