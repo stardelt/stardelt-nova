@@ -3412,6 +3412,57 @@
         }
       }
     },
+    "/api/query": {
+      "post": {
+        "tags": [
+          "public"
+        ],
+        "description": "Run one SQL statement as the caller and return the whole result. Synchronous: the call returns when the query ends. At most 50 000 rows are returned; past that `truncated` is true and the rows are a prefix.",
+        "operationId": "run_query",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QueryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The columns, the rows and the engine's query id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueryResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The statement is empty, was refused or failed in the engine",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The query engine is not reachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/warehouses": {
       "get": {
         "tags": [
@@ -3932,6 +3983,22 @@
               "boolean",
               "null"
             ]
+          }
+        }
+      },
+      "Column": {
+        "type": "object",
+        "required": [
+          "name",
+          "type"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "description": "The engine's type name, for example `varchar` or `bigint`."
           }
         }
       },
@@ -4982,6 +5049,66 @@
             "type": "integer",
             "format": "int64",
             "minimum": 0
+          }
+        }
+      },
+      "QueryRequest": {
+        "type": "object",
+        "required": [
+          "sql"
+        ],
+        "properties": {
+          "sql": {
+            "type": "string",
+            "description": "One SQL statement, run with the caller's identity."
+          }
+        }
+      },
+      "QueryResult": {
+        "type": "object",
+        "required": [
+          "columns",
+          "rows",
+          "row_count",
+          "truncated"
+        ],
+        "properties": {
+          "columns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Column"
+            }
+          },
+          "query_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "row_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            },
+            "description": "One array per row, in column order; values are JSON scalars, arrays or objects."
+          },
+          "stats": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "The engine's statistics object, passed through unchanged."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "True when rows were cut at [`MAX_ROWS`]: the result is a prefix, not the\nwhole answer. The UI says so instead of showing a silent partial table."
           }
         }
       },

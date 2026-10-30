@@ -20,26 +20,33 @@ use tokio::time::sleep;
 
 use crate::{AppState, api_json::ApiJson, jobs};
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct QueryRequest {
+    /// One SQL statement, run with the caller's identity.
     pub sql: String,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, utoipa::ToSchema)]
 pub struct QueryResult {
     pub columns: Vec<Column>,
+    /// One array per row, in column order; values are JSON scalars, arrays or objects.
+    #[schema(value_type = Vec<Vec<Object>>)]
     pub rows: Vec<Vec<Value>>,
     pub row_count: usize,
     pub query_id: Option<String>,
+    /// The engine's statistics object, passed through unchanged.
+    #[schema(value_type = Option<Object>)]
     pub stats: Option<Value>,
     /// True when rows were cut at [`MAX_ROWS`]: the result is a prefix, not the
     /// whole answer. The UI says so instead of showing a silent partial table.
     pub truncated: bool,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, utoipa::ToSchema)]
 pub struct Column {
     pub name: String,
+    /// The engine's type name, for example `varchar` or `bigint`.
+    #[schema(rename = "type")]
     pub r#type: String,
 }
 
@@ -394,6 +401,18 @@ fn scrub_internal(message: &str) -> String {
         .join(" ")
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/query",
+    tag = "public",
+    description = "Run one SQL statement as the caller and return the whole result. Synchronous: the call returns when the query ends. At most 50 000 rows are returned; past that `truncated` is true and the rows are a prefix.",
+    request_body = QueryRequest,
+    responses(
+        (status = 200, description = "The columns, the rows and the engine's query id", body = QueryResult),
+        (status = 400, description = "The statement is empty, was refused or failed in the engine", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The query engine is not reachable", body = crate::openapi::ErrorResponse),
+    )
+)]
 pub async fn run_query(
     State(s): State<Arc<AppState>>,
     caller: Option<axum::Extension<crate::auth::Principal>>,
