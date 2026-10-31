@@ -133,6 +133,15 @@ impl StatementStore {
         map.values().map(|e| e.held.load(Ordering::Relaxed)).sum()
     }
 
+    /// The owner's statements: id, slot and seconds since the last request that named it.
+    fn of(&self, owner: &str) -> Vec<(String, Arc<tokio::sync::Mutex<Statement>>, u64)> {
+        let map = self.0.lock().expect("statement store poisoned");
+        map.iter()
+            .filter(|(_, e)| e.owner == owner)
+            .map(|(id, e)| (id.clone(), e.slot.clone(), e.touched.elapsed().as_secs()))
+            .collect()
+    }
+
     fn live_for(&self, owner: &str) -> usize {
         let map = self.0.lock().expect("statement store poisoned");
         map.values().filter(|e| e.owner == owner).count()
@@ -186,6 +195,27 @@ pub struct SubmitRequest {
     /// The most rows to keep, 1 to 100 000 (the default and the cap). A longer result is cut here, the query
     /// is cancelled in the engine and the statement ends `SUCCEEDED` with `truncated: true`.
     pub max_rows: Option<usize>,
+}
+
+/// One line of `GET /api/statements`.
+#[derive(Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct StatementListItem {
+    /// The handle for every other call.
+    pub statement_id: String,
+    pub state: StatementState,
+    /// Rows read so far.
+    pub row_count: usize,
+    /// True when the rows were cut (see `statements_get`).
+    pub truncated: bool,
+    /// Seconds since the last request that named this statement; Nova forgets it an hour after that.
+    pub idle_seconds: u64,
+}
+
+/// `GET /api/statements`: the caller's own statements.
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct StatementList {
+    pub statements: Vec<StatementListItem>,
 }
 
 /// `GET /api/statements/{id}`: the wait, in seconds.
@@ -609,6 +639,37 @@ fn csv_text(names: Option<Vec<&str>>, rows: &[Vec<Value>]) -> String {
 }
 
 #[utoipa::path(
+    get,
+    operation_id = "statements_list",
+    path = "/api/statements",
+    tag = "public",
+    description = "The statements the caller holds (at most ten), in order of their ids: state, rows read, whether the rows were cut and the seconds since the last request that named each. It answers \"which ones do I hold?\" when a submit says the caller already holds ten. Only the caller's own are listed. A statement another request is advancing at that moment is listed as `RUNNING` with `rowCount` 0.",
+    responses((status = 200, description = "The caller's statements", body = StatementList)),
+)]
+async fn list(
+    State(s): State<Arc<AppState>>,
+    caller: Option<axum::Extension<crate::auth::Principal>>,
+) -> Response {
+    let owner = owner_of(&s, caller.as_ref().map(|c| &c.0));
+    let mut statements = Vec::new();
+    for (id, slot, idle_seconds) in s.statements.of(&owner) {
+        let (state, row_count, truncated) = match slot.try_lock() {
+            Ok(held) => (held.state, held.rows.len(), held.truncated),
+            Err(_) => (StatementState::Running, 0, false),
+        };
+        statements.push(StatementListItem {
+            statement_id: id,
+            state,
+            row_count,
+            truncated,
+            idle_seconds,
+        });
+    }
+    statements.sort_by(|a, b| a.statement_id.cmp(&b.statement_id));
+    Json(StatementList { statements }).into_response()
+}
+
+#[utoipa::path(
     delete,
     operation_id = "statements_cancel",
     path = "/api/statements/{id}",
@@ -643,7 +704,7 @@ async fn cancel(
 /// The four routes, all uncacheable (the answer carries a person's rows).
 pub(crate) fn router() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/statements", post(submit))
+        .route("/statements", post(submit).get(list))
         .route("/statements/{id}", get(poll).delete(cancel))
         .route("/statements/{id}/chunks/{n}", get(chunk))
         .route_layer(axum::middleware::from_fn(crate::notebooks::no_store))
@@ -1313,6 +1374,72 @@ mod tests {
             assert!(body["error"].as_str().unwrap().contains("maxRows must be"));
         }
         assert!(fake.sources.lock().unwrap().is_empty());
+    }
+
+    fn held(state: StatementState, rows_held: usize, truncated: bool) -> Statement {
+        let mut statement = Statement::new();
+        statement.state = state;
+        statement.rows = rows(rows_held);
+        statement.truncated = truncated;
+        statement
+    }
+
+    #[tokio::test]
+    async fn the_list_shows_the_callers_statements_and_nobody_elses() {
+        let fake = serve(vec![("FINISHED", true, rows(1))], false).await;
+        let state = crate::router_tests::test_state_with_trino(&fake.base);
+        state.statements.insert(
+            "b".into(),
+            "alice".into(),
+            held(StatementState::Succeeded, 3, true),
+        );
+        state.statements.insert(
+            "a".into(),
+            "alice".into(),
+            held(StatementState::Running, 0, false),
+        );
+        state.statements.insert(
+            "c".into(),
+            "bob".into(),
+            held(StatementState::Succeeded, 9, false),
+        );
+        let (status, body) =
+            call(&app(state.clone(), "alice"), "GET", "/api/statements", None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let items = body["statements"].as_array().unwrap();
+        assert_eq!(
+            items
+                .iter()
+                .map(|i| (
+                    i["statementId"].clone(),
+                    i["state"].clone(),
+                    i["rowCount"].clone(),
+                    i["truncated"].clone()
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (json!("a"), json!("RUNNING"), json!(0), json!(false)),
+                (json!("b"), json!("SUCCEEDED"), json!(3), json!(true)),
+            ]
+        );
+        let (_, body) = call(&app(state, "carol"), "GET", "/api/statements", None).await;
+        assert_eq!(body, json!({ "statements": [] }));
+    }
+
+    #[tokio::test]
+    async fn a_statement_another_request_is_advancing_is_listed_as_running() {
+        let fake = serve(vec![("FINISHED", true, rows(1))], false).await;
+        let state = crate::router_tests::test_state_with_trino(&fake.base);
+        state.statements.insert(
+            "a".into(),
+            "alice".into(),
+            held(StatementState::Succeeded, 5, false),
+        );
+        let slot = state.statements.find("a", "alice").unwrap();
+        let _advancing = slot.lock().await;
+        let (_, body) = call(&app(state, "alice"), "GET", "/api/statements", None).await;
+        assert_eq!(body["statements"][0]["state"], "RUNNING");
+        assert_eq!(body["statements"][0]["rowCount"], 0);
     }
 
     #[test]

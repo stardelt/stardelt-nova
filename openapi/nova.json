@@ -4484,6 +4484,25 @@
       }
     },
     "/api/statements": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "description": "The statements the caller holds (at most ten), in order of their ids: state, rows read, whether the rows were cut and the seconds since the last request that named each. It answers \"which ones do I hold?\" when a submit says the caller already holds ten. Only the caller's own are listed. A statement another request is advancing at that moment is listed as `RUNNING` with `rowCount` 0.",
+        "operationId": "statements_list",
+        "responses": {
+          "200": {
+            "description": "The caller's statements",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatementList"
+                }
+              }
+            }
+          }
+        }
+      },
       "post": {
         "tags": [
           "public"
@@ -7132,6 +7151,56 @@
           "yours": {
             "type": "boolean",
             "description": "The row this caller will land in: the largest usable class, or the default one."
+          }
+        }
+      },
+      "StatementList": {
+        "type": "object",
+        "description": "`GET /api/statements`: the caller's own statements.",
+        "required": [
+          "statements"
+        ],
+        "properties": {
+          "statements": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StatementListItem"
+            }
+          }
+        }
+      },
+      "StatementListItem": {
+        "type": "object",
+        "description": "One line of `GET /api/statements`.",
+        "required": [
+          "statementId",
+          "state",
+          "rowCount",
+          "truncated",
+          "idleSeconds"
+        ],
+        "properties": {
+          "idleSeconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Seconds since the last request that named this statement; Nova forgets it an hour after that.",
+            "minimum": 0
+          },
+          "rowCount": {
+            "type": "integer",
+            "description": "Rows read so far.",
+            "minimum": 0
+          },
+          "state": {
+            "$ref": "#/components/schemas/StatementState"
+          },
+          "statementId": {
+            "type": "string",
+            "description": "The handle for every other call."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "True when the rows were cut (see `statements_get`)."
           }
         }
       },
