@@ -131,6 +131,9 @@ test.describe('project footer', () => {
     // On a phone the sidebar is a drawer; open it so the links are where a person can see them.
     await page.getByRole('button', { name: 'Open menu' }).click()
     await expect(page.getByRole('button', { name: 'Close menu' })).toBeVisible()
+    // The drawer slides in (`transition-transform`): measure after it has stopped, or a link that is
+    // still on its way in has a negative x and the test fails on a slow runner.
+    await page.waitForFunction(() => document.getAnimations().every((a) => a.playState !== 'running'))
 
     for (const [name] of LINKS) {
       await expect(page.locator('#primary-nav footer').getByRole('link', { name })).toBeVisible()
