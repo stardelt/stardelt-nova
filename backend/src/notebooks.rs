@@ -504,6 +504,32 @@ impl NotebookStore {
         Ok(rows)
     }
 
+    /// Remove one object version for good (`versionId` in the query).
+    async fn delete_version(&self, key: &str, version: &str) -> Result<(), StoreError> {
+        let mut action = self.bucket.delete_object(Some(&self.credentials), key);
+        action.query_mut().insert("versionId", version.to_string());
+        let url = action.sign(PRESIGN_TTL);
+        self.send(self.http.delete(url)).await?;
+        Ok(())
+    }
+
+    /// Remove every version of exactly `key` and return how many there were. A delete
+    /// without a version id would only add a delete marker and leave every version
+    /// readable, so each version goes by its id. Oldest first: if the store fails half
+    /// way, the newest version is still there and a second call finishes the job, instead
+    /// of an old version coming back as the latest.
+    async fn remove_all_versions(&self, key: &str) -> Result<usize, StoreError> {
+        let listed = self.list_versions(key).await?;
+        let versions: Vec<ListedVersion> = listed
+            .into_iter()
+            .filter(|version| version.key == key)
+            .collect();
+        for version in versions.iter().rev() {
+            self.delete_version(key, &version.object_version).await?;
+        }
+        Ok(versions.len())
+    }
+
     /// Send one signed request. Never log the URL (it carries the signature) and never
     /// put a response body into an error: S3 can echo anything.
     async fn send(
@@ -789,6 +815,15 @@ pub struct PublishedNotebook {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
+pub struct DeletedNotebook {
+    pub name: String,
+    pub group: String,
+    /// How many object versions were removed.
+    pub deleted_versions: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct NotebookSummary {
     pub group: String,
     pub name: String,
@@ -927,6 +962,11 @@ fn too_many_publishes() -> Fail {
         StatusCode::TOO_MANY_REQUESTS,
         "too many notebooks published this hour; wait before publishing another",
     )
+}
+
+/// The notebook has no version in the store: never published, or already deleted.
+fn no_such_notebook() -> Fail {
+    Fail::new(StatusCode::NOT_FOUND, "no such notebook")
 }
 
 /// The version the caller named is not in the store (#237): never published, or gone.
@@ -1071,7 +1111,7 @@ fn hex(bytes: &[u8]) -> String {
 pub(crate) fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/notebooks", get(list))
-        .route("/notebooks/{group}/{name}", put(publish))
+        .route("/notebooks/{group}/{name}", put(publish).delete(remove))
         .route("/notebooks/{group}/{name}/versions", get(versions))
         .route("/notebooks/{group}/{name}/parameters", get(parameters))
         .route_layer(axum::middleware::from_fn(no_store))
@@ -1283,6 +1323,68 @@ pub(crate) async fn versions(
         Ok(rows) => Json(rows).into_response(),
         Err(error) => store_fail(error).into_response(),
     }
+}
+
+/// `DELETE /api/notebooks/{group}/{name}`: the notebook and every version of it (#298).
+#[utoipa::path(
+    delete,
+    operation_id = "notebooks_delete",
+    path = "/api/notebooks/{group}/{name}",
+    tag = "public",
+    description = "Delete a published notebook and every version of it from the `notebooks` bucket; the bucket is versioned, so each version is removed by its id and the bytes are gone, not hidden. Needs a signed-in person whose groups include `{group}` (403 `you are not a member of the group <g>`; administrators are not exempt). A notebook with no version is 404 `no such notebook`. The answer carries the number of versions removed. A schedule that pinned a deleted version fails its next run. Unset `NOVA_S3_*` is 503 `notebook storage is not configured`; an S3 that is down or refuses is 502 (a retry removes what is left). Each delete writes one audit line with group, name and the number of versions, never content. Answers `Cache-Control: no-store`.",
+    params(
+        ("group" = String, Path, description = "One of the caller's groups"),
+        ("name" = String, Path, description = "Notebook file name, ending in .ipynb"),
+    ),
+    responses(
+        (status = 200, description = "The notebook and the number of versions removed", body = DeletedNotebook),
+        (status = 400, description = "Bad name", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "Not a member of the group", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such notebook", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The notebook store did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "Notebook storage is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn remove(
+    State(state): State<Arc<AppState>>,
+    principal: Option<Extension<Principal>>,
+    Path((group, name)): Path<(String, String)>,
+) -> Response {
+    let Some(store) = state.notebooks.as_ref() else {
+        return no_storage().into_response();
+    };
+    let Some(Extension(principal)) = principal else {
+        return sign_in_again().into_response();
+    };
+    if !principal.identity.groups.iter().any(|g| g == &group) {
+        return forbidden_group(&group).into_response();
+    }
+    if !valid_group(&group) {
+        return Fail::new(
+            StatusCode::BAD_REQUEST,
+            "the group name cannot be used as a notebook prefix",
+        )
+        .into_response();
+    }
+    if !valid_name(&name) {
+        return bad_name().into_response();
+    }
+
+    let deleted_versions = match store.remove_all_versions(&object_key(&group, &name)).await {
+        Ok(0) => return no_such_notebook().into_response(),
+        Ok(count) => count,
+        Err(error) => return store_fail(error).into_response(),
+    };
+
+    crate::audit::notebook_delete_event(&principal.identity, &group, &name, deleted_versions);
+
+    Json(DeletedNotebook {
+        name,
+        group,
+        deleted_versions,
+    })
+    .into_response()
 }
 
 /// `GET /api/notebooks/{group}/{name}/parameters`: the parameters of one version, so the
@@ -1540,6 +1642,19 @@ pub(crate) mod fake {
                 seq,
             });
             return (StatusCode::OK, [("x-amz-version-id", version)]).into_response();
+        }
+
+        if method == Method::DELETE {
+            // A delete without a version id would only add a delete marker and keep every
+            // version readable: the store must name the version (#298).
+            let Some(version) = query.get("versionId") else {
+                return StatusCode::BAD_REQUEST.into_response();
+            };
+            let mut state = state.lock().expect("fake S3 state");
+            state
+                .objects
+                .retain(|object| !(object.key == key && object.version == *version));
+            return StatusCode::NO_CONTENT.into_response();
         }
 
         if method == Method::HEAD {
@@ -2460,6 +2575,89 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{answer}");
+    }
+
+    #[tokio::test]
+    async fn delete_removes_every_version_and_only_that_notebook() {
+        let s3 = FakeS3::start().await;
+        for _ in 0..3 {
+            s3.put_raw("analytics/a.ipynb", b"{\"v\":1}", "alice-name");
+        }
+        s3.put_raw("analytics/b.ipynb", b"{\"b\":1}", "bob-name");
+        s3.put_raw("analytics/a.ipynb.keep", b"{}", "bob-name");
+        s3.put_raw("other/a.ipynb", b"{}", "mallory-name");
+        let state = state(Some(notebook_store(&s3.base)));
+        let alice = app(state, Some(principal("alice", &["analytics"], false)));
+
+        let (status, answer) =
+            call(&alice, "DELETE", "/notebooks/analytics/a.ipynb", None, &[]).await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        assert_eq!(
+            answer,
+            json!({"name": "a.ipynb", "group": "analytics", "deletedVersions": 3})
+        );
+        let mut left: Vec<String> = s3.objects().into_iter().map(|o| o.key).collect();
+        left.sort();
+        assert_eq!(
+            left,
+            [
+                "analytics/a.ipynb.keep",
+                "analytics/b.ipynb",
+                "other/a.ipynb"
+            ],
+            "every version of a.ipynb is gone, nothing else is touched"
+        );
+
+        let (_, versions) = call(
+            &alice,
+            "GET",
+            "/notebooks/analytics/a.ipynb/versions",
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(versions, json!([]));
+        let (status, again) =
+            call(&alice, "DELETE", "/notebooks/analytics/a.ipynb", None, &[]).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{again}");
+        assert_eq!(again["error"], "no such notebook");
+    }
+
+    #[tokio::test]
+    async fn delete_by_a_non_member_is_403_and_removes_nothing() {
+        let s3 = FakeS3::start().await;
+        s3.put_raw("analytics/a.ipynb", b"{}", "alice-name");
+        let state = state(Some(notebook_store(&s3.base)));
+        let admin = app(state, Some(principal("root", &["platform"], true)));
+
+        let (status, answer) =
+            call(&admin, "DELETE", "/notebooks/analytics/a.ipynb", None, &[]).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{answer}");
+        assert_eq!(
+            s3.objects().len(),
+            1,
+            "an administrator outside the group deletes nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_refuses_a_bad_name_and_a_missing_store() {
+        let s3 = FakeS3::start().await;
+        let state_ok = state(Some(notebook_store(&s3.base)));
+        let alice = app(state_ok, Some(principal("alice", &["analytics"], false)));
+        let (status, _) = call(&alice, "DELETE", "/notebooks/analytics/a.txt", None, &[]).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let unconfigured = app(state(None), Some(principal("alice", &["analytics"], false)));
+        let (status, _) = call(
+            &unconfigured,
+            "DELETE",
+            "/notebooks/analytics/a.ipynb",
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]
