@@ -2351,6 +2351,106 @@
             }
           }
         }
+      },
+      "delete": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`DELETE /api/notebooks/{group}/{name}`: the notebook and every version of it (#298).",
+        "description": "Delete a published notebook and every version of it from the `notebooks` bucket; the bucket is versioned, so each version is removed by its id and the bytes are gone, not hidden. Needs a signed-in person whose groups include `{group}` (403 `you are not a member of the group <g>`; administrators are not exempt). A notebook with no version is 404 `no such notebook`. The answer carries the number of versions removed. A schedule that pinned a deleted version fails its next run. Unset `NOVA_S3_*` is 503 `notebook storage is not configured`; an S3 that is down or refuses is 502 (a retry removes what is left). Each delete writes one audit line with group, name and the number of versions, never content. Answers `Cache-Control: no-store`.",
+        "operationId": "notebooks_delete",
+        "parameters": [
+          {
+            "name": "group",
+            "in": "path",
+            "description": "One of the caller's groups",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Notebook file name, ending in .ipynb",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The notebook and the number of versions removed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeletedNotebook"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a member of the group",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such notebook",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The notebook store did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Notebook storage is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/api/notebooks/{group}/{name}/parameters": {
@@ -5045,6 +5145,27 @@
           "down",
           "disabled"
         ]
+      },
+      "DeletedNotebook": {
+        "type": "object",
+        "required": [
+          "name",
+          "group",
+          "deletedVersions"
+        ],
+        "properties": {
+          "deletedVersions": {
+            "type": "integer",
+            "description": "How many object versions were removed.",
+            "minimum": 0
+          },
+          "group": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
       },
       "DocumentationUpdate": {
         "type": "object",
