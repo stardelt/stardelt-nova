@@ -3430,11 +3430,11 @@
           "breakGlass": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/BreakGlassNotice",
                 "description": "The last break-glass read of a group connection; absent for personal and managed rows."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -3479,11 +3479,11 @@
           "sync": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/SyncView",
                 "description": "`Ready` and its reason from the resource's status; absent for a personal connection."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -3556,22 +3556,22 @@
           "notebook": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/NotebookRequest",
                 "description": "A published notebook version to run instead of a statement (#237)."
+              },
+              {
+                "type": "null"
               }
             ]
           },
           "options": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/PipelineOptions",
                 "description": "Retries, the wait between them, the time limit and the run mode; omitted fields keep the\ndefaults."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -3591,10 +3591,10 @@
           "schedule": {
             "oneOf": [
               {
-                "type": "null"
+                "$ref": "#/components/schemas/ScheduleRequest"
               },
               {
-                "$ref": "#/components/schemas/ScheduleRequest"
+                "type": "null"
               }
             ]
           },
@@ -4050,10 +4050,10 @@
               "retries": {
                 "oneOf": [
                   {
-                    "type": "null"
+                    "$ref": "#/components/schemas/RetriesView"
                   },
                   {
-                    "$ref": "#/components/schemas/RetriesView"
+                    "type": "null"
                   }
                 ]
               },
@@ -4174,10 +4174,10 @@
           "lastRun": {
             "oneOf": [
               {
-                "type": "null"
+                "$ref": "#/components/schemas/RunView"
               },
               {
-                "$ref": "#/components/schemas/RunView"
+                "type": "null"
               }
             ]
           },
@@ -4722,22 +4722,22 @@
           "notebook": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/NotebookRequest",
                 "description": "The notebook, its version and its parameters for a notebook pipeline; a statement\npipeline refuses it."
+              },
+              {
+                "type": "null"
               }
             ]
           },
           "options": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/PipelineOptions",
                 "description": "The whole option set; omitted means the defaults."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -4754,11 +4754,11 @@
           "schedule": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/ScheduleRequest",
                 "description": "Omitted means no schedule: the pipeline then runs on demand only."
+              },
+              {
+                "type": "null"
               }
             ]
           },
