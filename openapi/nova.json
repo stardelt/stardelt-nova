@@ -4665,7 +4665,7 @@
         "tags": [
           "public"
         ],
-        "description": "One chunk (1 000 rows, the last one fewer) of a statement's rows, counted from 0. A chunk exists once it is full or the statement has ended; the call does not wait.",
+        "description": "One chunk (1 000 rows, the last one fewer) of a statement's rows, counted from 0. A chunk exists once it is full or the statement has ended; the call does not wait. With `Accept: text/csv` the rows come as CSV (RFC 4180, lines end with CRLF) instead of JSON: chunk 0 starts with a row of the column names, the other chunks have none, so the chunks joined in order are one file; null is an empty cell and an array or an object is written as its JSON text.",
         "operationId": "statements_chunk_get",
         "parameters": [
           {
@@ -4695,6 +4695,11 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ChunkView"
+                }
+              },
+              "text/csv": {
+                "schema": {
+                  "type": "string"
                 }
               }
             }

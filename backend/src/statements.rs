@@ -516,19 +516,20 @@ async fn poll(
     operation_id = "statements_chunk_get",
     path = "/api/statements/{id}/chunks/{n}",
     tag = "public",
-    description = "One chunk (1 000 rows, the last one fewer) of a statement's rows, counted from 0. A chunk exists once it is full or the statement has ended; the call does not wait.",
+    description = "One chunk (1 000 rows, the last one fewer) of a statement's rows, counted from 0. A chunk exists once it is full or the statement has ended; the call does not wait. With `Accept: text/csv` the rows come as CSV (RFC 4180, lines end with CRLF) instead of JSON: chunk 0 starts with a row of the column names, the other chunks have none, so the chunks joined in order are one file; null is an empty cell and an array or an object is written as its JSON text.",
     params(
         ("id" = String, Path, description = "The statement id"),
         ("n" = usize, Path, description = "The chunk number, from 0"),
     ),
     responses(
-        (status = 200, description = "The rows of the chunk", body = ChunkView),
+        (status = 200, description = "The rows of the chunk", content((ChunkView = "application/json"), (String = "text/csv"))),
         (status = 404, description = "No such statement of the caller's, or no such chunk (yet)", body = crate::openapi::ErrorResponse),
     )
 )]
 async fn chunk(
     State(s): State<Arc<AppState>>,
     caller: Option<axum::Extension<crate::auth::Principal>>,
+    headers: axum::http::HeaderMap,
     Path((id, n)): Path<(String, usize)>,
 ) -> Response {
     let caller = caller.as_ref().map(|c| &c.0);
@@ -547,7 +548,50 @@ async fn chunk(
         return fail(StatusCode::NOT_FOUND, "no such chunk");
     }
     let rows = statement.rows[start..end.min(statement.rows.len())].to_vec();
+    let wants_csv = headers
+        .get(axum::http::header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|accept| accept.to_ascii_lowercase().contains("text/csv"));
+    if wants_csv {
+        let names = (n == 0).then(|| statement.columns.iter().map(|c| c.name.as_str()).collect());
+        return (
+            [(axum::http::header::CONTENT_TYPE, "text/csv; charset=utf-8")],
+            csv_text(names, &rows),
+        )
+            .into_response();
+    }
     Json(ChunkView { chunk: n, rows }).into_response()
+}
+
+/// One CSV cell: empty for null, the text of a string, the JSON text of anything else; in quotes when
+/// it holds a comma, a quote or a line break (quotes doubled).
+fn csv_cell(value: &Value) -> String {
+    let text = match value {
+        Value::Null => String::new(),
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    if text.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", text.replace('"', "\"\""))
+    } else {
+        text
+    }
+}
+
+/// CSV text (RFC 4180, CRLF line ends): a row of `names` first when given, then one line per row.
+fn csv_text(names: Option<Vec<&str>>, rows: &[Vec<Value>]) -> String {
+    let mut out = String::new();
+    if let Some(names) = names {
+        let cells: Vec<String> = names.into_iter().map(|n| csv_cell(&json!(n))).collect();
+        out.push_str(&cells.join(","));
+        out.push_str("\r\n");
+    }
+    for row in rows {
+        let cells: Vec<String> = row.iter().map(csv_cell).collect();
+        out.push_str(&cells.join(","));
+        out.push_str("\r\n");
+    }
+    out
 }
 
 #[utoipa::path(
@@ -1127,6 +1171,68 @@ mod tests {
         state.statements.remove("big", "bob");
         let (status, body) = call(&app, "POST", "/api/statements", submit).await;
         assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    #[test]
+    fn csv_cells_are_quoted_only_when_they_need_to_be() {
+        let rows = vec![
+            vec![json!(null), json!("plain"), json!(1.5), json!(true)],
+            vec![
+                json!("a,b"),
+                json!("say \"hi\""),
+                json!("two\nlines"),
+                json!([1, 2]),
+            ],
+        ];
+        assert_eq!(
+            csv_text(Some(vec!["id", "na,me"]), &rows),
+            "id,\"na,me\"\r\n,plain,1.5,true\r\n\"a,b\",\"say \"\"hi\"\"\",\"two\nlines\",\"[1,2]\"\r\n"
+        );
+        assert_eq!(csv_text(None, &rows[..1]), ",plain,1.5,true\r\n");
+    }
+
+    #[tokio::test]
+    async fn a_chunk_is_csv_when_asked_and_only_chunk_zero_has_the_header() {
+        let fake = serve(vec![("FINISHED", true, rows(1_500))], false).await;
+        let app = app(
+            crate::router_tests::test_state_with_trino(&fake.base),
+            "alice",
+        );
+        let (_, view) = call(
+            &app,
+            "POST",
+            "/api/statements",
+            Some(json!({ "sql": "select x" })),
+        )
+        .await;
+        let id = view["statementId"].as_str().unwrap().to_string();
+        let text = |n: usize| {
+            let app = app.clone();
+            let uri = format!("/api/statements/{id}/chunks/{n}");
+            async move {
+                let request = Request::builder()
+                    .uri(uri)
+                    .header("accept", "text/csv")
+                    .body(Body::empty())
+                    .unwrap();
+                let response = app.oneshot(request).await.unwrap();
+                let content_type = response.headers()["content-type"]
+                    .to_str()
+                    .unwrap()
+                    .to_string();
+                let bytes = axum::body::to_bytes(response.into_body(), 1 << 26)
+                    .await
+                    .unwrap();
+                (content_type, String::from_utf8(bytes.to_vec()).unwrap())
+            }
+        };
+        let (content_type, first) = text(0).await;
+        assert_eq!(content_type, "text/csv; charset=utf-8");
+        assert!(first.starts_with("x\r\n0\r\n1\r\n"), "{}", &first[..20]);
+        assert_eq!(first.lines().count(), 1_001);
+        let (_, second) = text(1).await;
+        assert!(second.starts_with("1000\r\n"), "{}", &second[..20]);
+        assert_eq!(second.lines().count(), 500);
     }
 
     #[test]
