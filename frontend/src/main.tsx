@@ -5,7 +5,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import App from './App'
 import { ApiError, api } from './api'
 import { hasTimeChoice, setTimeDisplay } from './format'
-import { applyTheme, hasThemeChoice, initTheme } from './theme'
+import { applyTheme, hasThemeChoice, initTheme, isTheme } from './theme'
 import './index.css'
 
 // A browser with no choice of its own follows the person's saved settings; the first
@@ -17,7 +17,8 @@ if (followTheme || followTime) {
   api
     .settings()
     .then((saved) => {
-      if (followTheme && (saved.theme === 'dark' || saved.theme === 'light')) applyTheme(saved.theme)
+      // A value that is not one of the four ids (written by another version) is ignored.
+      if (followTheme && isTheme(saved.theme)) applyTheme(saved.theme)
       // `time.display`: the state store's keys are lowercase only (#124), so the
       // ticket's camelCase name cannot be the stored key.
       const time = saved['time.display']

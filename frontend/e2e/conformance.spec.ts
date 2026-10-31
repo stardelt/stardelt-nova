@@ -11,6 +11,9 @@ const ROUTES = ['/', '/catalog', '/query', '/data', '/connections', '/jobs', '/p
 const VARIANTS = [
   { name: 'desktop-dark', viewport: { width: 1280, height: 800 }, theme: 'dark', keyboard: true },
   { name: 'desktop-light', viewport: { width: 1280, height: 800 }, theme: 'light', keyboard: false },
+  // The two neutral themes (stardelt-nova#221): every page, every rule, including U7.
+  { name: 'desktop-graphite', viewport: { width: 1280, height: 800 }, theme: 'graphite', keyboard: false },
+  { name: 'desktop-silver', viewport: { width: 1280, height: 800 }, theme: 'silver', keyboard: false },
   { name: 'phone-dark', viewport: { width: 360, height: 740 }, theme: 'dark', keyboard: false },
 ]
 const matched = new Set<Known>()
@@ -3619,15 +3622,109 @@ test.describe('preferences', () => {
     return { context, page, writes }
   }
 
-  test('theme applies at once and is saved twice', async ({ browser }) => {
-    const { context, page, writes } = await open(browser)
-    await page.goto('/preferences')
-    await page.getByLabel('Light').check()
+  /** The theme library (stardelt-nova#221): id and label, as the picker shows them. */
+  const THEMES = [
+    { id: 'dark', label: 'Dark blue' },
+    { id: 'graphite', label: 'Graphite' },
+    { id: 'light', label: 'Light' },
+    { id: 'silver', label: 'Silver' },
+  ] as const
 
-    await expect(page.locator('html')).toHaveAttribute('data-theme', 'light')
-    expect(await page.evaluate(() => localStorage.getItem('stardelt-nova:theme'))).toBe('light')
-    await expect.poll(() => writes.length).toBe(1)
-    expect(writes[0]).toEqual({ method: 'PUT', path: '/api/settings/theme', body: '"light"' })
+  test('choosing a theme applies and saves it', async ({ browser }) => {
+    // Each start theme differs from the one selected, so every choice is a change and
+    // sends exactly one PUT; the theme applies at once and is kept in both places.
+    for (const entry of THEMES) {
+      const start = entry.id === 'dark' ? 'light' : 'dark'
+      const { context, page, writes } = await open(browser)
+      await context.addInitScript((t) => { localStorage.setItem('stardelt-nova:theme', t) }, start)
+      await page.goto('/preferences')
+      await expect(page.locator('html')).toHaveAttribute('data-theme', start)
+
+      await page.getByRole('radio', { name: entry.label, exact: true }).check()
+
+      await expect(page.locator('html')).toHaveAttribute('data-theme', entry.id)
+      expect(await page.evaluate(() => localStorage.getItem('stardelt-nova:theme'))).toBe(entry.id)
+      await expect.poll(() => writes.length).toBe(1)
+      expect(writes[0]).toEqual({
+        method: 'PUT', path: '/api/settings/theme', body: JSON.stringify(entry.id),
+      })
+      await context.close()
+    }
+  })
+
+  test('an unknown stored theme falls back to dark', async ({ browser }) => {
+    // An id from an older or newer version is not a theme: neither the stored value nor
+    // the personal setting may put the UI into it (or overwrite it behind the person).
+    const { context, page } = await open(browser, { settings: { theme: 'neon' } })
+    await context.addInitScript(() => { localStorage.setItem('stardelt-nova:theme', 'neon') })
+
+    await page.goto('/')
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark')
+    expect(await page.evaluate(() => localStorage.getItem('stardelt-nova:theme'))).toBe('neon')
+
+    await page.goto('/preferences')
+    await expect(page.getByRole('radio', { name: 'Dark blue', exact: true })).toBeChecked()
+    await context.close()
+  })
+
+  test('the top-bar toggle pairs dark with light and graphite with silver', async ({ browser }) => {
+    const PAIRS = [
+      { start: 'dark', other: 'light', startLabel: 'Dark blue', otherLabel: 'Light' },
+      { start: 'light', other: 'dark', startLabel: 'Light', otherLabel: 'Dark blue' },
+      { start: 'graphite', other: 'silver', startLabel: 'Graphite', otherLabel: 'Silver' },
+      { start: 'silver', other: 'graphite', startLabel: 'Silver', otherLabel: 'Graphite' },
+    ] as const
+    for (const pair of PAIRS) {
+      const { context, page } = await open(browser)
+      await context.addInitScript((t) => { localStorage.setItem('stardelt-nova:theme', t) }, pair.start)
+      await page.goto('/')
+
+      const toggle = page.getByRole('button', { name: 'Toggle theme' })
+      await expect(toggle).toHaveAttribute('title', `Switch to ${pair.otherLabel}`)
+      // Four clicks from each start: the pair alternates, never a third theme.
+      for (let click = 0; click < 4; click++) {
+        await toggle.click()
+        const onOther = click % 2 === 0
+        await expect(page.locator('html')).toHaveAttribute('data-theme', onOther ? pair.other : pair.start)
+        await expect(toggle).toHaveAttribute('title', `Switch to ${onOther ? pair.startLabel : pair.otherLabel}`)
+      }
+      await context.close()
+    }
+  })
+
+  test('the Appearance options are a real radio group', async ({ browser }) => {
+    const { context, page } = await open(browser)
+    await page.goto('/preferences')
+    const group = page.getByRole('group', { name: 'Appearance' })
+    const card = (id: string) => page.locator(`label:has(input[value="${id}"])`)
+
+    // Four native radios, exactly one checked: dark blue, the default.
+    await expect(group.getByRole('radio')).toHaveCount(4)
+    await expect(group.locator('input[type=radio]:checked')).toHaveCount(1)
+    await expect(group.getByRole('radio', { name: 'Dark blue', exact: true })).toBeChecked()
+    await expect(group.getByText('Selected', { exact: true })).toHaveCount(1)
+    await expect(card('dark')).toContainText('Selected')
+
+    // Arrow keys move the selection: right/down forward, left back, wrapping round.
+    await group.getByRole('radio', { name: 'Dark blue', exact: true }).focus()
+    await page.keyboard.press('ArrowRight')
+    await expect(group.getByRole('radio', { name: 'Graphite', exact: true })).toBeChecked()
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'graphite')
+    await page.keyboard.press('ArrowDown')
+    await expect(group.getByRole('radio', { name: 'Light', exact: true })).toBeChecked()
+    await page.keyboard.press('ArrowDown')
+    await expect(group.getByRole('radio', { name: 'Silver', exact: true })).toBeChecked()
+    await page.keyboard.press('ArrowDown')
+    await expect(group.getByRole('radio', { name: 'Dark blue', exact: true })).toBeChecked()
+    await page.keyboard.press('ArrowLeft')
+    await expect(group.getByRole('radio', { name: 'Silver', exact: true })).toBeChecked()
+
+    // The word, not only the accent border, marks the selected card (U15).
+    await expect(group.getByText('Selected', { exact: true })).toHaveCount(1)
+    await expect(card('silver')).toContainText('Selected')
+
+    // Each card shows three swatches, decorative and hidden from the accessible name.
+    await expect(group.locator('[aria-hidden="true"]')).toHaveCount(12)
     await context.close()
   })
 
@@ -3640,7 +3737,7 @@ test.describe('preferences', () => {
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'light')
     expect(await page.evaluate(() => localStorage.getItem('stardelt-nova:time'))).toBe('utc')
     await page.goto('/preferences')
-    await expect(page.getByLabel('Light')).toBeChecked()
+    await expect(page.getByRole('radio', { name: 'Light', exact: true })).toBeChecked()
     await expect(page.getByLabel('UTC', { exact: true })).toBeChecked()
     expect(await page.evaluate(() => localStorage.getItem('stardelt-nova:theme'))).toBe('light')
     await context.close()
@@ -3686,7 +3783,7 @@ test.describe('preferences', () => {
     await expect(page.getByRole('alert')).toHaveCount(0)
 
     // Both controls still work through this browser's storage.
-    await page.getByLabel('Light').check()
+    await page.getByRole('radio', { name: 'Light', exact: true }).check()
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'light')
     await page.getByLabel('UTC', { exact: true }).check()
     expect(await page.evaluate(() => localStorage.getItem('stardelt-nova:theme'))).toBe('light')
@@ -3715,10 +3812,15 @@ test.describe('preferences', () => {
   })
 
   test('U5 the page has accessible names', async ({ browser }) => {
-    const { context, page } = await open(browser)
-    await page.goto('/preferences')
-    expect((await auditPage(page)).filter((finding) => finding.rule === 'U5')).toEqual([])
-    await context.close()
+    // In every theme: the appearance cards change with the choice, so the names must hold
+    // whether a card is selected or not.
+    for (const entry of THEMES) {
+      const { context, page } = await open(browser)
+      await context.addInitScript((t) => { localStorage.setItem('stardelt-nova:theme', t) }, entry.id)
+      await page.goto('/preferences')
+      expect((await auditPage(page)).filter((finding) => finding.rule === 'U5')).toEqual([])
+      await context.close()
+    }
   })
 })
 

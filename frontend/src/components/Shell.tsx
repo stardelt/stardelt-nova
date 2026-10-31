@@ -3,7 +3,7 @@ import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../api'
 import { Icon, type IconName } from './Icon'
-import { applyTheme, useTheme, type Theme } from '../theme'
+import { applyTheme, counterpart, themeLabel, useTheme } from '../theme'
 import { isAdmin } from '../roles'
 import ErrorBoundary from './ErrorBoundary'
 import UserMenu from './UserMenu'
@@ -198,8 +198,13 @@ export default function Shell() {
     document.title = title === 'Nova' ? 'stardelt Nova' : `${title} · stardelt Nova`
   }, [title])
 
+  // One button, four themes: it switches to the paired theme (dark blue ↔ light,
+  // graphite ↔ silver), never to an arbitrary third one.
+  const paired = counterpart(theme)
+  const darkTheme = theme === 'dark' || theme === 'graphite'
+
   function toggleTheme() {
-    const next: Theme = theme === 'dark' ? 'light' : 'dark'
+    const next = paired
     applyTheme(next)
     // The toggle and the Preferences page write the same two places; a missing state
     // store only means the choice stays in this browser.
@@ -347,11 +352,11 @@ export default function Shell() {
           <UserMenu me={me.data} />
           <button
             onClick={toggleTheme}
-            title={theme === 'dark' ? 'Switch to light' : 'Switch to dark'}
+            title={`Switch to ${themeLabel(paired)}`}
             className="btn-ghost px-2.5 py-2"
             aria-label="Toggle theme"
           >
-            {theme === 'dark' ? <Icon name="spark" className="w-4 h-4" /> : <Icon name="pulse" className="w-4 h-4" />}
+            {darkTheme ? <Icon name="spark" className="w-4 h-4" /> : <Icon name="pulse" className="w-4 h-4" />}
           </button>
         </header>
 

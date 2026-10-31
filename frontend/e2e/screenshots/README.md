@@ -48,3 +48,10 @@ block, the version that is running (`stardelt v0.1.0`, the frontend package's ve
 baked into the build) and the two links out of the product — Documentation and Source.
 The phone width shows the drawer open, because that is where the footer lives.
 
+`overview-*`, `catalog-*`, `query-log-*`, `preferences-*` — the four colour themes
+(stardelt-nova#221) on the four pages that show a theme best, at 1280×800, from the built
+UI in its dev mode (so every page also shows how it reads when its upstreams are
+unreachable). Dark blue and Light keep their look; Graphite is a neutral anthracite and
+Silver a neutral light gray. `overview-360-graphite.png` is the phone width.
+`themes-contact-sheet.png` arranges the sixteen at 640×400 in one image for review —
+rows are the pages, columns the themes, in the order dark, light, graphite, silver.
