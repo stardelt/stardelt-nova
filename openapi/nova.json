@@ -7196,7 +7196,7 @@
           },
           "truncated": {
             "type": "boolean",
-            "description": "True when the rows were cut at 100 000: they are a prefix, not the whole answer."
+            "description": "True when the rows were cut (at 100 000 rows or at about 64 MiB of data): they are a prefix, not the whole answer."
           }
         }
       },

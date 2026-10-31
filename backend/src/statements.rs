@@ -17,6 +17,7 @@
 //! Results live in this process's memory for one hour after the last request; a restart forgets them.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -39,6 +40,12 @@ use crate::trino::{self, Column, ENGINE_UNREACHABLE, TrinoResponse};
 const CHUNK_ROWS: usize = 1_000;
 /// Rows a statement keeps; past this the statement ends `SUCCEEDED` with `truncated: true`.
 const MAX_ROWS: usize = 100_000;
+/// Rough bytes of rows one statement keeps (see [`row_bytes`]); past this the statement ends
+/// `SUCCEEDED` with `truncated: true`, like [`MAX_ROWS`]: a few very wide rows must not fill the memory.
+const MAX_BYTES: usize = 64 * 1024 * 1024;
+/// Rough bytes of rows all statements together keep; while the store holds this much a new statement
+/// is refused with `429`.
+const MAX_STORE_BYTES: usize = 512 * 1024 * 1024;
 /// Statements one person may hold at once.
 const MAX_LIVE_PER_OWNER: usize = 10;
 /// How long a statement lives after the last request that named it.
@@ -57,7 +64,7 @@ pub enum StatementState {
     Pending,
     /// The engine is working on it; rows may already be readable.
     Running,
-    /// Finished; all rows (or the first 100 000 with `truncated`) are readable.
+    /// Finished; all rows (or a prefix of them with `truncated`) are readable.
     Succeeded,
     /// Refused or failed in the engine; `error` says why.
     Failed,
@@ -79,6 +86,24 @@ struct Statement {
     rows: Vec<Vec<Value>>,
     error: Option<String>,
     truncated: bool,
+    /// Rough bytes of `rows` (see [`row_bytes`]).
+    bytes: usize,
+    /// The same number, shared with the store so it can add up what every statement holds.
+    held: Arc<AtomicUsize>,
+}
+
+/// A rough size of a value in memory: enough to bound what a statement holds, not an exact count.
+fn value_bytes(value: &Value) -> usize {
+    32 + match value {
+        Value::String(s) => s.len(),
+        Value::Array(a) => a.iter().map(value_bytes).sum(),
+        Value::Object(o) => o.iter().map(|(k, v)| k.len() + value_bytes(v)).sum(),
+        _ => 0,
+    }
+}
+
+fn row_bytes(row: &[Value]) -> usize {
+    24 + row.iter().map(value_bytes).sum::<usize>()
 }
 
 impl Statement {
@@ -90,12 +115,16 @@ impl Statement {
             rows: Vec::new(),
             error: None,
             truncated: false,
+            bytes: 0,
+            held: Arc::new(AtomicUsize::new(0)),
         }
     }
 }
 
 struct Entry {
     owner: String,
+    /// Rough bytes the statement holds, shared with the statement itself.
+    held: Arc<AtomicUsize>,
     touched: Instant,
     /// One request at a time advances a statement: two polls of one `nextUri` would add a page twice.
     slot: Arc<tokio::sync::Mutex<Statement>>,
@@ -112,6 +141,12 @@ impl StatementStore {
         map.retain(|_, e| now.duration_since(e.touched) < KEEP);
     }
 
+    /// Rough bytes of rows the store holds, all statements together.
+    fn held_bytes(&self) -> usize {
+        let map = self.0.lock().expect("statement store poisoned");
+        map.values().map(|e| e.held.load(Ordering::Relaxed)).sum()
+    }
+
     fn live_for(&self, owner: &str) -> usize {
         let map = self.0.lock().expect("statement store poisoned");
         map.values().filter(|e| e.owner == owner).count()
@@ -123,9 +158,11 @@ impl StatementStore {
         owner: String,
         statement: Statement,
     ) -> Arc<tokio::sync::Mutex<Statement>> {
+        let held = statement.held.clone();
         let slot = Arc::new(tokio::sync::Mutex::new(statement));
         let entry = Entry {
             owner,
+            held,
             touched: Instant::now(),
             slot: slot.clone(),
         };
@@ -182,7 +219,7 @@ pub struct StatementView {
     pub row_count: usize,
     /// Chunks readable now: every full chunk while the statement runs, the last partial one too once it ends.
     pub chunks: usize,
-    /// True when the rows were cut at 100 000: they are a prefix, not the whole answer.
+    /// True when the rows were cut (at 100 000 rows or at about 64 MiB of data): they are a prefix, not the whole answer.
     pub truncated: bool,
     /// The engine's one-line reason when `state` is `FAILED` or `CANCELED`.
     pub error: Option<String>,
@@ -262,14 +299,19 @@ fn absorb(s: &mut Statement, mut page: TrinoResponse) -> Option<String> {
             .collect();
     }
     if let Some(data) = page.data.take() {
-        s.rows.extend(data);
-        if s.rows.len() > MAX_ROWS {
-            s.rows.truncate(MAX_ROWS);
-            s.truncated = true;
-            s.next = None;
-            s.state = StatementState::Succeeded;
-            return page.next_uri.take();
+        for row in data {
+            let size = row_bytes(&row);
+            if s.rows.len() >= MAX_ROWS || s.bytes + size > MAX_BYTES {
+                s.truncated = true;
+                s.next = None;
+                s.state = StatementState::Succeeded;
+                s.held.store(s.bytes, Ordering::Relaxed);
+                return page.next_uri.take();
+            }
+            s.bytes += size;
+            s.rows.push(row);
         }
+        s.held.store(s.bytes, Ordering::Relaxed);
     }
     s.next = page.next_uri.take();
     s.state = if s.next.is_none() {
@@ -402,6 +444,13 @@ async fn submit(
         return fail(
             StatusCode::TOO_MANY_REQUESTS,
             "you already hold ten statements; read or cancel one first",
+        );
+    }
+
+    if s.statements.held_bytes() >= MAX_STORE_BYTES {
+        return fail(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Nova holds as many results as it can right now; read or cancel a statement, or try again in a few minutes",
         );
     }
 
@@ -1033,6 +1082,68 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    }
+
+    fn page(value: Value) -> TrinoResponse {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn rows_past_the_byte_budget_are_cut_and_the_statement_says_so() {
+        let wide = json!("x".repeat(1024 * 1024));
+        let rows: Vec<Vec<Value>> = (0..70).map(|_| vec![wide.clone()]).collect();
+        let mut s = Statement::new();
+        let cancel = absorb(
+            &mut s,
+            page(json!({ "id": "q1", "nextUri": "http://engine/next", "data": rows })),
+        );
+        assert_eq!(cancel.as_deref(), Some("http://engine/next"));
+        assert_eq!((s.state, s.truncated), (StatementState::Succeeded, true));
+        assert_eq!(s.rows.len(), MAX_BYTES / row_bytes(&[wide]));
+        assert!(s.bytes <= MAX_BYTES);
+        assert_eq!(s.held.load(Ordering::Relaxed), s.bytes);
+    }
+
+    #[test]
+    fn a_small_page_is_kept_whole_and_counted() {
+        let mut s = Statement::new();
+        let cancel = absorb(
+            &mut s,
+            page(json!({ "id": "q1", "nextUri": "http://engine/next", "data": [[1], [2], [3]] })),
+        );
+        assert_eq!(cancel, None);
+        assert_eq!((s.rows.len(), s.truncated), (3, false));
+        assert!(s.bytes > 0);
+        assert_eq!(s.held.load(Ordering::Relaxed), s.bytes);
+    }
+
+    #[test]
+    fn the_store_adds_up_what_its_statements_hold() {
+        let store = StatementStore::default();
+        for (id, bytes) in [("a", 10), ("b", 20)] {
+            let statement = Statement::new();
+            statement.held.store(bytes, Ordering::Relaxed);
+            store.insert(id.into(), "alice".into(), statement);
+        }
+        assert_eq!(store.held_bytes(), 30);
+        store.remove("a", "alice");
+        assert_eq!(store.held_bytes(), 20);
+    }
+
+    #[tokio::test]
+    async fn a_store_that_holds_its_budget_refuses_a_new_statement_until_one_is_forgotten() {
+        let fake = serve(vec![("FINISHED", true, rows(3))], false).await;
+        let state = crate::router_tests::test_state_with_trino(&fake.base);
+        let full = Statement::new();
+        full.held.store(MAX_STORE_BYTES, Ordering::Relaxed);
+        state.statements.insert("big".into(), "bob".into(), full);
+        let app = app(state.clone(), "alice");
+        let submit = Some(json!({ "sql": "select x" }));
+        let (status, body) = call(&app, "POST", "/api/statements", submit.clone()).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+        state.statements.remove("big", "bob");
+        let (status, body) = call(&app, "POST", "/api/statements", submit).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
     }
 
     #[test]
