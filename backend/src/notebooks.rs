@@ -2722,6 +2722,7 @@ mod tests {
             public_url: "http://localhost:8080".into(),
             claims: ClaimConfig::default(),
             session_secret: Secret::new("x".repeat(48)),
+            device_client_id: None,
         };
         let validator = TestBearer {
             jwk: test_jwk(),
