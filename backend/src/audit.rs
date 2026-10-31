@@ -341,6 +341,26 @@ pub fn notebook_publish_event(
     });
 }
 
+/// One audit line per notebook delete (stardelt-nova#298): who removed which notebook and how
+/// many versions went. Never content.
+pub fn notebook_delete_event(
+    who: &crate::auth::Identity,
+    group: &str,
+    name: &str,
+    versions: usize,
+) {
+    tracing::info!(
+        target: "audit",
+        action = "delete",
+        group = %group,
+        name = %name,
+        versions,
+        actor = %who.display_name,
+        sub = %who.sub,
+        "notebook deleted"
+    );
+}
+
 /// Test-only capture of [`notebook_publish_event`]'s records, with the same reasoning as
 /// [`test_sink`]: a scoped tracing subscriber is process-global and unreliable under the
 /// parallel test runner. A record has no field that could hold notebook content.

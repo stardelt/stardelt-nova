@@ -47,6 +47,9 @@ pub struct ErrorResponse {
     ),
     paths(
         crate::me,
+        crate::health,
+        crate::openapi::serve,
+        crate::auth::config,
         crate::catalog::warehouse_info,
         crate::warehouses::list,
         crate::catalog::list_catalogs,
@@ -56,6 +59,8 @@ pub struct ErrorResponse {
         crate::catalog::create_namespace,
         crate::catalog::list_tables,
         crate::catalog::table_metadata,
+        crate::catalog::table_history,
+        crate::catalog::table_rollback,
         crate::catalog_docs::read,
         crate::catalog_docs::update,
         crate::catalog_docs::update_column,
@@ -89,19 +94,30 @@ pub struct ErrorResponse {
         crate::saved_queries::list,
         crate::saved_queries::create,
         crate::saved_queries::remove,
+        crate::query_log_api::list,
+        crate::query_log_api::detail,
+        crate::user_settings::list,
+        crate::user_settings::put,
+        crate::user_settings::remove,
         crate::notebooks::publish,
+        crate::notebooks::remove,
         crate::notebooks::list,
         crate::notebooks::versions,
+        crate::notebooks::parameters,
         crate::admin_catalogs::list,
         crate::admin_catalogs::update_access,
     ),
     components(schemas(
         crate::Me,
         crate::OidcMe,
+        crate::Health,
+        crate::auth::AuthConfig,
+        crate::db::DbStatus,
         crate::catalog::WarehouseInfo,
         crate::warehouses::SqlWarehouse,
         crate::catalog::CatalogInfo,
         crate::catalog::CatalogsResponse,
+        crate::catalog::RollbackRequest,
         crate::catalog_metrics::CatalogStats,
         crate::catalog_metrics::CatalogMetricsView,
         crate::catalog_metrics::MetricsTotals,
@@ -154,10 +170,19 @@ pub struct ErrorResponse {
         crate::trino::Column,
         crate::saved_queries::SavedQuery,
         crate::saved_queries::NewSavedQuery,
+        crate::query_log_api::QueryLogPage,
+        crate::query_log_api::QueryLogItem,
+        crate::query_log_api::QueryLogDetail,
+        crate::query_log_api::QueryTiming,
+        crate::query_log_api::QueryData,
+        crate::query_log_api::QueryFailure,
+        crate::user_settings::StoredSetting,
         crate::notebooks::PublishedNotebook,
+        crate::notebooks::DeletedNotebook,
         crate::notebooks::NotebookSummary,
         crate::notebooks::NotebookVersion,
         crate::notebooks::NotebookParameter,
+        crate::notebooks::NotebookParameters,
         crate::admin_catalogs::AdminCatalog,
         crate::admin_catalogs::CatalogGrant,
         crate::admin_catalogs::CatalogCondition,
@@ -216,6 +241,16 @@ pub fn document_json() -> String {
 
 /// Serve the document. Deliberately outside sign-in (wired next to
 /// `/api/health` in `main`): it carries shapes, not data.
+#[utoipa::path(
+    get,
+    operation_id = "openapi_document",
+    path = "/api/openapi.json",
+    tag = "public",
+    description = "This document. It answers without sign-in and carries shapes, not data.",
+    responses(
+        (status = 200, description = "The OpenAPI 3.1 document", body = Object),
+    )
+)]
 pub async fn serve() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "application/json")],
@@ -264,18 +299,9 @@ mod tests {
         "/api/apps",
         "/api/apps/links",
         "/api/apps/{id}",
-        "/api/catalog/tables/{ns}/{tbl}/history",
-        "/api/catalog/tables/{ns}/{tbl}/rollback",
         "/api/embeds",
-        "/api/health",
         "/api/ingest/upload",
         "/api/jobs",
-        "/api/notebooks/{group}/{name}/parameters",
-        "/api/openapi.json",
-        "/api/query-log",
-        "/api/query-log/{id}",
-        "/api/settings",
-        "/api/settings/{key}",
         "/api/transfer",
         "/api/trino/cluster",
         "/api/workloads",
@@ -388,6 +414,103 @@ mod tests {
             }
         }
         assert!(clashes.is_empty(), "duplicate operationIds: {clashes:#?}");
+    }
+
+    /// The SDKs, the CLI and the MCP server name their methods and tools after the
+    /// operation ids, so an id must read as `<resource>_<action>` (`pipelines_get`,
+    /// `table_history`), never as a bare verb (`get`, `run`, `logs`) that says nothing
+    /// outside its file. `me` and `health` are the two single-word ids.
+    #[test]
+    fn operation_ids_are_resource_first_snake_case() {
+        const BARE_VERBS: &[&str] = &[
+            "list", "get", "read", "create", "update", "delete", "remove", "run", "stop", "rotate",
+            "break", "trigger", "publish", "check", "preview", "pause", "resume", "refresh",
+        ];
+        let value = serde_json::to_value(document()).expect("the document is JSON");
+        let mut bad = Vec::new();
+        for (path, item) in value["paths"].as_object().expect("paths is an object") {
+            for (method, op) in item.as_object().expect("a path item is an object") {
+                let Some(id) = op["operationId"].as_str() else {
+                    continue;
+                };
+                let words: Vec<&str> = id.split('_').collect();
+                let snake = words.iter().all(|w| {
+                    !w.is_empty()
+                        && w.chars()
+                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+                });
+                let ok = id == "me"
+                    || id == "health"
+                    || (snake && words.len() >= 2 && !BARE_VERBS.contains(&words[0]));
+                if !ok {
+                    bad.push(format!("{id} ({method} {path})"));
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "operation ids must be <resource>_<action> in snake case: {bad:#?}"
+        );
+    }
+
+    /// A generated client builds the URL from the declared path parameters, so the
+    /// `{name}` parts of a path and its `in: path` parameters must be the same set:
+    /// a query parameter documented as a path one becomes a required argument.
+    #[test]
+    fn path_parameters_match_the_path_template() {
+        let value = serde_json::to_value(document()).expect("the document is JSON");
+        let mut bad = Vec::new();
+        for (path, item) in value["paths"].as_object().expect("paths is an object") {
+            let mut in_path: Vec<&str> = path
+                .split('/')
+                .filter_map(|part| part.strip_prefix('{')?.strip_suffix('}'))
+                .collect();
+            in_path.sort_unstable();
+            for (method, op) in item.as_object().expect("a path item is an object") {
+                let mut declared: Vec<&str> = op["parameters"]
+                    .as_array()
+                    .map(|all| all.iter().filter(|p| p["in"] == "path"))
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|p| p["name"].as_str())
+                    .collect();
+                declared.sort_unstable();
+                if declared != in_path {
+                    bad.push(format!(
+                        "{method} {path}: declared {declared:?}, template {in_path:?}"
+                    ));
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "path parameters differ from the path: {bad:#?}"
+        );
+    }
+
+    /// A setting's value is any JSON (a string, a number, a list), so the schema
+    /// must not say `object`: a generated client would refuse the rest.
+    #[test]
+    fn a_setting_value_is_any_json() {
+        let value = serde_json::to_value(document()).expect("the document is JSON");
+        let body = &value["paths"]["/api/settings/{key}"]["put"]["requestBody"]["content"]["application/json"]
+            ["schema"];
+        assert!(body.get("type").is_none(), "the PUT body is typed: {body}");
+        let stored = &value["components"]["schemas"]["StoredSetting"]["properties"]["value"];
+        assert!(
+            stored.get("type").is_none(),
+            "the stored value is typed: {stored}"
+        );
+    }
+
+    /// A cell of a query result is any JSON scalar, array or object, so the row
+    /// schema must not say `object`: a generated client would refuse the numbers.
+    #[test]
+    fn a_result_cell_is_any_json() {
+        let value = serde_json::to_value(document()).expect("the document is JSON");
+        let cell =
+            &value["components"]["schemas"]["QueryResult"]["properties"]["rows"]["items"]["items"];
+        assert!(cell.get("type").is_none(), "a result cell is typed: {cell}");
     }
 
     /// The document endpoint answers without a session and carries no data:

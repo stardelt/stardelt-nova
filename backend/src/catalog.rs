@@ -596,6 +596,7 @@ pub async fn catalog_scope(
 
 #[utoipa::path(
     get,
+    operation_id = "catalogs_list",
     path = "/api/catalog/catalogs",
     tag = "public",
     description = "The catalogs the caller may browse, each with its Lakekeeper warehouse id and its medallion layer when it has one, plus the catalog a request without `?catalog=` uses. The order is bronze, silver, gold first (in that order), then the rest alphabetically; `layer` is `stardelt.io/layer` from the catalog's `Catalog` resource, else the catalog's own name when that is `bronze`, `silver` or `gold`, and absent otherwise. The list is what the engine's `SHOW CATALOGS` shows the caller (through the caller's own token), minus the engine's own catalogs (`system`, `information_schema`, `memory`, `tpch`, `tpcds`, `jmx`); it is cached for 30 s (the layer for 60 s). Every other `/api/catalog/*` route takes the same `?catalog=`; a catalog the caller may not browse answers 403 there and is never proxied. Empty when no catalog is open to the caller. `demo` in demo mode.",
@@ -684,6 +685,7 @@ pub async fn warehouse_info(State(s): State<Arc<AppState>>) -> Response {
 
 #[utoipa::path(
     get,
+    operation_id = "namespaces_list",
     path = "/api/catalog/namespaces",
     tag = "public",
     description = "List one catalog's namespaces (schemas). Each namespace is a list of levels. `?catalog=` picks the catalog; omitted, the default one is used. A catalog the caller may not browse answers 403, a name no catalog knows 404.",
@@ -716,6 +718,7 @@ pub async fn list_namespaces(
 
 #[utoipa::path(
     post,
+    operation_id = "namespaces_create",
     path = "/api/catalog/namespaces",
     tag = "internal",
     description = "Create a schema in one catalog via Trino (`CREATE SCHEMA IF NOT EXISTS`). `?catalog=` picks the catalog; omitted, the default one is used. UI-only for now: not promised stable.",
@@ -771,6 +774,7 @@ pub async fn create_namespace(
 
 #[utoipa::path(
     get,
+    operation_id = "tables_list",
     path = "/api/catalog/namespaces/{ns}/tables",
     tag = "public",
     description = "List tables in one namespace of one catalog. `?catalog=` picks the catalog; omitted, the default one is used.",
@@ -907,9 +911,12 @@ where
     deserializer.deserialize_any(Visit)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct RollbackRequest {
+    /// The snapshot to return to, as a string of digits (an Iceberg id has 64 bits; a JSON
+    /// number is accepted too but a browser rounds it).
     #[serde(deserialize_with = "deserialize_snapshot_id")]
+    #[schema(value_type = String)]
     pub snapshot_id: i64,
 }
 
@@ -941,6 +948,25 @@ fn stringify_snapshot_ids(mut r: crate::trino::QueryResult) -> crate::trino::Que
     r
 }
 
+#[utoipa::path(
+    get,
+    operation_id = "table_history",
+    path = "/api/catalog/tables/{ns}/{tbl}/history",
+    tag = "public",
+    description = "The table's last 100 snapshots, newest first: `committed_at`, `snapshot_id`, `parent_id`, `operation`, `summary`. Snapshot and parent ids are strings so that all 64 bits survive JSON in a browser.",
+    params(
+        ("ns" = String, Path, description = "Namespace (schema) name"),
+        ("tbl" = String, Path, description = "Table name"),
+        CatalogParam,
+    ),
+    responses(
+        (status = 200, description = "One row per snapshot", body = crate::trino::QueryResult),
+        (status = 400, description = "A name is not a single path segment, or the engine refused the statement", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller may not browse that catalog", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such catalog", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The catalog or the engine is not reachable", body = crate::openapi::ErrorResponse),
+    )
+)]
 pub async fn table_history(
     State(s): State<Arc<AppState>>,
     Path((ns, tbl)): Path<(String, String)>,
@@ -964,6 +990,26 @@ pub async fn table_history(
     }
 }
 
+#[utoipa::path(
+    post,
+    operation_id = "table_rollback",
+    path = "/api/catalog/tables/{ns}/{tbl}/rollback",
+    tag = "public",
+    description = "Move the table's current pointer back to an earlier snapshot (`ALTER TABLE … EXECUTE rollback_to_snapshot`), run as the caller, so the engine's permissions decide. Nothing is deleted: the newer snapshots stay until they are expired.",
+    params(
+        ("ns" = String, Path, description = "Namespace (schema) name"),
+        ("tbl" = String, Path, description = "Table name"),
+        CatalogParam,
+    ),
+    request_body = RollbackRequest,
+    responses(
+        (status = 200, description = "The engine's answer to the statement", body = crate::trino::QueryResult),
+        (status = 400, description = "A name or the body is not valid, the snapshot is unknown, or the engine refused the statement", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller may not browse that catalog", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such catalog", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The catalog or the engine is not reachable", body = crate::openapi::ErrorResponse),
+    )
+)]
 pub async fn table_rollback(
     State(s): State<Arc<AppState>>,
     Path((ns, tbl)): Path<(String, String)>,

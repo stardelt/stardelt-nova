@@ -30,7 +30,7 @@ pub struct QueryRequest {
 pub struct QueryResult {
     pub columns: Vec<Column>,
     /// One array per row, in column order; values are JSON scalars, arrays or objects.
-    #[schema(value_type = Vec<Vec<Object>>)]
+    #[schema(value_type = Vec<Vec<Value>>)]
     pub rows: Vec<Vec<Value>>,
     pub row_count: usize,
     pub query_id: Option<String>,
@@ -403,6 +403,7 @@ fn scrub_internal(message: &str) -> String {
 
 #[utoipa::path(
     post,
+    operation_id = "query_run",
     path = "/api/query",
     tag = "public",
     description = "Run one SQL statement as the caller and return the whole result. Synchronous: the call returns when the query ends. At most 50 000 rows are returned; past that `truncated` is true and the rows are a prefix.",
