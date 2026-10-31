@@ -104,6 +104,10 @@ pub struct ErrorResponse {
         crate::notebooks::list,
         crate::notebooks::versions,
         crate::notebooks::parameters,
+        crate::statements::submit,
+        crate::statements::poll,
+        crate::statements::chunk,
+        crate::statements::cancel,
         crate::admin_catalogs::list,
         crate::admin_catalogs::update_access,
     ),
@@ -111,6 +115,10 @@ pub struct ErrorResponse {
         crate::Me,
         crate::OidcMe,
         crate::Health,
+        crate::statements::SubmitRequest,
+        crate::statements::StatementView,
+        crate::statements::StatementState,
+        crate::statements::ChunkView,
         crate::auth::AuthConfig,
         crate::db::DbStatus,
         crate::catalog::WarehouseInfo,
@@ -342,6 +350,7 @@ mod tests {
         }
         served.extend(routes_in(include_str!("pipelines.rs"), "fn router()"));
         served.extend(routes_in(include_str!("notebooks.rs"), "fn router()"));
+        served.extend(routes_in(include_str!("statements.rs"), "fn router()"));
         assert!(
             served.len() > 40,
             "the scan found only {} routes",

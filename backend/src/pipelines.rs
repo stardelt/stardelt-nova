@@ -4644,6 +4644,7 @@ mod tests {
             table_locks: Mutex::new(std::collections::HashMap::new()),
             people_touched: Mutex::new(std::collections::HashMap::new()),
             notebooks: None,
+            statements: Default::default(),
         })
     }
 

@@ -1117,7 +1117,7 @@ pub(crate) fn router() -> Router<Arc<AppState>> {
         .route_layer(axum::middleware::from_fn(no_store))
 }
 
-async fn no_store(request: Request, next: Next) -> Response {
+pub(crate) async fn no_store(request: Request, next: Next) -> Response {
     let mut response = next.run(request).await;
     response
         .headers_mut()
@@ -1878,6 +1878,7 @@ mod tests {
             table_locks: Mutex::new(HashMap::new()),
             people_touched: Mutex::new(HashMap::new()),
             notebooks: store,
+            statements: Default::default(),
         })
     }
 
