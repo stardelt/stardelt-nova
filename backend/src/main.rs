@@ -15,6 +15,7 @@
 //!   GET  /api/catalog/namespaces            — list namespaces
 //!   POST /api/catalog/namespaces            — create a schema
 //!   GET  /api/catalog/namespaces/:ns/tables — list tables
+//!   GET  /api/catalog/search?q=             — find tables by name
 //!   GET  /api/catalog/tables/:ns/:tbl       — table metadata
 //!   GET/PUT /api/catalog/tables/:ns/:tbl/documentation — descriptions, tags, owner, domain
 //!   PUT  /api/catalog/tables/:ns/:tbl/columns/:column/description — one column's description
@@ -77,6 +78,7 @@ mod auth;
 mod catalog;
 mod catalog_docs;
 mod catalog_metrics;
+mod catalog_search;
 mod catalog_token;
 mod cluster;
 mod connection_routes;
@@ -577,6 +579,7 @@ fn api_router() -> Router<Arc<AppState>> {
             get(catalog::list_namespaces).post(catalog::create_namespace),
         )
         .route("/catalog/namespaces/{ns}/tables", get(catalog::list_tables))
+        .route("/catalog/search", get(catalog_search::search))
         .route("/catalog/tables/{ns}/{tbl}", get(catalog::table_metadata))
         .route(
             "/catalog/tables/{ns}/{tbl}/documentation",
@@ -1032,6 +1035,17 @@ mod router_tests {
         build_test_state(None, trino_url, lakekeeper_url, false, None, None)
     }
 
+    /// A live (not demo) state whose catalog (Lakekeeper) is the server at `lakekeeper_url`.
+    pub(crate) fn test_state_with_lakekeeper(lakekeeper_url: &str) -> Arc<AppState> {
+        build_test_state(
+            None,
+            "http://127.0.0.1:1",
+            lakekeeper_url,
+            false,
+            None,
+            None,
+        )
+    }
     /// A live (not demo) state whose engine is the server at `trino_url`.
     pub(crate) fn test_state_with_trino(trino_url: &str) -> Arc<AppState> {
         build_test_state(None, trino_url, "http://127.0.0.1:1", false, None, None)
