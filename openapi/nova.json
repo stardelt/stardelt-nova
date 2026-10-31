@@ -554,6 +554,97 @@
         }
       }
     },
+    "/api/catalog/search": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "description": "Find tables by name in one catalog. `q` is one or more words; a table matches when its `namespace.table` contains every word, in any case. The catalog's namespaces and tables are listed the way `namespaces_list` and `tables_list` list them, so the answer shows only what the caller may browse; only names are searched (single-level namespaces), not comments or tags. `?catalog=` picks the catalog; omitted, the default one is used. At most 100 namespaces are read per request: `truncated` says when the answer is a prefix.",
+        "operationId": "catalog_search",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Words to look for in `namespace.table`, separated by spaces; every word must be there. 1 to 100 characters.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "catalog",
+            "in": "query",
+            "description": "Catalog to search (`warehouse`, `finance`, …). Omitted, the default catalog is used.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Most matches to return, 1 to 100; 20 when omitted.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The matching tables",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`q` is missing or longer than 100 characters, or the catalog name is invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not browse that catalog",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such catalog",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The catalog or the engine is not reachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/catalog/tables/{ns}/{tbl}": {
       "get": {
         "tags": [
@@ -6933,6 +7024,50 @@
           "group",
           "managed"
         ]
+      },
+      "SearchMatch": {
+        "type": "object",
+        "required": [
+          "catalog",
+          "namespace",
+          "table"
+        ],
+        "properties": {
+          "catalog": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "table": {
+            "type": "string"
+          }
+        }
+      },
+      "SearchResult": {
+        "type": "object",
+        "required": [
+          "query",
+          "matches",
+          "truncated"
+        ],
+        "properties": {
+          "matches": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SearchMatch"
+            },
+            "description": "Matches in order of namespace, then table."
+          },
+          "query": {
+            "type": "string",
+            "description": "The words searched, trimmed."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "True when more tables match than were returned, or when the catalog has more namespaces than one\nrequest reads (100): the answer is then a prefix, so narrow the words or name the catalog."
+          }
+        }
       },
       "SqlWarehouse": {
         "type": "object",
