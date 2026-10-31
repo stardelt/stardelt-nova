@@ -20,45 +20,52 @@ use tokio::time::sleep;
 
 use crate::{AppState, api_json::ApiJson, jobs};
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct QueryRequest {
+    /// One SQL statement, run with the caller's identity.
     pub sql: String,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, utoipa::ToSchema)]
 pub struct QueryResult {
     pub columns: Vec<Column>,
+    /// One array per row, in column order; values are JSON scalars, arrays or objects.
+    #[schema(value_type = Vec<Vec<Value>>)]
     pub rows: Vec<Vec<Value>>,
     pub row_count: usize,
     pub query_id: Option<String>,
+    /// The engine's statistics object, passed through unchanged.
+    #[schema(value_type = Option<Object>)]
     pub stats: Option<Value>,
     /// True when rows were cut at [`MAX_ROWS`]: the result is a prefix, not the
     /// whole answer. The UI says so instead of showing a silent partial table.
     pub truncated: bool,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, utoipa::ToSchema)]
 pub struct Column {
     pub name: String,
+    /// The engine's type name, for example `varchar` or `bigint`.
+    #[schema(rename = "type")]
     pub r#type: String,
 }
 
 #[derive(Deserialize)]
-struct TrinoColumn {
-    name: String,
+pub(crate) struct TrinoColumn {
+    pub(crate) name: String,
     #[serde(rename = "type")]
-    ty: String,
+    pub(crate) ty: String,
 }
 
 #[derive(Deserialize)]
-struct TrinoResponse {
-    id: Option<String>,
+pub(crate) struct TrinoResponse {
+    pub(crate) id: Option<String>,
     #[serde(rename = "nextUri")]
-    next_uri: Option<String>,
-    columns: Option<Vec<TrinoColumn>>,
-    data: Option<Vec<Vec<Value>>>,
-    error: Option<Value>,
-    stats: Option<Value>,
+    pub(crate) next_uri: Option<String>,
+    pub(crate) columns: Option<Vec<TrinoColumn>>,
+    pub(crate) data: Option<Vec<Vec<Value>>>,
+    pub(crate) error: Option<Value>,
+    pub(crate) stats: Option<Value>,
 }
 
 /// Rows Nova will hold in memory for one query. The page granularity means a
@@ -106,7 +113,7 @@ fn upstream_headers(
 /// Attach the caller's identity to a Trino request: the initial POST, every
 /// `nextUri` poll and the cancel DELETE all carry the same `X-Trino-User` and
 /// the same forwarded `Authorization` (when the platform asked for it).
-fn trino_request(
+pub(crate) fn trino_request(
     state: &AppState,
     caller: Option<&crate::auth::Principal>,
     rb: reqwest::RequestBuilder,
@@ -194,7 +201,7 @@ const SOURCE_NOVA: &str = "nova";
 
 /// The statement POST: the caller's identity plus where the statement comes from. The engine records
 /// `source` and the client tag in its query events, and the query log keeps them.
-fn statement_post(
+pub(crate) fn statement_post(
     state: &AppState,
     caller: Option<&crate::auth::Principal>,
     source: &str,
@@ -362,7 +369,7 @@ pub async fn execute_from(
 /// coordinator and worker URLs, the build — internals no signed-in user needs and which
 /// the Query page used to print verbatim. The document is logged once at debug level;
 /// the response says what went wrong.
-fn client_error(err: &Value) -> String {
+pub(crate) fn client_error(err: &Value) -> String {
     tracing::debug!(error = %err, "trino error");
     let name = err
         .get("errorName")
@@ -394,6 +401,19 @@ fn scrub_internal(message: &str) -> String {
         .join(" ")
 }
 
+#[utoipa::path(
+    post,
+    operation_id = "query_run",
+    path = "/api/query",
+    tag = "public",
+    description = "Run one SQL statement as the caller and return the whole result. Synchronous: the call returns when the query ends. At most 50 000 rows are returned; past that `truncated` is true and the rows are a prefix.",
+    request_body = QueryRequest,
+    responses(
+        (status = 200, description = "The columns, the rows and the engine's query id", body = QueryResult),
+        (status = 400, description = "The statement is empty, was refused or failed in the engine", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The query engine is not reachable", body = crate::openapi::ErrorResponse),
+    )
+)]
 pub async fn run_query(
     State(s): State<Arc<AppState>>,
     caller: Option<axum::Extension<crate::auth::Principal>>,
@@ -625,6 +645,7 @@ mod tests {
             table_locks: std::sync::Mutex::new(std::collections::HashMap::new()),
             people_touched: std::sync::Mutex::new(std::collections::HashMap::new()),
             notebooks: None,
+            statements: Default::default(),
         }
     }
 

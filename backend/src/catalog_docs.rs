@@ -901,6 +901,7 @@ async fn catalog_or_error(
 
 #[utoipa::path(
     get,
+    operation_id = "table_documentation_get",
     path = "/api/catalog/tables/{ns}/{tbl}/documentation",
     tag = "public",
     description = "A table's documentation: the Iceberg `comment` as `description`, the `stardelt.tags`/`stardelt.owner`/`stardelt.domain` custom properties, and the description and type of every column of the **current** schema. `?catalog=` picks the catalog. `canEdit`/`editRule` apply Nova's interim rule: until the catalog enforces permissions, Nova decides who may edit, and anyone who reaches Lakekeeper or Trino directly can still change these properties. Demo mode answers 503.",
@@ -951,6 +952,7 @@ pub async fn read(
 
 #[utoipa::path(
     put,
+    operation_id = "table_documentation_update",
     path = "/api/catalog/tables/{ns}/{tbl}/documentation",
     tag = "public",
     description = "Set or remove a table's description, tags, owner and domain in one Lakekeeper commit. `?catalog=` picks the catalog. Every key is optional: absent changes nothing, `null` (or an empty tag list, or a blank description) removes the property, and a write with nothing to change sends no commit. Description at most 4,000 characters; at most 20 unique tags `^[a-z0-9][a-z0-9_-]{0,31}$`; owner a group name; domain `^[a-z0-9][a-z0-9_-]{0,39}$`. An ownerless table may be edited by anybody, but the request must then set `owner` to one of the caller's own groups. **The interim rule is enforced by Nova; the catalog does not enforce it yet** — anyone who reaches Lakekeeper or Trino directly can still change these properties. Edits of one table are serialised by Nova and a contended commit is retried; a catalog that stays busy answers 502 `the catalog is busy, try again`. Demo mode answers 503.",
@@ -1003,6 +1005,7 @@ pub async fn update(
 
 #[utoipa::path(
     put,
+    operation_id = "column_description_update",
     path = "/api/catalog/tables/{ns}/{tbl}/columns/{column}/description",
     tag = "public",
     description = "Set or remove one column's description. The column must be a field of the current schema, matched exactly. Nova runs `COMMENT ON COLUMN <catalog>.<ns>.<tbl>.<column>` through Trino **as the caller** (source `nova-catalog`), because a column description lives in a new Iceberg schema and only the engine writes it. `?catalog=` picks the catalog. Same 4,000-character limit and null rule as the table description. The interim rule is enforced by Nova; the catalog does not enforce it yet. Demo mode answers 503.",
@@ -1319,6 +1322,7 @@ mod tests {
             table_locks: Mutex::new(std::collections::HashMap::new()),
             people_touched: Mutex::new(std::collections::HashMap::new()),
             notebooks: None,
+            statements: Default::default(),
         })
     }
 

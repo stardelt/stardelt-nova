@@ -136,6 +136,7 @@ pub struct CatalogAccessUpdate {
 
 #[utoipa::path(
     get,
+    operation_id = "admin_catalogs_list",
     path = "/api/admin/catalogs",
     tag = "internal",
     description = "Every `Catalog` of the platform namespace, ordered bronze, silver, gold, then the rest alphabetically (`layer`: the `stardelt.io/layer` label, else the catalog's own name): identity, owner, managed access, the storage key prefix, phase and the grants and conditions the access-sync job last wrote. Administrator-only; a non-administrator answers 403 `this view is for platform administrators`. The write is `PUT /api/admin/catalogs/{name}/access`; this route never changes anything. A catalog the job has not observed yet answers `phase: \"Unknown\"` with no conditions. Without a cluster connection (demo mode, a local run) the answer is the one in-memory `warehouse` catalog. Answers `Cache-Control: no-store`.",
@@ -159,9 +160,11 @@ pub(crate) async fn list(State(state): State<Arc<AppState>>) -> Response {
 
 #[utoipa::path(
     put,
+    operation_id = "admin_catalogs_access_update",
     path = "/api/admin/catalogs/{name}/access",
     tag = "internal",
     description = "Change one catalog's `spec.owner`, `spec.managedAccess` and `spec.grants` as a JSON merge patch on the `Catalog` resource, carrying the `resourceVersion` the page read. Administrator-only; a non-administrator answers 403 `this view is for platform administrators`. A malformed owner, group name, verb or a duplicate grant is a 400 in the words the form shows; a catalog that changed meanwhile is a 409 `this catalog changed since you opened it; reload`; a name that is not a catalog or no longer exists is a 404; more than 30 changes per administrator in an hour is a 429. Without a cluster connection the answer is 503 `the cluster is not reachable from Nova` (demo mode changes memory instead). Answers the updated row, the same shape as the list, with the new `metadata.generation`; `status.observedGeneration` catches up when the access-sync job runs (about two minutes). Never carries a storage credential. `Cache-Control: no-store`.",
+    params(("name" = String, Path, description = "The catalog's name")),
     request_body = CatalogAccessUpdate,
     responses(
         (status = 200, description = "The updated row", body = AdminCatalog),

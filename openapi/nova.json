@@ -16,7 +16,7 @@
           "internal"
         ],
         "description": "Every `Catalog` of the platform namespace, ordered bronze, silver, gold, then the rest alphabetically (`layer`: the `stardelt.io/layer` label, else the catalog's own name): identity, owner, managed access, the storage key prefix, phase and the grants and conditions the access-sync job last wrote. Administrator-only; a non-administrator answers 403 `this view is for platform administrators`. The write is `PUT /api/admin/catalogs/{name}/access`; this route never changes anything. A catalog the job has not observed yet answers `phase: \"Unknown\"` with no conditions. Without a cluster connection (demo mode, a local run) the answer is the one in-memory `warehouse` catalog. Answers `Cache-Control: no-store`.",
-        "operationId": "list",
+        "operationId": "admin_catalogs_list",
         "responses": {
           "200": {
             "description": "One row per catalog, medallion layers first, then by name",
@@ -60,7 +60,18 @@
           "internal"
         ],
         "description": "Change one catalog's `spec.owner`, `spec.managedAccess` and `spec.grants` as a JSON merge patch on the `Catalog` resource, carrying the `resourceVersion` the page read. Administrator-only; a non-administrator answers 403 `this view is for platform administrators`. A malformed owner, group name, verb or a duplicate grant is a 400 in the words the form shows; a catalog that changed meanwhile is a 409 `this catalog changed since you opened it; reload`; a name that is not a catalog or no longer exists is a 404; more than 30 changes per administrator in an hour is a 429. Without a cluster connection the answer is 503 `the cluster is not reachable from Nova` (demo mode changes memory instead). Answers the updated row, the same shape as the list, with the new `metadata.generation`; `status.observedGeneration` catches up when the access-sync job runs (about two minutes). Never carries a storage credential. `Cache-Control: no-store`.",
-        "operationId": "update_access",
+        "operationId": "admin_catalogs_access_update",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "The catalog's name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -155,13 +166,35 @@
         }
       }
     },
+    "/api/auth/config": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "summary": "How to sign in from a command line. Outside sign-in like the rest of `/api/auth/*`: it names\nthe identity provider and the public client, never a secret.",
+        "description": "How to sign in from a command line: the identity provider's address and the public client for the device flow. It answers without sign-in and carries no secret.",
+        "operationId": "auth_config",
+        "responses": {
+          "200": {
+            "description": "The sign-in mode and, in `oidc` mode, the issuer and the device client",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthConfig"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/catalog/catalogs": {
       "get": {
         "tags": [
           "public"
         ],
         "description": "The catalogs the caller may browse, each with its Lakekeeper warehouse id and its medallion layer when it has one, plus the catalog a request without `?catalog=` uses. The order is bronze, silver, gold first (in that order), then the rest alphabetically; `layer` is `stardelt.io/layer` from the catalog's `Catalog` resource, else the catalog's own name when that is `bronze`, `silver` or `gold`, and absent otherwise. The list is what the engine's `SHOW CATALOGS` shows the caller (through the caller's own token), minus the engine's own catalogs (`system`, `information_schema`, `memory`, `tpch`, `tpcds`, `jmx`); it is cached for 30 s (the layer for 60 s). Every other `/api/catalog/*` route takes the same `?catalog=`; a catalog the caller may not browse answers 403 there and is never proxied. Empty when no catalog is open to the caller. `demo` in demo mode.",
-        "operationId": "list_catalogs",
+        "operationId": "catalogs_list",
         "responses": {
           "200": {
             "description": "The browsable catalogs and the default one",
@@ -202,7 +235,7 @@
           "public"
         ],
         "description": "What is in each catalog the caller may browse: schemas, tables, rows, bytes on the object store and the newest commit, plus the sums. Rows are ordered bronze, silver, gold first, then by name, and carry `layer` when the catalog is one of the three (the `stardelt.io/layer` label, else the catalog's own name). The catalog list is the caller's own `SHOW CATALOGS` (`GET /api/catalog/catalogs`); a catalog the caller may not browse is never read and never appears. The numbers come from the catalog's Iceberg metadata (the current snapshot's `total-records` and `total-files-size`), so the endpoint runs no query, and they are read in the background every five minutes (`NOVA_METRICS_REFRESH_SECS`): a request answers from the last numbers at once, whatever their age, and `updatedAt` says when they were read. A catalog with no numbers yet is answered with zeros and `pending: true` while one background scan reads it; `totals` leave pending rows out. At most 200 tables per catalog are loaded: `truncated` says the rows and bytes are a sample while `tables` stays exact. A catalog whose scan failed keeps its last numbers and carries an `error` sentence (zeros for one that never answered); only an unreachable engine or catalog fails the request with 502. 403 when no catalog is open to the caller. Never cached by the client.",
-        "operationId": "get",
+        "operationId": "catalog_metrics_get",
         "responses": {
           "200": {
             "description": "One entry per browsable catalog, medallion layers first, then by name, with the totals",
@@ -243,7 +276,7 @@
           "public"
         ],
         "description": "Read every catalog again now, instead of waiting for the next background round (every five minutes). Administrator only: it is an operator action on the whole warehouse, and `main` puts the same `require_admin` in front of it as `/api/apps`, so a non-administrator answers 403. Answers 202 — the round runs in the background, one at a time, and the page reads the new numbers with its next `GET /api/catalog/metrics`. At most one per minute: a second call answers 429 with the sentence `the numbers were refreshed less than a minute ago`.",
-        "operationId": "refresh",
+        "operationId": "catalog_metrics_refresh",
         "responses": {
           "202": {
             "description": "The round is running; the numbers follow on the next read",
@@ -284,7 +317,7 @@
           "public"
         ],
         "description": "List one catalog's namespaces (schemas). Each namespace is a list of levels. `?catalog=` picks the catalog; omitted, the default one is used. A catalog the caller may not browse answers 403, a name no catalog knows 404.",
-        "operationId": "list_namespaces",
+        "operationId": "namespaces_list",
         "parameters": [
           {
             "name": "catalog",
@@ -364,7 +397,7 @@
           "internal"
         ],
         "description": "Create a schema in one catalog via Trino (`CREATE SCHEMA IF NOT EXISTS`). `?catalog=` picks the catalog; omitted, the default one is used. UI-only for now: not promised stable.",
-        "operationId": "create_namespace",
+        "operationId": "namespaces_create",
         "parameters": [
           {
             "name": "catalog",
@@ -446,7 +479,7 @@
           "public"
         ],
         "description": "List tables in one namespace of one catalog. `?catalog=` picks the catalog; omitted, the default one is used.",
-        "operationId": "list_tables",
+        "operationId": "tables_list",
         "parameters": [
           {
             "name": "ns",
@@ -617,7 +650,7 @@
           "public"
         ],
         "description": "Set or remove one column's description. The column must be a field of the current schema, matched exactly. Nova runs `COMMENT ON COLUMN <catalog>.<ns>.<tbl>.<column>` through Trino **as the caller** (source `nova-catalog`), because a column description lives in a new Iceberg schema and only the engine writes it. `?catalog=` picks the catalog. Same 4,000-character limit and null rule as the table description. The interim rule is enforced by Nova; the catalog does not enforce it yet. Demo mode answers 503.",
-        "operationId": "update_column",
+        "operationId": "column_description_update",
         "parameters": [
           {
             "name": "ns",
@@ -736,7 +769,7 @@
           "public"
         ],
         "description": "A table's documentation: the Iceberg `comment` as `description`, the `stardelt.tags`/`stardelt.owner`/`stardelt.domain` custom properties, and the description and type of every column of the **current** schema. `?catalog=` picks the catalog. `canEdit`/`editRule` apply Nova's interim rule: until the catalog enforces permissions, Nova decides who may edit, and anyone who reaches Lakekeeper or Trino directly can still change these properties. Demo mode answers 503.",
-        "operationId": "read",
+        "operationId": "table_documentation_get",
         "parameters": [
           {
             "name": "ns",
@@ -834,7 +867,7 @@
           "public"
         ],
         "description": "Set or remove a table's description, tags, owner and domain in one Lakekeeper commit. `?catalog=` picks the catalog. Every key is optional: absent changes nothing, `null` (or an empty tag list, or a blank description) removes the property, and a write with nothing to change sends no commit. Description at most 4,000 characters; at most 20 unique tags `^[a-z0-9][a-z0-9_-]{0,31}$`; owner a group name; domain `^[a-z0-9][a-z0-9_-]{0,39}$`. An ownerless table may be edited by anybody, but the request must then set `owner` to one of the caller's own groups. **The interim rule is enforced by Nova; the catalog does not enforce it yet** — anyone who reaches Lakekeeper or Trino directly can still change these properties. Edits of one table are serialised by Nova and a contended commit is retried; a catalog that stays busy answers 502 `the catalog is busy, try again`. Demo mode answers 503.",
-        "operationId": "update",
+        "operationId": "table_documentation_update",
         "parameters": [
           {
             "name": "ns",
@@ -938,6 +971,196 @@
         }
       }
     },
+    "/api/catalog/tables/{ns}/{tbl}/history": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "description": "The table's last 100 snapshots, newest first: `committed_at`, `snapshot_id`, `parent_id`, `operation`, `summary`. Snapshot and parent ids are strings so that all 64 bits survive JSON in a browser.",
+        "operationId": "table_history",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "description": "Namespace (schema) name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tbl",
+            "in": "path",
+            "description": "Table name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "catalog",
+            "in": "query",
+            "description": "Catalog to work in (`warehouse`, `finance`, …). Omitted, the default catalog is used.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One row per snapshot",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueryResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A name is not a single path segment, or the engine refused the statement",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not browse that catalog",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such catalog",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The catalog or the engine is not reachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/catalog/tables/{ns}/{tbl}/rollback": {
+      "post": {
+        "tags": [
+          "public"
+        ],
+        "description": "Move the table's current pointer back to an earlier snapshot (`ALTER TABLE … EXECUTE rollback_to_snapshot`), run as the caller, so the engine's permissions decide. Nothing is deleted: the newer snapshots stay until they are expired.",
+        "operationId": "table_rollback",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "description": "Namespace (schema) name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tbl",
+            "in": "path",
+            "description": "Table name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "catalog",
+            "in": "query",
+            "description": "Catalog to work in (`warehouse`, `finance`, …). Omitted, the default catalog is used.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RollbackRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The engine's answer to the statement",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueryResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A name or the body is not valid, the snapshot is unknown, or the engine refused the statement",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not browse that catalog",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such catalog",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The catalog or the engine is not reachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/catalog/warehouse": {
       "get": {
         "tags": [
@@ -985,7 +1208,7 @@
           "public"
         ],
         "description": "The caller's connections: their own, their groups', and — for administrators — the managed ones. Values are never part of an answer, only the field names.",
-        "operationId": "list",
+        "operationId": "connections_list",
         "responses": {
           "200": {
             "description": "Personal, then group, then managed connections, each sorted by name",
@@ -1034,7 +1257,7 @@
           "public"
         ],
         "description": "Create a connection. The values in `secret` are written to the platform's secret store with the caller's own token and are never returned by any route.",
-        "operationId": "create",
+        "operationId": "connections_create",
         "requestBody": {
           "content": {
             "application/json": {
@@ -1125,7 +1348,7 @@
           "public"
         ],
         "description": "The last 200 break-glass reads and refusals, newest first, for administrators. The rows carry the administrator, group, connection, reason and outcome — never a value. `Cache-Control: no-store`.",
-        "operationId": "break_glass_log",
+        "operationId": "connections_break_glass_log",
         "responses": {
           "200": {
             "description": "The most recent events, newest first",
@@ -1166,7 +1389,7 @@
           "public"
         ],
         "description": "Delete one of a group's connections. The value goes first, then the resource; if the resource delete fails the entry stays visible as not-ready and the delete can be retried.",
-        "operationId": "delete_group",
+        "operationId": "connections_group_delete",
         "parameters": [
           {
             "name": "group",
@@ -1250,7 +1473,7 @@
           "public"
         ],
         "description": "Emergency read of a group connection by an administrator: a written reason, a notice on the Connection for the owner group, an audit row, and the values returned **once**. The answer is never stored and carries `Cache-Control: no-store` and `Pragma: no-cache`. Personal and managed connections are never readable.",
-        "operationId": "break_glass_group",
+        "operationId": "connections_group_break_glass",
         "parameters": [
           {
             "name": "group",
@@ -1371,7 +1594,7 @@
           "public"
         ],
         "description": "Rotate some fields of one of a group's connections. Asked to write the fields that are sent; the others keep their value.",
-        "operationId": "rotate_group",
+        "operationId": "connections_group_rotate",
         "parameters": [
           {
             "name": "group",
@@ -1482,7 +1705,7 @@
           "public"
         ],
         "description": "Delete an administrator-managed connection. The value goes first, then the resource; if the resource delete fails the entry stays visible as not-ready and the delete can be retried.",
-        "operationId": "delete_managed",
+        "operationId": "connections_managed_delete",
         "parameters": [
           {
             "name": "name",
@@ -1557,7 +1780,7 @@
           "public"
         ],
         "description": "Always refused: break-glass covers group connections only. An administrator gets a 403 and an audit row; nothing is read.",
-        "operationId": "break_glass_managed",
+        "operationId": "connections_managed_break_glass",
         "parameters": [
           {
             "name": "name",
@@ -1619,7 +1842,7 @@
           "public"
         ],
         "description": "Rotate an administrator-managed connection. Nobody can read it back, so every field must be sent.",
-        "operationId": "rotate_managed",
+        "operationId": "connections_managed_rotate",
         "parameters": [
           {
             "name": "name",
@@ -1721,7 +1944,7 @@
           "public"
         ],
         "description": "Delete one of the caller's own connections.",
-        "operationId": "delete_personal",
+        "operationId": "connections_personal_delete",
         "parameters": [
           {
             "name": "name",
@@ -1786,7 +2009,7 @@
           "public"
         ],
         "description": "Always refused: break-glass covers group connections only. An administrator gets a 403 and an audit row; nothing is read.",
-        "operationId": "break_glass_personal",
+        "operationId": "connections_personal_break_glass",
         "parameters": [
           {
             "name": "name",
@@ -1848,7 +2071,7 @@
           "public"
         ],
         "description": "Rotate some fields of one of the caller's own connections; the fields that are not sent keep their value.",
-        "operationId": "rotate_personal",
+        "operationId": "connections_personal_rotate",
         "parameters": [
           {
             "name": "name",
@@ -1934,6 +2157,28 @@
         }
       }
     },
+    "/api/health": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "summary": "Always `200`: the kubelet's readiness probe must not take Trino queries offline because\nthe state store is down. The body says what is wrong: `db` is `up`, `down` or `disabled`.",
+        "description": "The readiness probe. It answers 200 without sign-in whenever the process is up, so a state store that is down never takes Trino queries offline; `db` says what is wrong.",
+        "operationId": "health",
+        "responses": {
+          "200": {
+            "description": "The process is up; `db` is the state store's state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/me": {
       "get": {
         "tags": [
@@ -1962,7 +2207,7 @@
         ],
         "summary": "`GET /api/notebooks`: the latest version of every notebook in the caller's groups,\nnewest first. Administrators see their own groups only.",
         "description": "The latest published version of every notebook in the caller's groups, newest first. Each row carries the group, the name, the latest `objectVersion`, its size, `uploadedAt` as an RFC 3339 timestamp in UTC (SeaweedFS's RFC 1123 `LastModified` normalised) and the publisher's `uploadedBy` display name. An administrator gets no wider view than their own groups. Unset `NOVA_S3_*` is 503; an S3 that is down or refuses is 502. Answers `Cache-Control: no-store`.",
-        "operationId": "list",
+        "operationId": "notebooks_list",
         "responses": {
           "200": {
             "description": "One row per notebook",
@@ -2017,7 +2262,7 @@
         ],
         "summary": "`PUT /api/notebooks/{group}/{name}`: validate, strip, store one immutable version.",
         "description": "Publish a notebook as a new immutable object version in the `notebooks` bucket. Needs a signed-in person whose groups include `{group}` (403 `you are not a member of the group <g>`; administrators are not exempt). `{name}` must match `^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}\\.ipynb$` and the body must be an nbformat 4 notebook of at most 5 MiB. Every cell's `outputs` and `execution_count` and the notebook's widget metadata are removed before storing — no cell output reaches the object store. `sha256` is of the stored (stripped) bytes. `parameters` are the `name = literal` lines of the first cell tagged `parameters`, at most 32; defaults are text and are never evaluated. A 61st publish by one person in an hour is 429. Unset `NOVA_S3_*` is 503 `notebook storage is not configured`; an S3 that is down or refuses is 502. Each publish writes one audit line with group, name, version and size, never content.",
-        "operationId": "publish",
+        "operationId": "notebooks_publish",
         "parameters": [
           {
             "name": "group",
@@ -2128,6 +2373,216 @@
             }
           }
         }
+      },
+      "delete": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`DELETE /api/notebooks/{group}/{name}`: the notebook and every version of it (#298).",
+        "description": "Delete a published notebook and every version of it from the `notebooks` bucket; the bucket is versioned, so each version is removed by its id and the bytes are gone, not hidden. Needs a signed-in person whose groups include `{group}` (403 `you are not a member of the group <g>`; administrators are not exempt). A notebook with no version is 404 `no such notebook`. The answer carries the number of versions removed. A schedule that pinned a deleted version fails its next run. Unset `NOVA_S3_*` is 503 `notebook storage is not configured`; an S3 that is down or refuses is 502 (a retry removes what is left). Each delete writes one audit line with group, name and the number of versions, never content. Answers `Cache-Control: no-store`.",
+        "operationId": "notebooks_delete",
+        "parameters": [
+          {
+            "name": "group",
+            "in": "path",
+            "description": "One of the caller's groups",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Notebook file name, ending in .ipynb",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The notebook and the number of versions removed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeletedNotebook"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a member of the group",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such notebook",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The notebook store did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Notebook storage is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/notebooks/{group}/{name}/parameters": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`GET /api/notebooks/{group}/{name}/parameters`: the parameters of one version, so the\nSchedule dialog can offer the form the notebook declares (stardelt-nova#237).",
+        "description": "The parameters of one published version of a notebook, read from the stored bytes: the `name = literal` lines of the first cell tagged `parameters`, in order, at most 32, defaults as text and never evaluated. `?version=<id>` names the immutable version; omitted, the latest is read and its id answered. Needs a member of `{group}` (403 `you are not a member of the group <g>`; administrators are not exempt). An unknown version is 404 `no such notebook version`. The answer carries `parameters` and the `objectVersion` it describes — a schedule pins that id. Unset `NOVA_S3_*` is 503 `notebook storage is not configured`; an S3 that is down or refuses is 502. Answers `Cache-Control: no-store`.",
+        "operationId": "notebooks_parameters",
+        "parameters": [
+          {
+            "name": "group",
+            "in": "path",
+            "description": "One of the caller's groups",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Notebook file name, ending in .ipynb",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "version",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The parameters and the version they belong to",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotebookParameters"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a member of the group",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such notebook version",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The notebook store did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Notebook storage is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/api/notebooks/{group}/{name}/versions": {
@@ -2137,7 +2592,7 @@
         ],
         "summary": "`GET /api/notebooks/{group}/{name}/versions`: the versions of one notebook, newest\nfirst, at most 50.",
         "description": "The published versions of one notebook, newest first, at most 50. Needs a member of `{group}` (403 `you are not a member of the group <g>`; administrators are not exempt). Each row carries the immutable `objectVersion`, its size, `uploadedAt` as an RFC 3339 timestamp in UTC (SeaweedFS's RFC 1123 `LastModified` normalised), the publisher's `uploadedBy` and the `sha256` of the stored bytes. A group with no such notebook answers an empty list. Unset `NOVA_S3_*` is 503; an S3 that is down or refuses is 502. Answers `Cache-Control: no-store`.",
-        "operationId": "versions",
+        "operationId": "notebooks_versions",
         "parameters": [
           {
             "name": "group",
@@ -2225,13 +2680,35 @@
         }
       }
     },
+    "/api/openapi.json": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "summary": "Serve the document. Deliberately outside sign-in (wired next to\n`/api/health` in `main`): it carries shapes, not data.",
+        "description": "This document. It answers without sign-in and carries shapes, not data.",
+        "operationId": "openapi_document",
+        "responses": {
+          "200": {
+            "description": "The OpenAPI 3.1 document",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/pipelines": {
       "get": {
         "tags": [
           "public"
         ],
         "description": "The pipelines the caller may see: their groups' pipelines, and every pipeline for an administrator. A pipeline without `spec.ownerGroup` is administrators-only. `state` is one of `loading`, `paused`, `running`, `failed`, `succeeded`, `idle`; `loaded` is false while Airflow has no DAG for a new pipeline yet. Answers `Cache-Control: no-store`.",
-        "operationId": "list",
+        "operationId": "pipelines_list",
         "responses": {
           "200": {
             "description": "The visible pipelines, sorted by name",
@@ -2280,7 +2757,7 @@
           "public"
         ],
         "description": "Schedule a statement or a published notebook: create a `Pipeline` for one of the caller's owner groups (`runAs: pipeline-<group>`), validated so the loader accepts it. A body gives exactly one of a non-empty `sql` and a `notebook` (`{ name, objectVersion, params }`, #237) — both or neither is 400 `give a statement or a notebook`. Refusals, in this order: a name outside 1 to 40 lower-case letters, digits and dashes starting with a letter 400; a group the caller is not a member of 403 (`you are not a member of the group <g>` — administrators included); a group without a ready `ServicePrincipal` 409 with the `principals` route's message; an empty, over-20,000-character or NUL-carrying statement 400; a parameter name, a parameter count or value, or a `${…}` placeholder the loader cannot fill 400; a notebook name outside `^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}\\.ipynb$` 400, more than 32 notebook parameters, a value over 256 characters or NUL, or a `params` JSON text over 4096 characters 400, and a version that is not in the store 400 `that notebook version does not exist in group <g>` (503 when `NOVA_S3_*` is unset, 502 when S3 does not answer); a retry, wait, time-limit or run-mode option out of range 400; a cron that is not five in-range fields or fires more often than every five minutes 400; an unknown IANA timezone 400; a name that already exists 409; more than ten creations per user per hour 429. `options` and `params` are optional: an omitted option keeps its default (1 retry after 5 minutes, a 120-minute time limit, `Forbid`); `params` are the statement's `${params.<name>}` values, a notebook's values are in `notebook.params`. Airflow is not needed: the resource is the source of truth, and the answer is the new pipeline with `loaded: false`, `state: \"loading\"`. The audit line carries the statement's length, the cron and, for a notebook, the group, the file name and the pinned version — never the statement and never a parameter value. Answers `Cache-Control: no-store`.",
-        "operationId": "create",
+        "operationId": "pipelines_create",
         "requestBody": {
           "content": {
             "application/json": {
@@ -2381,7 +2858,7 @@
           "public"
         ],
         "description": "What the engine says about a statement, without running it: Nova fills the statement's `${run.date}` (today, UTC), `${run.id}` (`check`) and `${params.<name>}` placeholders and sends `EXPLAIN <statement>` to the engine as the caller, under the source `nova-schedule-check`. It never sends `EXPLAIN ANALYZE` and never the statement itself. `checked: false` means this kind of statement cannot be checked here (only `select`, `with`, `insert`, `merge`, `delete`, `update`, `values` and `create … as …` are). A refused statement answers 200 with `ok: false` and the engine's sentence; an engine that does not answer is 502. Refusals before the engine: an empty, over-20,000-character or NUL-carrying statement 400, a parameter table or a placeholder as on create 400. Answers `Cache-Control: no-store`.",
-        "operationId": "check",
+        "operationId": "pipelines_check",
         "requestBody": {
           "content": {
             "application/json": {
@@ -2442,7 +2919,7 @@
           "public"
         ],
         "description": "The next fire times of a cron in its zone, RFC 3339 with that zone's offset (for example `2026-10-21T03:00:00+02:00`), so the Schedule dialog can show what a cadence means before it is saved. A field or a zone as on create (400 with the same sentences); `count` is 1 to 10, 5 when omitted. Like croniter, a day matches when both day fields are restricted and either matches, and when one is unrestricted and the other matches. A wall-clock time the zone skips at a DST jump is not a run; a time that happens twice is answered with its first occurrence. A cron that can never fire answers fewer runs (at most 366 days are searched), not an error. Answers `Cache-Control: no-store`.",
-        "operationId": "preview",
+        "operationId": "pipelines_preview_schedule",
         "requestBody": {
           "content": {
             "application/json": {
@@ -2493,7 +2970,7 @@
           "public"
         ],
         "description": "The caller's own groups and the pipeline principal of each. `principal` is `pipeline-<group>` when a `ServicePrincipal` of that name with `spec.ownerGroup` equal to the group exists; `ready` is its `status.ready`. `message` is `null` when it is ready, otherwise the `Ready` condition's message (or `no status yet`), and for a group without a principal the `make sync-principal NAME=pipeline-<group> GROUP=<group>` command that creates one. A group without a ready principal cannot schedule. Answers `Cache-Control: no-store`.",
-        "operationId": "principals",
+        "operationId": "pipelines_principals",
         "responses": {
           "200": {
             "description": "One entry per group of the caller, sorted by group",
@@ -2544,7 +3021,7 @@
           "public"
         ],
         "description": "One pipeline: the list fields, the latest 20 runs, and the resource's `params`, `retries` and `options` (defaults filled in when a field is absent, so the edit dialog can prefill). A pipeline whose DAG does not exist yet answers 200 with `loaded: false` and `state: \"loading\"`. A pipeline of another group answers 404. History of a deleted pipeline is not offered in this version: without the resource the answer is 404.",
-        "operationId": "detail",
+        "operationId": "pipelines_get",
         "parameters": [
           {
             "name": "namespace",
@@ -2623,7 +3100,7 @@
           "public"
         ],
         "description": "Change a pipeline Nova created (`app.kubernetes.io/managed-by: stardelt-nova`) and nothing else. A statement pipeline's body carries `sql`; a notebook pipeline's carries `notebook` (`{ name, objectVersion, params }`), and an update never changes which of the two it is: `sql` on a notebook pipeline is 400 `this pipeline runs a notebook`, a notebook on a statement pipeline 400 `this pipeline runs a statement`, and both or neither 400 `give a statement or a notebook`. The body describes the whole editable state: an omitted `schedule` removes it, an omitted `params` removes the table, an omitted option keeps its default, and a notebook body's file name, version and parameters replace the task's `config`. Refusals: a pipeline the caller may not act on 404; a pipeline Nova did not write, or one whose task shape is not exactly one `run` task of kind `sql` or `notebook` 409; the statement, a parameter, a placeholder, a notebook name, a parameter value or count, or a version that is not in the store (503 without `NOVA_S3_*`, 502 when S3 does not answer), an option, the cron or the timezone as on create 400; the group's principal no longer ready 409 with the `principals` route's message; a concurrent change to the resource 409 `the pipeline changed while you edited it: reload`. The audit line carries the statement's length, the cron and, for a notebook, the group, the file name and the pinned version — never the statement and never a parameter value. Answers `Cache-Control: no-store`.",
-        "operationId": "update",
+        "operationId": "pipelines_update",
         "parameters": [
           {
             "name": "namespace",
@@ -2732,7 +3209,7 @@
           "public"
         ],
         "description": "Delete a pipeline Nova created. Only a pipeline the caller may act on and that carries `app.kubernetes.io/managed-by: stardelt-nova` may be deleted: a `kubectl` or GitOps pipeline answers 409 instead. Airflow is not called — the resource is the source of truth; the DAG leaves the scheduler's default list after about 90 seconds while its history stays readable. Answers 204 with `Cache-Control: no-store`; the attempt is audited.",
-        "operationId": "remove",
+        "operationId": "pipelines_delete",
         "parameters": [
           {
             "name": "namespace",
@@ -2816,7 +3293,7 @@
           "public"
         ],
         "description": "Pause a pipeline. Idempotent: pausing a paused pipeline answers 200. A pipeline the scheduler has not loaded answers 409. Answers the fresh `PipelineView` — the DAG as Airflow returned it after the patch — and `Cache-Control: no-store`. The attempt is audited, including a refusal.",
-        "operationId": "pause",
+        "operationId": "pipelines_pause",
         "parameters": [
           {
             "name": "namespace",
@@ -2907,7 +3384,7 @@
           "public"
         ],
         "description": "Resume a pipeline. Idempotent: resuming a running pipeline answers 200. A pipeline the scheduler has not loaded answers 409. Answers the fresh `PipelineView` — the DAG as Airflow returned it after the patch — and `Cache-Control: no-store`. The attempt is audited, including a refusal.",
-        "operationId": "resume",
+        "operationId": "pipelines_resume",
         "parameters": [
           {
             "name": "namespace",
@@ -2998,7 +3475,7 @@
           "public"
         ],
         "description": "Start a run now. Nova refuses instead of passing Airflow's silent behaviour on: a pipeline the scheduler has not loaded yet answers 409, a paused pipeline 409 (Airflow would create a run that waits `queued` until someone resumes), more than ten starts per user per minute 429, and a `Forbid` or `Replace` pipeline whose latest five runs include a queued or running one 409 (`Allow` skips that check). `logicalDate` is always now, UTC, whole seconds, so the run has tasks; the note is `Started from Nova by <display name>`. Every attempt, including a refusal, writes one audit line without note text. Answers `Cache-Control: no-store`.",
-        "operationId": "trigger_run",
+        "operationId": "pipelines_run_trigger",
         "parameters": [
           {
             "name": "namespace",
@@ -3099,7 +3576,7 @@
           "public"
         ],
         "description": "One run of a pipeline with its task instances. The run id is looked up through this pipeline's DAG id, so a run id of another pipeline answers 404. Answers `Cache-Control: no-store`.",
-        "operationId": "run",
+        "operationId": "pipelines_run_get",
         "parameters": [
           {
             "name": "namespace",
@@ -3189,7 +3666,7 @@
           "public"
         ],
         "description": "Stop a run: mark it failed. This is **not a cancel** — work already in flight can finish and commit its side effects (stardelt-nova#255), so the answer promises only that the run is marked failed. The run id is looked up through this pipeline's DAG id first: a run id of another pipeline answers 404 and is never patched. A run that is not `queued` or `running` answers 409 and is not patched. Answers the fresh `RunView` and `Cache-Control: no-store`. The attempt is audited, including a refusal.",
-        "operationId": "stop",
+        "operationId": "pipelines_run_stop",
         "parameters": [
           {
             "name": "namespace",
@@ -3289,7 +3766,7 @@
           "public"
         ],
         "description": "One page of a task's log: at most 2000 lines and 512 KiB, ANSI escapes removed, the `::group::` source marker dropped (it names internal object-store paths and is never returned). `try` defaults to the task's last attempt; `token` is the `nextToken` of the previous answer. Every read writes one audit line with user, pipeline, run and task — never the content. Answers `Cache-Control: no-store`.",
-        "operationId": "logs",
+        "operationId": "pipelines_run_task_logs",
         "parameters": [
           {
             "name": "namespace",
@@ -3412,6 +3889,738 @@
         }
       }
     },
+    "/api/query": {
+      "post": {
+        "tags": [
+          "public"
+        ],
+        "description": "Run one SQL statement as the caller and return the whole result. Synchronous: the call returns when the query ends. At most 50 000 rows are returned; past that `truncated` is true and the rows are a prefix.",
+        "operationId": "query_run",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QueryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The columns, the rows and the engine's query id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueryResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The statement is empty, was refused or failed in the engine",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The query engine is not reachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/query-log": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`GET /api/query-log?scope=mine|team|all&state=&warehouse=&q=&from=&to=&limit=&cursor=`",
+        "description": "The statements run on the engine, newest first, a page at a time. A person sees their own; an administrator may ask for everyone's with scope=all. Times are epoch milliseconds.",
+        "operationId": "query_log_list",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "query",
+            "description": "mine (default), team or all. all is for administrators; team stays empty until ownership is recorded",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "description": "QUEUED, FINISHED, FAILED or CANCELED, in any case",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "warehouse",
+            "in": "query",
+            "description": "Only queries that ran on this warehouse",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Text inside the statement, or an exact query id; at most 200 characters",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Created at or after this time",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Created at or before this time",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size from 1 to 200; 50 by default",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "The nextCursor of the previous page",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of the log",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueryLogPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A parameter is not valid; the message names it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "scope=all by somebody who is not an administrator",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The state store is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/query-log/{id}": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`GET /api/query-log/{id}` — everything stored about one query the caller may see.",
+        "description": "One query with its whole statement. Somebody else's query answers 404, exactly like a missing one; an administrator who opens another person's query is audited.",
+        "operationId": "query_log_detail",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The engine's query id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The stored query",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueryLogDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such query, or it is not the caller's to see",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The state store is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/saved-queries": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`GET /api/saved-queries` — the caller's own, newest first.",
+        "description": "The caller's own saved queries, most recently changed first. Times are epoch milliseconds.",
+        "operationId": "saved_queries_list",
+        "responses": {
+          "200": {
+            "description": "The caller's saved queries",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SavedQuery"
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The state store is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`POST /api/saved-queries` — `201` with the stored row.",
+        "description": "Save a query for the caller. The title is at most 200 characters and the SQL at most 100 000.",
+        "operationId": "saved_queries_create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewSavedQuery"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The stored row",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SavedQuery"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The title or the SQL is empty or too long",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The state store is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/saved-queries/{id}": {
+      "delete": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`DELETE /api/saved-queries/{id}` — `204`; `404` when the id is not the caller's.",
+        "description": "Delete one of the caller's saved queries.",
+        "operationId": "saved_queries_remove",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The saved query's id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "404": {
+            "description": "No such saved query, or it is not the caller's",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The state store is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/settings": {
+      "get": {
+        "tags": [
+          "internal"
+        ],
+        "summary": "`GET /api/settings` — the caller's settings as one JSON object (`{}` when none).",
+        "description": "The caller's personal settings as one JSON object, key to value (`{}` when there are none). The UI decides what a key means; Nova only stores them.",
+        "operationId": "settings_list",
+        "responses": {
+          "200": {
+            "description": "Key to value",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The state store is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/settings/{key}": {
+      "put": {
+        "tags": [
+          "internal"
+        ],
+        "summary": "`PUT /api/settings/{key}` — the body is the value (any JSON); creates or replaces.\nAnswers `200 {\"key\":…,\"value\":…}`.",
+        "description": "Create or replace one of the caller's settings. The body is the value itself, any JSON, at most 16 KiB of JSON text. A key is 1 to 64 characters: a-z, 0-9, '.', '_' or '-', starting with a letter or digit.",
+        "operationId": "settings_put",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "description": "The setting's key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "The value: any JSON",
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The key and the value as stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StoredSetting"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The key or the value is not valid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The state store is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "internal"
+        ],
+        "summary": "`DELETE /api/settings/{key}` — `204`, or `404` when the caller has no such key.",
+        "description": "Remove one of the caller's settings.",
+        "operationId": "settings_remove",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "description": "The setting's key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Removed"
+          },
+          "404": {
+            "description": "The caller has no such setting",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The state store is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/statements": {
+      "post": {
+        "tags": [
+          "public"
+        ],
+        "description": "Submit one SQL statement as the caller and get a handle to it. The call waits up to `waitSeconds` (0 to 30, default 5): when the statement ends in that time the answer is `200` and carries the first chunk of rows, otherwise it is `202` and the caller polls `statements_get`. A statement that fails in the engine is still `200` with `state: FAILED` and `error`.",
+        "operationId": "statements_submit",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubmitRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The statement ended within the wait",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatementView"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "The statement is still running; poll it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatementView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The statement is empty",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The caller already holds ten statements; read or cancel one",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The query engine is not reachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Not available in demo mode",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/statements/{id}": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "description": "The state of one of the caller's statements. Each call reads the engine's next pages with the caller's current token, for up to `waitSeconds` (0 to 30, default 0); the rows are read with `statements_chunk_get`. A statement that nobody polls for the engine's client timeout (5 minutes by default) is cancelled by the engine.",
+        "operationId": "statements_get",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The statement id from `statements_submit`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "waitSeconds",
+            "in": "query",
+            "description": "Wait up to this many seconds (0 to 30) for the statement to end",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The statement",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatementView"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "The engine refused the caller's token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such statement of the caller's",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The query engine is not reachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "public"
+        ],
+        "description": "Cancel one of the caller's statements in the engine and forget it. Idempotent: it answers `204` whether or not the statement exists or is the caller's (it cancels only the caller's own).",
+        "operationId": "statements_cancel",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The statement id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Cancelled, or nothing to cancel"
+          }
+        }
+      }
+    },
+    "/api/statements/{id}/chunks/{n}": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "description": "One chunk (1 000 rows, the last one fewer) of a statement's rows, counted from 0. A chunk exists once it is full or the statement has ended; the call does not wait.",
+        "operationId": "statements_chunk_get",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The statement id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "n",
+            "in": "path",
+            "description": "The chunk number, from 0",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The rows of the chunk",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChunkView"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such statement of the caller's, or no such chunk (yet)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/warehouses": {
       "get": {
         "tags": [
@@ -3419,7 +4628,7 @@
         ],
         "summary": "`GET /api/warehouses`: the compute classes of the platform, which one this caller may use\nand which one a query will land in.",
         "description": "Every `SqlWarehouse` of the platform namespace, largest class first (`large`, `medium`, `small`, `xs`; name order inside one size), each row carrying the class `size`, the numbers the resource group is rendered with (`running`, `queued`, `memoryShare`: the class defaults, overridden by `spec.concurrency`), `default`, `canUse` (one of the caller's groups is in `spec.grants`) and `yours` (the first usable row — the class the engine's first matching selector picks — or the default class when nothing is granted). An administrator gets one synthetic row first (`name: \"admin\"`, `displayName: \"Administrators\"`, `size: null`, 50/100/100 %: the `admin` root group access-sync renders) with `yours` on it and `yours: false` on every other row. Non-authoritative: the engine selects by identity, Nova only shows it. Without a cluster connection (demo mode, a local run) the answer is the one `small` class. A cluster that refuses or fails is a 502. Answers `Cache-Control: no-store`.",
-        "operationId": "list",
+        "operationId": "warehouses_list",
         "responses": {
           "200": {
             "description": "One row per class, largest first, the administrator's row first of all",
@@ -3561,6 +4770,33 @@
               "null"
             ],
             "description": "`status.warehouseId`: the Lakekeeper warehouse, as the access-sync job wrote it."
+          }
+        }
+      },
+      "AuthConfig": {
+        "type": "object",
+        "description": "`GET /api/auth/config`: what a client needs to start a sign-in of its own.",
+        "required": [
+          "mode"
+        ],
+        "properties": {
+          "deviceClientId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The public client a command line signs in with (device flow); `null` when none is set up."
+          },
+          "issuer": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The identity provider's realm address; `null` in `dev` mode."
+          },
+          "mode": {
+            "type": "string",
+            "description": "`oidc` (sign-in is required) or `dev` (Nova answers without one)."
           }
         }
       },
@@ -3935,6 +5171,44 @@
           }
         }
       },
+      "ChunkView": {
+        "type": "object",
+        "description": "`GET /api/statements/{id}/chunks/{n}`.",
+        "required": [
+          "chunk",
+          "rows"
+        ],
+        "properties": {
+          "chunk": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {}
+            },
+            "description": "One array per row, in column order."
+          }
+        }
+      },
+      "Column": {
+        "type": "object",
+        "required": [
+          "name",
+          "type"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "description": "The engine's type name, for example `varchar` or `bigint`."
+          }
+        }
+      },
       "ColumnDescriptionUpdate": {
         "type": "object",
         "description": "`PUT /api/catalog/tables/{ns}/{tbl}/columns/{column}/description` body.",
@@ -4163,6 +5437,36 @@
           }
         }
       },
+      "DbStatus": {
+        "type": "string",
+        "description": "What `/api/health` reports about the state store.",
+        "enum": [
+          "up",
+          "down",
+          "disabled"
+        ]
+      },
+      "DeletedNotebook": {
+        "type": "object",
+        "required": [
+          "name",
+          "group",
+          "deletedVersions"
+        ],
+        "properties": {
+          "deletedVersions": {
+            "type": "integer",
+            "description": "How many object versions were removed.",
+            "minimum": 0
+          },
+          "group": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
       "DocumentationUpdate": {
         "type": "object",
         "description": "`PUT /api/catalog/tables/{ns}/{tbl}/documentation` body.\n\nEvery key is optional. Absent changes nothing; `null` removes the property; an empty tag\nlist and a blank description also remove. A field whose value equals what the table\nalready stores is not a change.",
@@ -4210,6 +5514,23 @@
           "error": {
             "type": "string",
             "description": "Human-readable sentence. Never contains tokens, URLs or stack traces."
+          }
+        }
+      },
+      "Health": {
+        "type": "object",
+        "description": "What the readiness probe answers.",
+        "required": [
+          "status",
+          "db"
+        ],
+        "properties": {
+          "db": {
+            "$ref": "#/components/schemas/DbStatus"
+          },
+          "status": {
+            "type": "string",
+            "description": "Always `ok`."
           }
         }
       },
@@ -4441,6 +5762,26 @@
           }
         }
       },
+      "NewSavedQuery": {
+        "type": "object",
+        "description": "`POST /api/saved-queries` body.",
+        "required": [
+          "title",
+          "sql"
+        ],
+        "properties": {
+          "sql": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "warehouse": {
+            "type": "string",
+            "description": "The warehouse the query was written for; free text, may be empty."
+          }
+        }
+      },
       "NotebookParameter": {
         "type": "object",
         "required": [
@@ -4454,6 +5795,27 @@
           },
           "name": {
             "type": "string"
+          }
+        }
+      },
+      "NotebookParameters": {
+        "type": "object",
+        "description": "`GET /api/notebooks/{group}/{name}/parameters`: the parameters of one pinned version\n(stardelt-nova#237).",
+        "required": [
+          "parameters",
+          "objectVersion"
+        ],
+        "properties": {
+          "objectVersion": {
+            "type": "string",
+            "description": "The version the answer describes — the one asked for, or the latest when the query\nnamed none. A schedule pins this exact id."
+          },
+          "parameters": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NotebookParameter"
+            },
+            "description": "The `name = literal` lines of the first cell tagged `parameters`, in order, at most\n32; empty when no cell carries the tag."
           }
         }
       },
@@ -4985,6 +6347,393 @@
           }
         }
       },
+      "QueryData": {
+        "type": "object",
+        "description": "How much data the query read, wrote and held in memory.",
+        "properties": {
+          "inputBytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "inputRows": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "outputBytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "outputRows": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "peakMemoryBytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "writtenBytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "writtenRows": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          }
+        }
+      },
+      "QueryFailure": {
+        "type": "object",
+        "description": "Why a query failed.",
+        "required": [
+          "code"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "QueryLogDetail": {
+        "type": "object",
+        "description": "Everything stored about one query: the whole statement, timing, data volumes, tables.",
+        "required": [
+          "id",
+          "state",
+          "user",
+          "clientTags",
+          "warehouse",
+          "sql",
+          "sqlHash",
+          "createdAt",
+          "timing",
+          "data",
+          "tablesRead",
+          "tablesWritten"
+        ],
+        "properties": {
+          "catalog": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "clientTags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "createdAt": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "data": {
+            "$ref": "#/components/schemas/QueryData"
+          },
+          "endedAt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "error": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/QueryFailure"
+              }
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "queryType": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "schema": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sql": {
+            "type": "string"
+          },
+          "sqlHash": {
+            "type": "string"
+          },
+          "startedAt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "state": {
+            "type": "string"
+          },
+          "tablesRead": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "tablesWritten": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "timing": {
+            "$ref": "#/components/schemas/QueryTiming"
+          },
+          "user": {
+            "type": "string",
+            "description": "The raw engine user (the `sub` once authz 8/8 is live)."
+          },
+          "userName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "warehouse": {
+            "type": "string"
+          }
+        }
+      },
+      "QueryLogItem": {
+        "type": "object",
+        "description": "One row of the query log list; the statement is cut to a preview.",
+        "required": [
+          "id",
+          "state",
+          "user",
+          "warehouse",
+          "sql",
+          "createdAt"
+        ],
+        "properties": {
+          "createdAt": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "errorCode": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "outputRows": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "queryType": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sql": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "user": {
+            "type": "string",
+            "description": "The raw engine user (the `sub` once authz 8/8 is live)."
+          },
+          "userName": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The person's display name when Nova knows the engine user; `None` falls back to\n`user` in the UI."
+          },
+          "wallMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "warehouse": {
+            "type": "string"
+          }
+        }
+      },
+      "QueryLogPage": {
+        "type": "object",
+        "description": "One page of the query log; `nextCursor` is null on the last page.",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/QueryLogItem"
+            }
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "QueryRequest": {
+        "type": "object",
+        "required": [
+          "sql"
+        ],
+        "properties": {
+          "sql": {
+            "type": "string",
+            "description": "One SQL statement, run with the caller's identity."
+          }
+        }
+      },
+      "QueryResult": {
+        "type": "object",
+        "required": [
+          "columns",
+          "rows",
+          "row_count",
+          "truncated"
+        ],
+        "properties": {
+          "columns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Column"
+            }
+          },
+          "query_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "row_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {}
+            },
+            "description": "One array per row, in column order; values are JSON scalars, arrays or objects."
+          },
+          "stats": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "The engine's statistics object, passed through unchanged."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "True when rows were cut at [`MAX_ROWS`]: the result is a prefix, not the\nwhole answer. The UI says so instead of showing a silent partial table."
+          }
+        }
+      },
+      "QueryTiming": {
+        "type": "object",
+        "description": "How long the query waited, planned and ran, in milliseconds.",
+        "properties": {
+          "cpuMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "executionMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "planningMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "queuedMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "wallMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          }
+        }
+      },
       "RefreshAccepted": {
         "type": "object",
         "description": "The answer to an accepted `POST /api/catalog/metrics/refresh`: the round runs in the\nbackground, and the page reads the new numbers with its next request.",
@@ -5014,6 +6763,18 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "RollbackRequest": {
+        "type": "object",
+        "required": [
+          "snapshot_id"
+        ],
+        "properties": {
+          "snapshot_id": {
+            "type": "string",
+            "description": "The snapshot to return to, as a string of digits (an Iceberg id has 64 bits; a JSON\nnumber is accepted too but a browser rounds it)."
           }
         }
       },
@@ -5114,6 +6875,41 @@
           }
         }
       },
+      "SavedQuery": {
+        "type": "object",
+        "description": "A row as the API returns it. Times are epoch milliseconds, like `Job.started_at`.",
+        "required": [
+          "id",
+          "title",
+          "sql",
+          "warehouse",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "sql": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "warehouse": {
+            "type": "string"
+          }
+        }
+      },
       "ScheduleRequest": {
         "type": "object",
         "description": "A cron expression and its IANA zone; both required when a `schedule` object is sent.",
@@ -5196,6 +6992,114 @@
           "yours": {
             "type": "boolean",
             "description": "The row this caller will land in: the largest usable class, or the default one."
+          }
+        }
+      },
+      "StatementState": {
+        "type": "string",
+        "enum": [
+          "PENDING",
+          "RUNNING",
+          "SUCCEEDED",
+          "FAILED",
+          "CANCELED"
+        ]
+      },
+      "StatementView": {
+        "type": "object",
+        "description": "A statement as the caller sees it.",
+        "required": [
+          "statementId",
+          "state",
+          "columns",
+          "rowCount",
+          "chunks",
+          "truncated"
+        ],
+        "properties": {
+          "chunks": {
+            "type": "integer",
+            "description": "Chunks readable now: every full chunk while the statement runs, the last partial one too once it ends.",
+            "minimum": 0
+          },
+          "columns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Column"
+            },
+            "description": "Known once the engine has sent them; empty before."
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The engine's one-line reason when `state` is `FAILED` or `CANCELED`."
+          },
+          "rowCount": {
+            "type": "integer",
+            "description": "Rows read so far (at most 100 000).",
+            "minimum": 0
+          },
+          "rows": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "array",
+              "items": {}
+            },
+            "description": "Chunk 0 when `state` is `SUCCEEDED`, so a short statement needs one call; absent otherwise."
+          },
+          "state": {
+            "$ref": "#/components/schemas/StatementState"
+          },
+          "statementId": {
+            "type": "string",
+            "description": "The engine's query id; the handle for every other call."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "True when the rows were cut at 100 000: they are a prefix, not the whole answer."
+          }
+        }
+      },
+      "StoredSetting": {
+        "type": "object",
+        "description": "What `PUT /api/settings/{key}` answers: the key and the value as stored.",
+        "required": [
+          "key",
+          "value"
+        ],
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "value": {
+            "description": "Any JSON value."
+          }
+        }
+      },
+      "SubmitRequest": {
+        "type": "object",
+        "description": "`POST /api/statements`.",
+        "required": [
+          "sql"
+        ],
+        "properties": {
+          "sql": {
+            "type": "string",
+            "description": "One SQL statement, run with the caller's identity."
+          },
+          "waitSeconds": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "How long the call waits for the statement to end before it answers `202`; 0 to 30, default 5.",
+            "minimum": 0
           }
         }
       },
@@ -5490,8 +7394,30 @@
           }
         }
       }
+    },
+    "securitySchemes": {
+      "bearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "An access token from the platform's identity provider, sent in the `Authorization` header. In `dev` mode no credential is needed."
+      },
+      "session": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "nova_session",
+        "description": "The signed session cookie the browser sign-in sets. Same rules as the bearer token."
+      }
     }
   },
+  "security": [
+    {
+      "bearer": []
+    },
+    {
+      "session": []
+    }
+  ],
   "tags": [
     {
       "name": "public",

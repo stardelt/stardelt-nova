@@ -690,6 +690,7 @@ sign-in, never a fallback to `dev`.
 | `NOVA_OIDC_ADMIN_GROUP` | `stardelt-admins` | Group that makes a Nova admin; Keycloak's full path `/stardelt-admins` also matches. Set it to an empty value to turn the group mechanism off (nobody becomes an admin through a group). |
 | `NOVA_OIDC_ADMIN_ROLE` | = admin group | Value in the `roles` claim (Entra app roles) that makes a Nova admin. Empty turns the role mechanism off. |
 | `NOVA_OIDC_AUDIENCES` | client id | Comma-separated `aud` values accepted on bearer access tokens |
+| `NOVA_OIDC_DEVICE_CLIENT_ID` | unset | The public client (device flow) a command line signs in with; `GET /api/auth/config` (no sign-in needed) tells it, with the issuer, to `stardelt login` |
 
 **Claims.** `sub` is the identifier; display uses `preferred_username` → `email` →
 `upn` → `name`. Admin precedence: the `roles` claim is checked against
