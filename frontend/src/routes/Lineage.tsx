@@ -1,3 +1,7 @@
+// The diagram paints with the theme tokens (index.css), so it follows the four themes.
+const ACCENT = 'rgb(var(--c-accent))'
+const MUTED = 'rgb(var(--c-text-mute))'
+
 export default function Lineage() {
   return (
     <div className="max-w-6xl space-y-6">
@@ -13,11 +17,11 @@ export default function Lineage() {
         <svg viewBox="0 0 1000 380" className="w-full min-w-[720px]" role="img" aria-label="Lineage graph">
           <defs>
             <marker id="arr" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
-              <path d="M0,0 L8,4 L0,8 Z" fill="#5b6cff" />
+              <path d="M0,0 L8,4 L0,8 Z" style={{ fill: ACCENT }} />
             </marker>
             <linearGradient id="node" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="#171d3a" />
-              <stop offset="100%" stopColor="#11152b" />
+              <stop offset="0%" style={{ stopColor: 'rgb(var(--c-bg-soft))' }} />
+              <stop offset="100%" style={{ stopColor: 'rgb(var(--c-bg-elev))' }} />
             </linearGradient>
           </defs>
 
@@ -31,9 +35,9 @@ export default function Lineage() {
           <Node x={390} y={235} title="analytics.daily_revenue" sub="aggregate · 3 rows" />
           <Node x={750} y={150} title="Superset dashboard" sub="consumer" />
 
-          <text x={268} y={78} fill="#7079a3" fontSize="11">GROUP BY borough</text>
-          <text x={228} y={258} fill="#7079a3" fontSize="11">GROUP BY day</text>
-          <text x={655} y={120} fill="#7079a3" fontSize="11">read</text>
+          <text x={268} y={78} style={{ fill: MUTED }} fontSize="11">GROUP BY borough</text>
+          <text x={228} y={258} style={{ fill: MUTED }} fontSize="11">GROUP BY day</text>
+          <text x={655} y={120} style={{ fill: MUTED }} fontSize="11">read</text>
         </svg>
       </div>
 
@@ -52,7 +56,7 @@ function Edge({ x1, y1, x2, y2 }: { x1: number; y1: number; x2: number; y2: numb
     <path
       d={`M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`}
       fill="none"
-      stroke="#5b6cff"
+      style={{ stroke: ACCENT }}
       strokeOpacity="0.55"
       strokeWidth="1.6"
       markerEnd="url(#arr)"
@@ -70,11 +74,11 @@ function Node({ x, y, title, sub, accent }: { x: number; y: number; title: strin
         height={64}
         rx={12}
         fill="url(#node)"
-        stroke={accent ? '#5b6cff' : '#232a4d'}
+        style={{ stroke: accent ? ACCENT : 'rgb(var(--c-border))' }}
         strokeWidth={accent ? 1.6 : 1}
       />
-      <text x={x + 14} y={y + 26} fill="#e7ebff" fontSize="13" fontWeight="600">{title}</text>
-      <text x={x + 14} y={y + 46} fill="#7079a3" fontSize="11">{sub}</text>
+      <text x={x + 14} y={y + 26} style={{ fill: 'rgb(var(--c-text))' }} fontSize="13" fontWeight="600">{title}</text>
+      <text x={x + 14} y={y + 46} style={{ fill: MUTED }} fontSize="11">{sub}</text>
     </g>
   )
 }
