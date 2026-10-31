@@ -6558,10 +6558,10 @@
           "error": {
             "oneOf": [
               {
-                "type": "null"
+                "$ref": "#/components/schemas/QueryFailure"
               },
               {
-                "$ref": "#/components/schemas/QueryFailure"
+                "type": "null"
               }
             ]
           },
