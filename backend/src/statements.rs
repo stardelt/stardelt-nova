@@ -83,6 +83,8 @@ struct Statement {
     rows: Vec<Vec<Value>>,
     error: Option<String>,
     truncated: bool,
+    /// The most rows this statement keeps (the request's `maxRows`, at most [`MAX_ROWS`]).
+    max_rows: usize,
     /// Rough bytes of `rows` (see [`trino::row_bytes`]); a statement keeps at most [`MAX_BYTES`].
     bytes: usize,
     /// The same number, shared with the store so it can add up what every statement holds.
@@ -98,6 +100,7 @@ impl Statement {
             rows: Vec::new(),
             error: None,
             truncated: false,
+            max_rows: MAX_ROWS,
             bytes: 0,
             held: Arc::new(AtomicUsize::new(0)),
         }
@@ -180,6 +183,9 @@ pub struct SubmitRequest {
     pub sql: String,
     /// How long the call waits for the statement to end before it answers `202`; 0 to 30, default 5.
     pub wait_seconds: Option<u64>,
+    /// The most rows to keep, 1 to 100 000 (the default and the cap). A longer result is cut here, the query
+    /// is cancelled in the engine and the statement ends `SUCCEEDED` with `truncated: true`.
+    pub max_rows: Option<usize>,
 }
 
 /// `GET /api/statements/{id}`: the wait, in seconds.
@@ -284,7 +290,7 @@ fn absorb(s: &mut Statement, mut page: TrinoResponse) -> Option<String> {
     if let Some(data) = page.data.take() {
         for row in data {
             let size = row_bytes(&row);
-            if s.rows.len() >= MAX_ROWS || s.bytes + size > MAX_BYTES {
+            if s.rows.len() >= s.max_rows || s.bytes + size > MAX_BYTES {
                 s.truncated = true;
                 s.next = None;
                 s.state = StatementState::Succeeded;
@@ -420,6 +426,13 @@ async fn submit(
     if req.sql.trim().is_empty() {
         return fail(StatusCode::BAD_REQUEST, "the statement is empty");
     }
+    let max_rows = req.max_rows.unwrap_or(MAX_ROWS);
+    if !(1..=MAX_ROWS).contains(&max_rows) {
+        return fail(
+            StatusCode::BAD_REQUEST,
+            format!("maxRows must be a whole number from 1 to {MAX_ROWS}"),
+        );
+    }
     let caller = caller.as_ref().map(|c| &c.0);
     let owner = owner_of(&s, caller);
     s.statements.sweep(Instant::now());
@@ -457,6 +470,7 @@ async fn submit(
     };
 
     let mut statement = Statement::new();
+    statement.max_rows = max_rows;
     let cut = absorb(&mut statement, page);
     if let Some(cut) = cut {
         let _ = trino::trino_request(&s, caller, s.http.delete(&cut))
@@ -1233,6 +1247,72 @@ mod tests {
         let (_, second) = text(1).await;
         assert!(second.starts_with("1000\r\n"), "{}", &second[..20]);
         assert_eq!(second.lines().count(), 500);
+    }
+
+    #[tokio::test]
+    async fn max_rows_cuts_the_result_there_and_says_so() {
+        let fake = serve(vec![("FINISHED", true, rows(5_000))], false).await;
+        let app = app(
+            crate::router_tests::test_state_with_trino(&fake.base),
+            "alice",
+        );
+        let (status, view) = call(
+            &app,
+            "POST",
+            "/api/statements",
+            Some(json!({ "sql": "select x", "maxRows": 2_500 })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{view}");
+        assert_eq!(
+            (
+                view["rowCount"].clone(),
+                view["chunks"].clone(),
+                view["truncated"].clone()
+            ),
+            (json!(2_500), json!(3), json!(true))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_result_that_just_fits_max_rows_is_not_truncated() {
+        let fake = serve(vec![("FINISHED", true, rows(40))], false).await;
+        let app = app(
+            crate::router_tests::test_state_with_trino(&fake.base),
+            "alice",
+        );
+        let (_, view) = call(
+            &app,
+            "POST",
+            "/api/statements",
+            Some(json!({ "sql": "select x", "maxRows": 40 })),
+        )
+        .await;
+        assert_eq!(
+            (view["rowCount"].clone(), view["truncated"].clone()),
+            (json!(40), json!(false))
+        );
+    }
+
+    #[tokio::test]
+    async fn max_rows_outside_one_to_the_cap_is_a_400_and_asks_the_engine_nothing() {
+        let fake = serve(vec![("FINISHED", true, rows(3))], false).await;
+        let app = app(
+            crate::router_tests::test_state_with_trino(&fake.base),
+            "alice",
+        );
+        for bad in [json!(0), json!(MAX_ROWS + 1)] {
+            let (status, body) = call(
+                &app,
+                "POST",
+                "/api/statements",
+                Some(json!({ "sql": "select x", "maxRows": bad })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert!(body["error"].as_str().unwrap().contains("maxRows must be"));
+        }
+        assert!(fake.sources.lock().unwrap().is_empty());
     }
 
     #[test]
