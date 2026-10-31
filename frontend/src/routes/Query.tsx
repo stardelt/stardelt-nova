@@ -10,6 +10,8 @@ import { formatCount, sqlTableRef } from '../format'
 
 const HISTORY_KEY = 'stardelt-nova:history'
 const HISTORY_LIMIT = 50
+/** Rows the table draws: a result can hold 50,000, and a browser draws that many table rows very slowly. The CSV holds them all. */
+const SHOWN_ROWS = 1000
 
 /**
  * A sample that exists: the NYC demo table if present, else the first table, else a
@@ -184,13 +186,18 @@ export default function Query() {
                 Showing the first {formatCount(result.row_count)} rows. Add a LIMIT or aggregate to see the rest.
               </div>
             )}
+            {result.rows.length > SHOWN_ROWS && (
+              <div className="px-4 py-2 text-xs border-b border-border text-text-mute">
+                The table shows the first {formatCount(SHOWN_ROWS)} of {formatCount(result.rows.length)} rows; the CSV holds all of them.
+              </div>
+            )}
             <div className="overflow-auto flex-1">
               <table className="w-full text-sm font-mono">
                 <thead className="text-text-mute sticky top-0 bg-bg-elev">
                   <tr>{result.columns.map((c, i) => <th key={i} className="th px-4 py-2">{c.name}</th>)}</tr>
                 </thead>
                 <tbody>
-                  {result.rows.map((row, i) => (
+                  {result.rows.slice(0, SHOWN_ROWS).map((row, i) => (
                     <tr key={i} className="border-t border-border/60">
                       {row.map((cell, j) => <td key={j} className="td px-4 text-text-dim">{formatCell(cell)}</td>)}
                     </tr>
