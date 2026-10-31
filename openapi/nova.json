@@ -166,6 +166,28 @@
         }
       }
     },
+    "/api/auth/config": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "summary": "How to sign in from a command line. Outside sign-in like the rest of `/api/auth/*`: it names\nthe identity provider and the public client, never a secret.",
+        "description": "How to sign in from a command line: the identity provider's address and the public client for the device flow. It answers without sign-in and carries no secret.",
+        "operationId": "auth_config",
+        "responses": {
+          "200": {
+            "description": "The sign-in mode and, in `oidc` mode, the issuer and the device client",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthConfig"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/catalog/catalogs": {
       "get": {
         "tags": [
@@ -4519,6 +4541,33 @@
               "null"
             ],
             "description": "`status.warehouseId`: the Lakekeeper warehouse, as the access-sync job wrote it."
+          }
+        }
+      },
+      "AuthConfig": {
+        "type": "object",
+        "description": "`GET /api/auth/config`: what a client needs to start a sign-in of its own.",
+        "required": [
+          "mode"
+        ],
+        "properties": {
+          "deviceClientId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The public client a command line signs in with (device flow); `null` when none is set up."
+          },
+          "issuer": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The identity provider's realm address; `null` in `dev` mode."
+          },
+          "mode": {
+            "type": "string",
+            "description": "`oidc` (sign-in is required) or `dev` (Nova answers without one)."
           }
         }
       },
