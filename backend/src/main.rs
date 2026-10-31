@@ -21,6 +21,7 @@
 //!   GET  /api/catalog/tables/:ns/:tbl/history — last 100 snapshots
 //!   POST /api/catalog/tables/:ns/:tbl/rollback — roll back to a snapshot
 //!   POST /api/query                         — run SQL
+//!   POST /api/statements                    — submit a statement; GET/DELETE /api/statements/:id poll and cancel it
 //!   GET  /api/jobs                          — recent activity
 //!   GET  /api/saved-queries                 — the caller's saved queries (state store)
 //!   POST /api/saved-queries                 — save one: {title, sql, warehouse?}
@@ -100,6 +101,7 @@ mod query_log_event;
 mod query_log_store;
 mod saved_queries;
 mod secret_store;
+mod statements;
 mod trino;
 mod user_settings;
 mod warehouses;
@@ -210,6 +212,9 @@ pub struct AppState {
     /// all four `NOVA_S3_*` variables are set: the notebook routes then answer 503 and
     /// say so, never panic.
     pub notebooks: Option<notebooks::NotebookStore>,
+    /// The statements people submitted through `/api/statements` (`statements.rs`), in this
+    /// process's memory: a restart forgets them, and one replica sees only its own.
+    pub statements: statements::StatementStore,
     /// One edit lock per table (`"{ns}.{tbl}"`) for the documentation writes. In-process,
     /// so it serialises one Nova replica; more than one replica needs a database lock (a
     /// later ticket). Lakekeeper 0.12.2 deadlocks on concurrent commits to one table
@@ -665,6 +670,8 @@ fn api_router() -> Router<Arc<AppState>> {
         .merge(pipelines::router())
         // Published notebooks: immutable versions, owner-group scoped (stardelt-nova#225).
         .merge(notebooks::router())
+        // Statements: submit, poll, read in chunks, cancel by id (stardelt-nova#272).
+        .merge(statements::router())
 }
 
 /// The operator surfaces: the service inventory, the workload list, the engine
@@ -857,6 +864,7 @@ async fn main() -> anyhow::Result<()> {
         table_locks: Mutex::new(HashMap::new()),
         people_touched: Mutex::new(HashMap::new()),
         notebooks,
+        statements: Default::default(),
     });
 
     // The Overview's numbers are read in the background, never on a request: every five
@@ -1024,6 +1032,10 @@ mod router_tests {
         build_test_state(None, trino_url, lakekeeper_url, false, None, None)
     }
 
+    /// A live (not demo) state whose engine is the server at `trino_url`.
+    pub(crate) fn test_state_with_trino(trino_url: &str) -> Arc<AppState> {
+        build_test_state(None, trino_url, "http://127.0.0.1:1", false, None, None)
+    }
     fn build_test_state(
         db: Option<sqlx::PgPool>,
         trino_url: &str,
@@ -1065,6 +1077,7 @@ mod router_tests {
             table_locks: Mutex::new(std::collections::HashMap::new()),
             people_touched: Mutex::new(std::collections::HashMap::new()),
             notebooks: None,
+            statements: Default::default(),
         })
     }
 

@@ -4392,6 +4392,235 @@
         }
       }
     },
+    "/api/statements": {
+      "post": {
+        "tags": [
+          "public"
+        ],
+        "description": "Submit one SQL statement as the caller and get a handle to it. The call waits up to `waitSeconds` (0 to 30, default 5): when the statement ends in that time the answer is `200` and carries the first chunk of rows, otherwise it is `202` and the caller polls `statements_get`. A statement that fails in the engine is still `200` with `state: FAILED` and `error`.",
+        "operationId": "statements_submit",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubmitRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The statement ended within the wait",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatementView"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "The statement is still running; poll it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatementView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The statement is empty",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The caller already holds ten statements; read or cancel one",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The query engine is not reachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Not available in demo mode",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/statements/{id}": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "description": "The state of one of the caller's statements. Each call reads the engine's next pages with the caller's current token, for up to `waitSeconds` (0 to 30, default 0); the rows are read with `statements_chunk_get`. A statement that nobody polls for the engine's client timeout (5 minutes by default) is cancelled by the engine.",
+        "operationId": "statements_get",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The statement id from `statements_submit`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "waitSeconds",
+            "in": "query",
+            "description": "Wait up to this many seconds (0 to 30) for the statement to end",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The statement",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatementView"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "The engine refused the caller's token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such statement of the caller's",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The query engine is not reachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "public"
+        ],
+        "description": "Cancel one of the caller's statements in the engine and forget it. Idempotent: it answers `204` whether or not the statement exists or is the caller's (it cancels only the caller's own).",
+        "operationId": "statements_cancel",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The statement id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Cancelled, or nothing to cancel"
+          }
+        }
+      }
+    },
+    "/api/statements/{id}/chunks/{n}": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "description": "One chunk (1 000 rows, the last one fewer) of a statement's rows, counted from 0. A chunk exists once it is full or the statement has ended; the call does not wait.",
+        "operationId": "statements_chunk_get",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The statement id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "n",
+            "in": "path",
+            "description": "The chunk number, from 0",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The rows of the chunk",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChunkView"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such statement of the caller's, or no such chunk (yet)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/warehouses": {
       "get": {
         "tags": [
@@ -4939,6 +5168,28 @@
               "boolean",
               "null"
             ]
+          }
+        }
+      },
+      "ChunkView": {
+        "type": "object",
+        "description": "`GET /api/statements/{id}/chunks/{n}`.",
+        "required": [
+          "chunk",
+          "rows"
+        ],
+        "properties": {
+          "chunk": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {}
+            },
+            "description": "One array per row, in column order."
           }
         }
       },
@@ -6744,6 +6995,76 @@
           }
         }
       },
+      "StatementState": {
+        "type": "string",
+        "enum": [
+          "PENDING",
+          "RUNNING",
+          "SUCCEEDED",
+          "FAILED",
+          "CANCELED"
+        ]
+      },
+      "StatementView": {
+        "type": "object",
+        "description": "A statement as the caller sees it.",
+        "required": [
+          "statementId",
+          "state",
+          "columns",
+          "rowCount",
+          "chunks",
+          "truncated"
+        ],
+        "properties": {
+          "chunks": {
+            "type": "integer",
+            "description": "Chunks readable now: every full chunk while the statement runs, the last partial one too once it ends.",
+            "minimum": 0
+          },
+          "columns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Column"
+            },
+            "description": "Known once the engine has sent them; empty before."
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The engine's one-line reason when `state` is `FAILED` or `CANCELED`."
+          },
+          "rowCount": {
+            "type": "integer",
+            "description": "Rows read so far (at most 100 000).",
+            "minimum": 0
+          },
+          "rows": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "array",
+              "items": {}
+            },
+            "description": "Chunk 0 when `state` is `SUCCEEDED`, so a short statement needs one call; absent otherwise."
+          },
+          "state": {
+            "$ref": "#/components/schemas/StatementState"
+          },
+          "statementId": {
+            "type": "string",
+            "description": "The engine's query id; the handle for every other call."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "True when the rows were cut at 100 000: they are a prefix, not the whole answer."
+          }
+        }
+      },
       "StoredSetting": {
         "type": "object",
         "description": "What `PUT /api/settings/{key}` answers: the key and the value as stored.",
@@ -6757,6 +7078,28 @@
           },
           "value": {
             "description": "Any JSON value."
+          }
+        }
+      },
+      "SubmitRequest": {
+        "type": "object",
+        "description": "`POST /api/statements`.",
+        "required": [
+          "sql"
+        ],
+        "properties": {
+          "sql": {
+            "type": "string",
+            "description": "One SQL statement, run with the caller's identity."
+          },
+          "waitSeconds": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "How long the call waits for the statement to end before it answers `202`; 0 to 30, default 5.",
+            "minimum": 0
           }
         }
       },

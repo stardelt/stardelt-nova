@@ -2519,6 +2519,7 @@ mod tests {
             table_locks: Mutex::new(HashMap::new()),
             people_touched: Mutex::new(HashMap::new()),
             notebooks: None,
+            statements: Default::default(),
         })
     }
 
