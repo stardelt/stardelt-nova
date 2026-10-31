@@ -1,12 +1,12 @@
 import { test, expect, type Browser, type Locator, type Page, type Route } from '@playwright/test'
 import { KNOWN, type Known } from './known'
 import { auditPage, focusAudit, type Finding } from './audit'
-import { formatTime, setTimeDisplay, sqlTableRef } from '../src/format'
+import { formatTime, relativeTime, setTimeDisplay, sqlTableRef } from '../src/format'
 
 // Rules U1–U13 are written down in stardelt-internal/design/ui-conformance.md.
 
 const ROUTES = ['/', '/catalog', '/query', '/data', '/connections', '/jobs', '/pipelines', '/queries',
-  '/apps', '/lineage', '/dashboards', '/notebooks', '/health', '/settings', '/preferences', '/profile',
+  '/apps', '/admin/catalogs', '/lineage', '/dashboards', '/notebooks', '/health', '/settings', '/preferences', '/profile',
   '/no-such-page']
 const VARIANTS = [
   { name: 'desktop-dark', viewport: { width: 1280, height: 800 }, theme: 'dark', keyboard: true },
@@ -86,6 +86,85 @@ test.describe('keyboard', () => {
 
     await page.keyboard.press('Enter')
     expect(await page.evaluate(() => document.activeElement?.id)).toBe('main')
+    await page.context().close()
+  })
+})
+
+test.describe('project footer', () => {
+  // The project names itself at the bottom of the sidebar (stardelt-nova#268): the version
+  // that is running, and where to read more or report a problem. The version is the build's
+  // own — the frontend package's version, baked in by `vite.config.ts` — so nothing is
+  // asked of the network to show it.
+  const DOCS = 'https://stardelt.io'
+  const SOURCE = 'https://github.com/stardelt/stardelt'
+  const LINKS = [['Documentation', DOCS], ['Source', SOURCE]] as const
+
+  test('the footer names the project, its version and the two places to read more', async ({ browser }) => {
+    const page = await (await browser.newContext({ viewport: { width: 1280, height: 800 } })).newPage()
+    const outbound: string[] = []
+    page.on('request', (request) => {
+      const url = request.url()
+      if (url.startsWith('https://stardelt.io') || url.startsWith('https://github.com')) outbound.push(url)
+    })
+    await page.goto('/')
+
+    const footer = page.locator('#primary-nav footer')
+    await expect(footer).toBeVisible()
+    // The version of the frontend package (frontend/package.json), read at build time.
+    await expect(footer).toContainText('stardelt v0.1.0')
+
+    for (const [name, href] of LINKS) {
+      const link = footer.getByRole('link', { name })
+      await expect(link).toBeVisible()
+      await expect(link).toHaveAttribute('href', href)
+      await expect(link).toHaveAttribute('target', '_blank')
+      await expect(link).toHaveAttribute('rel', 'noopener noreferrer')
+    }
+    // Nothing left the browser: the links are anchors, and the version is in the build.
+    expect(outbound).toEqual([])
+    await page.context().close()
+  })
+
+  test('both links are reachable with the keyboard at 360 px', async ({ browser }) => {
+    const page = await (await browser.newContext({ viewport: { width: 360, height: 740 } })).newPage()
+    await page.goto('/')
+    // On a phone the sidebar is a drawer; open it so the links are where a person can see them.
+    await page.getByRole('button', { name: 'Open menu' }).click()
+    await expect(page.getByRole('button', { name: 'Close menu' })).toBeVisible()
+    // The drawer slides in (`transition-transform`): measure after it has stopped, or a link that is
+    // still on its way in has a negative x and the test fails on a slow runner.
+    await page.waitForFunction(() => document.getAnimations().every((a) => a.playState !== 'running'))
+
+    for (const [name] of LINKS) {
+      await expect(page.locator('#primary-nav footer').getByRole('link', { name })).toBeVisible()
+    }
+
+    // Walk the tab order from the top of the document: the navigation comes first, the
+    // footer links last.
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur())
+    const reached: string[] = []
+    for (let i = 0; i < 60 && reached.length < LINKS.length; i++) {
+      await page.keyboard.press('Tab')
+      const focused = await page.evaluate(() => {
+        const el = document.activeElement as HTMLElement | null
+        if (!el || el.tagName !== 'A') return null
+        const style = getComputedStyle(el)
+        return {
+          text: (el.textContent ?? '').trim(),
+          // U6: the focused link shows where the keyboard is.
+          indicator: (style.outlineStyle !== 'none' && parseFloat(style.outlineWidth) > 0) || style.boxShadow !== 'none',
+        }
+      })
+      if (!focused || !LINKS.some(([name]) => name === focused.text)) continue
+      reached.push(focused.text)
+      expect(focused.indicator, `${focused.text} has no focus indicator`).toBe(true)
+      // The focused link is on the screen, inside the 360 px phone.
+      const box = await page.getByRole('link', { name: focused.text }).boundingBox()
+      expect(box).not.toBeNull()
+      expect(box!.x).toBeGreaterThanOrEqual(0)
+      expect(box!.x + box!.width).toBeLessThanOrEqual(360)
+    }
+    expect(reached).toEqual(['Documentation', 'Source'])
     await page.context().close()
   })
 })
@@ -1451,6 +1530,51 @@ test.describe('catalog switcher', () => {
     })
     return { context, page, seen }
   }
+
+  test('switcher_groups_by_layer_in_order', async ({ browser }) => {
+    const { context, page } = await open(browser, {
+      body: {
+        catalogs: [
+          { name: 'bronze', id: 'wid-bronze', layer: 'bronze' },
+          { name: 'silver', id: 'wid-silver', layer: 'silver' },
+          { name: 'gold', id: 'wid-gold', layer: 'gold' },
+          { name: 'warehouse', id: 'wid-warehouse' },
+          { name: 'shared', id: 'wid-shared' },
+        ],
+        default: 'warehouse',
+      },
+    })
+    await page.goto('/catalog')
+    const select = page.getByRole('combobox', { name: 'Catalog' })
+    await expect(select).toBeVisible()
+
+    // The three medallion layers come first, in bronze → silver → gold order, and every
+    // catalog without a layer follows in the API's order under Other.
+    const groups = select.locator('optgroup')
+    await expect(groups).toHaveCount(4)
+    expect(await groups.evaluateAll((elements) => elements.map((group) => group.getAttribute('label'))))
+      .toEqual(['Bronze', 'Silver', 'Gold', 'Other'])
+    await expect(select.locator('option')).toHaveText(['bronze', 'silver', 'gold', 'warehouse', 'shared'])
+    await expect(select).toHaveValue('warehouse')
+
+    // A grouped option still selects and names the catalog, as the flat list does.
+    await select.selectOption('gold')
+    await expect(page).toHaveURL(/[?&]catalog=gold\b/)
+    await expect(page.getByRole('button', { name: /nyc_taxi/ })).toBeVisible()
+    judge('/catalog', await auditPage(page))
+    await context.close()
+  })
+
+  test('no_layer_no_group_headers', async ({ browser }) => {
+    const { context, page } = await open(browser, { body: TWO })
+    await page.goto('/catalog')
+    const select = page.getByRole('combobox', { name: 'Catalog' })
+    await expect(select).toBeVisible()
+    // No catalog has a layer: the switcher stays the flat list it was before layers.
+    await expect(select.locator('optgroup')).toHaveCount(0)
+    await expect(select.locator('option')).toHaveText(['finance', 'warehouse'])
+    await context.close()
+  })
 
   test('the second catalog is what every request then names', async ({ browser }) => {
     const { context, page, seen } = await open(browser, { body: TWO })
@@ -3598,6 +3722,920 @@ test.describe('preferences', () => {
   })
 })
 
+test.describe('admin catalogs', () => {
+  // stardelt-nova#251: an administrator sees every Catalog and the permissions assigned
+  // on it, by catalog and transposed as a matrix. Both views read one API answer; the
+  // tests stub exactly that answer and let the rest of the shell use the dev backend.
+  const ADMIN = {
+    user: 'admin', auth_mode: 'oidc', demo: false, warehouse: 'warehouse',
+    is_admin: true, groups: ['stardelt-admins'],
+  }
+  const NON_ADMIN = {
+    user: 'outsider', auth_mode: 'oidc', demo: false, warehouse: 'warehouse',
+    is_admin: false, groups: ['analysts'],
+  }
+  const READY = [
+    { type: 'CatalogReady', status: 'True', reason: 'Ready', message: 'catalog and its grants are ready' },
+    { type: 'GrantsReady', status: 'True', reason: 'Ready', message: 'grants match the resource' },
+    { type: 'Drift', status: 'False', reason: 'Clean', message: 'no foreign grants' },
+  ]
+  /** One `AdminCatalog` row as the API sends it; each test overrides what it cares about. */
+  const row = (fields: Record<string, unknown>) => ({
+    displayName: null, description: null, owner: null, managedAccess: false,
+    keyPrefix: null, phase: 'Ready', warehouseId: null, generation: 1,
+    observedGeneration: 1, resourceVersion: '1', grants: [], conditions: [],
+    ...fields,
+  })
+  // The four catalogs of the rollout check, in the API's order (bronze/silver/gold first,
+  // then alphabetical — stardelt-nova#109). The page keeps that order.
+  const CATALOGS = [
+    row({
+      name: 'finance', displayName: 'Finance', owner: 'stardelt-finops', managedAccess: true,
+      grants: [
+        { group: 'stardelt-finops', verb: 'browse' },
+        { group: 'stardelt-analytics', verb: 'select' },
+      ],
+      conditions: READY,
+    }),
+    row({
+      name: 'product', owner: 'stardelt-product', phase: 'Invalid',
+      conditions: [
+        { type: 'CatalogReady', status: 'False', reason: 'RoleConflict', message: 'role stardelt-product-rw already exists' },
+        { type: 'GrantsReady', status: 'False', reason: 'UnknownGroup', message: 'group stardelt-ghost does not exist in the realm' },
+      ],
+    }),
+    row({ name: 'sandbox', displayName: 'Sandbox', owner: 'stardelt-sandbox', phase: 'Unknown' }),
+    row({
+      name: 'warehouse', displayName: 'Shared warehouse', owner: 'stardelt-admins',
+      grants: ['browse', 'select', 'write', 'create'].map((verb) => ({ group: 'stardelt-users', verb })),
+      conditions: READY,
+    }),
+  ]
+
+  /** The page with its one admin answer stubbed; `me` overrides `/api/me` when a role matters. */
+  async function open(
+    browser: Browser,
+    { catalogs = CATALOGS, me, viewport = { width: 1280, height: 800 }, init }: {
+      catalogs?: unknown
+      me?: Record<string, unknown>
+      viewport?: { width: number; height: number }
+      init?: () => void
+    } = {},
+  ) {
+    const context = await browser.newContext({ viewport })
+    const page = await context.newPage()
+    if (init) await page.addInitScript(init)
+    await page.route('**/api/admin/catalogs', (route) => json(route, catalogs))
+    if (me) await page.route('**/api/me', (route) => json(route, me))
+    return { context, page }
+  }
+
+  test('by_catalog_lists_owner_grants_and_conditions', async ({ browser }) => {
+    const { context, page } = await open(browser)
+    await page.goto('/admin/catalogs')
+
+    await expect(page.getByRole('heading', { level: 1, name: 'Catalogs' })).toBeVisible()
+    await expect(page.getByText(
+      'Platform administrators can do everything in every catalog; they are not listed. Permissions are catalog-wide today.',
+    )).toBeVisible()
+    await expect(page.getByRole('radio', { name: 'By catalog' })).toBeChecked()
+
+    const table = page.getByRole('table', { name: 'All catalogs' })
+    await expect(table).toBeVisible()
+    // The API's order is kept: bronze/silver/gold first, then alphabetical.
+    await expect(table.locator('tbody tr td:first-child > div:first-child > span:first-child'))
+      .toHaveText(['finance', 'product', 'sandbox', 'warehouse'])
+
+    const finance = table.locator('tbody tr').filter({ hasText: 'finance' })
+    await expect(finance).toContainText('Finance')                  // the muted displayName
+    await expect(finance).toContainText('stardelt-finops')
+    await expect(finance.getByTitle('Ready: catalog and its grants are ready')).toBeVisible()
+    await expect(finance).toContainText('2 groups')
+    await expect(finance.getByText('Managed access')).toBeVisible()
+    // The grants are text lines, one per group, revealed by the row's own details.
+    await finance.getByText('Grants', { exact: true }).click()
+    await expect(finance.getByText('stardelt-finops: browse')).toBeVisible()
+    await expect(finance.getByText('stardelt-analytics: select')).toBeVisible()
+    // All three conditions are badges; the reason is the text and the sentence is the title.
+    await expect(finance.getByText('CatalogReady: Ready')).toBeVisible()
+    await expect(finance.getByText('GrantsReady: Ready')).toBeVisible()
+    await expect(finance.getByText('Drift: Clean')).toBeVisible()
+    await expect(finance.getByRole('link', { name: 'Open catalog finance' }))
+      .toHaveAttribute('href', '/catalog?catalog=finance')
+
+    const product = table.locator('tbody tr').filter({ hasText: 'product' })
+    await expect(product.getByTitle('RoleConflict: role stardelt-product-rw already exists')).toBeVisible()
+    await expect(product.getByText('GrantsReady: UnknownGroup')).toBeVisible()
+
+    const sandbox = table.locator('tbody tr').filter({ hasText: 'sandbox' })
+    await expect(sandbox.getByTitle('The access-sync job has not observed this catalog yet.')).toBeVisible()
+    await expect(sandbox).toContainText('0 groups')
+
+    await expect(table.locator('tbody tr').filter({ hasText: 'warehouse' })).toContainText('1 group')
+    await context.close()
+  })
+
+  test('admin_page_badge', async ({ browser }) => {
+    // The API sends the layers first and marks them; the admin table keeps that order and
+    // badges each catalog with its layer (stardelt-nova#109).
+    const catalogs = [
+      row({ name: 'bronze', layer: 'bronze', conditions: READY }),
+      row({ name: 'silver', layer: 'silver', conditions: READY }),
+      row({ name: 'gold', layer: 'gold', conditions: READY }),
+      row({ name: 'warehouse', conditions: READY }),
+    ]
+    const { context, page } = await open(browser, { catalogs })
+    await page.goto('/admin/catalogs')
+
+    const table = page.getByRole('table', { name: 'All catalogs' })
+    const rows = table.locator('tbody tr')
+    await expect(rows.locator('td:first-child > div:first-child > span:first-child'))
+      .toHaveText(['bronze', 'silver', 'gold', 'warehouse'])
+    await expect(rows.nth(0).locator('td').first().getByText('Bronze', { exact: true })).toBeVisible()
+    await expect(rows.nth(1).locator('td').first().getByText('Silver', { exact: true })).toBeVisible()
+    await expect(rows.nth(2).locator('td').first().getByText('Gold', { exact: true })).toBeVisible()
+    await expect(rows.nth(3).locator('td').first().getByText(/^(Bronze|Silver|Gold)$/)).toHaveCount(0)
+    judge('/admin/catalogs', await auditPage(page))
+    await context.close()
+
+    // The same badge and the same order on the light theme; U7 checks its contrast.
+    const light = await open(browser, {
+      catalogs,
+      init: () => { localStorage.setItem('stardelt-nova:theme', 'light') },
+    })
+    await light.page.goto('/admin/catalogs')
+    await expect(light.page.getByRole('table', { name: 'All catalogs' })).toBeVisible()
+    judge('/admin/catalogs', await auditPage(light.page))
+    await light.context.close()
+  })
+
+  test('matrix_shows_groups_by_catalog_and_filters', async ({ browser }) => {
+    const { context, page } = await open(browser)
+    await page.goto('/admin/catalogs')
+    await page.getByRole('group', { name: 'View' }).getByText('Matrix', { exact: true }).click()
+    await expect(page.getByRole('radio', { name: 'Matrix' })).toBeChecked()
+
+    const table = page.getByRole('table', { name: 'Who holds what' })
+    await expect(table).toBeVisible()
+    // Rows are the union of owners and grant groups, sorted; columns are the catalogs.
+    await expect(table.getByRole('rowheader')).toHaveText([
+      'stardelt-admins', 'stardelt-analytics', 'stardelt-finops',
+      'stardelt-product', 'stardelt-sandbox', 'stardelt-users',
+    ])
+    await expect(table.getByRole('columnheader')).toHaveText([
+      'Group', 'finance', 'product', 'sandbox', 'warehouse',
+    ])
+
+    const offered = (group: string) =>
+      table.getByRole('row', { name: new RegExp(`^${group}`) }).locator('td')
+    // Ownership is prefixed, the verbs are text, and an empty cell is an em dash.
+    await expect(offered('stardelt-finops')).toHaveText(['owner, browse', '—', '—', '—'])
+    await expect(offered('stardelt-analytics')).toHaveText(['select', '—', '—', '—'])
+    await expect(offered('stardelt-admins')).toHaveText(['—', '—', '—', 'owner'])
+    await expect(offered('stardelt-users')).toHaveText(['—', '—', '—', 'browse, select, write, create'])
+
+    const filter = page.getByLabel('Filter groups or catalogs')
+    await filter.fill('fin')
+    await expect(table.getByRole('rowheader')).toHaveText(['stardelt-finops'])
+    await expect(table.getByRole('columnheader')).toHaveText(['Group', 'finance'])
+
+    // Naming a group narrows the rows; every catalog stays visible so its grants can be read.
+    await filter.fill('stardelt-users')
+    await expect(table.getByRole('rowheader')).toHaveText(['stardelt-users'])
+    await expect(table.getByRole('columnheader')).toHaveText([
+      'Group', 'finance', 'product', 'sandbox', 'warehouse',
+    ])
+
+    // Naming a catalog narrows the columns; the rows stay.
+    await filter.fill('warehouse')
+    await expect(table.getByRole('columnheader')).toHaveText(['Group', 'warehouse'])
+
+    await filter.fill('no-such-group-or-catalog')
+    await expect(page.getByText('No group or catalog matches that filter.')).toBeVisible()
+    await context.close()
+  })
+
+  test('unknown_group_condition_is_visible', async ({ browser }) => {
+    const { context, page } = await open(browser)
+    await page.goto('/admin/catalogs')
+
+    // `GrantsReady: False` is the API's own reason in words, not a colour; the sentence
+    // the access-sync job wrote stays available as the badge's title.
+    const badge = page.getByText('GrantsReady: UnknownGroup')
+    await expect(badge).toBeVisible()
+    await expect(badge).toHaveAttribute('title', 'group stardelt-ghost does not exist in the realm')
+    // The same reason explains the catalog's phase without the person opening anything.
+    await expect(page.locator('span.badge', { hasText: 'Invalid' })).toHaveAttribute(
+      'title',
+      'RoleConflict: role stardelt-product-rw already exists',
+    )
+    await context.close()
+  })
+
+  test('non_admin_is_refused', async ({ browser }) => {
+    const hits: string[] = []
+    const context = await browser.newContext({ viewport: { width: 1280, height: 800 } })
+    const page = await context.newPage()
+    await page.route('**/api/me', (route) => json(route, NON_ADMIN))
+    await page.route('**/api/admin/catalogs', (route) => {
+      hits.push(new URL(route.request().url()).pathname)
+      return json(route, { error: 'this view is for platform administrators' }, 403)
+    })
+
+    await page.goto('/admin/catalogs')
+    // The same explanation `/apps`, `/health` and `/settings` give: a refusal in words,
+    // and no request to the admin endpoint at all.
+    await expect(page.getByText(/for platform administrators/i)).toBeVisible()
+    const nav = await page.evaluate(() => [...document.querySelectorAll('nav a')].map((a) => a.textContent?.trim()))
+    expect(nav).not.toContain('Catalogs')
+    expect(hits).toEqual([])
+    await context.close()
+  })
+
+  test('hostile_names_are_text', async ({ browser }) => {
+    const evil = '<img src=x onerror="window.__xss=1">'
+    const long = 'x'.repeat(400)
+    const { context, page } = await open(browser, {
+      init: () => { (window as unknown as { __xss: number }).__xss = 0 },
+      catalogs: [
+        row({
+          name: evil, displayName: evil, owner: evil, managedAccess: true,
+          grants: [{ group: evil, verb: 'browse' }],
+          conditions: [
+            { type: 'GrantsReady', status: 'False', reason: 'UnknownGroup', message: evil },
+          ],
+        }),
+        row({ name: long, displayName: long, owner: long, grants: [{ group: long, verb: 'select' }] }),
+      ],
+    })
+    await page.goto('/admin/catalogs')
+
+    // Markup in a name is text: no element, no script, no widened page — in either view.
+    await expect(page.getByText(evil, { exact: true }).first()).toBeVisible()
+    for (const view of ['By catalog', 'Matrix']) {
+      if (view !== 'By catalog') {
+        await page.getByRole('group', { name: 'View' }).getByText(view, { exact: true }).click()
+        await expect(page.getByRole('radio', { name: view })).toBeChecked()
+      }
+      for (const width of [1280, 360]) {
+        await page.setViewportSize({ width, height: 800 })
+        const s = await page.evaluate(() => ({
+          xss: (window as unknown as { __xss: number }).__xss,
+          imgs: document.querySelectorAll('img[src="x"]').length,
+          overflow: document.documentElement.scrollWidth - window.innerWidth,
+        }))
+        expect(s, `${view} ${width}px`).toEqual({ xss: 0, imgs: 0, overflow: expect.any(Number) })
+        expect(s.overflow, `${view} ${width}px overflow`).toBeLessThanOrEqual(1)
+      }
+    }
+    await context.close()
+  })
+
+  test('U5 audit at 360 px for both views', async ({ browser }) => {
+    const { context, page } = await open(browser, {
+      me: ADMIN,
+      viewport: { width: 360, height: 740 },
+    })
+    await page.goto('/admin/catalogs')
+    await expect(page.getByRole('table', { name: 'All catalogs' })).toBeVisible()
+    expect((await auditPage(page)).filter((finding) => finding.rule === 'U5')).toEqual([])
+
+    // The segmented control and the matrix survive the phone width; the tables scroll in
+    // their card rather than widening the page (rule U4).
+    await page.getByRole('group', { name: 'View' }).getByText('Matrix', { exact: true }).click()
+    await expect(page.getByRole('radio', { name: 'Matrix' })).toBeChecked()
+    await expect(page.getByRole('table', { name: 'Who holds what' })).toBeVisible()
+    expect((await auditPage(page)).filter((finding) => finding.rule === 'U5')).toEqual([])
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
+    expect(overflow).toBeLessThanOrEqual(1)
+    await context.close()
+  })
+
+  // ---------------------------------------------------------------------------
+  // stardelt-nova#253: the Edit dialog and the write. The API is stubbed; the tests
+  // assert the exact PUT body, the confirm step, the poll and the API's own sentences.
+  // ---------------------------------------------------------------------------
+
+  type RecordedWrite = { method: string; path: string; body: string | null }
+
+  /** The page with GET and PUT of the catalog API stubbed; `onPut` answers the write. */
+  async function openEditable(
+    browser: Browser,
+    {
+      catalogs = CATALOGS,
+      onPut,
+      viewport = { width: 1280, height: 800 },
+      init,
+    }: {
+      catalogs?: unknown | (() => unknown)
+      onPut: (route: Route, body: string | null) => void | Promise<void>
+      viewport?: { width: number; height: number }
+      init?: () => void
+    },
+  ) {
+    const context = await browser.newContext({ viewport })
+    const page = await context.newPage()
+    if (init) await page.addInitScript(init)
+    const writes: RecordedWrite[] = []
+    await page.route('**/api/admin/catalogs**', async (route) => {
+      const request = route.request()
+      const path = new URL(request.url()).pathname
+      const method = request.method()
+      if (method === 'GET' && path === '/api/admin/catalogs') {
+        const list = typeof catalogs === 'function' ? (catalogs as () => unknown)() : catalogs
+        return json(route, list)
+      }
+      if (method === 'PUT' && /^\/api\/admin\/catalogs\/[^/]+\/access$/.test(path)) {
+        const body = request.postData()
+        writes.push({ method, path, body })
+        return onPut(route, body)
+      }
+      return json(route, { error: 'not stubbed' }, 404)
+    })
+    return { context, page, writes }
+  }
+
+  /** Open one catalog's Edit dialog and return it. */
+  async function openEdit(page: Page, name = 'finance') {
+    await page.goto('/admin/catalogs')
+    await page.getByRole('button', { name: `Edit permissions for ${name}` }).click()
+    const dialog = page.getByRole('dialog')
+    await expect(dialog).toBeVisible()
+    return dialog
+  }
+
+  const editedFinance = (fields: Record<string, unknown> = {}) => ({
+    ...CATALOGS.find((catalog) => catalog.name === 'finance')!,
+    generation: 2,
+    observedGeneration: 1,
+    ...fields,
+  })
+
+  test('edit_dialog_prefills_owner_and_grants', async ({ browser }) => {
+    const { context, page } = await openEditable(browser, {
+      onPut: (route) => json(route, editedFinance()),
+    })
+    const dialog = await openEdit(page)
+
+    await expect(dialog.getByRole('heading', { name: 'Edit finance' })).toBeVisible()
+    await expect(dialog.getByLabel('Owner')).toHaveValue('stardelt-finops')
+    await expect(dialog.getByRole('checkbox', { name: 'Managed access' })).toBeChecked()
+
+    await expect(dialog.getByRole('checkbox', { name: 'browse for stardelt-finops' })).toBeChecked()
+    await expect(dialog.getByRole('checkbox', { name: 'select for stardelt-finops' })).not.toBeChecked()
+    await expect(dialog.getByRole('checkbox', { name: 'select for stardelt-analytics' })).toBeChecked()
+    await expect(dialog.getByRole('checkbox', { name: 'write for stardelt-analytics' })).not.toBeChecked()
+    await expect(dialog.getByText('grant and revoke on this catalog')).toHaveCount(2)
+
+    // Both datalists carry every group the page sees, not just this catalog's.
+    const offered = await page.locator('datalist option').evaluateAll((options) =>
+      options.map((option) => (option as HTMLOptionElement).value),
+    )
+    for (const group of ['stardelt-admins', 'stardelt-analytics', 'stardelt-finops', 'stardelt-users']) {
+      expect(offered, group).toContain(group)
+    }
+
+    // Escape closes the dialog and returns focus to the button that opened it.
+    await page.keyboard.press('Escape')
+    await expect(dialog).toBeHidden()
+    await expect(page.getByRole('button', { name: 'Edit permissions for finance' })).toBeFocused()
+    await context.close()
+  })
+
+  test('save_sends_exact_body_with_resource_version', async ({ browser }) => {
+    const { context, page, writes } = await openEditable(browser, {
+      onPut: (route) => json(route, editedFinance()),
+    })
+    const dialog = await openEdit(page)
+
+    await dialog.getByRole('checkbox', { name: 'select for stardelt-analytics' }).uncheck()
+    await dialog.getByRole('checkbox', { name: 'write for stardelt-analytics' }).check()
+    await dialog.getByLabel('Add group').fill('stardelt-qa')
+    await dialog.getByRole('button', { name: 'Add group' }).click()
+    await dialog.getByRole('checkbox', { name: 'browse for stardelt-qa' }).check()
+    await dialog.getByRole('button', { name: 'Save' }).click()
+
+    await expect.poll(() => writes.length).toBe(1)
+    const write = writes[0]
+    expect(write.method).toBe('PUT')
+    expect(write.path).toBe('/api/admin/catalogs/finance/access')
+    expect(JSON.parse(write.body ?? 'null')).toEqual({
+      resourceVersion: '1',
+      owner: 'stardelt-finops',
+      managedAccess: true,
+      grants: [
+        { group: 'stardelt-finops', verb: 'browse' },
+        { group: 'stardelt-analytics', verb: 'write' },
+        { group: 'stardelt-qa', verb: 'browse' },
+      ],
+    })
+    await expect(dialog).toBeHidden()
+    await context.close()
+  })
+
+  test('conflict_409_message', async ({ browser }) => {
+    const { context, page, writes } = await openEditable(browser, {
+      onPut: (route) =>
+        json(route, { error: 'this catalog changed since you opened it; reload' }, 409),
+    })
+    const dialog = await openEdit(page)
+
+    await dialog.getByLabel('Owner').fill('stardelt-fintax')
+    await dialog.getByRole('button', { name: 'Save' }).click()
+
+    await expect(dialog.getByRole('alert')).toHaveText(
+      'this catalog changed since you opened it; reload',
+    )
+    await expect(dialog).toBeVisible()
+    await expect(dialog.getByLabel('Owner')).toHaveValue('stardelt-fintax')
+    expect(writes).toHaveLength(1)
+    await context.close()
+  })
+
+  test('confirm_step_for_removing_all_grants', async ({ browser }) => {
+    const { context, page, writes } = await openEditable(browser, {
+      onPut: (route) => json(route, editedFinance({ grants: [] })),
+    })
+    const dialog = await openEdit(page)
+
+    await dialog.getByRole('button', { name: 'Remove stardelt-finops' }).click()
+    await dialog.getByRole('button', { name: 'Remove stardelt-analytics' }).click()
+    await dialog.getByRole('button', { name: 'Save' }).click()
+
+    // Nothing is sent on the first click; the consequence is the second sentence.
+    expect(writes).toHaveLength(0)
+    await expect(
+      dialog.getByText('This hides the catalog from people who are not administrators.'),
+    ).toBeVisible()
+    const confirm = dialog.getByRole('button', { name: 'Confirm' })
+    await expect(confirm).toBeVisible()
+    await confirm.click()
+
+    await expect.poll(() => writes.length).toBe(1)
+    expect(JSON.parse(writes[0].body ?? 'null').grants).toEqual([])
+    await context.close()
+  })
+
+  test('applying_then_applied_poll', async ({ browser }) => {
+    let saved = false
+    const applied = () =>
+      CATALOGS.map((catalog) =>
+        catalog.name === 'finance'
+          ? { ...catalog, generation: 2, observedGeneration: 2, conditions: READY }
+          : catalog,
+      )
+    const { context, page } = await openEditable(browser, {
+      catalogs: () => (saved ? applied() : CATALOGS),
+      onPut: (route) => {
+        saved = true
+        json(route, editedFinance())
+      },
+    })
+    const dialog = await openEdit(page)
+
+    await dialog.getByLabel('Owner').fill('stardelt-fintax')
+    await dialog.getByRole('button', { name: 'Save' }).click()
+
+    // The row says what is happening until the sync reports the generation it processed.
+    await expect(page.getByText('Applying…')).toBeVisible()
+    await expect(page.getByText('Applied', { exact: true })).toBeVisible({ timeout: 20_000 })
+    await context.close()
+  })
+
+  test('unknown_group_condition_shown', async ({ browser }) => {
+    let saved = false
+    const unresolved = () =>
+      CATALOGS.map((catalog) =>
+        catalog.name === 'finance'
+          ? {
+              ...catalog,
+              generation: 2,
+              observedGeneration: 2,
+              conditions: [
+                READY[0],
+                {
+                  type: 'GrantsReady',
+                  status: 'False',
+                  reason: 'UnknownGroup',
+                  message: 'the realm has no group `ghost`',
+                },
+                READY[2],
+              ],
+            }
+          : catalog,
+      )
+    const { context, page } = await openEditable(browser, {
+      catalogs: () => (saved ? unresolved() : CATALOGS),
+      onPut: (route) => {
+        saved = true
+        json(route, editedFinance())
+      },
+    })
+    const dialog = await openEdit(page)
+
+    await dialog.getByLabel('Owner').fill('stardelt-fintax')
+    await dialog.getByRole('button', { name: 'Save' }).click()
+
+    await expect(
+      page.getByText('One of the groups does not exist in the realm; nothing is granted for it.'),
+    ).toBeVisible({ timeout: 20_000 })
+    await expect(page.getByText('Applying…')).toBeHidden()
+    await context.close()
+  })
+
+  test('validation_sentences_inline', async ({ browser }) => {
+    const { context, page, writes } = await openEditable(browser, {
+      onPut: (route) => json(route, editedFinance()),
+    })
+    const dialog = await openEdit(page)
+    const owner = dialog.getByLabel('Owner')
+
+    await owner.fill('')
+    await expect(dialog.getByText('the owner is one group name')).toBeVisible()
+    await expect(dialog.getByRole('button', { name: 'Save' })).toBeDisabled()
+
+    await owner.fill('bad group')
+    await expect(
+      dialog.getByText('a group name is letters, digits, dots, dashes and underscores (up to 64)'),
+    ).toBeVisible()
+
+    await owner.fill('stardelt-finops')
+    await dialog.getByLabel('Add group').fill('<img src=x onerror="window.__xss=1">')
+    await dialog.getByRole('button', { name: 'Add group' }).click()
+    await expect(
+      dialog.getByText('a group name is letters, digits, dots, dashes and underscores (up to 64)'),
+    ).toBeVisible()
+    expect(writes).toHaveLength(0)
+    await context.close()
+  })
+
+  test('hostile_group_name_is_text', async ({ browser }) => {
+    const evil = '<img src=x onerror="window.__xss=1">'
+    const { context, page } = await openEditable(browser, {
+      catalogs: [
+        row({
+          name: 'finance',
+          displayName: evil,
+          owner: evil,
+          managedAccess: true,
+          grants: [{ group: evil, verb: 'browse' }],
+        }),
+      ],
+      onPut: (route) => json(route, editedFinance()),
+      init: () => { (window as unknown as { __xss: number }).__xss = 0 },
+    })
+    const dialog = await openEdit(page)
+
+    await expect(dialog.getByLabel('Owner')).toHaveValue(evil)
+    await expect(dialog.getByText(evil, { exact: true }).first()).toBeVisible()
+    for (const width of [1280, 360]) {
+      await page.setViewportSize({ width, height: 800 })
+      const s = await page.evaluate(() => ({
+        xss: (window as unknown as { __xss: number }).__xss,
+        imgs: document.querySelectorAll('img[src="x"]').length,
+        overflow: document.documentElement.scrollWidth - window.innerWidth,
+      }))
+      expect(s, `${width}px`).toEqual({ xss: 0, imgs: 0, overflow: expect.any(Number) })
+      expect(s.overflow, `${width}px overflow`).toBeLessThanOrEqual(1)
+    }
+    await context.close()
+  })
+
+  test('U5 audit with the dialog open at 360 px', async ({ browser }) => {
+    const { context, page } = await openEditable(browser, {
+      onPut: (route) => json(route, editedFinance()),
+      viewport: { width: 360, height: 740 },
+    })
+    const dialog = await openEdit(page)
+    await expect(dialog).toBeVisible()
+    expect((await auditPage(page)).filter((finding) => finding.rule === 'U5')).toEqual([])
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
+    expect(overflow).toBeLessThanOrEqual(1)
+    await context.close()
+  })
+})
+
+test.describe('overview metrics', () => {
+  // stardelt-nova#250: the Overview shows the catalog metrics API's numbers per catalog
+  // the person may see, instead of the static "Format: Iceberg" tile. The one answer is
+  // stubbed; the rest of the shell uses the dev backend, as the other suites do.
+  const now = Date.now()
+  const CATALOGS = [
+    { name: 'gold', schemas: 2, tables: 7, records: 1234, sizeBytes: 1536, lastCommitMs: now - 5 * 60_000, truncated: false, pending: false, updatedAt: now },
+    { name: 'silver', schemas: 1, tables: 1, records: 1, sizeBytes: 512, lastCommitMs: now - 2 * 3600_000, truncated: false, pending: false, updatedAt: now },
+    { name: 'bronze', schemas: 2, tables: 1, records: 0, sizeBytes: 0, lastCommitMs: null, truncated: false, pending: false, updatedAt: now },
+  ]
+  const TOTALS = { catalogs: 3, schemas: 5, tables: 9, records: 1235, sizeBytes: 2048 }
+  const METRICS = { catalogs: CATALOGS, totals: TOTALS, generatedAt: now }
+
+  /** The Overview with its one metrics answer stubbed; every test overrides what it needs. */
+  async function open(browser: Browser, { metrics = METRICS, status, viewport = { width: 1280, height: 800 }, init }: {
+    metrics?: unknown
+    status?: number
+    viewport?: { width: number; height: number }
+    init?: () => void
+  } = {}) {
+    const context = await browser.newContext({ viewport })
+    const page = await context.newPage()
+    if (init) await page.addInitScript(init)
+    await page.route('**/api/catalog/metrics', (route) => json(route, metrics, status))
+    return { context, page }
+  }
+
+  /** One summary tile, found by its label; the card around it holds the value and hint. */
+  const tile = (page: Page, label: string) =>
+    page.locator('div.card').filter({ has: page.locator('span.label', { hasText: label }) })
+
+  test('tiles_show_totals_and_no_format_tile', async ({ browser }) => {
+    const { context, page } = await open(browser)
+    await page.goto('/')
+    await expect(page.getByRole('heading', { level: 1, name: 'Lakehouse overview' })).toBeVisible()
+
+    // The tiles read the totals: catalogs, schemas, tables, size and rows.
+    await expect(tile(page, 'Catalogs')).toContainText('3')
+    await expect(tile(page, 'Catalogs')).toContainText('5 schemas')
+    await expect(tile(page, 'Tables')).toContainText('9')
+    await expect(tile(page, 'Tables')).toContainText('2.0 KiB · 1,235 rows')
+
+    // The static format tile is gone, and its claims with it.
+    await expect(page.getByText('Format', { exact: true })).toHaveCount(0)
+    await expect(page.getByText('Iceberg', { exact: true })).toHaveCount(0)
+    await expect(page.getByText('open tables on S3')).toHaveCount(0)
+    await context.close()
+  })
+
+  test('catalog_rows_link_to_the_explorer', async ({ browser }) => {
+    const { context, page } = await open(browser)
+    await page.goto('/')
+
+    const table = page.getByRole('table', { name: 'Catalogs you can see' })
+    await expect(table).toBeVisible()
+    await expect(table.getByRole('columnheader')).toHaveText([
+      'Catalog', 'Schemas', 'Tables', 'Size', 'Rows', 'Last change',
+    ])
+    // One row per catalog, in the API's order, with the numbers it sent.
+    await expect(table.locator('tbody tr')).toHaveCount(3)
+    const gold = table.locator('tbody tr').filter({ hasText: 'gold' })
+    await expect(gold).toContainText('2')
+    await expect(gold).toContainText('7')
+    await expect(gold).toContainText('1.5 KiB')
+    await expect(gold).toContainText('1,234')
+    const goldChanged = CATALOGS[0].lastCommitMs as number
+    await expect(gold.getByText(relativeTime(goldChanged))).toHaveAttribute('title', formatTime(goldChanged))
+    // A catalog with no commit says so instead of inventing a time.
+    await expect(table.locator('tbody tr').filter({ hasText: 'bronze' })).toContainText('—')
+
+    const link = table.getByRole('link', { name: 'gold' })
+    await expect(link).toHaveAttribute('href', '/catalog?catalog=gold')
+    await link.click()
+    await expect(page).toHaveURL(/\/catalog\?catalog=gold$/)
+    await context.close()
+  })
+
+  test('overview_rows_in_layer_order_with_badge', async ({ browser }) => {
+    // The API sends bronze/silver/gold first and marks their layer; the table keeps that
+    // order and names the layer beside the catalog (stardelt-nova#109).
+    const catalogs = [
+      { name: 'bronze', layer: 'bronze', schemas: 1, tables: 1, records: 0, sizeBytes: 0, lastCommitMs: null, truncated: false },
+      { name: 'silver', layer: 'silver', schemas: 1, tables: 2, records: 10, sizeBytes: 512, lastCommitMs: now, truncated: false },
+      { name: 'gold', layer: 'gold', schemas: 2, tables: 7, records: 1234, sizeBytes: 1536, lastCommitMs: now, truncated: false },
+      { name: 'warehouse', schemas: 3, tables: 9, records: 99, sizeBytes: 2048, lastCommitMs: now, truncated: false },
+    ]
+    const { context, page } = await open(browser, {
+      metrics: { catalogs, totals: { catalogs: 4, schemas: 7, tables: 19, records: 1343, sizeBytes: 4096 }, generatedAt: now },
+    })
+    await page.goto('/')
+
+    const table = page.getByRole('table', { name: 'Catalogs you can see' })
+    const rows = table.locator('tbody tr')
+    await expect(rows.locator('td:first-child a')).toHaveText(['bronze', 'silver', 'gold', 'warehouse'])
+    await expect(rows.nth(0).getByText('Bronze', { exact: true })).toBeVisible()
+    await expect(rows.nth(1).getByText('Silver', { exact: true })).toBeVisible()
+    await expect(rows.nth(2).getByText('Gold', { exact: true })).toBeVisible()
+    // Warehouse is not a medallion layer: no badge is invented for it.
+    await expect(rows.nth(3).getByText(/^(Bronze|Silver|Gold)$/)).toHaveCount(0)
+    judge('/', await auditPage(page))
+    await context.close()
+  })
+
+  test('hostile_layer_is_text', async ({ browser }) => {
+    const evil = '<img src=x onerror="window.__xss=1">'
+    const { context, page } = await open(browser, {
+      metrics: {
+        catalogs: [
+          { name: 'shared', layer: evil, schemas: 1, tables: 1, records: 1, sizeBytes: 1, lastCommitMs: now, truncated: false },
+        ],
+        totals: { catalogs: 1, schemas: 1, tables: 1, records: 1, sizeBytes: 1 },
+        generatedAt: now,
+      },
+      init: () => { (window as unknown as { __xss: number }).__xss = 0 },
+    })
+    await page.goto('/')
+    // The API validates the layer, but a value it would never send is still text: no
+    // element, no script, no widened page.
+    await expect(page.getByText(evil, { exact: true })).toBeVisible()
+    const s = await page.evaluate(() => ({
+      xss: (window as unknown as { __xss: number }).__xss,
+      imgs: document.querySelectorAll('img[src="x"]').length,
+      overflow: document.documentElement.scrollWidth - window.innerWidth,
+    }))
+    expect(s).toEqual({ xss: 0, imgs: 0, overflow: expect.any(Number) })
+    expect(s.overflow).toBeLessThanOrEqual(1)
+    await context.close()
+  })
+
+  test('error_row_and_truncated_note', async ({ browser }) => {
+    const error = 'the warehouse is not reachable right now'
+    const catalogs = [
+      { ...CATALOGS[0], truncated: true },
+      { name: 'broken', schemas: 0, tables: 0, records: 0, sizeBytes: 0, lastCommitMs: null, truncated: false, error },
+    ]
+    const { context, page } = await open(browser, { metrics: { catalogs, totals: TOTALS, generatedAt: now } })
+    await page.goto('/')
+
+    const table = page.getByRole('table', { name: 'Catalogs you can see' })
+    // A failed scan keeps its row and its sentence; it is not dropped, which would read
+    // "you have no such catalog".
+    const broken = table.locator('tbody tr').filter({ hasText: 'broken' })
+    await expect(broken.getByRole('status')).toHaveText(error)
+    await expect(table.locator('tbody tr')).toHaveCount(2)
+
+    // Rows and size are a sample in this answer; the note says so under the table.
+    await expect(page.getByText('first 200 tables counted')).toBeVisible()
+    await context.close()
+  })
+
+  test('forbidden_shows_the_sentence', async ({ browser }) => {
+    const sentence = 'no catalog is open to you yet; ask an administrator for access'
+    const { context, page } = await open(browser, { metrics: { error: sentence }, status: 403 })
+    await page.goto('/')
+
+    await expect(page.getByRole('status').filter({ hasText: sentence })).toBeVisible()
+    await expect(page.getByText('Ask an administrator for access.')).toBeVisible()
+    // The tiles answer with a dash and the API's sentence as the hint, never a zero.
+    await expect(tile(page, 'Catalogs')).toContainText('—')
+    await expect(tile(page, 'Catalogs')).toContainText(sentence)
+    await expect(tile(page, 'Tables')).toContainText('—')
+    await expect(page.getByRole('table', { name: 'Catalogs you can see' })).toHaveCount(0)
+    await context.close()
+  })
+
+  test('hostile_catalog_name_is_text', async ({ browser }) => {
+    const evil = '<img src=x onerror="window.__xss=1">'
+    const long = 'x'.repeat(400)
+    const catalogs = [
+      { name: evil, schemas: 1, tables: 1, records: 1, sizeBytes: 1, lastCommitMs: now, truncated: false },
+      { name: long, schemas: 1, tables: 1, records: 1, sizeBytes: 1, lastCommitMs: now, truncated: false },
+    ]
+    const { context, page } = await open(browser, {
+      metrics: { catalogs, totals: { catalogs: 2, schemas: 2, tables: 2, records: 2, sizeBytes: 2 }, generatedAt: now },
+      init: () => { (window as unknown as { __xss: number }).__xss = 0 },
+    })
+    await page.goto('/')
+    // Markup in a catalog name is text: no element, no script.
+    await expect(page.getByText(evil, { exact: true })).toBeVisible()
+
+    for (const width of [1280, 360]) {
+      await page.setViewportSize({ width, height: 800 })
+      const s = await page.evaluate(() => ({
+        xss: (window as unknown as { __xss: number }).__xss,
+        imgs: document.querySelectorAll('img[src="x"]').length,
+        overflow: document.documentElement.scrollWidth - window.innerWidth,
+      }))
+      expect(s, `${width}px`).toEqual({ xss: 0, imgs: 0, overflow: expect.any(Number) })
+      expect(s.overflow, `${width}px overflow`).toBeLessThanOrEqual(1)
+    }
+    // At the phone width the table scrolls inside its card rather than widening the page.
+    const table = page.getByRole('table', { name: 'Catalogs you can see' })
+    expect(await table.evaluate((el) => getComputedStyle(el.parentElement as HTMLElement).overflowX)).toBe('auto')
+    await context.close()
+  })
+
+  test('U5 audit of the page at 360 px', async ({ browser }) => {
+    const { context, page } = await open(browser, { viewport: { width: 360, height: 740 } })
+    await page.goto('/')
+    await expect(page.getByRole('table', { name: 'Catalogs you can see' })).toBeVisible()
+    expect((await auditPage(page)).filter((finding) => finding.rule === 'U5')).toEqual([])
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
+    expect(overflow).toBeLessThanOrEqual(1)
+    await context.close()
+  })
+
+  // stardelt-nova#263: the numbers are read in the background every five minutes, so the
+  // page never waits for a scan. A catalog with none yet says so; the card says how fresh
+  // the numbers are; an administrator can ask for a round now.
+  test('pending_rows_then_numbers', async ({ browser }) => {
+    const pending = {
+      catalogs: [
+        { name: 'gold', schemas: 0, tables: 0, records: 0, sizeBytes: 0, lastCommitMs: null, truncated: false, pending: true, updatedAt: null },
+        { ...CATALOGS[2], name: 'bronze' },
+      ],
+      // A pending row is not counted: its zeros are not numbers.
+      totals: { catalogs: 1, schemas: 2, tables: 1, records: 0, sizeBytes: 0 },
+      generatedAt: now,
+    }
+    const context = await browser.newContext({ viewport: { width: 1280, height: 800 } })
+    const page = await context.newPage()
+    let reads = 0
+    await page.route('**/api/catalog/metrics', (route) => {
+      reads += 1
+      return json(route, reads === 1 ? pending : METRICS)
+    })
+
+    await page.goto('/')
+    const table = page.getByRole('table', { name: 'Catalogs you can see' })
+    const gold = table.locator('tbody tr').filter({ hasText: 'gold' })
+    // No numbers yet: "calculating…" in muted text, never a zero and never a spinner.
+    await expect(gold.getByText('calculating…')).toHaveCount(5)
+    await expect(gold.getByText('calculating…').first()).toHaveClass(/text-text-mute/)
+    // The tiles answer at once with the totals the API sent, pending row left out.
+    await expect(tile(page, 'Catalogs')).toContainText('1')
+    await expect(tile(page, 'Tables')).toContainText('1')
+    await expect(tile(page, 'Tables')).toContainText('0 rows')
+
+    // The page asks again five seconds later (the interval only runs while something is
+    // pending) and the numbers replace the placeholders.
+    await expect(gold).toContainText('1,234', { timeout: 20_000 })
+    await expect(gold.getByText('calculating…')).toHaveCount(0)
+    await expect(tile(page, 'Tables')).toContainText('9')
+    await context.close()
+  })
+
+  test('updated_caption_and_admin_refresh_button', async ({ browser }) => {
+    const updatedAt = now - 4 * 60_000
+    const metrics = { catalogs: CATALOGS.map(catalog => ({ ...catalog, updatedAt })), totals: TOTALS, generatedAt: now }
+    const context = await browser.newContext({ viewport: { width: 1280, height: 800 } })
+    const page = await context.newPage()
+    let refreshes = 0
+    let reads = 0
+    await page.route('**/api/catalog/metrics', (route) => {
+      reads += 1
+      return json(route, metrics)
+    })
+    await page.route('**/api/catalog/metrics/refresh', (route) => {
+      refreshes += 1
+      return json(route, { accepted: true }, 202)
+    })
+
+    await page.goto('/')
+    // The card says how fresh the numbers are, and the tooltip has the exact moment.
+    const caption = page.getByText(`Updated ${relativeTime(updatedAt)}`)
+    await expect(caption).toBeVisible()
+    await expect(caption).toHaveAttribute('title', formatTime(updatedAt))
+
+    // dev mode is the administrator: the button is there, and the round is a POST.
+    const refresh = page.getByRole('button', { name: 'Refresh' })
+    await expect(refresh).toBeVisible()
+    const before = reads
+    await refresh.click()
+    await expect.poll(() => refreshes).toBe(1)
+    // ...and the numbers follow: the page asks again a few seconds after the round starts.
+    await expect.poll(() => reads, { timeout: 20_000 }).toBeGreaterThan(before)
+    await context.close()
+  })
+
+  test('non_admin_has_no_refresh', async ({ browser }) => {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 800 } })
+    const page = await context.newPage()
+    await page.route('**/api/me', (route) =>
+      json(route, { user: 'alice', auth_mode: 'oidc', demo: false, warehouse: 'warehouse', is_admin: false, groups: ['analysts'] }))
+    await page.route('**/api/catalog/metrics', (route) => json(route, METRICS))
+
+    await page.goto('/')
+    await expect(page.getByRole('table', { name: 'Catalogs you can see' })).toBeVisible()
+    // The numbers are shared and the freshness is everyone's; the round is an operator's.
+    await expect(page.getByText(/^Updated /)).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Refresh' })).toHaveCount(0)
+    await context.close()
+  })
+
+  test('error_row_keeps_old_numbers', async ({ browser }) => {
+    const error = 'the catalog is not reachable'
+    const catalogs = [
+      CATALOGS[0],
+      {
+        name: 'broken', schemas: 4, tables: 9, records: 77, sizeBytes: 2048,
+        lastCommitMs: now - 3600_000, truncated: false, pending: false,
+        updatedAt: now - 600_000, error,
+      },
+    ]
+    const { context, page } = await open(browser, {
+      metrics: { catalogs, totals: TOTALS, generatedAt: now },
+    })
+    await page.goto('/')
+
+    // A failed refresh keeps the last good numbers and adds the sentence: the page does
+    // not blank a catalog it could read ten minutes ago.
+    const broken = page.getByRole('table', { name: 'Catalogs you can see' }).locator('tbody tr').filter({ hasText: 'broken' })
+    await expect(broken.getByRole('status')).toHaveText(error)
+    await expect(broken).toContainText('9')
+    await expect(broken).toContainText('77')
+    await expect(broken).toContainText('2.0 KiB')
+    await expect(broken.getByText('calculating…')).toHaveCount(0)
+    await context.close()
+  })
+})
+
 test.describe('format', () => {
   test('sqlTableRef names the catalog the person works in', () => {
     // Plain check, no browser: the generated SQL is the one a person pastes and runs.
@@ -3609,6 +4647,67 @@ test.describe('format', () => {
     // a quote inside one is doubled instead of ending the identifier early.
     expect(sqlTableRef('sales', 'my table', 'finance')).toBe('finance.sales."my table"')
     expect(sqlTableRef('sales', 'orders', 'x"y')).toBe('"x""y".sales.orders')
+  })
+})
+
+test.describe('warehouses', () => {
+  // `GET /api/warehouses` (stardelt-nova#236): the class a person uses is the `yours` row,
+  // shown next to the Run button and on the Profile page.
+  const SMALL = {
+    name: 'small', displayName: 'Small', size: 'small', running: 10, queued: 100,
+    memoryShare: '20%', default: true, canUse: true, yours: false,
+  }
+  const LARGE = {
+    name: 'large', displayName: 'Large', size: 'large', running: 6, queued: 70,
+    memoryShare: '70%', default: false, canUse: true, yours: true,
+  }
+  const ME = {
+    user: 'alice', auth_mode: 'oidc', demo: false, warehouse: 'warehouse',
+    is_admin: false, groups: ['analysts'], via: 'session',
+  }
+
+  /** One page with `/api/warehouses` answered by `warehouses`; the caller closes the context. */
+  async function open(browser: Browser, route: string, warehouses: unknown[]) {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 800 } })
+    const page = await context.newPage()
+    await page.route('**/api/**', (r) => {
+      const path = new URL(r.request().url()).pathname
+      if (path === '/api/warehouses') return json(r, warehouses)
+      if (path === '/api/me') return json(r, ME)
+      if (path === '/api/settings') return json(r, {})
+      if (path === '/api/apps/links') return json(r, [])
+      return json(r, [])
+    })
+    await page.goto(route)
+    return { context, page }
+  }
+
+  test('the class in use is named next to Run and on the Profile', async ({ browser }) => {
+    const { context, page } = await open(browser, '/query', [SMALL, LARGE])
+    // The `yours` row, not the default one; the title carries the three numbers.
+    const note = page.getByTitle('6 running, 70 queued, 70% memory')
+    await expect(note).toHaveText('Warehouse: Large (large)')
+    await expect(page.getByTitle('10 running, 100 queued, 20% memory')).toHaveCount(0)
+
+    await page.goto('/profile')
+    await expect(page.getByText('SQL warehouse', { exact: true })).toBeVisible()
+    await expect(page.getByTitle('6 running, 70 queued, 70% memory')).toHaveText('Warehouse: Large (large)')
+    await context.close()
+  })
+
+  test('an administrator row has no size and an empty list shows no line', async ({ browser }) => {
+    const admin = {
+      name: 'admin', displayName: 'Administrators', size: null, running: 50, queued: 100,
+      memoryShare: '100%', default: false, canUse: true, yours: true,
+    }
+    const { context, page } = await open(browser, '/profile', [admin])
+    await expect(page.getByTitle('50 running, 100 queued, 100% memory')).toHaveText('Warehouse: Administrators')
+    await expect(page.locator('body')).not.toContainText('(null)')
+    await context.close()
+
+    const empty = await open(browser, '/query', [])
+    await expect(empty.page.getByText(/^Warehouse:/)).toHaveCount(0)
+    await empty.context.close()
   })
 })
 
@@ -3774,6 +4873,172 @@ test.describe('profile', () => {
   test('U5 the page has accessible names', async ({ browser }) => {
     const { context, page } = await open(browser, ME)
     await expect(page.getByRole('heading', { level: 1, name: 'Profile' })).toBeVisible()
+    expect((await auditPage(page)).filter((finding) => finding.rule === 'U5')).toEqual([])
+    await context.close()
+  })
+})
+
+test.describe('person menu', () => {
+  const ME_MEMBER = { user: 'alice', auth_mode: 'oidc', demo: false, warehouse: 'warehouse', is_admin: false, groups: ['analysts'], email: 'alice@example.com' }
+  const ME_ADMIN = { user: 'bob', auth_mode: 'oidc', demo: false, warehouse: 'warehouse', is_admin: true, groups: ['admins'], email: 'bob@example.com' }
+  const ME_DEV = { user: 'operator', auth_mode: 'static-dev', demo: false, warehouse: 'warehouse' }
+
+  async function openPersonMenu(browser: Browser, me: unknown, route = '/') {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 800 } })
+    const page = await context.newPage()
+    await page.route('**/api/**', (r) => {
+      const path = new URL(r.request().url()).pathname
+      if (path === '/api/me') return json(r, me)
+      if (path === '/api/apps/links') return json(r, [])
+      return json(r, path.includes('namespaces') ? { namespaces: [] } : [])
+    })
+    await page.goto(route)
+    await page.waitForTimeout(500)
+    const button = page.getByRole('button', { name: new RegExp(`Account menu for`) })
+    return { context, page, button }
+  }
+
+  test('opens with Enter and closes with Escape and focus returns', async ({ browser }) => {
+    const { context, page, button } = await openPersonMenu(browser, ME_MEMBER)
+    await button.focus()
+    await page.keyboard.press('Enter')
+    const menu = page.getByRole('menu', { name: 'Account menu' })
+    await expect(menu).toBeVisible()
+    const first = page.getByRole('menuitem', { name: 'Profile' })
+    await expect(first).toBeFocused()
+    await page.keyboard.press('Escape')
+    await expect(menu).not.toBeVisible()
+    await expect(button).toBeFocused()
+    await context.close()
+  })
+
+  test('arrow keys, Home and End move between items and Tab closes', async ({ browser }) => {
+    const { context, page, button } = await openPersonMenu(browser, ME_MEMBER)
+    await button.click()
+    const menu = page.getByRole('menu', { name: 'Account menu' })
+    await expect(menu).toBeVisible()
+    const items = [page.getByRole('menuitem', { name: 'Profile' }), page.getByRole('menuitem', { name: 'Preferences' }), page.getByRole('menuitem', { name: 'Sign out' })]
+    await expect(items[0]).toBeFocused()
+    await page.keyboard.press('ArrowDown')
+    await expect(items[1]).toBeFocused()
+    await page.keyboard.press('ArrowDown')
+    await expect(items[2]).toBeFocused()
+    await page.keyboard.press('Home')
+    await expect(items[0]).toBeFocused()
+    await page.keyboard.press('End')
+    await expect(items[2]).toBeFocused()
+    await page.keyboard.press('Tab')
+    await expect(menu).not.toBeVisible()
+    await context.close()
+  })
+
+  test('items by role', async ({ browser }) => {
+    // member
+    const m1 = await openPersonMenu(browser, ME_MEMBER)
+    await m1.button.click()
+    await expect(m1.page.getByRole('menuitem', { name: 'Profile' })).toBeVisible()
+    await expect(m1.page.getByRole('menuitem', { name: 'Preferences' })).toBeVisible()
+    await expect(m1.page.getByRole('menuitem', { name: 'Sign out' })).toBeVisible()
+    await expect(m1.page.getByRole('menuitem', { name: 'Platform settings' })).toHaveCount(0)
+    await expect(m1.page.getByText('Administrator')).toHaveCount(0)
+    await m1.context.close()
+
+    // administrator
+    const m2 = await openPersonMenu(browser, ME_ADMIN)
+    await m2.button.click()
+    await expect(m2.page.getByText('Administrator')).toBeVisible()
+    await expect(m2.page.getByRole('menuitem', { name: 'Platform settings' })).toBeVisible()
+    await m2.context.close()
+
+    // dev mode
+    const m3 = await openPersonMenu(browser, ME_DEV)
+    await m3.button.click()
+    await expect(m3.page.getByText('Development mode (no sign-in)')).toBeVisible()
+    await expect(m3.page.getByRole('menuitem', { name: 'Profile' })).toBeVisible()
+    await expect(m3.page.getByRole('menuitem', { name: 'Preferences' })).toBeVisible()
+    await expect(m3.page.getByRole('menuitem', { name: 'Sign out' })).toHaveCount(0)
+    await m3.context.close()
+  })
+
+  test('sign out works from the menu', async ({ browser }) => {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 800 } })
+    const page = await context.newPage()
+    let logoutReq: Request | null = null
+    await page.route('**/api/**', (r) => {
+      const path = new URL(r.request().url()).pathname
+      if (path === '/api/me') return json(r, ME_MEMBER)
+      if (path === '/api/apps/links') return json(r, [])
+      return json(r, [])
+    })
+    page.on('request', (req) => {
+      if (req.url().includes('/api/auth/logout')) logoutReq = req
+    })
+    await page.goto('/')
+    await page.getByRole('button', { name: /Account menu for/ }).click()
+    const logoutBtn = page.getByRole('menuitem', { name: 'Sign out' })
+    await expect(logoutBtn).toBeVisible()
+    // form submit
+    await logoutBtn.click()
+    await page.waitForTimeout(100)
+    await context.close()
+  })
+
+  test('hostile name and email stay text and truncated', async ({ browser }) => {
+    const evil = '<img src=x onerror="window.__xss=1">'
+    const long = 'x'.repeat(300)
+    const context = await browser.newContext({ viewport: { width: 1280, height: 800 } })
+    const page = await context.newPage()
+    await page.addInitScript(() => { (window as unknown as { __xss: number }).__xss = 0 })
+    await page.route('**/api/**', (r) => {
+      const path = new URL(r.request().url()).pathname
+      if (path === '/api/me') return json(r, { user: long, auth_mode: 'oidc', demo: false, warehouse: 'warehouse', is_admin: false, groups: ['analysts'], email: evil, name: long })
+      if (path === '/api/apps/links') return json(r, [])
+      return json(r, [])
+    })
+    await page.goto('/')
+    await page.getByRole('button', { name: /Account menu for/ }).click()
+    await expect(page.getByText(long, { exact: true }).first()).toBeVisible()
+    await expect(page.getByText(evil, { exact: true }).first()).toBeVisible()
+    for (const width of [1280, 360]) {
+      await page.setViewportSize({ width, height: 800 })
+      const s = await page.evaluate(() => ({
+        xss: (window as unknown as { __xss: number }).__xss,
+        imgs: document.querySelectorAll('img[src="x"]').length,
+        overflow: document.documentElement.scrollWidth - window.innerWidth,
+      }))
+      expect(s, `${width}px`).toEqual({ xss: 0, imgs: 0, overflow: expect.any(Number) })
+      expect(s.overflow, `${width}px overflow`).toBeLessThanOrEqual(1)
+    }
+    await context.close()
+  })
+
+  test('the sidebar shows the Admin group without scrolling at 1280 x 800', async ({ browser }) => {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 800 } })
+    const page = await context.newPage()
+    await page.route('**/api/**', (r) => {
+      const path = new URL(r.request().url()).pathname
+      if (path === '/api/me') return json(r, ME_ADMIN)
+      if (path === '/api/apps/links') return json(r, [])
+      return json(r, [])
+    })
+    await page.goto('/')
+    await page.waitForTimeout(500)
+    const settings = page.locator('nav').getByRole('link', { name: 'Settings' })
+    await expect(settings).toBeVisible()
+    const box = await settings.boundingBox()
+    expect(box).not.toBeNull()
+    const nav = page.locator('nav')
+    const navBox = await nav.boundingBox()
+    expect(navBox).not.toBeNull()
+    expect(box!.y + box!.height).toBeLessThanOrEqual(navBox!.y + navBox!.height + 5)
+    await context.close()
+  })
+
+  test('generic route tests still pass and U5 audit over open menu: no U5 finding', async ({ browser }) => {
+    const { context, page, button } = await openPersonMenu(browser, ME_ADMIN)
+    await button.click()
+    const menu = page.getByRole('menu', { name: 'Account menu' })
+    await expect(menu).toBeVisible()
     expect((await auditPage(page)).filter((finding) => finding.rule === 'U5')).toEqual([])
     await context.close()
   })

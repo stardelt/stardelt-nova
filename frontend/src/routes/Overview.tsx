@@ -1,15 +1,46 @@
 import { useQuery } from '@tanstack/react-query'
+import { useRef, useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
-import { api, allTables } from '../api'
-import { formatTime } from '../format'
+import { ApiError, api, errorMessage, type CatalogStat } from '../api'
+import { formatBytes, formatCount, formatTime, relativeTime, rowsLabel, statusLabel } from '../format'
 import ErrorBox from '../components/ErrorBox'
 import { Icon } from '../components/Icon'
+import LayerBadge from '../components/LayerBadge'
 import { isAdmin } from '../roles'
-import { rowsLabel, statusLabel } from '../format'
+
+/** `1,234 rows`, and never the "1 rows" a plain template would print. */
+function countRows(n: number): string {
+  return `${formatCount(n)} ${n === 1 ? 'row' : 'rows'}`
+}
+
+/** When the newest numbers of the card were read, or `null` while nothing has been read. */
+function newestUpdate(catalogs: CatalogStat[] | undefined): number | null {
+  let newest: number | null = null
+  for (const catalog of catalogs ?? []) {
+    const at = catalog.updatedAt
+    if (typeof at === 'number' && (newest === null || at > newest)) newest = at
+  }
+  return newest
+}
 
 export default function Overview() {
   const me = useQuery({ queryKey: ['me'], queryFn: api.me })
-  const tables = useQuery({ queryKey: ['catalog', 'all'], queryFn: () => allTables() })
+  // The numbers are read in the background (#263), so the first answer is already there.
+  // A catalog that has none yet is `pending`: re-ask every 5 s until it has numbers, and
+  // stop after a minute — a scan that never finishes must not turn this page into a poller.
+  const pendingSince = useRef<number | null>(null)
+  const metrics = useQuery({
+    queryKey: ['catalog', 'metrics'],
+    queryFn: api.catalogMetrics,
+    refetchInterval: (query) => {
+      if (!query.state.data?.catalogs.some(catalog => catalog.pending)) {
+        pendingSince.current = null
+        return false
+      }
+      pendingSince.current ??= Date.now()
+      return Date.now() - pendingSince.current < 60_000 ? 5_000 : false
+    },
+  })
   const jobs = useQuery({ queryKey: ['jobs'], queryFn: api.jobs, refetchInterval: 10_000 })
   // The engine and app cards are operator views: their endpoints answer 403 to everyone else,
   // so they are not fetched at all for a non-admin (an `enabled: false` query stays pending —
@@ -18,8 +49,30 @@ export default function Overview() {
   const cluster = useQuery({ queryKey: ['trino', 'cluster'], queryFn: api.trinoCluster, retry: false, enabled: admin })
   const apps = useQuery({ queryKey: ['apps'], queryFn: api.apps, refetchInterval: 15_000, enabled: admin })
 
-  const refs = tables.data ?? []
-  const schemas = new Set(refs.map(r => r.ns)).size
+  // An administrator's Refresh starts a round in the background; the numbers follow with
+  // the next read, which is why the page asks again five seconds later (a scan takes a
+  // few). The button is disabled while anything is pending: no second round.
+  const [refreshing, setRefreshing] = useState(false)
+  const [refreshError, setRefreshError] = useState('')
+  const pending = metrics.data?.catalogs.some(catalog => catalog.pending) ?? false
+  async function refreshNow() {
+    setRefreshing(true)
+    setRefreshError('')
+    try {
+      await api.refreshCatalogMetrics()
+      window.setTimeout(() => { void metrics.refetch() }, 5_000)
+    } catch (e) {
+      setRefreshError(errorMessage(e))
+    } finally {
+      setRefreshing(false)
+    }
+  }
+
+  const totals = metrics.data?.totals
+  // A 403 is the API saying no catalog is open to this person: an answer, not a failure
+  // they can retry away by clicking something.
+  const denied = metrics.isError && metrics.error instanceof ApiError && metrics.error.status === 403
+  const metricsFailure = metrics.isError ? errorMessage(metrics.error) : ''
   const info = cluster.data as Record<string, unknown> | undefined
   const engineState = typeof info?.state === 'string' ? info.state : cluster.isError ? 'unreachable' : '…'
   const recent = (jobs.data ?? []).slice(0, 6)
@@ -30,7 +83,7 @@ export default function Overview() {
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Lakehouse overview</h1>
           <p className="text-text-dim text-sm mt-1">
-            One catalog, one engine, one place to load and move data.
+            Your catalogs, one engine, one place to load and move data.
             {me.data?.demo && <span className="text-warn"> Demo data is in memory.</span>}
           </p>
         </div>
@@ -41,13 +94,34 @@ export default function Overview() {
       </header>
 
       <section className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <Stat label="Tables" value={tables.data ? String(refs.length) : tables.isError ? '—' : '…'} hint={tables.data || !tables.isError ? `${schemas} schemas` : 'catalog unavailable'} icon="table" />
+        <Stat
+          label="Catalogs"
+          value={totals ? formatCount(totals.catalogs) : metrics.isError ? '—' : '…'}
+          hint={totals ? `${formatCount(totals.schemas)} schemas` : metrics.isError ? metricsFailure : 'catalogs you can see'}
+          icon="database"
+        />
+        <Stat
+          label="Tables"
+          value={totals ? formatCount(totals.tables) : metrics.isError ? '—' : '…'}
+          hint={totals ? `${formatBytes(totals.sizeBytes)} · ${countRows(totals.records)}` : metrics.isError ? metricsFailure : 'across your catalogs'}
+          icon="table"
+        />
         {admin && (
           <Stat label="Engine" value={String(engineState)} hint="Trino" icon="spark" tone={engineState === 'ACTIVE' ? 'ok' : undefined} />
         )}
         <Stat label="Jobs" value={jobs.data ? String(jobs.data.length) : jobs.isError ? '—' : '…'} hint="recent activity" icon="clock" />
-        <Stat label="Format" value="Iceberg" hint="open tables on S3" icon="database" />
       </section>
+
+      <CatalogsCard
+        metrics={metrics.data?.catalogs}
+        error={metrics.error}
+        denied={denied}
+        admin={admin}
+        pending={pending}
+        refreshing={refreshing}
+        refreshError={refreshError}
+        onRefresh={refreshNow}
+      />
 
       <section className="grid lg:grid-cols-3 gap-4">
         <div className={`card p-5 ${admin ? 'lg:col-span-2' : 'lg:col-span-3'}`}>
@@ -106,6 +180,126 @@ export default function Overview() {
   )
 }
 
+/**
+ * The catalogs the person may see, one table row each (stardelt-nova#250). Every number is
+ * the API's: a catalog whose scan failed keeps its row with the sentence, and a shortened
+ * scan says so under the table instead of pretending the sample is the whole catalog.
+ *
+ * The numbers are read in the background (#263), so the card says how fresh they are and
+ * an administrator can ask for a round now; a catalog with no numbers yet says
+ * "calculating…" instead of zero, which would be a wrong number rather than none.
+ */
+function CatalogsCard({ metrics, error, denied, admin, pending, refreshing, refreshError, onRefresh }: {
+  metrics: CatalogStat[] | undefined
+  error: unknown
+  denied: boolean
+  admin: boolean
+  pending: boolean
+  refreshing: boolean
+  refreshError: string
+  onRefresh: () => void
+}) {
+  const updated = newestUpdate(metrics)
+  return (
+    <section className="card p-5 min-w-0">
+      <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
+        <div className="flex items-baseline gap-3 flex-wrap">
+          <h2 className="text-sm font-semibold">Catalogs</h2>
+          {updated !== null && (
+            <span className="text-xs text-text-mute" title={formatTime(updated)}>
+              Updated {relativeTime(updated)}
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-3">
+          {admin && (
+            <button type="button" className="btn-ghost" onClick={onRefresh} disabled={pending || refreshing}>
+              {refreshing ? 'Refreshing…' : 'Refresh'}
+            </button>
+          )}
+          <Link to="/catalog" className="text-xs text-text-dim hover:text-text">Browse all →</Link>
+        </div>
+      </div>
+      {refreshError && <p role="status" className="text-xs text-bad mb-2 break-words">{refreshError}</p>}
+      {!metrics && !error && <div className="text-text-mute text-sm">loading…</div>}
+      {denied && (
+        <div className="space-y-1">
+          <p role="status" className="text-sm break-words">{errorMessage(error)}</p>
+          <p className="text-xs text-text-mute">Ask an administrator for access.</p>
+        </div>
+      )}
+      {error != null && !denied && <ErrorBox error={error} />}
+      {metrics && metrics.length === 0 && !error && (
+        <p className="text-text-mute text-sm">No catalogs to show.</p>
+      )}
+      {metrics && metrics.length > 0 && (
+        <>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <caption className="sr-only">Catalogs you can see</caption>
+              <thead className="bg-bg-soft/50">
+                <tr>
+                  <th scope="col" className="th px-3 py-2.5">Catalog</th>
+                  <th scope="col" className="th px-3 py-2.5 text-right">Schemas</th>
+                  <th scope="col" className="th px-3 py-2.5 text-right">Tables</th>
+                  <th scope="col" className="th px-3 py-2.5 text-right">Size</th>
+                  <th scope="col" className="th px-3 py-2.5 text-right">Rows</th>
+                  <th scope="col" className="th px-3 py-2.5 text-right">Last change</th>
+                </tr>
+              </thead>
+              <tbody>
+                {metrics.map(catalog => {
+                  const commit = catalog.lastCommitMs
+                  const changed = typeof commit === 'number' && Number.isFinite(commit) ? commit : null
+                  return (
+                    <tr key={catalog.name} className="border-t border-border/70">
+                      <td className="td px-3">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Link
+                            to={`/catalog?catalog=${encodeURIComponent(catalog.name)}`}
+                            className="text-accent hover:underline break-words"
+                          >
+                            {catalog.name}
+                          </Link>
+                          <LayerBadge layer={catalog.layer} />
+                        </div>
+                        {catalog.error && (
+                          <div role="status" className="text-xs text-bad mt-0.5 break-words">{catalog.error}</div>
+                        )}
+                      </td>
+                      <td className="td px-3 text-right tabular-nums"><CellNumber pending={catalog.pending}>{formatCount(catalog.schemas)}</CellNumber></td>
+                      <td className="td px-3 text-right tabular-nums"><CellNumber pending={catalog.pending}>{formatCount(catalog.tables)}</CellNumber></td>
+                      <td className="td px-3 text-right tabular-nums whitespace-nowrap"><CellNumber pending={catalog.pending}>{formatBytes(catalog.sizeBytes)}</CellNumber></td>
+                      <td className="td px-3 text-right tabular-nums"><CellNumber pending={catalog.pending}>{formatCount(catalog.records)}</CellNumber></td>
+                      <td
+                        className="td px-3 text-right whitespace-nowrap text-text-dim"
+                        title={changed !== null ? formatTime(changed) : undefined}
+                      >
+                        <CellNumber pending={catalog.pending}>{changed !== null ? relativeTime(changed) : '—'}</CellNumber>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+          {metrics.some(catalog => catalog.truncated) && (
+            <p className="text-xs text-text-mute mt-2">first 200 tables counted</p>
+          )}
+        </>
+      )}
+    </section>
+  )
+}
+
+/**
+ * One number cell: the value, or "calculating…" while the catalog has no numbers yet. Muted
+ * text, never a zero — a zero is a claim, and nothing has been read.
+ */
+function CellNumber({ pending, children }: { pending: boolean; children: ReactNode }) {
+  return pending ? <span className="text-text-mute">calculating…</span> : <>{children}</>
+}
+
 function Stat({ label, value, hint, icon, tone }: {
   label: string
   value: string
@@ -120,7 +314,7 @@ function Stat({ label, value, hint, icon, tone }: {
         <Icon name={icon} className="w-4 h-4 text-text-mute" />
       </div>
       <div className={`text-2xl font-semibold mt-2 ${tone === 'ok' ? 'text-success' : ''}`}>{value}</div>
-      <div className="text-xs text-text-mute mt-0.5">{hint}</div>
+      <div className="text-xs text-text-mute mt-0.5 break-words">{hint}</div>
     </div>
   )
 }

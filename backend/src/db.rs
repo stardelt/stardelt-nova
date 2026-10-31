@@ -26,7 +26,7 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
 /// What `/api/health` reports about the state store.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(utoipa::ToSchema, Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DbStatus {
     /// A `SELECT 1` answered within two seconds.

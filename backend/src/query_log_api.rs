@@ -19,9 +19,11 @@ use axum::{
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::Serialize;
 use sqlx::{FromRow, Postgres, QueryBuilder};
+use utoipa::ToSchema;
 
 use crate::AppState;
 use crate::auth::Principal;
+use crate::people;
 use crate::query_log::{RowOwner, Scope, Viewer, in_scope, visible};
 use crate::saved_queries::{error, not_found, store_failed, unavailable};
 
@@ -62,6 +64,7 @@ impl Caller {
     fn viewer(&self) -> Viewer<'_> {
         Viewer {
             username: &self.username,
+            sub: &self.sub,
             groups: &self.groups,
             is_admin: self.is_admin,
         }
@@ -177,12 +180,17 @@ struct ListRow {
     error_code: Option<String>,
 }
 
-#[derive(Serialize)]
+/// One row of the query log list; the statement is cut to a preview.
+#[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
-struct ListItem {
+pub struct QueryLogItem {
     id: String,
     state: String,
+    /// The raw engine user (the `sub` once authz 8/8 is live).
     user: String,
+    /// The person's display name when Nova knows the engine user; `None` falls back to
+    /// `user` in the UI.
+    user_name: Option<String>,
     source: Option<String>,
     warehouse: String,
     query_type: Option<String>,
@@ -193,12 +201,13 @@ struct ListItem {
     error_code: Option<String>,
 }
 
-impl From<ListRow> for ListItem {
+impl From<ListRow> for QueryLogItem {
     fn from(r: ListRow) -> Self {
         Self {
             id: r.query_id,
             state: r.state,
             user: r.principal,
+            user_name: None,
             source: r.source,
             warehouse: r.warehouse,
             query_type: r.query_type,
@@ -211,7 +220,38 @@ impl From<ListRow> for ListItem {
     }
 }
 
+/// One page of the query log; `nextCursor` is null on the last page.
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct QueryLogPage {
+    items: Vec<QueryLogItem>,
+    next_cursor: Option<String>,
+}
+
 /// `GET /api/query-log?scope=mine|team|all&state=&warehouse=&q=&from=&to=&limit=&cursor=`
+#[utoipa::path(
+    get,
+    operation_id = "query_log_list",
+    path = "/api/query-log",
+    tag = "public",
+    description = "The statements run on the engine, newest first, a page at a time. A person sees their own; an administrator may ask for everyone's with scope=all. Times are epoch milliseconds.",
+    params(
+        ("scope" = Option<String>, Query, description = "mine (default), team or all. all is for administrators; team stays empty until ownership is recorded"),
+        ("state" = Option<String>, Query, description = "QUEUED, FINISHED, FAILED or CANCELED, in any case"),
+        ("warehouse" = Option<String>, Query, description = "Only queries that ran on this warehouse"),
+        ("q" = Option<String>, Query, description = "Text inside the statement, or an exact query id; at most 200 characters"),
+        ("from" = Option<i64>, Query, description = "Created at or after this time"),
+        ("to" = Option<i64>, Query, description = "Created at or before this time"),
+        ("limit" = Option<i64>, Query, description = "Page size from 1 to 200; 50 by default"),
+        ("cursor" = Option<String>, Query, description = "The nextCursor of the previous page"),
+    ),
+    responses(
+        (status = 200, description = "One page of the log", body = QueryLogPage),
+        (status = 400, description = "A parameter is not valid; the message names it", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "scope=all by somebody who is not an administrator", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
 pub async fn list(
     State(s): State<Arc<AppState>>,
     caller: Option<Extension<Principal>>,
@@ -240,7 +280,13 @@ pub async fn list(
          wall_ms, output_rows, error_code FROM query_log WHERE true"
     ));
     if params.scope == Scope::Mine {
-        q.push(" AND principal = ").push_bind(who.username.clone());
+        // The engine user is the sub once authz 8/8 is live; rows written before it (or in a
+        // deployment that has not switched) still carry the sign-in name.
+        q.push(" AND (principal = ")
+            .push_bind(who.username.clone())
+            .push(" OR principal = ")
+            .push_bind(who.sub.clone())
+            .push(")");
     }
     if let Some(state) = &params.state {
         q.push(" AND state = ").push_bind(state.clone());
@@ -302,8 +348,27 @@ pub async fn list(
     } else {
         None
     };
-    let items: Vec<ListItem> = rows.into_iter().map(ListItem::from).collect();
-    Json(serde_json::json!({ "items": items, "nextCursor": next })).into_response()
+    let mut items: Vec<QueryLogItem> = rows.into_iter().map(QueryLogItem::from).collect();
+    // An engine user that is a UUID is a person's subject; the directory turns it into a
+    // name. Deduplicated, because a page is often the same person's queries.
+    let mut subs: Vec<String> = items
+        .iter()
+        .filter(|item| people::is_uuid(&item.user))
+        .map(|item| item.user.clone())
+        .collect();
+    subs.sort();
+    subs.dedup();
+    if !subs.is_empty() {
+        let display = people::names(pool, &subs).await;
+        for item in &mut items {
+            item.user_name = display.get(&item.user).cloned();
+        }
+    }
+    Json(QueryLogPage {
+        items,
+        next_cursor: next,
+    })
+    .into_response()
 }
 
 #[derive(FromRow, Debug)]
@@ -340,7 +405,78 @@ struct DetailRow {
     tables_written: Vec<String>,
 }
 
+/// How long the query waited, planned and ran, in milliseconds.
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct QueryTiming {
+    queued_ms: Option<i64>,
+    planning_ms: Option<i64>,
+    execution_ms: Option<i64>,
+    wall_ms: Option<i64>,
+    cpu_ms: Option<i64>,
+}
+
+/// How much data the query read, wrote and held in memory.
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct QueryData {
+    input_rows: Option<i64>,
+    input_bytes: Option<i64>,
+    output_rows: Option<i64>,
+    output_bytes: Option<i64>,
+    written_rows: Option<i64>,
+    written_bytes: Option<i64>,
+    peak_memory_bytes: Option<i64>,
+}
+
+/// Why a query failed.
+#[derive(Serialize, ToSchema)]
+pub struct QueryFailure {
+    code: String,
+    message: Option<String>,
+}
+
+/// Everything stored about one query: the whole statement, timing, data volumes, tables.
+#[derive(Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct QueryLogDetail {
+    id: String,
+    state: String,
+    /// The raw engine user (the `sub` once authz 8/8 is live).
+    user: String,
+    user_name: Option<String>,
+    source: Option<String>,
+    client_tags: Vec<String>,
+    warehouse: String,
+    catalog: Option<String>,
+    schema: Option<String>,
+    query_type: Option<String>,
+    sql: String,
+    sql_hash: String,
+    created_at: i64,
+    started_at: Option<i64>,
+    ended_at: Option<i64>,
+    timing: QueryTiming,
+    data: QueryData,
+    tables_read: Vec<String>,
+    tables_written: Vec<String>,
+    error: Option<QueryFailure>,
+}
+
 /// `GET /api/query-log/{id}` — everything stored about one query the caller may see.
+#[utoipa::path(
+    get,
+    operation_id = "query_log_detail",
+    path = "/api/query-log/{id}",
+    tag = "public",
+    description = "One query with its whole statement. Somebody else's query answers 404, exactly like a missing one; an administrator who opens another person's query is audited.",
+    params(("id" = String, Path, description = "The engine's query id")),
+    responses(
+        (status = 200, description = "The stored query", body = QueryLogDetail),
+        (status = 404, description = "No such query, or it is not the caller's to see", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
 pub async fn detail(
     State(s): State<Arc<AppState>>,
     caller: Option<Extension<Principal>>,
@@ -378,7 +514,7 @@ pub async fn detail(
     if !visible(&owner, &who.viewer()) {
         return not_found();
     }
-    if r.principal != who.username {
+    if r.principal != who.username && r.principal != who.sub {
         // An administrator opening somebody else's statement leaves a trace.
         tracing::info!(
             target: "audit",
@@ -390,34 +526,54 @@ pub async fn detail(
             "administrator opened another user's query"
         );
     }
-    Json(serde_json::json!({
-        "id": r.query_id,
-        "state": r.state,
-        "user": r.principal,
-        "source": r.source,
-        "clientTags": r.client_tags,
-        "warehouse": r.warehouse,
-        "catalog": r.catalog,
-        "schema": r.schema_name,
-        "queryType": r.query_type,
-        "sql": r.sql_text,
-        "sqlHash": r.sql_hash,
-        "createdAt": r.created_ms,
-        "startedAt": r.started_ms,
-        "endedAt": r.ended_ms,
-        "timing": {
-            "queuedMs": r.queued_ms, "planningMs": r.planning_ms, "executionMs": r.execution_ms,
-            "wallMs": r.wall_ms, "cpuMs": r.cpu_ms
+    let user_name = if people::is_uuid(&r.principal) {
+        people::names(pool, std::slice::from_ref(&r.principal))
+            .await
+            .get(&r.principal)
+            .cloned()
+    } else {
+        None
+    };
+    let error = r.error_code.map(|code| QueryFailure {
+        code,
+        message: r.error_message,
+    });
+    Json(QueryLogDetail {
+        id: r.query_id,
+        state: r.state,
+        user: r.principal,
+        user_name,
+        source: r.source,
+        client_tags: r.client_tags,
+        warehouse: r.warehouse,
+        catalog: r.catalog,
+        schema: r.schema_name,
+        query_type: r.query_type,
+        sql: r.sql_text,
+        sql_hash: r.sql_hash,
+        created_at: r.created_ms,
+        started_at: r.started_ms,
+        ended_at: r.ended_ms,
+        timing: QueryTiming {
+            queued_ms: r.queued_ms,
+            planning_ms: r.planning_ms,
+            execution_ms: r.execution_ms,
+            wall_ms: r.wall_ms,
+            cpu_ms: r.cpu_ms,
         },
-        "data": {
-            "inputRows": r.input_rows, "inputBytes": r.input_bytes, "outputRows": r.output_rows,
-            "outputBytes": r.output_bytes, "writtenRows": r.written_rows,
-            "writtenBytes": r.written_bytes, "peakMemoryBytes": r.peak_memory_bytes
+        data: QueryData {
+            input_rows: r.input_rows,
+            input_bytes: r.input_bytes,
+            output_rows: r.output_rows,
+            output_bytes: r.output_bytes,
+            written_rows: r.written_rows,
+            written_bytes: r.written_bytes,
+            peak_memory_bytes: r.peak_memory_bytes,
         },
-        "tablesRead": r.tables_read,
-        "tablesWritten": r.tables_written,
-        "error": r.error_code.map(|code| serde_json::json!({ "code": code, "message": r.error_message })),
-    }))
+        tables_read: r.tables_read,
+        tables_written: r.tables_written,
+        error,
+    })
     .into_response()
 }
 
@@ -430,6 +586,84 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    /// The UI and the SDKs read these names; typing the responses must not rename one.
+    #[test]
+    fn the_detail_keeps_its_wire_names() {
+        let detail = QueryLogDetail {
+            id: "q1".into(),
+            state: "FAILED".into(),
+            user: "u".into(),
+            user_name: None,
+            source: None,
+            client_tags: vec![],
+            warehouse: "analytics".into(),
+            catalog: None,
+            schema: None,
+            query_type: None,
+            sql: "select 1".into(),
+            sql_hash: "h".into(),
+            created_at: 1,
+            started_at: None,
+            ended_at: None,
+            timing: QueryTiming {
+                queued_ms: None,
+                planning_ms: None,
+                execution_ms: None,
+                wall_ms: Some(5),
+                cpu_ms: None,
+            },
+            data: QueryData {
+                input_rows: None,
+                input_bytes: None,
+                output_rows: None,
+                output_bytes: None,
+                written_rows: None,
+                written_bytes: None,
+                peak_memory_bytes: Some(7),
+            },
+            tables_read: vec![],
+            tables_written: vec![],
+            error: Some(QueryFailure {
+                code: "X".into(),
+                message: None,
+            }),
+        };
+        let v = serde_json::to_value(&detail).unwrap();
+        for key in [
+            "id",
+            "state",
+            "user",
+            "userName",
+            "source",
+            "clientTags",
+            "warehouse",
+            "catalog",
+            "schema",
+            "queryType",
+            "sql",
+            "sqlHash",
+            "createdAt",
+            "startedAt",
+            "endedAt",
+            "timing",
+            "data",
+            "tablesRead",
+            "tablesWritten",
+            "error",
+        ] {
+            assert!(v.get(key).is_some(), "the detail lost {key}");
+        }
+        assert_eq!(v["timing"]["wallMs"], 5);
+        assert_eq!(v["data"]["peakMemoryBytes"], 7);
+        assert_eq!(v["error"]["code"], "X");
+        let page = serde_json::to_value(QueryLogPage {
+            items: vec![],
+            next_cursor: None,
+        })
+        .unwrap();
+        assert_eq!(page, serde_json::json!({ "items": [], "nextCursor": null }));
     }
 
     #[test]

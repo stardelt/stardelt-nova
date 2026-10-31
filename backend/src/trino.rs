@@ -20,45 +20,52 @@ use tokio::time::sleep;
 
 use crate::{AppState, api_json::ApiJson, jobs};
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct QueryRequest {
+    /// One SQL statement, run with the caller's identity.
     pub sql: String,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, utoipa::ToSchema)]
 pub struct QueryResult {
     pub columns: Vec<Column>,
+    /// One array per row, in column order; values are JSON scalars, arrays or objects.
+    #[schema(value_type = Vec<Vec<Value>>)]
     pub rows: Vec<Vec<Value>>,
     pub row_count: usize,
     pub query_id: Option<String>,
+    /// The engine's statistics object, passed through unchanged.
+    #[schema(value_type = Option<Object>)]
     pub stats: Option<Value>,
     /// True when rows were cut at [`MAX_ROWS`]: the result is a prefix, not the
     /// whole answer. The UI says so instead of showing a silent partial table.
     pub truncated: bool,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, utoipa::ToSchema)]
 pub struct Column {
     pub name: String,
+    /// The engine's type name, for example `varchar` or `bigint`.
+    #[schema(rename = "type")]
     pub r#type: String,
 }
 
 #[derive(Deserialize)]
-struct TrinoColumn {
-    name: String,
+pub(crate) struct TrinoColumn {
+    pub(crate) name: String,
     #[serde(rename = "type")]
-    ty: String,
+    pub(crate) ty: String,
 }
 
 #[derive(Deserialize)]
-struct TrinoResponse {
-    id: Option<String>,
+pub(crate) struct TrinoResponse {
+    pub(crate) id: Option<String>,
     #[serde(rename = "nextUri")]
-    next_uri: Option<String>,
-    columns: Option<Vec<TrinoColumn>>,
-    data: Option<Vec<Vec<Value>>>,
-    error: Option<Value>,
-    stats: Option<Value>,
+    pub(crate) next_uri: Option<String>,
+    pub(crate) columns: Option<Vec<TrinoColumn>>,
+    pub(crate) data: Option<Vec<Vec<Value>>>,
+    pub(crate) error: Option<Value>,
+    pub(crate) stats: Option<Value>,
 }
 
 /// Rows Nova will hold in memory for one query. The page granularity means a
@@ -78,32 +85,35 @@ fn apply_row_cap(rows: &mut Vec<Vec<Value>>) -> bool {
 /// Headers that identify the caller to Trino; identical on the statement POST
 /// and every nextUri poll.
 ///
-/// `X-Trino-User` is what Trino records in its query events, so it should name
-/// the person who asked — the token identifies them for authentication, this
-/// identifies them to the audit trail. Falls back to the dev user when nobody
-/// is signed in.
+/// With a forwarded identity the token *is* the user: the platform switch sets
+/// `principal-field=sub`, so the engine principal is the person's sub. Sending
+/// `X-Trino-User: <preferred_username>` alongside the token would ask Trino to
+/// impersonate the username as the sub — refused by the file rules and the OPA
+/// bridge (platform#311). The header stays for dev mode, where no token is
+/// forwarded and Trino records it as the user.
 fn upstream_headers(
     dev_user: &str,
     forward: bool,
     caller: Option<&crate::auth::Principal>,
 ) -> Vec<(reqwest::header::HeaderName, String)> {
-    let user = caller
-        .map(|c| c.identity.display_name.as_str())
-        .unwrap_or(dev_user);
-    let mut h = vec![(
-        reqwest::header::HeaderName::from_static("x-trino-user"),
-        user.to_string(),
-    )];
-    if let Some(v) = crate::auth::upstream_authorization(forward, caller) {
-        h.push((reqwest::header::AUTHORIZATION, v));
+    match crate::auth::upstream_authorization(forward, caller) {
+        Some(v) => vec![(reqwest::header::AUTHORIZATION, v)],
+        None => {
+            let user = caller
+                .map(|c| c.identity.display_name.as_str())
+                .unwrap_or(dev_user);
+            vec![(
+                reqwest::header::HeaderName::from_static("x-trino-user"),
+                user.to_string(),
+            )]
+        }
     }
-    h
 }
 
 /// Attach the caller's identity to a Trino request: the initial POST, every
 /// `nextUri` poll and the cancel DELETE all carry the same `X-Trino-User` and
 /// the same forwarded `Authorization` (when the platform asked for it).
-fn trino_request(
+pub(crate) fn trino_request(
     state: &AppState,
     caller: Option<&crate::auth::Principal>,
     rb: reqwest::RequestBuilder,
@@ -160,13 +170,28 @@ impl Drop for CancelOnDrop {
             let user = self.user.clone();
             let auth = self.auth.clone();
             tokio::spawn(async move {
-                let mut req = http.delete(uri).header("X-Trino-User", user);
-                if let Some(a) = auth {
-                    req = req.header(reqwest::header::AUTHORIZATION, a);
-                }
-                let _ = req.send().await;
+                let _ = cancel_request(&http, uri, &user, auth.as_deref())
+                    .send()
+                    .await;
             });
         }
+    }
+}
+
+/// The cancel DELETE carries the same single identity header as the statement POST:
+/// the forwarded bearer when the caller has one, `X-Trino-User` in dev mode. Sending
+/// both would make the cancel an impersonation request (platform#311).
+fn cancel_request(
+    http: &reqwest::Client,
+    uri: String,
+    user: &str,
+    auth: Option<&str>,
+) -> reqwest::RequestBuilder {
+    match auth {
+        Some(token) => http
+            .delete(uri)
+            .header(reqwest::header::AUTHORIZATION, token),
+        None => http.delete(uri).header("X-Trino-User", user),
     }
 }
 
@@ -176,7 +201,7 @@ const SOURCE_NOVA: &str = "nova";
 
 /// The statement POST: the caller's identity plus where the statement comes from. The engine records
 /// `source` and the client tag in its query events, and the query log keeps them.
-fn statement_post(
+pub(crate) fn statement_post(
     state: &AppState,
     caller: Option<&crate::auth::Principal>,
     source: &str,
@@ -344,7 +369,7 @@ pub async fn execute_from(
 /// coordinator and worker URLs, the build — internals no signed-in user needs and which
 /// the Query page used to print verbatim. The document is logged once at debug level;
 /// the response says what went wrong.
-fn client_error(err: &Value) -> String {
+pub(crate) fn client_error(err: &Value) -> String {
     tracing::debug!(error = %err, "trino error");
     let name = err
         .get("errorName")
@@ -376,6 +401,19 @@ fn scrub_internal(message: &str) -> String {
         .join(" ")
 }
 
+#[utoipa::path(
+    post,
+    operation_id = "query_run",
+    path = "/api/query",
+    tag = "public",
+    description = "Run one SQL statement as the caller and return the whole result. Synchronous: the call returns when the query ends. At most 50 000 rows are returned; past that `truncated` is true and the rows are a prefix.",
+    request_body = QueryRequest,
+    responses(
+        (status = 200, description = "The columns, the rows and the engine's query id", body = QueryResult),
+        (status = 400, description = "The statement is empty, was refused or failed in the engine", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The query engine is not reachable", body = crate::openapi::ErrorResponse),
+    )
+)]
 pub async fn run_query(
     State(s): State<Arc<AppState>>,
     caller: Option<axum::Extension<crate::auth::Principal>>,
@@ -584,6 +622,11 @@ mod tests {
             warehouse_name: "warehouse".into(),
             catalog_ids: std::sync::RwLock::new(std::collections::HashMap::new()),
             catalog_access: std::sync::Mutex::new(std::collections::HashMap::new()),
+            catalog_metrics: std::sync::Mutex::new(std::collections::HashMap::new()),
+            metrics_in_flight: std::sync::Mutex::new(std::collections::HashSet::new()),
+            metrics_round: tokio::sync::Mutex::new(()),
+            metrics_refresh: std::sync::Mutex::new(None),
+            catalog_layers: std::sync::Mutex::new(None),
             http: reqwest::Client::new(),
             demo: false,
             forward_identity: forward,
@@ -597,9 +640,12 @@ mod tests {
             break_glass_reads: std::sync::Mutex::new(std::collections::HashMap::new()),
             run_starts: std::sync::Mutex::new(std::collections::HashMap::new()),
             pipeline_creates: std::sync::Mutex::new(std::collections::HashMap::new()),
+            catalog_access_changes: std::sync::Mutex::new(std::collections::HashMap::new()),
             airflow: None,
             table_locks: std::sync::Mutex::new(std::collections::HashMap::new()),
+            people_touched: std::sync::Mutex::new(std::collections::HashMap::new()),
             notebooks: None,
+            statements: Default::default(),
         }
     }
 
@@ -614,15 +660,47 @@ mod tests {
     #[test]
     fn headers_forward_the_token_only_when_asked() {
         let p = alice(Some("t"));
+        // With a forwarded token the sub is the engine user; an X-Trino-User header
+        // would be an impersonation request (platform#311), so it must not be sent.
         let on = upstream_headers("dev", true, Some(&p));
-        assert_eq!(on.len(), 2);
-        assert_eq!(on[0].1, "alice");
-        assert_eq!(on[1].0, reqwest::header::AUTHORIZATION);
-        assert_eq!(on[1].1, "Bearer t");
+        assert_eq!(on.len(), 1);
+        assert_eq!(on[0].0, reqwest::header::AUTHORIZATION);
+        assert_eq!(on[0].1, "Bearer t");
 
         let off = upstream_headers("dev", false, Some(&p));
         assert_eq!(off.len(), 1);
+        assert_eq!(off[0].0.as_str(), "x-trino-user");
         assert_eq!(off[0].1, "alice");
+    }
+
+    #[test]
+    fn cancel_on_drop_sends_bearer_without_user() {
+        let client = reqwest::Client::new();
+        let req = cancel_request(&client, "http://example/".into(), "alice", Some("Bearer t"))
+            .build()
+            .unwrap();
+        assert!(req.headers().get("x-trino-user").is_none());
+        assert_eq!(req.headers().get("authorization").unwrap(), "Bearer t");
+
+        let dev = cancel_request(&client, "http://example/".into(), "dev", None)
+            .build()
+            .unwrap();
+        assert_eq!(dev.headers().get("x-trino-user").unwrap(), "dev");
+        assert!(dev.headers().get("authorization").is_none());
+    }
+
+    #[test]
+    fn dev_mode_still_sends_the_user_header() {
+        // No bearer forwarded: Trino has no authentication and trusts the header.
+        let h = upstream_headers("dev", false, Some(&alice(Some("t"))));
+        assert_eq!(h.len(), 1);
+        assert_eq!(h[0].0.as_str(), "x-trino-user");
+        assert_eq!(h[0].1, "alice");
+
+        // Nobody signed in: the dev user.
+        let h = upstream_headers("dev", true, None);
+        assert_eq!(h.len(), 1);
+        assert_eq!(h[0].1, "dev");
     }
 
     #[test]
@@ -639,7 +717,9 @@ mod tests {
             "nova-sql-editor"
         );
         assert_eq!(req.headers().get("x-trino-client-tags").unwrap(), "nova");
-        assert_eq!(req.headers().get("x-trino-user").unwrap(), "alice");
+        // A forwarded token is the identity; no impersonation header (platform#311).
+        assert!(req.headers().get("x-trino-user").is_none());
+        assert_eq!(req.headers().get("authorization").unwrap(), "Bearer t");
         assert_eq!(req.headers().get("content-type").unwrap(), "text/plain");
 
         // Polls and cancels carry the identity but not the source (the engine takes it from the POST).
@@ -660,10 +740,9 @@ mod tests {
         let req = trino_request(&state, Some(&p), state.http.get("http://example/"))
             .build()
             .unwrap();
-        assert_eq!(
-            req.headers().get("x-trino-user").unwrap(),
-            "alice",
-            "polls carry the caller, not the dev user"
+        assert!(
+            req.headers().get("x-trino-user").is_none(),
+            "a forwarded token must not be combined with an impersonation header"
         );
         assert_eq!(
             req.headers().get(reqwest::header::AUTHORIZATION).unwrap(),

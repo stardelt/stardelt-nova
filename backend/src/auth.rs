@@ -182,6 +182,9 @@ pub struct OidcConfig {
     pub public_url: String,
     pub claims: ClaimConfig,
     pub session_secret: Secret,
+    /// The public client a command line signs in with (device flow); `GET /api/auth/config`
+    /// tells it to the client. `None` when `NOVA_OIDC_DEVICE_CLIENT_ID` is unset or blank.
+    pub device_client_id: Option<String>,
 }
 
 impl OidcConfig {
@@ -307,6 +310,7 @@ impl AuthMode {
             public_url,
             claims,
             session_secret: Secret::new(session_secret),
+            device_client_id: var("NOVA_OIDC_DEVICE_CLIENT_ID"),
         })))
     }
 }
@@ -1316,16 +1320,32 @@ impl AuthState {
     }
 }
 
+/// The state of [`require_auth`]: the identity provider, plus the app state the person
+/// directory (`people::touch`) writes through. One value because `from_fn_with_state`
+/// takes a single state type.
+#[derive(Clone)]
+pub struct AuthContext {
+    pub auth: Arc<AuthState>,
+    pub app: Arc<crate::AppState>,
+}
+
 /// `route_layer` middleware for every protected `/api/*` route in `oidc` mode.
 pub async fn require_auth(
-    State(auth): State<Arc<AuthState>>,
+    State(ctx): State<AuthContext>,
     mut req: Request,
     next: Next,
 ) -> Response {
-    match auth.authenticate(req.headers()).await {
+    match ctx.auth.authenticate(req.headers()).await {
         Ok((principal, facts)) => {
+            // The directory is best effort and must not add latency to the request: the
+            // token's identity is copied into a task and the request goes on.
+            let identity = principal.identity.clone();
             req.extensions_mut().insert(principal);
             req.extensions_mut().insert(facts);
+            let app = ctx.app.clone();
+            tokio::spawn(async move {
+                crate::people::touch(&app, &identity).await;
+            });
             next.run(req).await
         }
         Err(e) => {
@@ -1684,12 +1704,45 @@ async fn logout(State(auth): State<Arc<AuthState>>, headers: HeaderMap) -> Respo
     no_store((jar, Redirect::to(&target)))
 }
 
+/// `GET /api/auth/config`: what a client needs to start a sign-in of its own.
+#[derive(Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthConfig {
+    /// `oidc` (sign-in is required) or `dev` (Nova answers without one).
+    pub mode: &'static str,
+    /// The identity provider's realm address; `null` in `dev` mode.
+    pub issuer: Option<String>,
+    /// The public client a command line signs in with (device flow); `null` when none is set up.
+    pub device_client_id: Option<String>,
+}
+
+/// How to sign in from a command line. Outside sign-in like the rest of `/api/auth/*`: it names
+/// the identity provider and the public client, never a secret.
+#[utoipa::path(
+    get,
+    operation_id = "auth_config",
+    path = "/api/auth/config",
+    tag = "public",
+    description = "How to sign in from a command line: the identity provider's address and the public client for the device flow. It answers without sign-in and carries no secret.",
+    responses(
+        (status = 200, description = "The sign-in mode and, in `oidc` mode, the issuer and the device client", body = AuthConfig),
+    )
+)]
+pub(crate) async fn config(State(auth): State<Arc<AuthState>>) -> Json<AuthConfig> {
+    Json(AuthConfig {
+        mode: "oidc",
+        issuer: Some(auth.config.issuer.clone()),
+        device_client_id: auth.config.device_client_id.clone(),
+    })
+}
+
 /// `/api/auth/*` in `oidc` mode.
 pub fn router<S: Clone + Send + Sync + 'static>(auth: Arc<AuthState>) -> Router<S> {
     Router::new()
         .route("/login", get(login))
         .route("/callback", get(callback))
         .route("/logout", post(logout))
+        .route("/config", get(config))
         .with_state(auth)
 }
 
@@ -1701,6 +1754,16 @@ pub fn dev_router<S: Clone + Send + Sync + 'static>() -> Router<S> {
     Router::new()
         .route("/login", get(dev_login))
         .route("/logout", post(|| async { Redirect::to("/") }))
+        .route(
+            "/config",
+            get(|| async {
+                Json(AuthConfig {
+                    mode: "dev",
+                    issuer: None,
+                    device_client_id: None,
+                })
+            }),
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -2151,6 +2214,47 @@ mod tests {
         ("NOVA_SESSION_SECRET", "0123456789abcdef0123456789abcdef!"),
         ("NOVA_PUBLIC_URL", "https://nova.example.com/"),
     ];
+
+    #[test]
+    fn auth_config_device_client_is_optional() {
+        let with = |extra: &[(&'static str, &'static str)]| {
+            let mut pairs = FULL.to_vec();
+            pairs.extend_from_slice(extra);
+            let Ok(AuthMode::Oidc(c)) = AuthMode::from_lookup(env(&pairs)) else {
+                panic!()
+            };
+            c.device_client_id
+        };
+        assert_eq!(with(&[]), None);
+        assert_eq!(with(&[("NOVA_OIDC_DEVICE_CLIENT_ID", "  ")]), None);
+        assert_eq!(
+            with(&[("NOVA_OIDC_DEVICE_CLIENT_ID", " stardelt-dev ")]).as_deref(),
+            Some("stardelt-dev")
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_config_names_the_issuer_without_sign_in() {
+        let app = app(test_auth());
+        let (status, body) = call(&app, "/api/auth/config", &[]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            serde_json::from_str::<Value>(&body).unwrap(),
+            json!({ "mode": "oidc", "issuer": ISS, "deviceClientId": null })
+        );
+        assert!(!body.contains("s3cret"), "no secret in the answer: {body}");
+    }
+
+    #[tokio::test]
+    async fn auth_config_in_dev_mode_names_no_issuer() {
+        let app = Router::new().nest("/api", Router::new().nest("/auth", dev_router()));
+        let (status, body) = call(&app, "/api/auth/config", &[]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            serde_json::from_str::<Value>(&body).unwrap(),
+            json!({ "mode": "dev", "issuer": null, "deviceClientId": null })
+        );
+    }
 
     #[test]
     fn config_defaults_and_fail_closed() {
@@ -2809,15 +2913,16 @@ mod tests {
     }
 
     fn app(auth: Arc<AuthState>) -> Router {
+        let context = AuthContext {
+            auth: auth.clone(),
+            app: crate::router_tests::test_state(),
+        };
         let protected = Router::new()
             .route(
                 "/me",
                 get(|axum::Extension(p): axum::Extension<Principal>| async move { p.identity.sub }),
             )
-            .route_layer(axum::middleware::from_fn_with_state(
-                auth.clone(),
-                require_auth,
-            ));
+            .route_layer(axum::middleware::from_fn_with_state(context, require_auth));
         let api = Router::new()
             .route("/health", get(|| async { "ok" }))
             .merge(protected)
@@ -2914,9 +3019,13 @@ mod tests {
 
     /// The real `/api/me` behind the real `require_auth`: what a browser gets.
     fn me_app(auth: Arc<AuthState>) -> Router {
+        let context = AuthContext {
+            auth,
+            app: crate::router_tests::test_state(),
+        };
         Router::new()
             .route("/api/me", get(crate::me))
-            .route_layer(axum::middleware::from_fn_with_state(auth, require_auth))
+            .route_layer(axum::middleware::from_fn_with_state(context, require_auth))
             .with_state(crate::router_tests::test_state())
     }
 
