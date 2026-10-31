@@ -7228,6 +7228,14 @@
           "sql"
         ],
         "properties": {
+          "maxRows": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "The most rows to keep, 1 to 100 000 (the default and the cap). A longer result is cut here, the query\nis cancelled in the engine and the statement ends `SUCCEEDED` with `truncated: true`.",
+            "minimum": 0
+          },
           "sql": {
             "type": "string",
             "description": "One SQL statement, run with the caller's identity."
