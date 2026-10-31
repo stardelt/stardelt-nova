@@ -3985,7 +3985,7 @@
         "tags": [
           "public"
         ],
-        "description": "Run one SQL statement as the caller and return the whole result. Synchronous: the call returns when the query ends. At most 50 000 rows are returned; past that `truncated` is true and the rows are a prefix.",
+        "description": "Run one SQL statement as the caller and return the whole result. Synchronous: the call returns when the query ends. At most 50 000 rows or about 64 MiB of data are returned; past that `truncated` is true and the rows are a prefix.",
         "operationId": "query_run",
         "requestBody": {
           "content": {
@@ -6780,7 +6780,7 @@
           },
           "truncated": {
             "type": "boolean",
-            "description": "True when rows were cut at [`MAX_ROWS`]: the result is a prefix, not the\nwhole answer. The UI says so instead of showing a silent partial table."
+            "description": "True when rows were cut at [`MAX_ROWS`] or [`MAX_BYTES`]: the result is a prefix, not the\nwhole answer. The UI says so instead of showing a silent partial table."
           }
         }
       },
