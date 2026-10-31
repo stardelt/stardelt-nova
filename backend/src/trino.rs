@@ -37,7 +37,7 @@ pub struct QueryResult {
     /// The engine's statistics object, passed through unchanged.
     #[schema(value_type = Option<Object>)]
     pub stats: Option<Value>,
-    /// True when rows were cut at [`MAX_ROWS`]: the result is a prefix, not the
+    /// True when rows were cut at [`MAX_ROWS`] or [`MAX_BYTES`]: the result is a prefix, not the
     /// whole answer. The UI says so instead of showing a silent partial table.
     pub truncated: bool,
 }
@@ -72,14 +72,36 @@ pub(crate) struct TrinoResponse {
 /// result is cut to exactly this many rows, not approximately.
 const MAX_ROWS: usize = 50_000;
 
-/// Cut `rows` to [`MAX_ROWS`]; true when anything was cut.
-fn apply_row_cap(rows: &mut Vec<Vec<Value>>) -> bool {
-    if rows.len() > MAX_ROWS {
-        rows.truncate(MAX_ROWS);
-        true
-    } else {
-        false
+/// Rough bytes of rows one query (or one statement of the statement API) keeps; past this the result is
+/// a prefix and says `truncated`, like [`MAX_ROWS`]: a few very wide rows must not fill the memory.
+pub(crate) const MAX_BYTES: usize = 64 * 1024 * 1024;
+
+/// A rough size of a value in memory: enough to bound what is held, not an exact count.
+fn value_bytes(value: &Value) -> usize {
+    32 + match value {
+        Value::String(s) => s.len(),
+        Value::Array(a) => a.iter().map(value_bytes).sum(),
+        Value::Object(o) => o.iter().map(|(k, v)| k.len() + value_bytes(v)).sum(),
+        _ => 0,
     }
+}
+
+pub(crate) fn row_bytes(row: &[Value]) -> usize {
+    24 + row.iter().map(value_bytes).sum::<usize>()
+}
+
+/// Cut `rows` to [`MAX_ROWS`] rows and [`MAX_BYTES`] rough bytes; true when anything was cut. `from` is
+/// where the newest page starts in `rows`, and `bytes` counts the rows before it and is updated.
+fn apply_row_cap(rows: &mut Vec<Vec<Value>>, from: usize, bytes: &mut usize) -> bool {
+    for i in from..rows.len() {
+        let size = row_bytes(&rows[i]);
+        if i >= MAX_ROWS || *bytes + size > MAX_BYTES {
+            rows.truncate(i);
+            return true;
+        }
+        *bytes += size;
+    }
+    false
 }
 
 /// Headers that identify the caller to Trino; identical on the statement POST
@@ -271,6 +293,7 @@ pub async fn execute_from(
         .map_err(|e| format!("malformed Trino response: {e}"))?;
 
     let mut all_rows: Vec<Vec<Value>> = Vec::new();
+    let mut held_bytes = 0usize;
     let mut columns: Vec<Column> = Vec::new();
     let query_id = current.id.clone();
     let mut last_stats: Option<Value> = None;
@@ -299,8 +322,9 @@ pub async fn execute_from(
             }
 
             if let Some(d) = current.data.take() {
+                let from = all_rows.len();
                 all_rows.extend(d);
-                if apply_row_cap(&mut all_rows) {
+                if apply_row_cap(&mut all_rows, from, &mut held_bytes) {
                     truncated = true;
                     // Trino cancels a query on DELETE nextUri: abandon the rest
                     // server-side instead of leaving it RUNNING.
@@ -406,7 +430,7 @@ fn scrub_internal(message: &str) -> String {
     operation_id = "query_run",
     path = "/api/query",
     tag = "public",
-    description = "Run one SQL statement as the caller and return the whole result. Synchronous: the call returns when the query ends. At most 50 000 rows are returned; past that `truncated` is true and the rows are a prefix.",
+    description = "Run one SQL statement as the caller and return the whole result. Synchronous: the call returns when the query ends. At most 50 000 rows or about 64 MiB of data are returned; past that `truncated` is true and the rows are a prefix.",
     request_body = QueryRequest,
     responses(
         (status = 200, description = "The columns, the rows and the engine's query id", body = QueryResult),
@@ -783,11 +807,65 @@ mod tests {
     #[test]
     fn row_cap_cuts_to_exactly_max_rows() {
         let mut big: Vec<Vec<Value>> = (0..55_000).map(|i| vec![serde_json::json!(i)]).collect();
-        assert!(apply_row_cap(&mut big));
+        let mut bytes = 0;
+        assert!(apply_row_cap(&mut big, 0, &mut bytes));
         assert_eq!(big.len(), MAX_ROWS);
 
         let mut small: Vec<Vec<Value>> = (0..10).map(|i| vec![serde_json::json!(i)]).collect();
-        assert!(!apply_row_cap(&mut small));
+        let mut bytes = 0;
+        assert!(!apply_row_cap(&mut small, 0, &mut bytes));
         assert_eq!(small.len(), 10);
+        assert_eq!(bytes, small.iter().map(|r| row_bytes(r)).sum::<usize>());
+    }
+
+    #[tokio::test]
+    async fn a_query_whose_rows_pass_the_byte_budget_over_two_pages_is_cut_and_says_so() {
+        let wide = serde_json::json!("x".repeat(1024 * 1024));
+        let rows: Vec<Vec<Value>> = (0..40).map(|_| vec![wide.clone()]).collect();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let first = serde_json::json!({
+            "id": "q1", "nextUri": format!("{base}/v1/statement/q1/1"),
+            "columns": [{ "name": "x", "type": "varchar" }], "data": rows,
+        });
+        let second = serde_json::json!({ "id": "q1", "data": rows });
+        let engine = axum::Router::new()
+            .route(
+                "/v1/statement",
+                axum::routing::post(move || {
+                    let page = first.clone();
+                    async move { axum::Json(page) }
+                }),
+            )
+            .route(
+                "/v1/statement/q1/1",
+                axum::routing::get(move || {
+                    let page = second.clone();
+                    async move { axum::Json(page) }
+                }),
+            );
+        tokio::spawn(async move { axum::serve(listener, engine).await.unwrap() });
+        let state = crate::router_tests::test_state_with_trino(&base);
+        let result = execute(&state, "select x".into(), None).await.unwrap();
+        assert!(result.truncated);
+        assert_eq!(result.rows.len(), MAX_BYTES / row_bytes(&[wide]));
+        assert_eq!(result.row_count, result.rows.len());
+    }
+
+    #[test]
+    fn rows_past_the_byte_budget_are_cut_across_pages() {
+        let wide = serde_json::json!("x".repeat(1024 * 1024));
+        let each = row_bytes(std::slice::from_ref(&wide));
+        let per_page = MAX_BYTES / each / 2 + 1;
+        let mut rows: Vec<Vec<Value>> = (0..per_page).map(|_| vec![wide.clone()]).collect();
+        let mut bytes = 0;
+        assert!(!apply_row_cap(&mut rows, 0, &mut bytes));
+        assert_eq!(rows.len(), per_page);
+
+        let from = rows.len();
+        rows.extend((0..per_page).map(|_| vec![wide.clone()]));
+        assert!(apply_row_cap(&mut rows, from, &mut bytes));
+        assert_eq!(rows.len(), MAX_BYTES / each);
+        assert!(bytes <= MAX_BYTES);
     }
 }

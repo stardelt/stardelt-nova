@@ -34,15 +34,12 @@ use tokio::time::sleep;
 
 use crate::AppState;
 use crate::api_json::ApiJson;
-use crate::trino::{self, Column, ENGINE_UNREACHABLE, TrinoResponse};
+use crate::trino::{self, Column, ENGINE_UNREACHABLE, MAX_BYTES, TrinoResponse, row_bytes};
 
 /// Rows in one chunk.
 const CHUNK_ROWS: usize = 1_000;
 /// Rows a statement keeps; past this the statement ends `SUCCEEDED` with `truncated: true`.
 const MAX_ROWS: usize = 100_000;
-/// Rough bytes of rows one statement keeps (see [`row_bytes`]); past this the statement ends
-/// `SUCCEEDED` with `truncated: true`, like [`MAX_ROWS`]: a few very wide rows must not fill the memory.
-const MAX_BYTES: usize = 64 * 1024 * 1024;
 /// Rough bytes of rows all statements together keep; while the store holds this much a new statement
 /// is refused with `429`.
 const MAX_STORE_BYTES: usize = 512 * 1024 * 1024;
@@ -86,24 +83,10 @@ struct Statement {
     rows: Vec<Vec<Value>>,
     error: Option<String>,
     truncated: bool,
-    /// Rough bytes of `rows` (see [`row_bytes`]).
+    /// Rough bytes of `rows` (see [`trino::row_bytes`]); a statement keeps at most [`MAX_BYTES`].
     bytes: usize,
     /// The same number, shared with the store so it can add up what every statement holds.
     held: Arc<AtomicUsize>,
-}
-
-/// A rough size of a value in memory: enough to bound what a statement holds, not an exact count.
-fn value_bytes(value: &Value) -> usize {
-    32 + match value {
-        Value::String(s) => s.len(),
-        Value::Array(a) => a.iter().map(value_bytes).sum(),
-        Value::Object(o) => o.iter().map(|(k, v)| k.len() + value_bytes(v)).sum(),
-        _ => 0,
-    }
-}
-
-fn row_bytes(row: &[Value]) -> usize {
-    24 + row.iter().map(value_bytes).sum::<usize>()
 }
 
 impl Statement {
