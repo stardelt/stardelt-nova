@@ -25,3 +25,26 @@ whole form is visible. The viewport is taller than 800/740 px for the same reaso
 `finance` is the chosen catalog, `seed` is open and `nation` selected, so the switcher, the
 catalog's own namespace list and the table header are visible at once. With one catalog —
 demo mode — the switcher renders nothing and the page looks as it did before.
+
+`admin-catalogs-*.png` — the administrator's Catalogs page (stardelt-nova#251) at 1280×800
+and 360×740, dark and light, from the built UI with a stubbed `/api/admin/catalogs` for the
+four catalogs of the rollout check: `warehouse` (owner `stardelt-admins`, `stardelt-users`
+browse/select/write/create), `finance` (managed access; `stardelt-finops` owns it, `finops`
+holds browse and `analytics` select), `product` and `sandbox` (no status yet, so
+`Unknown`). The By catalog view is the default; the phone width shows the table scrolling
+inside its card. `admin-catalogs-matrix-1280-dark.png` is the same answer as a matrix:
+groups down, catalogs across, the owner prefixed in its cell and an em dash where a group
+holds nothing.
+
+`overview-metrics-*.png` — the Overview with catalog metrics (stardelt-nova#250) at
+1280×800 and 360×740, dark and light, from the built demo UI: the Catalogs and Tables
+tiles show the totals, the Catalogs card lists `warehouse` with its schemas, tables, size,
+rows and last change, and the static Iceberg tile is gone. The phone width shows the
+catalog table scrolling inside its card while the page itself does not widen.
+
+`project-footer-*.png` — the project footer (stardelt-nova#268) at 1280×800 and 360×740,
+dark and light, from the built demo UI. At the bottom of the sidebar, under the person
+block, the version that is running (`stardelt v0.1.0`, the frontend package's version,
+baked into the build) and the two links out of the product — Documentation and Source.
+The phone width shows the drawer open, because that is where the footer lives.
+

@@ -47,7 +47,7 @@ tower = { version = "0.5", features = ["util"] }
 futures = { version = "0.3", default-features = false, features = ["std"] }
 # OpenAPI description of the public API (ticket #107). utoipa is MIT/Apache-2.0;
 # annotations only — no new runtime behaviour beyond serving the document.
-utoipa = { version = "5" }
+utoipa = { version = "6" }
 # Published notebooks (`notebooks.rs`): SigV4 presigning for S3 (BSD-2-Clause) and the
 # XML parser it already depends on (Apache-2.0 OR MIT). `jiff` is rusty-s3's clock,
 # needed to sign a `ListObjectVersions` request it has no action for.

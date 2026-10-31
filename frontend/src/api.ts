@@ -45,13 +45,86 @@ export type Me = {
 export type Warehouse = { name: string; id: string }
 
 /**
+ * One SQL compute class (`GET /api/warehouses`, stardelt-nova#236): the Trino resource
+ * group a query lands in. Not the catalog warehouse of `Warehouse` above — that is the
+ * Iceberg REST catalog the SQL addresses (`me.warehouse`), this is the class the engine
+ * schedules the query into.
+ *
+ * `size` is `xs`, `small`, `medium` or `large`; `null` for the synthetic administrator row,
+ * which is not a class of its own. `running`, `queued` and `memoryShare` are the numbers
+ * the class is rendered with (the class defaults, overridden by `spec.concurrency`).
+ * `canUse` is non-authoritative: one of the caller's groups is granted the class. `yours`
+ * is the class a query will land in — the largest usable one, or the default class.
+ */
+export type SqlWarehouse = {
+  name: string
+  /** `spec.displayName`; `null` when the object carries none — show `name` then. */
+  displayName: string | null
+  size: string | null
+  running: number
+  queued: number
+  memoryShare: string
+  /** The class a query lands in when no selector matches. */
+  default: boolean
+  /** One of the caller's groups is granted this class (the engine decides, not Nova). */
+  canUse: boolean
+  /** The class this caller lands in: the largest usable one, or the default class. */
+  yours: boolean
+}
+
+/**
  * One catalog the caller may browse (`GET /api/catalog/catalogs`): the name the SQL
  * addresses and the Lakekeeper warehouse id behind it. A catalog a person may not
  * browse is not in the list at all — the engine's `SHOW CATALOGS` filters it.
+ *
+ * `layer` is the medallion layer Nova knows for the catalog (stardelt-nova#109):
+ * `bronze`, `silver` or `gold`, from the `stardelt.io/layer` label on the `Catalog`
+ * resource or the catalog's own name. The API omits it for every other catalog, and
+ * sends the list already ordered bronze, silver, gold, then alphabetically.
  */
-export type Catalog = { name: string; id: string }
+export type Catalog = { name: string; id: string; layer?: string | null }
 
 export type CatalogList = { catalogs: Catalog[]; default: string }
+
+/**
+ * One catalog's numbers (`GET /api/catalog/metrics`, stardelt-nova#249, #263), read from
+ * the catalog's Iceberg metadata rather than counted by a query. `lastCommitMs` is the
+ * newest commit among the loaded tables (null when none has one). `truncated` means
+ * `records` and `sizeBytes` cover the first 200 tables while `tables` stays exact. `error`
+ * is the sentence for a catalog whose last scan failed; its numbers are then the last good
+ * ones, or zeros for a catalog that never answered, never omitted. `updatedAt` is when
+ * those numbers were read (null while `pending`: no numbers yet, one scan is reading it).
+ * `layer` and the row order are the catalog layers of stardelt-nova#109.
+ */
+export type CatalogStat = {
+  name: string
+  layer?: string | null
+  schemas: number
+  tables: number
+  records: number
+  sizeBytes: number
+  lastCommitMs: number | null
+  truncated: boolean
+  error?: string
+  updatedAt: number | null
+  pending: boolean
+}
+
+/** The sums over the catalogs the caller may see; pending catalogs are left out. */
+export type CatalogMetricsTotals = {
+  catalogs: number
+  schemas: number
+  tables: number
+  records: number
+  sizeBytes: number
+}
+
+/** `GET /api/catalog/metrics`: one row per catalog the caller may browse, plus the sums. */
+export type CatalogMetrics = {
+  catalogs: CatalogStat[]
+  totals: CatalogMetricsTotals
+  generatedAt: number
+}
 
 export type NamespaceList = { namespaces: string[][] }
 
@@ -276,6 +349,62 @@ export type AppDetail = {
   links: AppLink[]
   /** Present only for apps Nova frames in its own UI. */
   embed?: AppEmbed
+}
+
+/**
+ * One catalog as an administrator sees it (`GET /api/admin/catalogs`, stardelt-nova#251):
+ * the `Catalog` resource's identity, owner, managed access, storage key prefix, phase and
+ * what the access-sync job last wrote. Administrator-only — everyone else gets 403.
+ * The credential reference and the bucket never leave the cluster, so they are not here.
+ */
+export type AdminCatalog = {
+  /** `metadata.name`, also the name the SQL addresses and the warehouse name. */
+  name: string
+  /** The medallion layer (stardelt-nova#109), from the label or the name; absent otherwise. */
+  layer?: string | null
+  displayName: string | null
+  description: string | null
+  /** The one owning group; ownership means `manage`, not `select`. */
+  owner: string | null
+  /** The owner cannot grant on this catalog. */
+  managedAccess: boolean
+  keyPrefix: string | null
+  /** `Ready` | `Invalid`, or `Unknown` when the access-sync job has not observed it. */
+  phase: string
+  warehouseId: string | null
+  generation: number | null
+  observedGeneration: number | null
+  resourceVersion: string | null
+  /** `spec.grants`, in the order the resource declares them: one verb per entry. */
+  grants: AdminCatalogGrant[]
+  conditions: AdminCatalogCondition[]
+}
+
+/** One declared grant: a group and one verb (`browse`, `select`, `write`, `create`, `manage`). */
+export type AdminCatalogGrant = { group: string; verb: string }
+
+/** One condition of a catalog's status, reduced to the four fields the page shows. */
+export type AdminCatalogCondition = {
+  type: 'CatalogReady' | 'GrantsReady' | 'Drift' | string
+  status: 'True' | 'False' | string
+  reason: string | null
+  message: string | null
+}
+
+/**
+ * The body of `PUT /api/admin/catalogs/{name}/access` (stardelt-nova#253): the whole
+ * `spec.owner`, `spec.managedAccess` and `spec.grants` of one `Catalog`, plus the
+ * `resourceVersion` the page read. A concurrent change answers 409 and never overwrites.
+ */
+export type CatalogAccessUpdate = {
+  /** `metadata.resourceVersion` from the row the page holds. */
+  resourceVersion: string
+  /** Exactly one group name. */
+  owner: string
+  /** The owner cannot grant on this catalog; only administrators can. */
+  managedAccess: boolean
+  /** One `{group, verb}` per group and verb, in the order the dialog shows them. */
+  grants: AdminCatalogGrant[]
 }
 
 /**
@@ -700,6 +829,8 @@ export type QueryLogItem = {
   /** QUEUED (in progress), FINISHED, FAILED or CANCELED. */
   state: string
   user: string
+  /** The person's display name; absent when Nova does not know the engine user. */
+  userName?: string | null
   source: string | null
   warehouse: string
   queryType: string | null
@@ -718,6 +849,8 @@ export type QueryLogDetail = {
   id: string
   state: string
   user: string
+  /** The person's display name; absent when Nova does not know the engine user. */
+  userName?: string | null
   source: string | null
   clientTags: string[]
   warehouse: string
@@ -807,8 +940,14 @@ export const api = {
     jpost<BreakGlassAnswer>(`/api/connections/group/${seg(group)}/${seg(name)}/break-glass`, { reason }),
   trinoCluster: ()                            => jget<unknown>('/api/trino/cluster'),
   warehouse:    ()                            => jget<Warehouse>('/api/catalog/warehouse'),
+  /** The SQL compute classes and the one the caller lands in (#236). */
+  warehouses:   ()                            => jget<SqlWarehouse[]>('/api/warehouses'),
   /** The catalogs the caller may browse and the one a request without `?catalog=` uses. */
   catalogs:     ()                            => jget<CatalogList>('/api/catalog/catalogs'),
+  /** Schemas, tables, rows, bytes and the newest commit per catalog, plus the totals (#249). */
+  catalogMetrics: ()                          => jget<CatalogMetrics>('/api/catalog/metrics'),
+  /** Read every catalog again now (administrators; 429 when a minute has not passed). */
+  refreshCatalogMetrics: ()                   => jpost<{ accepted: boolean }>('/api/catalog/metrics/refresh', {}),
   namespaces:   (catalog?: string)            => jget<NamespaceList>(catalogPath('/api/catalog/namespaces', catalog)),
   tables:       (ns: string, catalog?: string) =>
     jget<TableList>(catalogPath(`/api/catalog/namespaces/${seg(ns)}/tables`, catalog)),
@@ -866,6 +1005,11 @@ export const api = {
   embeds:       ()                            => jget<EmbedApp[]>('/api/embeds'),
   links:        ()                            => jget<AppShortcut[]>('/api/apps/links'),
   app:          (id: string)                  => jget<AppDetail>(`/api/apps/${seg(id)}`),
+  /** Every catalog of the platform namespace with its grants (administrators only, #251). */
+  adminCatalogs: ()                           => jget<AdminCatalog[]>('/api/admin/catalogs'),
+  /** Change one catalog's owner, managed access and grants (#253); the resource stays the source. */
+  putCatalogAccess: (name: string, body: CatalogAccessUpdate) =>
+    jput<AdminCatalog>(`/api/admin/catalogs/${seg(name)}/access`, body),
   workloads:    ()                            => jget<WorkloadSnapshot>('/api/workloads'),
   createNamespace: (namespace: string, catalog?: string) =>
     jpost<{ namespace: string }>(catalogPath('/api/catalog/namespaces', catalog), { namespace }),

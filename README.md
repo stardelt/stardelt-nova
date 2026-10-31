@@ -22,11 +22,14 @@ Browser
          ├─ POST /api/auth/logout      sign out here and at the IdP
          ├─ GET  /api/trino/cluster    → Trino /v1/info
          ├─ GET  /api/catalog/catalogs the catalogs the caller may browse (?catalog= names one)
+         ├─ GET  /api/catalog/metrics  what is in each of them: schemas, tables, rows, bytes, last change
+         ├─ POST /api/catalog/metrics/refresh  read every catalog again now (administrators)
          ├─ GET  /api/catalog/*        → Lakekeeper REST catalog, in the catalog ?catalog= names
          ├─ POST /api/catalog/namespaces  create schema
          ├─ GET/PUT /api/catalog/tables/:ns/:tbl/documentation  description, tags, owner, domain
          ├─ PUT  /api/catalog/tables/:ns/:tbl/columns/:column/description  one column's description
          ├─ POST /api/query            → Trino query engine
+         ├─ GET  /api/warehouses       the SQL compute classes; the one the caller uses
          ├─ GET  /api/jobs             recent activity
          ├─ GET  /api/saved-queries    the caller's saved queries (needs the state store)
          ├─ POST /api/saved-queries    save one: {title, sql, warehouse?}
@@ -39,6 +42,8 @@ Browser
          ├─ GET  /api/apps             installed apps: live status + images
          ├─ GET  /api/apps/:id         one app: workloads, facts, links, embed check
          ├─ GET  /api/workloads        workloads in Nova's namespace + read state (ok/stale/unreachable)
+         ├─ GET  /api/admin/catalogs   every Catalog and its grants (administrators only)
+         ├─ PUT  /api/admin/catalogs/:name/access  change owner, managed access and grants (administrators only)
          ├─ GET  /api/connections      the caller's connections (needs the secret store)
          ├─ POST /api/connections      create one: the values go to the store, never back
          ├─ PUT  /api/connections/…/secret  rotate fields of one connection
@@ -115,13 +120,23 @@ The platform runs several catalogs (one Lakekeeper warehouse each, rendered into
 one catalog per warehouse). **A person sees only the catalogs they may browse**, and Nova
 does not decide that itself: it asks the engine.
 
-`GET /api/catalog/catalogs` answers the caller's catalogs, sorted by name, each with its
-warehouse id, plus the default:
+`GET /api/catalog/catalogs` answers the caller's catalogs, each with its warehouse id and
+— when it is one — its medallion layer, plus the default:
 
 ```json
-{"catalogs": [{"name": "finance", "id": "5e6c…"}, {"name": "warehouse", "id": "a1b2…"}],
+{"catalogs": [{"name": "bronze", "id": "3d0a…", "layer": "bronze"},
+              {"name": "finance", "id": "5e6c…"},
+              {"name": "warehouse", "id": "a1b2…"}],
  "default": "warehouse"}
 ```
+
+The order is **bronze, silver, gold first** (in that order), then every other catalog
+alphabetically. The layer is the `stardelt.io/layer` label on the catalog's `Catalog`
+resource, and when the label is absent the catalog's own name if it is one of the three;
+labels are not sensitive, and a value that is not `bronze`, `silver` or `gold` is ignored.
+The label list is read once and cached for 60 s, so a changed label shows up within a
+minute; without a cluster connection only the name convention applies. `layer` is absent,
+not `null`, for every other catalog.
 
 Every `/api/catalog/*` route takes an optional `?catalog=<name>`; omitted, the default is
 used — the configured `NOVA_WAREHOUSE_NAME` when the caller may browse it, otherwise the
@@ -154,6 +169,129 @@ mode, a single-warehouse install — the switcher is not shown at all. Generated
 chosen catalog (`finance.seed.nation`), so a statement keeps working after it is pasted
 elsewhere; a catalog the person may not browse answers with the API's own refusal instead of
 an empty list.
+
+### Overview numbers
+
+`GET /api/catalog/metrics` answers what is in the lakehouse for the catalogs the caller may
+browse — the tile on the Overview page instead of a static "Format: Iceberg":
+
+```json
+{"catalogs": [{"name": "finance", "schemas": 1, "tables": 4, "records": 1200,
+               "sizeBytes": 524288, "lastCommitMs": 1761000000000, "truncated": false,
+               "updatedAt": 1761000000000, "pending": false}],
+ "totals": {"catalogs": 1, "schemas": 1, "tables": 4, "records": 1200, "sizeBytes": 524288},
+ "generatedAt": 1761000001234}
+```
+
+The list is the caller's own (`GET /api/catalog/catalogs`): a catalog they may not browse is
+never read and never appears. Rows carry the same `layer` and the same order — bronze,
+silver, gold first, then by name. The numbers come from each table's Iceberg metadata — the
+current snapshot's `total-records`, `total-files-size` and `timestamp-ms` — so the endpoint
+runs no query over the data. At most 200 tables per catalog are loaded: `tables` stays
+exact, `truncated: true` says `records` and `sizeBytes` are a sample. A catalog whose scan
+failed keeps its last numbers and carries an `error` sentence (zeros for one that never
+answered) rather than failing the page; only an unreachable engine or catalog is `502`, and
+no catalog open to the caller is `403` with the sentence above. Demo mode derives the
+numbers from its seeded tables.
+
+The numbers describe the catalog, not the person, so Nova reads them **in the background**:
+one round every five minutes (`NOVA_METRICS_REFRESH_SECS`), with Nova's own service token,
+two catalogs at a time, after a ten-second wait at start-up. A request never scans — it
+answers from the last numbers at once, however old they are, and `updatedAt` says when they
+were read (the Overview's "Updated 4 min ago"). A catalog that has no numbers yet — it
+appeared after the last round, or Nova just started — is listed with zeros, `pending: true`
+and `updatedAt: null`, and one background scan reads it (two requests for the same new
+catalog start one scan, and the page asks again every five seconds until it has numbers).
+`totals` leave pending rows out: zeros are not numbers. A failed refresh keeps the last
+good numbers, their `updatedAt`, and adds the sentence.
+
+An administrator can ask for a round now — the **Refresh** button on the Overview catalogs
+card — with `POST /api/catalog/metrics/refresh`: `202 {"accepted":true}` and the round runs
+in the background, one at a time, never on top of the five-minute round. At most one per
+minute; a second call answers `429 {"error":"the numbers were refreshed less than a minute
+ago"}`. A non-administrator answers `403` like every other operator route.
+
+### Catalog permissions
+
+An administrator changes a catalog's owner, managed access and grants in **Admin →
+Catalogs**: **Edit** on a row opens a dialog with the owner, the managed-access switch and
+one line per group with the five verbs (`browse`, `select`, `write`, `create`, `manage`).
+**Save** writes the change; removing every grant, or removing `stardelt-users` from
+`warehouse`, asks for a second **Confirm** because those actions hide the catalog from
+people who are not administrators.
+
+The dialog writes a JSON merge patch on the `Catalog` resource (`spec.owner`,
+`spec.managedAccess` and the whole `spec.grants` array), carrying the `resourceVersion`
+the page read. A concurrent change is a `409` and the dialog says so instead of
+overwriting; more than 30 changes per administrator in an hour is a `429`. Nova never
+writes Lakekeeper: the resource is the only state, and the access-sync job applies the new
+spec to Lakekeeper every two minutes. The row says `Applying…` until the job reports
+`status.observedGeneration` equal to the generation the save answered, then `Applied`, or
+the sync's own verdict (a group that does not exist in the realm is `UnknownGroup`; it
+grants nothing for that group).
+
+The same change is one ordinary resource edit, so kubectl or Git works exactly as the
+dialog does:
+
+```yaml
+apiVersion: stardelt.io/v1alpha1
+kind: Catalog
+metadata:
+  name: sandbox
+  namespace: stardelt
+spec:
+  lakehouseRef:
+    name: default
+  owner: stardelt-finops
+  managedAccess: true
+  grants:
+    - group: stardelt-users
+      verb: browse
+    - group: stardelt-finops
+      verb: select
+```
+
+```bash
+kubectl -n stardelt apply -f sandbox-catalog.yaml
+# or a one-field change, the same merge patch the dialog sends:
+kubectl -n stardelt patch catalog sandbox --type merge \
+  -p '{"spec":{"grants":[{"group":"stardelt-users","verb":"browse"},{"group":"stardelt-finops","verb":"select"}]}}'
+```
+
+The resource stays the source of truth. A later GitOps source or `kubectl apply` of the
+same resource overwrites a change made in the dialog; keep the manifest as the record, or
+do not reconcile this resource from both places. Nova's ServiceAccount needs `patch` on
+`catalogs.stardelt.io` for the dialog (part of the platform's `nova-pipelines` Role);
+without a cluster connection the route answers `503` and demo mode changes memory.
+
+### SQL warehouses
+
+`GET /api/warehouses` answers the `SqlWarehouse` objects of the platform namespace — the
+compute classes the platform renders into Trino resource groups — largest class first
+(`large`, `medium`, `small`, `xs`, name order inside one size):
+
+```json
+[{"name": "large", "displayName": "Large", "size": "large", "running": 6, "queued": 70,
+  "memoryShare": "70%", "default": false, "canUse": true, "yours": true}]
+```
+
+`running`, `queued` and `memoryShare` are the class defaults (xs 2/10/10 %, small
+10/100/20 %, medium 5/50/40 %, large 6/70/70 %) with each field overridden by
+`spec.concurrency`. `canUse` says one of the caller's groups is in `spec.grants`, matched by
+the exact group name. `yours` is the first usable row — the class the engine's first matching
+selector picks — or the one `default: true` class when nothing is granted. An administrator
+gets one synthetic row first (`admin` / `Administrators`, 50 running, 100 queued, 100 % of the
+memory, no size: the `admin` root group), with `yours` on it and `false` on every other row.
+
+Nova is not the authority: the engine picks the class from the authenticated identity, so
+bypassing Nova and calling Trino directly changes nothing, and a warehouse grant is scheduler
+placement rather than an admission decision. The SQL editor shows
+`Warehouse: <displayName or name> (<size>)` next to **Run**, and the Profile page shows the
+same line as `SQL warehouse`; the `title` tooltip carries the three numbers. This is not
+`me.warehouse`, which is the default **catalog** a query addresses. Without a cluster
+connection (demo mode, a local run) the answer is the one `small` class. Nova's
+ServiceAccount needs `get`/`list` on `sqlwarehouses.stardelt.io` (part of the platform's
+`nova-pipelines` Role); a cluster that refuses or fails is a `502`, never an empty list.
 
 ## Demo mode (no cluster)
 
@@ -309,6 +447,7 @@ The backend is configured entirely through environment variables:
 | `NOVA_CATALOG_CLIENT_ID` | — (required with the URL) | Confidential client id `svc-catalog-nova` (audience `lakekeeper`, stardelt-platform#282) |
 | `NOVA_CATALOG_CLIENT_SECRET` | — (required with the id) | That client's secret, from the `svc-catalog-nova` Secret (key `client-secret`). Never logged, and no error or response ever carries it |
 | `NOVA_WAREHOUSE_NAME` | `warehouse` | The **default catalog**: the Lakekeeper warehouse the catalog routes work in when a request names none and the caller may browse it. `/api/catalog/warehouse` and the dashboard facts always describe this warehouse |
+| `NOVA_METRICS_REFRESH_SECS` | `300` | How often the background refresher re-reads every catalog for `GET /api/catalog/metrics` (the Overview's numbers). Clamped to 30–3600; a value that is not a number means the default. The first round runs ten seconds after start-up, and a request never scans — it answers from the last numbers and says when they were read (`updatedAt`). Administrators can start a round with `POST /api/catalog/metrics/refresh`, at most once a minute |
 | `NOVA_SUPERSET_URL` | `http://superset:8088` | Superset base URL (probe + embed check) |
 | `NOVA_JUPYTERHUB_URL` | `http://proxy-public:80` | JupyterHub public proxy base URL (probe + embed check) |
 | `NOVA_AIRFLOW_URL` | — (empty) | Airflow API server base URL, plain HTTP in-cluster (`http://airflow-api-server:8080`). Needs `NOVA_AIRFLOW_USER` and `NOVA_AIRFLOW_PASSWORD` too; unless all three are set the pipelines API is disabled and says so. Nova signs in once as that service user (built-in role `User`, enough to read, trigger, pause and mark a run failed), keeps the 24 h token until shortly before it expires, and decides itself who may see what — Airflow cannot scope the credential to owner groups |
@@ -551,6 +690,7 @@ sign-in, never a fallback to `dev`.
 | `NOVA_OIDC_ADMIN_GROUP` | `stardelt-admins` | Group that makes a Nova admin; Keycloak's full path `/stardelt-admins` also matches. Set it to an empty value to turn the group mechanism off (nobody becomes an admin through a group). |
 | `NOVA_OIDC_ADMIN_ROLE` | = admin group | Value in the `roles` claim (Entra app roles) that makes a Nova admin. Empty turns the role mechanism off. |
 | `NOVA_OIDC_AUDIENCES` | client id | Comma-separated `aud` values accepted on bearer access tokens |
+| `NOVA_OIDC_DEVICE_CLIENT_ID` | unset | The public client (device flow) a command line signs in with; `GET /api/auth/config` (no sign-in needed) tells it, with the issuer, to `stardelt login` |
 
 **Claims.** `sub` is the identifier; display uses `preferred_username` → `email` →
 `upn` → `name`. Admin precedence: the `roles` claim is checked against

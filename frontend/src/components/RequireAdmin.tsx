@@ -4,7 +4,7 @@ import { api } from '../api'
 import { isAdmin } from '../roles'
 
 /**
- * Wrapper for admin-only routes: `apps`, `apps/:id`, `health`, `settings`.
+ * Wrapper for admin-only routes: `apps`, `apps/:id`, `admin/catalogs`, `health`, `settings`.
  *
  * A signed-in non-admin who types the URL gets an explanation and a way forward, not a
  * blank page or a half-rendered table. The honest part is *why*: the role comes from the

@@ -341,6 +341,26 @@ pub fn notebook_publish_event(
     });
 }
 
+/// One audit line per notebook delete (stardelt-nova#298): who removed which notebook and how
+/// many versions went. Never content.
+pub fn notebook_delete_event(
+    who: &crate::auth::Identity,
+    group: &str,
+    name: &str,
+    versions: usize,
+) {
+    tracing::info!(
+        target: "audit",
+        action = "delete",
+        group = %group,
+        name = %name,
+        versions,
+        actor = %who.display_name,
+        sub = %who.sub,
+        "notebook deleted"
+    );
+}
+
 /// Test-only capture of [`notebook_publish_event`]'s records, with the same reasoning as
 /// [`test_sink`]: a scoped tracing subscriber is process-global and unreliable under the
 /// parallel test runner. A record has no field that could hold notebook content.
@@ -448,6 +468,107 @@ pub fn catalog_doc_event(who: &crate::auth::Identity, table: &str, changed: &[&s
         record = ?record,
         "table documentation"
     );
+}
+
+/// One catalog-permission change: who, which catalog, the owner before and after, and the
+/// added and removed `(group, verb)` pairs with the number that stayed the same. Group names
+/// and verbs are permissions, not secrets; there is deliberately no field for the request
+/// body, a description or a storage credential (stardelt-nova#253).
+pub fn catalog_access_changed(
+    who: &crate::auth::Identity,
+    catalog: &str,
+    owner_before: Option<&str>,
+    owner_after: &str,
+    added: &[(String, String)],
+    removed: &[(String, String)],
+    unchanged: usize,
+) {
+    let added_text = pairs_text(added);
+    let removed_text = pairs_text(removed);
+    tracing::info!(
+        target: "audit",
+        action = "catalog-access-changed",
+        catalog = %catalog,
+        owner_before = owner_before.unwrap_or(""),
+        owner_after = %owner_after,
+        added = %added_text,
+        removed = %removed_text,
+        added_count = added.len(),
+        removed_count = removed.len(),
+        unchanged,
+        actor = %who.display_name,
+        sub = %who.sub,
+        "catalog access changed"
+    );
+    #[cfg(test)]
+    catalog_test_sink::push(catalog_test_sink::Record {
+        catalog: catalog.to_string(),
+        owner_before: owner_before.map(str::to_string),
+        owner_after: owner_after.to_string(),
+        added: added.to_vec(),
+        removed: removed.to_vec(),
+        unchanged,
+        actor: who.display_name.clone(),
+        sub: who.sub.clone(),
+    });
+}
+
+/// `group:verb` pairs, comma-separated, in the caller's order (sorted by the caller).
+fn pairs_text(pairs: &[(String, String)]) -> String {
+    pairs
+        .iter()
+        .map(|(group, verb)| format!("{group}:{verb}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Test-only capture of [`catalog_access_changed`]'s records, with the same reasoning as
+/// [`test_sink`]: a scoped tracing subscriber is process-global and unreliable under the
+/// parallel test runner. The record has no field a body or a canary could reach.
+#[cfg(test)]
+pub(crate) mod catalog_test_sink {
+    use std::sync::{Mutex, OnceLock};
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Record {
+        pub catalog: String,
+        pub owner_before: Option<String>,
+        pub owner_after: String,
+        pub added: Vec<(String, String)>,
+        pub removed: Vec<(String, String)>,
+        pub unchanged: usize,
+        pub actor: String,
+        pub sub: String,
+    }
+
+    static RECORDS: OnceLock<Mutex<Vec<Record>>> = OnceLock::new();
+
+    fn records() -> &'static Mutex<Vec<Record>> {
+        RECORDS.get_or_init(|| Mutex::new(Vec::new()))
+    }
+
+    pub fn push(record: Record) {
+        records()
+            .lock()
+            .expect("catalog audit test sink poisoned")
+            .push(record);
+    }
+
+    /// Drain one actor's records, leaving everybody else's for their own test.
+    pub fn take_for(sub: &str) -> Vec<Record> {
+        let mut records = records().lock().expect("catalog audit test sink poisoned");
+        let mut mine = Vec::new();
+        let mut theirs = Vec::new();
+        for record in records.drain(..) {
+            if record.sub == sub {
+                mine.push(record);
+            } else {
+                theirs.push(record);
+            }
+        }
+        *records = theirs;
+        mine
+    }
 }
 
 #[cfg(test)]

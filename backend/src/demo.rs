@@ -16,6 +16,13 @@ pub struct DemoTable {
 #[derive(Default)]
 pub struct DemoState {
     pub tables: Vec<DemoTable>,
+    /// The one catalog's administrator view after an edit through the dialog (#253).
+    /// `None` is the seeded `warehouse` row; there is no cluster and no sync in demo mode.
+    pub admin_catalog: Option<crate::admin_catalogs::AdminCatalog>,
+    /// When the in-memory lakehouse last changed: the seed, or the last upload or
+    /// transfer. The Overview reads it as "last change" (`catalog_metrics.rs`); there are
+    /// no snapshots in memory, so there is no per-table commit time.
+    pub last_write_ms: Option<i64>,
 }
 
 fn col(name: &str, ty: &str) -> Column {
@@ -243,6 +250,8 @@ impl DemoState {
                     rows: daily_rows,
                 },
             ],
+            admin_catalog: None,
+            last_write_ms: Some(crate::jobs::now_ms() as i64),
         }
     }
 
@@ -392,6 +401,7 @@ impl DemoState {
                 rows,
             }),
         }
+        self.mark_written();
         Ok(n)
     }
 
@@ -420,7 +430,13 @@ impl DemoState {
                 rows: src.rows.clone(),
             }),
         }
+        self.mark_written();
         Ok(n)
+    }
+
+    /// The demo lakehouse changed: remember when, for the Overview's "last change".
+    fn mark_written(&mut self) {
+        self.last_write_ms = Some(crate::jobs::now_ms() as i64);
     }
 }
 
@@ -736,6 +752,21 @@ mod tests {
             .unwrap();
         assert_eq!(moved, 2);
         assert!(demo.table("analytics", "zones_copy").is_some());
+    }
+
+    #[test]
+    fn writes_mark_the_demo_lakehouse_changed() {
+        let mut demo = DemoState::seed();
+        assert!(demo.last_write_ms.is_some(), "the seed is a write");
+        // A later write moves the stamp the Overview reads as "last change".
+        demo.last_write_ms = Some(0);
+        demo.upload("nyc_taxi", "zones", "csv", "zone_id,zone\n1,Manhattan")
+            .unwrap();
+        assert!(demo.last_write_ms.is_some_and(|ms| ms > 0));
+        demo.last_write_ms = Some(0);
+        demo.transfer("nyc_taxi.zones", "analytics.zones_copy", "overwrite")
+            .unwrap();
+        assert!(demo.last_write_ms.is_some_and(|ms| ms > 0));
     }
 
     #[test]

@@ -322,7 +322,11 @@ function Row({
         <td className="td px-3 text-right text-text-dim whitespace-nowrap">
           {item.outputRows != null ? rowsLabel(item.outputRows) : '—'}
         </td>
-        {shown.has('user') && <td className="td px-3 text-text-dim whitespace-nowrap">{item.user}</td>}
+        {shown.has('user') && (
+          <td className="td px-3 text-text-dim whitespace-nowrap" title={item.user}>
+            {item.userName ?? item.user}
+          </td>
+        )}
         {shown.has('source') && <td className="td px-3 text-text-dim whitespace-nowrap">{sourceLabel(item.source)}</td>}
         {shown.has('type') && <td className="td px-3 text-text-dim whitespace-nowrap">{item.queryType ?? '—'}</td>}
         {shown.has('error') && <td className="td px-3 text-bad whitespace-nowrap">{item.errorCode ?? ''}</td>}
@@ -398,6 +402,9 @@ function Details({ id }: { id: string }) {
           </button>
         </Fact>
         <Fact label="Started">{formatTime(q.startedAt ?? q.createdAt)}</Fact>
+        <Fact label="User">
+          <span title={q.user}>{q.userName ?? q.user}</span>
+        </Fact>
         <Fact label="Source">{sourceLabel(q.source)}{q.clientTags.length > 0 && <span className="text-text-mute"> · {q.clientTags.join(', ')}</span>}</Fact>
         <Fact label="Catalog and schema">{[q.catalog, q.schema].filter(Boolean).join('.') || '—'}</Fact>
       </dl>
