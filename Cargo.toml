@@ -21,8 +21,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 thiserror = "2"
-# OIDC (auth.rs). jsonwebtoken 9 verifies with `ring`, which rustls already brings in.
-jsonwebtoken = { version = "9.3", default-features = false }
+# OIDC (auth.rs). 11 requires an explicit crypto provider: with
+# `default-features = false` nothing selects one and every decode panics with
+# "Could not automatically determine the process-level CryptoProvider".
+# `rust_crypto` is the pure-Rust backend (no C toolchain, no aws-lc-rs build);
+# `use_pem` keeps the PEM parsing the tests' keys rely on.
+jsonwebtoken = { version = "11.1", default-features = false, features = ["rust_crypto", "use_pem"] }
 axum-extra = { version = "0.12", default-features = false, features = ["cookie-signed", "cookie-key-expansion"] }
 base64 = "0.23"
 getrandom = "0.4"
