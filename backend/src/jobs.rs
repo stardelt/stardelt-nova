@@ -13,7 +13,7 @@ use crate::AppState;
 
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, utoipa::ToSchema)]
 pub struct Job {
     pub id: String,
     pub kind: String,
@@ -82,6 +82,17 @@ fn visible<'a>(jobs: &'a [Job], who: Option<&crate::auth::Principal>) -> Vec<&'a
     }
 }
 
+#[utoipa::path(
+    get,
+    operation_id = "jobs_list",
+    path = "/api/jobs",
+    tag = "internal",
+    description = "The loads (`ingest_upload`) and copies (`tables_transfer`) this Nova process has run, newest first, at most the newest 200. They are kept in memory only, so a restart of Nova empties the list. A person sees their own jobs; an administrator sees all. `kind` is `load` or `transfer`, `status` is `succeeded` or `failed`, `started_at` is milliseconds since the Unix epoch, `detail` is a sentence (the row count, or why it failed) and `rows` the rows loaded. Field names are snake_case. These are not the scheduled pipelines: those are under `/api/pipelines`.",
+    responses(
+        (status = 200, description = "The caller's jobs, newest first", body = [Job]),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
+    )
+)]
 pub async fn list(
     State(s): State<Arc<AppState>>,
     caller: Option<axum::Extension<crate::auth::Principal>>,

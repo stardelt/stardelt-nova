@@ -2445,6 +2445,91 @@
         }
       }
     },
+    "/api/ingest/upload": {
+      "post": {
+        "tags": [
+          "internal"
+        ],
+        "description": "Load a CSV or JSON text into the table `namespace.table` of the `warehouse` catalog: the whole file is the string `content` of the request. `format` is `csv` (the default; any value except `json` is read as CSV) or `json` (an array of objects). Column types are inferred from the values. The rows are built in a staging table first and then replace the target, so an existing table of that name is replaced, not appended to. The statements run with the caller's own identity, so the engine's permissions apply. Every call is recorded as a job (`job_id`, listed by `GET /api/jobs`). A file that cannot be read or a statement the engine refuses is a 400 with a sentence, and the job is recorded as failed. In demo mode the rows go into an in-memory lakehouse.",
+        "operationId": "ingest_upload",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UploadRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The table was loaded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The file could not be read or the engine refused a statement",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/jobs": {
+      "get": {
+        "tags": [
+          "internal"
+        ],
+        "description": "The loads (`ingest_upload`) and copies (`tables_transfer`) this Nova process has run, newest first, at most the newest 200. They are kept in memory only, so a restart of Nova empties the list. A person sees their own jobs; an administrator sees all. `kind` is `load` or `transfer`, `status` is `succeeded` or `failed`, `started_at` is milliseconds since the Unix epoch, `detail` is a sentence (the row count, or why it failed) and `rows` the rows loaded. Field names are snake_case. These are not the scheduled pipelines: those are under `/api/pipelines`.",
+        "operationId": "jobs_list",
+        "responses": {
+          "200": {
+            "description": "The caller's jobs, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Job"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/me": {
       "get": {
         "tags": [
@@ -5053,6 +5138,57 @@
         }
       }
     },
+    "/api/transfer": {
+      "post": {
+        "tags": [
+          "internal"
+        ],
+        "description": "Copy one table of the `warehouse` catalog into another. `source` and `target` are `namespace.table`. `mode` is `overwrite` (the default: the target is dropped and rebuilt from the source) or `append` (rows are added to the target). Overwriting a table with itself is refused, because the copy would read from a table that no longer exists; appending to itself is allowed. The statements run with the caller's own identity, so the engine's permissions apply. The answer counts the rows now in the target. Every call is recorded as a job (`job_id`, listed by `GET /api/jobs`). A refusal or an engine error is a 400 with a sentence, and the job is recorded as failed.",
+        "operationId": "tables_transfer",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TransferRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The table was copied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransferResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The mode, a table name or the copy was refused",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/trino/cluster": {
       "get": {
         "tags": [
@@ -6292,6 +6428,51 @@
           "status": {
             "type": "string",
             "description": "Always `ok`."
+          }
+        }
+      },
+      "Job": {
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "title",
+          "status",
+          "started_at"
+        ],
+        "properties": {
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "rows": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "started_at": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "status": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "user": {
+            "type": "string"
           }
         }
       },
@@ -8427,6 +8608,48 @@
           }
         }
       },
+      "TransferRequest": {
+        "type": "object",
+        "required": [
+          "source",
+          "target"
+        ],
+        "properties": {
+          "mode": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string"
+          }
+        }
+      },
+      "TransferResult": {
+        "type": "object",
+        "required": [
+          "source",
+          "target",
+          "rows",
+          "job_id"
+        ],
+        "properties": {
+          "job_id": {
+            "type": "string"
+          },
+          "rows": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "source": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string"
+          }
+        }
+      },
       "UpdatePipelineRequest": {
         "type": "object",
         "description": "`PUT /api/pipelines/{namespace}/{name}`: change the statement, the schedule, the parameters\nand the options — or, for a notebook pipeline, the notebook, its version and its parameters.\nEvery other field of the resource stays as it is, and what the pipeline runs never changes\nkind.",
@@ -8495,6 +8718,52 @@
           "sql": {
             "type": "string",
             "description": "The statement of a statement pipeline; a notebook pipeline refuses it."
+          }
+        }
+      },
+      "UploadRequest": {
+        "type": "object",
+        "required": [
+          "namespace",
+          "table",
+          "content"
+        ],
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "format": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "table": {
+            "type": "string"
+          }
+        }
+      },
+      "UploadResult": {
+        "type": "object",
+        "required": [
+          "namespace",
+          "table",
+          "rows_loaded",
+          "job_id"
+        ],
+        "properties": {
+          "job_id": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "rows_loaded": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "table": {
+            "type": "string"
           }
         }
       },
