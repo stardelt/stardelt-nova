@@ -109,7 +109,7 @@ export default function Overview() {
         {admin && (
           <Stat label="Engine" value={String(engineState)} hint="Trino" icon="spark" tone={engineState === 'ACTIVE' ? 'ok' : undefined} />
         )}
-        <Stat label="Jobs" value={jobs.data ? String(jobs.data.length) : jobs.isError ? '—' : '…'} hint="recent activity" icon="clock" />
+        <Stat label="Activity" value={jobs.data ? String(jobs.data.length) : jobs.isError ? '—' : '…'} hint="recent queries, loads and transfers" icon="clock" />
       </section>
 
       <CatalogsCard

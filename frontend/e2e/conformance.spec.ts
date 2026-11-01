@@ -5479,3 +5479,35 @@ test.describe('person menu', () => {
     await context.close()
   })
 })
+
+test.describe('activity', () => {
+  // stardelt-nova#352: "Jobs" sounded like the scheduled work of Pipelines. The page lists every
+  // query, load and transfer, so it is called Activity; the address stays, old links keep working.
+  test('the page that listed jobs is called Activity, at the same address', async ({ browser }) => {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 800 } })
+    const page = await context.newPage()
+    await page.route('**/api/**', (route) => {
+      const path = new URL(route.request().url()).pathname
+      if (path === '/api/me') {
+        return json(route, { user: 'alice', auth_mode: 'oidc', demo: false, warehouse: 'warehouse', is_admin: false, groups: ['analytics'] })
+      }
+      if (path === '/api/jobs') return json(route, [])
+      // Everything else is unavailable, as on an installation with nothing behind Nova: the pages show
+      // their failure states instead of choking on data of the wrong shape.
+      return json(route, { error: 'not available in this test' }, 503)
+    })
+
+    await page.goto('/jobs')
+    await expect(page.getByRole('heading', { name: 'Activity', exact: true })).toBeVisible()
+    await expect(page.getByText('No activity yet.')).toBeVisible()
+    await expect(page).toHaveTitle('Activity · stardelt Nova')
+    const nav = await page.evaluate(() => [...document.querySelectorAll('nav a')].map((a) => a.textContent?.trim()))
+    expect(nav).toContain('Activity')
+    expect(nav).not.toContain('Jobs')
+
+    await page.goto('/')
+    await expect(page.getByText('recent queries, loads and transfers')).toBeVisible()
+    await expect(page.getByText('Jobs', { exact: true })).toHaveCount(0)
+    await context.close()
+  })
+})
