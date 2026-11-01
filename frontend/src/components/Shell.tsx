@@ -47,7 +47,7 @@ const groups: NavGroup[] = [
       { to: '/admin/catalogs', label: 'Catalogs', icon: 'database' },
       { to: '/apps', label: 'Apps', icon: 'grid' },
       { to: '/health', label: 'Health', icon: 'pulse' },
-      { to: '/settings', label: 'Settings', icon: 'sliders' },
+      { to: '/settings', label: 'Platform settings', icon: 'sliders' },
     ],
   },
 ]
@@ -67,7 +67,7 @@ const titles: Record<string, string> = {
   '/dashboards': 'Dashboards',
   '/notebooks': 'Notebooks',
   '/health': 'Health',
-  '/settings': 'Settings',
+  '/settings': 'Platform settings',
   '/preferences': 'Preferences',
   '/profile': 'Profile',
 }
