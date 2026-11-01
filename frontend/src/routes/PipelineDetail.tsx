@@ -4,6 +4,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import { ApiError, api, type LogLine, type PipelineDetail as PipelineDetailView, type RunView } from '../api'
 import ErrorBox from '../components/ErrorBox'
 import ScheduleDialog, { DeletePipelineDialog } from '../components/ScheduleDialog'
+import DefinitionEditor from '../components/DefinitionEditor'
 import StopRunDialog from '../components/StopRunDialog'
 import { shortVersion } from '../format'
 import { toYaml } from '../yaml'
@@ -35,6 +36,7 @@ export default function PipelineDetail() {
   const [editing, setEditing] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [showDefinition, setShowDefinition] = useState(false)
+  const [editingDefinition, setEditingDefinition] = useState(false)
 
   const detail = useQuery({
     queryKey: ['pipeline', namespace, name],
@@ -198,14 +200,20 @@ export default function PipelineDetail() {
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="min-w-0">
             <h2 className="text-lg font-semibold">Definition</h2>
-            <p className="text-text-mute text-sm mt-1">The pipeline as the document that creates it. Read-only here.</p>
+            <p className="text-text-mute text-sm mt-1">
+              The pipeline as the document that creates it.
+              {showDefinition && definition.data ? (definition.data.editable ? ' Press Edit definition to change it.' : ' Read-only here.') : ''}
+            </p>
           </div>
           <button
             type="button"
             className="btn-ghost py-1.5 text-xs"
             aria-expanded={showDefinition}
             aria-controls="pipeline-definition"
-            onClick={() => setShowDefinition(!showDefinition)}
+            onClick={() => {
+              setShowDefinition(!showDefinition)
+              setEditingDefinition(false)
+            }}
           >
             {showDefinition ? 'Hide definition' : 'Show definition'}
           </button>
@@ -223,14 +231,40 @@ export default function PipelineDetail() {
                       : 'This pipeline has a shape the form cannot edit.'}
                   </p>
                 )}
-                <pre
-                  role="region"
-                  aria-label="Definition as YAML"
-                  tabIndex={0}
-                  className="overflow-x-auto rounded border border-border bg-bg-soft p-3 font-mono text-xs"
-                >
-                  {toYaml(definition.data.document)}
-                </pre>
+                {editingDefinition ? (
+                  <DefinitionEditor
+                    key={definition.dataUpdatedAt}
+                    namespace={namespace}
+                    name={name}
+                    spec={definition.data}
+                    onClose={() => setEditingDefinition(false)}
+                    onReload={() => void definition.refetch()}
+                    onSaved={(view) => {
+                      setEditingDefinition(false)
+                      actions.clearError()
+                      actions.announce(`Saved ${view.name}.`)
+                      void queryClient.invalidateQueries({ queryKey: ['pipeline', namespace, name] })
+                      void queryClient.invalidateQueries({ queryKey: ['pipeline-spec', namespace, name] })
+                      void queryClient.invalidateQueries({ queryKey: ['pipelines'] })
+                    }}
+                  />
+                ) : (
+                  <>
+                    <pre
+                      role="region"
+                      aria-label="Definition as YAML"
+                      tabIndex={0}
+                      className="overflow-x-auto rounded border border-border bg-bg-soft p-3 font-mono text-xs"
+                    >
+                      {toYaml(definition.data.document)}
+                    </pre>
+                    {definition.data.editable && (
+                      <button type="button" className="btn-ghost py-1.5 text-xs" onClick={() => setEditingDefinition(true)}>
+                        Edit definition
+                      </button>
+                    )}
+                  </>
+                )}
               </>
             )}
           </div>

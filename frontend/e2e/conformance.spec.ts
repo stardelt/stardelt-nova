@@ -2161,6 +2161,201 @@ test.describe('pipelines', () => {
     await context.close()
   })
 
+  // The definition editor (stardelt-nova#351, slice S4b): the text is checked while it is typed,
+  // nothing is written until "Apply changes", and what is sent carries the version that was read.
+  const EDIT_OPTIONS = { retries: 1, backoffMinutes: 5, timeoutMinutes: 120, concurrency: 'Forbid' }
+  const EDIT_SQL = 'select a,\n       b\nfrom t'
+  const editSpec = (cron = '0 3 * * *', extra: Record<string, unknown> = {}) => ({
+    document: {
+      name: 'team-a',
+      ownerGroup: 'analytics',
+      sql: EDIT_SQL,
+      schedule: { cron, timezone: 'Europe/Berlin' },
+      params: { day: '2026-11-01' },
+      options: EDIT_OPTIONS,
+    },
+    resourceVersion: '7',
+    managedBy: 'nova',
+    editable: true,
+    ...extra,
+  })
+  const editYaml = (cron: string) => [
+    'name: team-a', 'ownerGroup: analytics', 'sql: |-', '  select a,', '         b', '  from t',
+    'schedule:', `  cron: "${cron}"`, '  timezone: Europe/Berlin', 'params:', '  day: "2026-11-01"',
+    'options:', '  retries: 1', '  backoffMinutes: 5', '  timeoutMinutes: 120', '  concurrency: Forbid', '',
+  ].join('\n')
+
+  /** The pipeline page of `team-a` with the spec, the check and the update stubbed. */
+  async function openEditor(browser: Browser, {
+    specs = [editSpec()],
+    check,
+    update,
+  }: {
+    specs?: unknown[]
+    check: (body: Record<string, unknown>) => unknown
+    update?: (route: Route) => void
+  }) {
+    const detail = { ...pipeline({ name: 'team-a', state: 'idle' }), runs: [], params: {}, retries: null }
+    let specReads = 0
+    const { context, page, requests } = await open(browser, {
+      rows: [detail],
+      start: `/pipelines/${NS}/team-a`,
+      read: (route, path, method) => {
+        if (method !== 'GET') return false
+        if (path === `/api/pipelines/${NS}/team-a/spec`) {
+          json(route, specs[Math.min(specReads, specs.length - 1)])
+          specReads += 1
+          return true
+        }
+        if (path === `/api/pipelines/${NS}/team-a`) {
+          json(route, detail)
+          return true
+        }
+        return false
+      },
+      write: (route, path, method) => {
+        if (method === 'POST' && path === '/api/pipelines/validate') {
+          json(route, check(JSON.parse(route.request().postData() ?? '{}')))
+          return true
+        }
+        if (method === 'PUT' && path === `/api/pipelines/${NS}/team-a` && update) {
+          update(route)
+          return true
+        }
+        return false
+      },
+    })
+    const sent = (method: string, suffix: string) =>
+      requests.filter((request) => request.method === method && pathOf(request).endsWith(suffix))
+    await page.getByRole('button', { name: 'Show definition' }).click()
+    await page.getByRole('button', { name: 'Edit definition' }).click()
+    const editor = page.getByLabel('Definition as YAML (editable)')
+    return { context, page, requests, editor, sent, specReads: () => specReads }
+  }
+  const unchanged = { ok: true, action: 'update', errors: [], changes: [], nextRuns: [] }
+
+  test('definition editor: checked while typed, reviewed, applied with the version it read', async ({ browser }) => {
+    const nextRuns = ['2026-11-02T04:00:00+01:00', '2026-11-03T04:00:00+01:00']
+    const { context, page, editor, sent } = await openEditor(browser, {
+      check: (body) =>
+        (body.schedule as { cron: string }).cron === '0 4 * * *'
+          ? { ok: true, action: 'update', errors: [], changes: ['schedule'], nextRuns }
+          : unchanged,
+      update: (route) => json(route, pipeline({ name: 'team-a' })),
+    })
+
+    await expect(editor).toHaveValue(editYaml('0 3 * * *'))
+    await expect(page.getByText('Nothing changed.')).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Apply changes' })).toBeDisabled()
+    expect(sent('PUT', '/team-a')).toHaveLength(0)
+
+    await editor.fill(editYaml('0 4 * * *'))
+    await expect(page.getByText('This changes: the schedule.')).toBeVisible()
+    await expect(page.getByText(/^Next runs: /)).toBeVisible()
+    const checks = sent('POST', '/validate')
+    expect(JSON.parse(checks[checks.length - 1].body ?? '{}')).toEqual({
+      name: 'team-a', ownerGroup: 'analytics', sql: EDIT_SQL,
+      schedule: { cron: '0 4 * * *', timezone: 'Europe/Berlin' },
+      params: { day: '2026-11-01' }, options: EDIT_OPTIONS,
+    })
+    expect(sent('PUT', '/team-a'), 'checking writes nothing').toHaveLength(0)
+
+    await page.getByRole('button', { name: 'Apply changes' }).click()
+    await expect(page.getByRole('status').filter({ hasText: 'Saved team-a.' })).toBeVisible()
+    await expect(editor).toHaveCount(0)
+    const puts = sent('PUT', '/team-a')
+    expect(puts).toHaveLength(1)
+    expect(JSON.parse(puts[0].body ?? '{}')).toEqual({
+      sql: EDIT_SQL,
+      schedule: { cron: '0 4 * * *', timezone: 'Europe/Berlin' },
+      params: { day: '2026-11-01' }, options: EDIT_OPTIONS,
+      resourceVersion: '7',
+    })
+    await context.close()
+  })
+
+  test('definition editor: a text that is not a pipeline is explained without asking Nova', async ({ browser }) => {
+    const { context, page, editor, sent } = await openEditor(browser, { check: () => unchanged })
+    await expect(page.getByText('Nothing changed.')).toBeVisible()
+    const before = sent('POST', '/validate').length
+
+    const cases: [string, RegExp][] = [
+      ['name: team-a\n\tsql: 1\n', /^Line 2: Tabs are not allowed/],
+      ['name: team-a\nshedule: x\n', /^Line 2: Unknown key "shedule"/],
+      [editYaml('0 3 * * *').replace('name: team-a', 'name: other'), /^The name cannot change here/],
+      [editYaml('0 3 * * *').replace('ownerGroup: analytics', 'ownerGroup: finance'), /^The group of a pipeline cannot change/],
+      ['- a\n- b\n', /must be a mapping/],
+    ]
+    for (const [text, message] of cases) {
+      await editor.fill(text)
+      await expect(page.getByRole('alert')).toHaveText(message)
+      await expect(page.getByRole('button', { name: 'Apply changes' })).toBeDisabled()
+    }
+    await page.waitForTimeout(800)
+    expect(sent('POST', '/validate').length, 'Nova is not asked about text that is not a pipeline').toBe(before)
+    expect(sent('PUT', '/team-a')).toHaveLength(0)
+    await context.close()
+  })
+
+  test('definition editor: Nova refuses, then a concurrent change is refused and reloaded', async ({ browser }) => {
+    let puts = 0
+    const { context, page, editor, sent, specReads } = await openEditor(browser, {
+      specs: [editSpec(), editSpec('0 5 * * *', { resourceVersion: '8' })],
+      check: (body) => {
+        const cron = (body.schedule as { cron: string }).cron
+        if (cron === '0 3 * * 9') return { ok: false, errors: [{ message: 'a cron has five fields' }], changes: [], nextRuns: [] }
+        return cron === '0 3 * * *' ? unchanged : { ok: true, action: 'update', errors: [], changes: ['schedule'], nextRuns: [] }
+      },
+      update: (route) => {
+        puts += 1
+        json(route, { error: 'the pipeline changed while you edited it: reload' }, 409)
+      },
+    })
+
+    await editor.fill(editYaml('0 3 * * 9'))
+    await expect(page.getByRole('alert')).toHaveText('a cron has five fields')
+    await expect(page.getByRole('button', { name: 'Apply changes' })).toBeDisabled()
+
+    await editor.fill(editYaml('0 4 * * *'))
+    await page.getByRole('button', { name: 'Apply changes' }).click()
+    await expect(page.getByRole('alert')).toContainText('the pipeline changed while you edited it: reload')
+    expect(puts).toBe(1)
+    expect(sent('PUT', '/team-a')).toHaveLength(1)
+    await expect(page.getByRole('button', { name: 'Apply changes' })).toBeDisabled()
+
+    expect(specReads()).toBe(1)
+    await page.getByRole('button', { name: 'Reload the definition' }).click()
+    await expect(editor).toHaveValue(editYaml('0 5 * * *'))
+    expect(specReads(), 'the definition was read again').toBe(2)
+    await expect(page.getByRole('alert')).toHaveCount(0)
+    await context.close()
+  })
+
+  test('definition editor: a pipeline Nova cannot change has no edit button', async ({ browser }) => {
+    const detail = { ...pipeline({ name: 'from-git', state: 'idle' }), runs: [], params: {}, retries: null }
+    const { context, page } = await open(browser, {
+      rows: [detail],
+      start: `/pipelines/${NS}/from-git`,
+      read: (route, path, method) => {
+        if (method !== 'GET') return false
+        if (path === `/api/pipelines/${NS}/from-git/spec`) {
+          json(route, { ...editSpec(), managedBy: 'other', editable: false })
+          return true
+        }
+        if (path === `/api/pipelines/${NS}/from-git`) {
+          json(route, detail)
+          return true
+        }
+        return false
+      },
+    })
+    await page.getByRole('button', { name: 'Show definition' }).click()
+    await expect(page.getByRole('region', { name: 'Definition as YAML' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Edit definition' })).toHaveCount(0)
+    await expect(page.getByLabel('Definition as YAML (editable)')).toHaveCount(0)
+    await context.close()
+  })
+
   test('log viewer', async ({ browser }) => {
     const failed = run({ state: 'failed', note: null })
     const detail = {
