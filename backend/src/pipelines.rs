@@ -1791,6 +1791,11 @@ pub struct ValidatePipelineResponse {
     /// The next five fire times (RFC 3339, in the schedule's zone) when the document is accepted
     /// and has a schedule.
     pub next_runs: Vec<String>,
+    /// `true` for an `update` of a pipeline that was changed after its last deploy
+    /// (`deployment.modified` of the pipeline view): applying this document overwrites that
+    /// change. Absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modified: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
@@ -3332,6 +3337,7 @@ fn not_ok(message: &str) -> ValidatePipelineResponse {
         }],
         changes: Vec::new(),
         next_runs: Vec::new(),
+        modified: None,
     }
 }
 
@@ -3350,6 +3356,7 @@ async fn validate_pipeline(
         Err(e) if e.outcome.starts_with("refused:") => return Ok(not_ok(e.fail.message())),
         Err(e) => return Err(e.fail),
     };
+    let mut modified = None;
     let (action, changes) = match resources.get(&body.name).await.map_err(resource_fail)? {
         None => ("create", Vec::new()),
         Some(existing) => {
@@ -3382,6 +3389,7 @@ async fn validate_pipeline(
             if let Some(provenance) = &body.provenance {
                 stamp_provenance(&mut updated, provenance, &who.display_name);
             }
+            modified = deployment_of(&existing).and_then(|deployment| deployment.modified);
             ("update", changes_of(&existing, &updated))
         }
     };
@@ -3403,6 +3411,7 @@ async fn validate_pipeline(
         errors: Vec::new(),
         changes,
         next_runs,
+        modified,
     })
 }
 
@@ -7834,6 +7843,84 @@ mod tests {
             .remove("stardelt.io/spec-digest");
         old["spec"]["schedule"] = json!({"cron": "5 4 * * *", "timezone": "UTC"});
         assert_eq!(deployment_of(&old).expect("stamped").modified, None);
+    }
+
+    #[tokio::test]
+    async fn the_check_says_when_an_update_would_overwrite_a_change_made_after_the_deploy() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        let namespace = crate::cluster::namespace();
+        let check = |body: CreatePipelineRequest| {
+            let resources = &resources;
+            let ada = &ada;
+            async move {
+                validate_pipeline(Some(resources), None, ada, body)
+                    .await
+                    .expect("an answer")
+            }
+        };
+
+        let mut body = create_body("daily-trips", "analytics", "select 1");
+        body.provenance = Some(provenance("shop-etl", "prod", Some("aaaaaaa")));
+        create_pipeline(
+            Some(&resources),
+            None,
+            &create_limiter(),
+            &ada,
+            body.clone(),
+        )
+        .await
+        .expect("created");
+        let same = check(body.clone()).await;
+        assert_eq!(same.modified, None, "nothing changed since the deploy");
+
+        // The form or the YAML editor changes it; the next deploy would overwrite that.
+        update_pipeline(
+            Some(&resources),
+            None,
+            None,
+            &ada,
+            &namespace,
+            "daily-trips",
+            update_body("select 2"),
+        )
+        .await
+        .expect("updated");
+        let drifted = check(body.clone()).await;
+        assert_eq!(drifted.action.as_deref(), Some("update"));
+        assert_eq!(drifted.modified, Some(true));
+
+        // A create has nothing to overwrite, and a pipeline no deploy touched has no baseline.
+        let mut fresh = create_body("other", "analytics", "select 1");
+        fresh.provenance = body.provenance.clone();
+        assert_eq!(check(fresh).await.modified, None);
+        create_pipeline(
+            Some(&resources),
+            None,
+            &create_limiter(),
+            &ada,
+            create_body("by-hand", "analytics", "select 1"),
+        )
+        .await
+        .expect("created");
+        let by_hand = check(create_body("by-hand", "analytics", "select 2")).await;
+        assert_eq!(by_hand.modified, None);
+
+        // The deploy itself clears it.
+        let mut deploy = update_body("select 1");
+        deploy.provenance = body.provenance.clone();
+        update_pipeline(
+            Some(&resources),
+            None,
+            None,
+            &ada,
+            &namespace,
+            "daily-trips",
+            deploy,
+        )
+        .await
+        .expect("updated");
+        assert_eq!(check(body).await.modified, None);
     }
 
     #[tokio::test]
