@@ -5158,6 +5158,102 @@ test.describe('overview metrics', () => {
     await context.close()
   })
 
+  // stardelt-nova#424: an instance with nothing to browse shows the commands that publish a first
+  // pipeline from Git, with this address and the person's own group filled in.
+  const EMPTY = { catalogs: [], totals: { catalogs: 0, schemas: 0, tables: 0, records: 0, sizeBytes: 0 }, generatedAt: now }
+  const GUIDE = 'https://stardelt.io/docs/guides/publish-pipelines'
+  const firstRunCard = (page: Page) =>
+    page.locator('section.card').filter({ has: page.getByRole('heading', { name: 'Publish your first pipeline from Git' }) })
+
+  /** The Overview as a non-admin in two groups; `settings` is what `GET /api/settings` answers, `puts` what is written. */
+  async function openFirstRun(browser: Browser, { metrics = EMPTY, settings = {}, settingsStatus, viewport }: {
+    metrics?: unknown
+    settings?: Record<string, unknown>
+    settingsStatus?: number
+    viewport?: { width: number; height: number }
+  } = {}) {
+    const { context, page } = await open(browser, { metrics, viewport })
+    const puts: Array<{ path: string; body: unknown }> = []
+    await page.route('**/api/me', (route) =>
+      json(route, { user: 'alice', auth_mode: 'oidc', demo: false, warehouse: 'warehouse', is_admin: false, groups: ['analysts', 'finance'] }))
+    await page.route('**/api/settings**', (route) => {
+      const request = route.request()
+      if (request.method() === 'PUT') {
+        puts.push({ path: new URL(request.url()).pathname, body: request.postDataJSON() })
+        return json(route, { key: 'first-run-card-dismissed', value: true })
+      }
+      return json(route, settingsStatus ? { error: 'the settings are not readable' } : settings, settingsStatus)
+    })
+    return { context, page, puts }
+  }
+
+  test('first_run_card_shows_the_commands_with_this_address_and_the_first_group', async ({ browser }) => {
+    const { context, page } = await openFirstRun(browser)
+    await page.goto('/')
+    const card = firstRunCard(page)
+    await expect(card).toBeVisible()
+    await expect(card.locator('pre')).toHaveJSProperty('textContent', [
+      'pip install stardelt',
+      `export STARDELT_NOVA_URL=${new URL(page.url()).origin}`,
+      'stardelt login',
+      'stardelt bundle init shop --name shop-etl --group analysts',
+      'stardelt bundle deploy shop -t dev',
+    ].join('\n'))
+    await expect(card.getByRole('link', { name: 'Read the guide' })).toHaveAttribute('href', GUIDE)
+    expect(await auditPage(page)).toEqual([])
+    await context.close()
+  })
+
+  test('first_run_card_is_hidden_when_a_table_exists_or_the_numbers_are_still_coming', async ({ browser }) => {
+    const withTables = await openFirstRun(browser, { metrics: METRICS })
+    await withTables.page.goto('/')
+    await expect(withTables.page.getByRole('table', { name: 'Catalogs you can see' })).toBeVisible()
+    await expect(firstRunCard(withTables.page)).toHaveCount(0)
+    await withTables.context.close()
+
+    // A catalog that is still being counted reads zero: that is not "no tables".
+    const counting = { catalogs: [{ ...CATALOGS[0], tables: 0, pending: true }], totals: { ...EMPTY.totals, catalogs: 1 }, generatedAt: now }
+    const waiting = await openFirstRun(browser, { metrics: counting })
+    await waiting.page.goto('/')
+    await expect(waiting.page.getByText('calculating…').first()).toBeVisible()
+    await expect(firstRunCard(waiting.page)).toHaveCount(0)
+    await waiting.context.close()
+  })
+
+  test('dismissing_the_first_run_card_hides_it_and_remembers_it', async ({ browser }) => {
+    const { context, page, puts } = await openFirstRun(browser)
+    await page.goto('/')
+    await firstRunCard(page).getByRole('button', { name: 'Dismiss' }).click()
+    await expect(firstRunCard(page)).toHaveCount(0)
+    await expect.poll(() => puts).toEqual([{ path: '/api/settings/first-run-card-dismissed', body: true }])
+    await context.close()
+
+    // The next visit reads the stored setting and never shows the card.
+    const again = await openFirstRun(browser, { settings: { 'first-run-card-dismissed': true } })
+    await again.page.goto('/')
+    await expect(again.page.getByRole('heading', { name: 'Lakehouse overview' })).toBeVisible()
+    await again.page.waitForTimeout(1000)
+    await expect(firstRunCard(again.page)).toHaveCount(0)
+    expect(again.puts).toEqual([])
+    await again.context.close()
+  })
+
+  test('first_run_card_still_shows_when_the_settings_cannot_be_read', async ({ browser }) => {
+    const { context, page } = await openFirstRun(browser, { settingsStatus: 503 })
+    await page.goto('/')
+    await expect(firstRunCard(page)).toBeVisible()
+    await context.close()
+  })
+
+  test('first_run_card_fits_a_phone_and_passes_the_audit', async ({ browser }) => {
+    const { context, page } = await openFirstRun(browser, { viewport: { width: 360, height: 740 } })
+    await page.goto('/')
+    await expect(firstRunCard(page)).toBeVisible()
+    expect(await auditPage(page)).toEqual([])
+    expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1)
+    await context.close()
+  })
+
   test('error_row_keeps_old_numbers', async ({ browser }) => {
     const error = 'the catalog is not reachable'
     const catalogs = [
