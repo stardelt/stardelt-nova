@@ -15,7 +15,7 @@ use serde_json::Value;
 
 use crate::{AppState, api_json::ApiJson, demo, jobs, trino};
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, utoipa::ToSchema)]
 pub struct UploadRequest {
     pub namespace: String,
     pub table: String,
@@ -28,7 +28,7 @@ fn default_format() -> String {
     "csv".into()
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct UploadResult {
     pub namespace: String,
     pub table: String,
@@ -36,7 +36,7 @@ pub struct UploadResult {
     pub job_id: String,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, utoipa::ToSchema)]
 pub struct TransferRequest {
     pub source: String,
     pub target: String,
@@ -48,7 +48,7 @@ fn default_mode() -> String {
     "overwrite".into()
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct TransferResult {
     pub source: String,
     pub target: String,
@@ -56,6 +56,19 @@ pub struct TransferResult {
     pub job_id: String,
 }
 
+#[utoipa::path(
+    post,
+    operation_id = "ingest_upload",
+    path = "/api/ingest/upload",
+    tag = "internal",
+    description = "Load a CSV or JSON text into the table `namespace.table` of the `warehouse` catalog: the whole file is the string `content` of the request. `format` is `csv` (the default; any value except `json` is read as CSV) or `json` (an array of objects). Column types are inferred from the values. The rows are built in a staging table first and then replace the target, so an existing table of that name is replaced, not appended to. The statements run with the caller's own identity, so the engine's permissions apply. Every call is recorded as a job (`job_id`, listed by `GET /api/jobs`). A file that cannot be read or a statement the engine refuses is a 400 with a sentence, and the job is recorded as failed. In demo mode the rows go into an in-memory lakehouse.",
+    request_body = UploadRequest,
+    responses(
+        (status = 200, description = "The table was loaded", body = UploadResult),
+        (status = 400, description = "The file could not be read or the engine refused a statement", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
+    )
+)]
 pub async fn upload(
     State(s): State<Arc<AppState>>,
     caller: Option<axum::Extension<crate::auth::Principal>>,
@@ -157,6 +170,19 @@ pub async fn upload(
     }
 }
 
+#[utoipa::path(
+    post,
+    operation_id = "tables_transfer",
+    path = "/api/transfer",
+    tag = "internal",
+    description = "Copy one table of the `warehouse` catalog into another. `source` and `target` are `namespace.table`. `mode` is `overwrite` (the default: the target is dropped and rebuilt from the source) or `append` (rows are added to the target). Overwriting a table with itself is refused, because the copy would read from a table that no longer exists; appending to itself is allowed. The statements run with the caller's own identity, so the engine's permissions apply. The answer counts the rows now in the target. Every call is recorded as a job (`job_id`, listed by `GET /api/jobs`). A refusal or an engine error is a 400 with a sentence, and the job is recorded as failed.",
+    request_body = TransferRequest,
+    responses(
+        (status = 200, description = "The table was copied", body = TransferResult),
+        (status = 400, description = "The mode, a table name or the copy was refused", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
+    )
+)]
 pub async fn transfer(
     State(s): State<Arc<AppState>>,
     caller: Option<axum::Extension<crate::auth::Principal>>,

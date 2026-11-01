@@ -120,6 +120,9 @@ pub struct ErrorResponse {
         crate::apps::embeds,
         crate::cluster::list_handler,
         crate::trino_cluster,
+        crate::jobs::list,
+        crate::data::upload,
+        crate::data::transfer,
     ),
     components(schemas(
         crate::Me,
@@ -324,7 +327,7 @@ mod tests {
     /// Routes that are served but not in the document yet. This list only
     /// shrinks: document a route (add its `#[utoipa::path]`) and delete its
     /// line here. Adding a route without either fails the test below.
-    const UNDOCUMENTED: &[&str] = &["/api/ingest/upload", "/api/jobs", "/api/transfer"];
+    const UNDOCUMENTED: &[&str] = &[];
 
     /// The `.route("<path>"` literals inside the router function that starts
     /// at `marker` in `src`, each prefixed with `/api` (where every router is
@@ -525,6 +528,24 @@ mod tests {
             assert_eq!(op["operationId"], id, "{path}");
             assert_eq!(op["tags"], serde_json::json!(["internal"]), "{path}");
             assert_eq!(op["responses"].get("403").is_some(), forbidden, "{path}");
+        }
+    }
+
+    /// Loading and copying a table are for the interface: `internal`, open to every
+    /// signed-in user (the engine's own permissions decide), and the two writes are POSTs.
+    #[test]
+    fn the_data_movement_routes_are_internal_and_open_to_every_signed_in_user() {
+        let value = serde_json::to_value(document()).expect("the document is JSON");
+        for (path, method, id) in [
+            ("/api/ingest/upload", "post", "ingest_upload"),
+            ("/api/transfer", "post", "tables_transfer"),
+            ("/api/jobs", "get", "jobs_list"),
+        ] {
+            let op = &value["paths"][path][method];
+            assert_eq!(op["operationId"], id, "{path}");
+            assert_eq!(op["tags"], serde_json::json!(["internal"]), "{path}");
+            assert!(op["responses"].get("403").is_none(), "{path}");
+            assert!(op["responses"].get("401").is_some(), "{path}");
         }
     }
 
