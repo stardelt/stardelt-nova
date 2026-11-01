@@ -173,6 +173,11 @@ export default function PipelineDetail() {
                   .join(' · ')}
               </p>
             )}
+            {pipeline.deployment.modified && (
+              <p className="mt-0.5 text-xs text-warn break-words">
+                Changed since the last deploy. The next deploy of this bundle overwrites the change.
+              </p>
+            )}
           </Fact>
         )}
       </dl>

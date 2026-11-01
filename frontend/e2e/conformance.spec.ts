@@ -2367,6 +2367,7 @@ test.describe('pipelines', () => {
       deployed: detailOf('deployed', { bundle: 'shop-etl', target: 'prod', revision: commit, deployedBy: evil, deployedAt: '2026-11-01T08:00:00Z' }),
       dirty: detailOf('dirty', { bundle: 'shop-etl', target: 'dev', revision: `${commit}-dirty` }),
       bare: detailOf('bare', { bundle: 'shop-etl', target: 'test' }),
+      drifted: detailOf('drifted', { bundle: 'shop-etl', target: 'prod', revision: commit, modified: true }),
       'by-hand': detailOf('by-hand'),
     }
     const { context, page } = await open(browser, {
@@ -2385,6 +2386,7 @@ test.describe('pipelines', () => {
     await expect(fact).toContainText('shop-etl · prod · 0123abc')
     await expect(fact.locator('[title]')).toHaveAttribute('title', commit)
     await expect(fact).toContainText(`by ${evil}`)
+    await expect(fact).not.toContainText('Changed since the last deploy')
     expect(await page.evaluate(() => ({
       xss: (window as unknown as { __xss?: number }).__xss ?? 0,
       imgs: document.querySelectorAll('img[src="x"]').length,
@@ -2395,6 +2397,8 @@ test.describe('pipelines', () => {
     await page.goto(`/pipelines/${NS}/bare`)
     await expect(fact).toContainText('shop-etl · test')
     await expect(fact).not.toContainText('by ')
+    await page.goto(`/pipelines/${NS}/drifted`)
+    await expect(fact).toContainText('Changed since the last deploy. The next deploy of this bundle overwrites the change.')
     await page.goto(`/pipelines/${NS}/by-hand`)
     await expect(page.getByRole('heading', { name: 'by-hand', exact: true })).toBeVisible()
     await expect(page.getByText('Deployed from', { exact: true })).toHaveCount(0)
