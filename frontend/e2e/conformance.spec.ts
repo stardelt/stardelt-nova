@@ -3310,7 +3310,7 @@ test.describe('schedule options', () => {
 
     await dialog.getByRole('textbox', { name: 'Name', exact: true }).fill('param-run')
     await create.click()
-    expect(posted).toEqual({
+    await expect.poll(() => posted).toEqual({
       name: 'param-run',
       ownerGroup: 'analytics',
       sql: "select * from t where ds = '${params.days}'",
@@ -3403,7 +3403,7 @@ test.describe('schedule options', () => {
     await dialog.getByRole('textbox', { name: 'Name', exact: true }).fill('advanced-run')
     await dialog.getByRole('button', { name: 'Create schedule' }).click()
 
-    expect(posted).not.toBeNull()
+    await expect.poll(() => posted).not.toBeNull()
     expect((posted as Record<string, unknown>).options).toEqual({
       retries: 3,
       backoffMinutes: 10,
@@ -3843,7 +3843,7 @@ test.describe('schedule notebook', () => {
 
     await dialog.getByRole('textbox', { name: 'Name', exact: true }).fill('pinned-run')
     await dialog.getByRole('button', { name: 'Create schedule' }).click()
-    expect(posted).not.toBeNull()
+    await expect.poll(() => posted).not.toBeNull()
     expect((posted as Record<string, unknown>).notebook).toEqual({
       name: 'smoke.ipynb', objectVersion: V2, params: { days: '7' },
     })
@@ -3875,7 +3875,7 @@ test.describe('schedule notebook', () => {
     await dialog.getByRole('textbox', { name: 'Name', exact: true }).fill('notebook-run')
     await dialog.getByRole('button', { name: 'Create schedule' }).click()
 
-    expect(posted).toEqual({
+    await expect.poll(() => posted).toEqual({
       name: 'notebook-run',
       ownerGroup: 'analytics',
       notebook: { name: 'smoke.ipynb', objectVersion: V3, params: { days: '2026-10-20', region: 'us' } },
