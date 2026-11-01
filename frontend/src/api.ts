@@ -575,6 +575,11 @@ export type UpdatePipelineRequest = {
   schedule: ScheduleSpec | null
   params?: Record<string, string>
   options?: PipelineOptions
+  /**
+   * The `resourceVersion` the editor read (`pipelines_spec`): when it is not the stored one the
+   * update answers 409 and writes nothing (stardelt-nova#387).
+   */
+  resourceVersion?: string
 }
 
 /** The published notebook version a schedule pins (stardelt-nova#237). */
@@ -660,6 +665,18 @@ export type PipelineDetail = PipelineView & {
    * sends nothing; the dialog then starts from the defaults.
    */
   options?: PipelineOptionsView | null
+}
+
+/** `POST /api/pipelines/validate`: what a create or an update of this document would do, without doing it. */
+export type ValidatePipelineResponse = {
+  ok: boolean
+  /** `create` for a free name, `update` for a pipeline the caller may change; absent when `ok` is false. */
+  action?: 'create' | 'update'
+  errors: { message: string }[]
+  /** What an update would change: `statement` or `notebook`, `schedule`, `params`, `options`. */
+  changes: string[]
+  /** The next five fire times (RFC 3339) of an accepted document with a schedule. */
+  nextRuns: string[]
 }
 
 /**
@@ -1016,6 +1033,7 @@ export const api = {
     jput<PipelineView>(`/api/pipelines/${seg(ns)}/${seg(name)}`, req),
   deletePipeline: (ns: string, name: string)  => jdel(`/api/pipelines/${seg(ns)}/${seg(name)}`),
   pipeline:     (ns: string, name: string)    => jget<PipelineDetail>(`/api/pipelines/${seg(ns)}/${seg(name)}`),
+  validatePipeline: (req: CreatePipelineRequest) => jpost<ValidatePipelineResponse>('/api/pipelines/validate', req),
   pipelineSpec: (ns: string, name: string)    => jget<PipelineSpec>(`/api/pipelines/${seg(ns)}/${seg(name)}/spec`),
   startPipelineRun: (ns: string, name: string) => jpost<RunView>(`/api/pipelines/${seg(ns)}/${seg(name)}/runs`, {}),
   pausePipeline: (ns: string, name: string)   => jpost<PipelineView>(`/api/pipelines/${seg(ns)}/${seg(name)}/pause`, {}),
