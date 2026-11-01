@@ -257,8 +257,7 @@ impl Fail {
         self.status
     }
 
-    /// The sentence, for a test that inspects a refusal.
-    #[cfg(test)]
+    /// The sentence of a refusal.
     pub(crate) fn message(&self) -> &str {
         &self.message
     }
