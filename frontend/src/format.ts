@@ -25,6 +25,16 @@ export function shortVersion(id: string | null | undefined): string {
 }
 
 /**
+ * A Git commit as a person compares two: the first seven characters, and "(uncommitted changes)"
+ * when the deploy marked the working tree as dirty (`-dirty` appended to the commit).
+ */
+export function shortRevision(revision: string): string {
+  const dirty = revision.endsWith('-dirty')
+  const commit = (dirty ? revision.slice(0, -'-dirty'.length) : revision).slice(0, 7)
+  return dirty ? `${commit} (uncommitted changes)` : commit
+}
+
+/**
  * Returns `raw` only if it parses as an absolute http(s) URL, else `undefined`.
  *
  * App links come from the API (derived from `NOVA_BASE_DOMAIN`). They end up in

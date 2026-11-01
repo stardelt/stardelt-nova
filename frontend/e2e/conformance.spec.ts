@@ -2356,6 +2356,51 @@ test.describe('pipelines', () => {
     await context.close()
   })
 
+  test('deployment: a pipeline a bundle deployed says where from, one made by hand does not', async ({ browser }) => {
+    const evil = '<img src=x onerror="window.__xss=1">'
+    const commit = '0123abcdef0123abcdef0123abcdef0123abcdef'
+    const detailOf = (name: string, deployment?: Record<string, unknown>) => ({
+      ...pipeline({ name, state: 'idle', ...(deployment ? { deployment } : {}) }),
+      runs: [], params: {}, retries: null,
+    })
+    const pages: Record<string, unknown> = {
+      deployed: detailOf('deployed', { bundle: 'shop-etl', target: 'prod', revision: commit, deployedBy: evil, deployedAt: '2026-11-01T08:00:00Z' }),
+      dirty: detailOf('dirty', { bundle: 'shop-etl', target: 'dev', revision: `${commit}-dirty` }),
+      bare: detailOf('bare', { bundle: 'shop-etl', target: 'test' }),
+      'by-hand': detailOf('by-hand'),
+    }
+    const { context, page } = await open(browser, {
+      rows: Object.values(pages),
+      start: `/pipelines/${NS}/deployed`,
+      init: () => { (window as unknown as { __xss: number }).__xss = 0 },
+      read: (route, path, method) => {
+        const name = path.replace(`/api/pipelines/${NS}/`, '')
+        if (method !== 'GET' || !(name in pages)) return false
+        json(route, pages[name])
+        return true
+      },
+    })
+
+    const fact = page.locator('dl > div', { has: page.getByText('Deployed from', { exact: true }) })
+    await expect(fact).toContainText('shop-etl · prod · 0123abc')
+    await expect(fact.locator('[title]')).toHaveAttribute('title', commit)
+    await expect(fact).toContainText(`by ${evil}`)
+    expect(await page.evaluate(() => ({
+      xss: (window as unknown as { __xss?: number }).__xss ?? 0,
+      imgs: document.querySelectorAll('img[src="x"]').length,
+    }))).toEqual({ xss: 0, imgs: 0 })
+
+    await page.goto(`/pipelines/${NS}/dirty`)
+    await expect(fact).toContainText('shop-etl · dev · 0123abc (uncommitted changes)')
+    await page.goto(`/pipelines/${NS}/bare`)
+    await expect(fact).toContainText('shop-etl · test')
+    await expect(fact).not.toContainText('by ')
+    await page.goto(`/pipelines/${NS}/by-hand`)
+    await expect(page.getByRole('heading', { name: 'by-hand', exact: true })).toBeVisible()
+    await expect(page.getByText('Deployed from', { exact: true })).toHaveCount(0)
+    await context.close()
+  })
+
   test('log viewer', async ({ browser }) => {
     const failed = run({ state: 'failed', note: null })
     const detail = {
