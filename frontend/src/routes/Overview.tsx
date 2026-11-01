@@ -8,6 +8,9 @@ import { Icon } from '../components/Icon'
 import LayerBadge from '../components/LayerBadge'
 import { isAdmin } from '../roles'
 
+/** The personal setting that hides the first-run card once a person dismissed it. */
+const FIRST_RUN_KEY = 'first-run-card-dismissed'
+
 /** `1,234 rows`, and never the "1 rows" a plain template would print. */
 function countRows(n: number): string {
   return `${formatCount(n)} ${n === 1 ? 'row' : 'rows'}`
@@ -69,6 +72,20 @@ export default function Overview() {
   }
 
   const totals = metrics.data?.totals
+  // An instance with nothing to browse yet gets a card with the commands that publish a first
+  // pipeline from Git. It waits for the numbers (a catalog still being counted reads zero) and
+  // for the settings answer (no flash for someone who dismissed it), and it goes away as soon
+  // as a table exists. An unreadable setting only means the card shows.
+  const settings = useQuery({ queryKey: ['settings'], queryFn: api.settings, retry: false })
+  const [dismissed, setDismissed] = useState(false)
+  const firstRun =
+    totals !== undefined && totals.tables === 0 && !pending &&
+    (settings.isSuccess || settings.isError) &&
+    !dismissed && settings.data?.[FIRST_RUN_KEY] !== true
+  function dismissFirstRun() {
+    setDismissed(true)
+    void api.putSetting(FIRST_RUN_KEY, true).catch(() => {})
+  }
   // A 403 is the API saying no catalog is open to this person: an answer, not a failure
   // they can retry away by clicking something.
   const denied = metrics.isError && metrics.error instanceof ApiError && metrics.error.status === 403
@@ -92,6 +109,8 @@ export default function Overview() {
           <Link to="/query" className="btn-ghost"><Icon name="terminal" />New query</Link>
         </div>
       </header>
+
+      {firstRun && <FirstRunCard group={me.data?.groups?.[0] ?? 'your-group'} onDismiss={dismissFirstRun} />}
 
       <section className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <Stat
@@ -298,6 +317,47 @@ function CatalogsCard({ metrics, error, denied, admin, pending, refreshing, refr
  */
 function CellNumber({ pending, children }: { pending: boolean; children: ReactNode }) {
   return pending ? <span className="text-text-mute">calculating…</span> : <>{children}</>
+}
+
+/**
+ * The first-run card: the commands that publish a first pipeline from Git, with this
+ * instance's address and the person's own first group filled in. Text only — nothing here
+ * runs anything, and nothing is written but the one personal "dismissed" setting.
+ */
+function FirstRunCard({ group, onDismiss }: { group: string; onDismiss: () => void }) {
+  const commands = [
+    'pip install stardelt',
+    `export STARDELT_NOVA_URL=${window.location.origin}`,
+    'stardelt login',
+    `stardelt bundle init shop --name shop-etl --group ${group}`,
+    'stardelt bundle deploy shop -t dev',
+  ].join('\n')
+  return (
+    <section className="card p-5" aria-labelledby="first-run-title">
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <h2 id="first-run-title" className="text-sm font-semibold">Publish your first pipeline from Git</h2>
+          <p className="text-sm text-text-dim mt-1">
+            This instance has no tables yet. A team keeps its pipelines in Git and publishes them with one command;
+            the same commands run on your laptop and in CI.
+          </p>
+        </div>
+        <button type="button" className="btn-ghost shrink-0" onClick={onDismiss}>Dismiss</button>
+      </div>
+      <pre className="mt-3 min-w-0 whitespace-pre-wrap wrap-anywhere rounded-[8px] border border-border/70 bg-bg-soft/50 p-3 font-mono text-[11px] select-all">{commands}</pre>
+      <p className="text-xs text-text-mute mt-2">
+        If the last command says your group has no pipeline identity yet, ask an administrator.{' '}
+        <a
+          href="https://stardelt.io/docs/guides/publish-pipelines"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="underline underline-offset-2 hover:text-text"
+        >
+          Read the guide
+        </a>
+      </p>
+    </section>
+  )
 }
 
 function Stat({ label, value, hint, icon, tone }: {
