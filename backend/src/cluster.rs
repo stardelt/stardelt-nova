@@ -45,7 +45,7 @@ pub fn namespace() -> String {
 /// The list alone is not enough: an empty list means "nothing is there" *or* "the cluster
 /// did not answer", and those are very different things to show a person. `error` plus
 /// `age_seconds` (time since the last successful read) let the UI say which.
-#[derive(Serialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Clone, Debug, PartialEq, utoipa::ToSchema)]
 pub struct Snapshot {
     pub workloads: Vec<Workload>,
     /// Set when the most recent read failed; the workloads above are then the last known
@@ -278,6 +278,18 @@ fn demo_workloads() -> Vec<Workload> {
 }
 
 /// `GET /api/workloads` — every workload Nova can see, with the image it runs.
+#[utoipa::path(
+    get,
+    operation_id = "workloads_list",
+    path = "/api/workloads",
+    tag = "internal",
+    description = "Every Deployment and StatefulSet of Nova's namespace, flattened to `name`, `kind`, the `image` exactly as the cluster has it (tag or digest) and the `ready` and `desired` replica counts, ordered by name. The answer says how far to trust the list: `state` is `ok` (just read), `stale` (the last read failed, so `workloads` is the last good one, `error` says why and `age_seconds` how old it is) or `unreachable` (the read failed and there never was a good one: an empty list then does NOT mean nothing runs). Reads are cached for a few seconds. Administrator-only: anybody else gets 403. Without a cluster connection (demo mode, a local run) the list is empty or the demo set. Field names are snake_case.",
+    responses(
+        (status = 200, description = "The workloads and how fresh they are", body = Snapshot),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller is not a platform administrator", body = crate::openapi::ErrorResponse),
+    )
+)]
 pub async fn list_handler(State(s): State<Arc<AppState>>) -> Json<Snapshot> {
     Json(s.workloads.snapshot(s.kube.as_ref(), s.demo).await)
 }

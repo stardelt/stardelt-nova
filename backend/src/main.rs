@@ -350,6 +350,19 @@ async fn health(State(s): State<Arc<AppState>>) -> Json<Health> {
     })
 }
 
+#[utoipa::path(
+    get,
+    operation_id = "trino_cluster",
+    path = "/api/trino/cluster",
+    tag = "internal",
+    description = "The query engine coordinator's own status page (`/v1/info`), passed through as the engine answers it: an object with `nodeVersion.version`, `environment`, `coordinator`, `starting` and `uptime`. The fields are the engine's and may change with its version; Nova adds nothing. In demo mode the answer is the fixed `{\"nodeVersion\": {\"version\": \"demo\"}, \"state\": \"ACTIVE\", \"demo\": true}`. The engine's own status code is passed through; when the engine cannot be reached the answer is 502 with a sentence. Administrator-only: anybody else gets 403.",
+    responses(
+        (status = 200, description = "The coordinator's status object, as the engine answers it", body = Object),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller is not a platform administrator", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The engine could not be reached", body = crate::openapi::ErrorResponse),
+    )
+)]
 async fn trino_cluster(State(s): State<Arc<AppState>>) -> Response {
     if s.demo {
         return Json(serde_json::json!({

@@ -118,6 +118,8 @@ pub struct ErrorResponse {
         crate::apps::links,
         crate::apps::detail,
         crate::apps::embeds,
+        crate::cluster::list_handler,
+        crate::trino_cluster,
     ),
     components(schemas(
         crate::Me,
@@ -322,13 +324,7 @@ mod tests {
     /// Routes that are served but not in the document yet. This list only
     /// shrinks: document a route (add its `#[utoipa::path]`) and delete its
     /// line here. Adding a route without either fails the test below.
-    const UNDOCUMENTED: &[&str] = &[
-        "/api/ingest/upload",
-        "/api/jobs",
-        "/api/transfer",
-        "/api/trino/cluster",
-        "/api/workloads",
-    ];
+    const UNDOCUMENTED: &[&str] = &["/api/ingest/upload", "/api/jobs", "/api/transfer"];
 
     /// The `.route("<path>"` literals inside the router function that starts
     /// at `marker` in `src`, each prefixed with `/api` (where every router is
@@ -522,6 +518,8 @@ mod tests {
             ("/api/apps/{id}", "apps_detail", true),
             ("/api/apps/links", "apps_links", false),
             ("/api/embeds", "apps_embeds", false),
+            ("/api/workloads", "workloads_list", true),
+            ("/api/trino/cluster", "trino_cluster", true),
         ] {
             let op = &value["paths"][path]["get"];
             assert_eq!(op["operationId"], id, "{path}");

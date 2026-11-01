@@ -5053,6 +5053,57 @@
         }
       }
     },
+    "/api/trino/cluster": {
+      "get": {
+        "tags": [
+          "internal"
+        ],
+        "description": "The query engine coordinator's own status page (`/v1/info`), passed through as the engine answers it: an object with `nodeVersion.version`, `environment`, `coordinator`, `starting` and `uptime`. The fields are the engine's and may change with its version; Nova adds nothing. In demo mode the answer is the fixed `{\"nodeVersion\": {\"version\": \"demo\"}, \"state\": \"ACTIVE\", \"demo\": true}`. The engine's own status code is passed through; when the engine cannot be reached the answer is 502 with a sentence. Administrator-only: anybody else gets 403.",
+        "operationId": "trino_cluster",
+        "responses": {
+          "200": {
+            "description": "The coordinator's status object, as the engine answers it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not a platform administrator",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The engine could not be reached",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/warehouses": {
       "get": {
         "tags": [
@@ -5087,6 +5138,48 @@
           },
           "502": {
             "description": "The cluster did not answer, or Nova may not list sqlwarehouses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/workloads": {
+      "get": {
+        "tags": [
+          "internal"
+        ],
+        "summary": "`GET /api/workloads` — every workload Nova can see, with the image it runs.",
+        "description": "Every Deployment and StatefulSet of Nova's namespace, flattened to `name`, `kind`, the `image` exactly as the cluster has it (tag or digest) and the `ready` and `desired` replica counts, ordered by name. The answer says how far to trust the list: `state` is `ok` (just read), `stale` (the last read failed, so `workloads` is the last good one, `error` says why and `age_seconds` how old it is) or `unreachable` (the read failed and there never was a good one: an empty list then does NOT mean nothing runs). Reads are cached for a few seconds. Administrator-only: anybody else gets 403. Without a cluster connection (demo mode, a local run) the list is empty or the demo set. Field names are snake_case.",
+        "operationId": "workloads_list",
+        "responses": {
+          "200": {
+            "description": "The workloads and how fresh they are",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Snapshot"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not a platform administrator",
             "content": {
               "application/json": {
                 "schema": {
@@ -7848,6 +7941,42 @@
           "truncated": {
             "type": "boolean",
             "description": "True when more tables match than were returned, or when the catalog has more namespaces than one\nrequest reads (100): the answer is then a prefix, so narrow the words or name the catalog."
+          }
+        }
+      },
+      "Snapshot": {
+        "type": "object",
+        "description": "What Nova knows about the namespace, and how it knows it.\n\nThe list alone is not enough: an empty list means \"nothing is there\" *or* \"the cluster\ndid not answer\", and those are very different things to show a person. `error` plus\n`age_seconds` (time since the last successful read) let the UI say which.",
+        "required": [
+          "workloads",
+          "state"
+        ],
+        "properties": {
+          "age_seconds": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Seconds since the last successful read. `None` when there never was one.",
+            "minimum": 0
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Set when the most recent read failed; the workloads above are then the last known\ngood state, not the current one."
+          },
+          "state": {
+            "type": "string",
+            "description": "`ok` | `stale` | `unreachable` — computed here rather than by the client, so the\nUI and the API cannot disagree about what an empty list means."
+          },
+          "workloads": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Workload"
+            }
           }
         }
       },
