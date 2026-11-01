@@ -662,6 +662,30 @@ export type PipelineDetail = PipelineView & {
   options?: PipelineOptionsView | null
 }
 
+/**
+ * `GET /api/pipelines/{namespace}/{name}/spec`: the editable document of one pipeline, in the shape
+ * of the body of `POST /api/pipelines` (stardelt-nova#383). `ownerGroup` and the statement are
+ * absent for a pipeline whose shape the form cannot show.
+ */
+export type PipelineDocument = {
+  name: string
+  ownerGroup?: string
+  sql?: string
+  notebook?: NotebookRequest
+  schedule?: ScheduleSpec
+  params?: Record<string, string>
+  options: PipelineOptionsView
+}
+
+export type PipelineSpec = {
+  document: PipelineDocument
+  resourceVersion: string | null
+  /** `nova` when Nova wrote the pipeline, `other` for one made with kubectl or by GitOps. */
+  managedBy: 'nova' | 'other'
+  /** True only for a pipeline Nova wrote that has the shape the form edits. */
+  editable: boolean
+}
+
 /** One task instance of a run. */
 export type TaskView = {
   taskId: string
@@ -992,6 +1016,7 @@ export const api = {
     jput<PipelineView>(`/api/pipelines/${seg(ns)}/${seg(name)}`, req),
   deletePipeline: (ns: string, name: string)  => jdel(`/api/pipelines/${seg(ns)}/${seg(name)}`),
   pipeline:     (ns: string, name: string)    => jget<PipelineDetail>(`/api/pipelines/${seg(ns)}/${seg(name)}`),
+  pipelineSpec: (ns: string, name: string)    => jget<PipelineSpec>(`/api/pipelines/${seg(ns)}/${seg(name)}/spec`),
   startPipelineRun: (ns: string, name: string) => jpost<RunView>(`/api/pipelines/${seg(ns)}/${seg(name)}/runs`, {}),
   pausePipeline: (ns: string, name: string)   => jpost<PipelineView>(`/api/pipelines/${seg(ns)}/${seg(name)}/pause`, {}),
   resumePipeline: (ns: string, name: string)  => jpost<PipelineView>(`/api/pipelines/${seg(ns)}/${seg(name)}/resume`, {}),
