@@ -7962,6 +7962,13 @@
             },
             "description": "Why not: one sentence per problem (today the first rule that refuses)."
           },
+          "modified": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "`true` for an `update` of a pipeline that was changed after its last deploy\n(`deployment.modified` of the pipeline view): applying this document overwrites that\nchange. Absent otherwise."
+          },
           "nextRuns": {
             "type": "array",
             "items": {
