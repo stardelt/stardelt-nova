@@ -4041,6 +4041,87 @@
         }
       }
     },
+    "/api/pipelines/{namespace}/{name}/spec": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "description": "The editable document of one pipeline, in the shape of the body of `pipelines_create`: `name`, `ownerGroup`, a `sql` statement or a `notebook` (file name, pinned object version, parameters), a `schedule` (`cron` and `timezone`; a resource without a zone is `UTC`), the `params` table (left out when empty) and the `options` with their defaults filled in. It is built from the resource alone, so it answers while the scheduler is down. `resourceVersion` is the resource's version; `managedBy` is `nova` or `other` (kubectl or GitOps); `editable` is true only for a pipeline Nova wrote that has one `run` task of kind `sql` or `notebook`. A pipeline that is not editable is still readable: its document then leaves out what the form cannot show. The document never holds status, annotations, a connection's secret or a token. A pipeline of another group answers 404. Answers `Cache-Control: no-store`.",
+        "operationId": "pipelines_spec",
+        "parameters": [
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "The Pipeline's namespace (Nova's own)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Pipeline name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The document, its resource version, who manages it, and whether it is editable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PipelineSpecResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token to sign in with",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such pipeline for this caller",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The cluster did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No cluster connection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/query": {
       "post": {
         "tags": [
@@ -6236,6 +6317,68 @@
         ],
         "description": "`GET /api/pipelines/{namespace}/{name}`: the view, the latest runs and the resource's\nparameters, retry policy and options."
       },
+      "PipelineDocument": {
+        "type": "object",
+        "description": "`GET /api/pipelines/{namespace}/{name}/spec`: the editable document of a pipeline, in the shape\nof the body of `pipelines_create`, so it can be edited and sent to `pipelines_validate` as it is.",
+        "required": [
+          "name",
+          "options"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "notebook": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/NotebookRequest",
+                "description": "The pinned notebook of a notebook pipeline."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "options": {
+            "$ref": "#/components/schemas/PipelineOptionsView",
+            "description": "Retries, the wait, the time limit and the run mode, defaults filled in."
+          },
+          "ownerGroup": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "params": {
+            "type": "object",
+            "description": "The values of `${params.<name>}`; left out when there are none.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "schedule": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ScheduleRequest",
+                "description": "The cron and its zone; a resource without a zone is `UTC`, as the loader reads it."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sql": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The statement of a statement pipeline."
+          }
+        }
+      },
       "PipelineListResponse": {
         "type": "object",
         "description": "`GET /api/pipelines`.",
@@ -6312,6 +6455,34 @@
           "timeoutMinutes": {
             "type": "integer",
             "format": "int64"
+          }
+        }
+      },
+      "PipelineSpecResponse": {
+        "type": "object",
+        "required": [
+          "document",
+          "managedBy",
+          "editable"
+        ],
+        "properties": {
+          "document": {
+            "$ref": "#/components/schemas/PipelineDocument"
+          },
+          "editable": {
+            "type": "boolean",
+            "description": "True when Nova may change it: Nova wrote it and it has the shape the form edits (one\n`run` task, a statement or a notebook). A pipeline that is not editable is still shown."
+          },
+          "managedBy": {
+            "type": "string",
+            "description": "`nova` when Nova wrote the pipeline, `other` for one made with kubectl or by GitOps."
+          },
+          "resourceVersion": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The resource's `resourceVersion`, for a later edit to detect a concurrent change."
           }
         }
       },
