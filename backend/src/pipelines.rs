@@ -1543,7 +1543,7 @@ fn take_create_slot(limiter: &CreateLimiter, sub: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 /// A cron expression and its IANA zone; both required when a `schedule` object is sent.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct ScheduleRequest {
     pub cron: String,
     pub timezone: String,
@@ -1614,7 +1614,7 @@ impl PipelineOptions {
 
 /// The published notebook version a schedule pins (#237): the `.ipynb` file name, the immutable
 /// object version a publish answered, and the parameters the run passes to papermill.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct NotebookRequest {
     /// `<group>/<name>` is the object key; the group is the pipeline's `ownerGroup`, so a
@@ -1737,6 +1737,43 @@ pub struct ValidatePipelineResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 pub struct ValidationIssue {
     pub message: String,
+}
+
+/// `GET /api/pipelines/{namespace}/{name}/spec`: the editable document of a pipeline, in the shape
+/// of the body of `pipelines_create`, so it can be edited and sent to `pipelines_validate` as it is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineDocument {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_group: Option<String>,
+    /// The statement of a statement pipeline.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sql: Option<String>,
+    /// The pinned notebook of a notebook pipeline.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notebook: Option<NotebookRequest>,
+    /// The cron and its zone; a resource without a zone is `UTC`, as the loader reads it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<ScheduleRequest>,
+    /// The values of `${params.<name>}`; left out when there are none.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, String>,
+    /// Retries, the wait, the time limit and the run mode, defaults filled in.
+    pub options: PipelineOptionsView,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineSpecResponse {
+    pub document: PipelineDocument,
+    /// The resource's `resourceVersion`, for a later edit to detect a concurrent change.
+    pub resource_version: Option<String>,
+    /// `nova` when Nova wrote the pipeline, `other` for one made with kubectl or by GitOps.
+    pub managed_by: String,
+    /// True when Nova may change it: Nova wrote it and it has the shape the form edits (one
+    /// `run` task, a statement or a notebook). A pipeline that is not editable is still shown.
+    pub editable: bool,
 }
 
 /// One of the caller's groups and its pipeline principal.
@@ -2385,6 +2422,75 @@ async fn pipeline_detail(
         retries: retries_of(spec),
         options: options_of(spec),
     })
+}
+
+/// The editable document of a stored pipeline (see [`PipelineDocument`]); built from the
+/// resource alone, so it needs neither Airflow nor a notebook store.
+fn spec_response(resource: &Value) -> PipelineSpecResponse {
+    let spec = spec_of(resource);
+    let kind = run_task_kind(resource);
+    let task = task_specs(spec, true).into_iter().next();
+    let (sql, notebook) = match (kind, task) {
+        (Some("sql"), Some(task)) => (task.sql, None),
+        (Some("notebook"), Some(task)) => {
+            let notebook = task
+                .notebook
+                .zip(task.object_version)
+                .map(|(name, object_version)| NotebookRequest {
+                    name,
+                    object_version,
+                    params: task.notebook_params.unwrap_or_default(),
+                });
+            (None, notebook)
+        }
+        _ => (None, None),
+    };
+    let schedule = spec.get("schedule").and_then(|schedule| {
+        let cron = schedule.get("cron")?.as_str()?;
+        let timezone = schedule
+            .get("timezone")
+            .and_then(Value::as_str)
+            .filter(|timezone| !timezone.is_empty())
+            .unwrap_or("UTC");
+        Some(ScheduleRequest {
+            cron: cron.to_string(),
+            timezone: timezone.to_string(),
+        })
+    });
+    let managed = nova_managed(resource);
+    PipelineSpecResponse {
+        document: PipelineDocument {
+            name: pipeline_name(resource).to_string(),
+            owner_group: spec
+                .get("ownerGroup")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            sql,
+            notebook,
+            schedule,
+            params: params_of(spec),
+            options: options_of(spec),
+        },
+        resource_version: resource
+            .get("metadata")
+            .and_then(|metadata| metadata.get("resourceVersion"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        managed_by: if managed { "nova" } else { "other" }.to_string(),
+        editable: managed && kind.is_some(),
+    }
+}
+
+/// `GET /api/pipelines/{namespace}/{name}/spec`: who may see a pipeline may read its document.
+async fn pipeline_spec(
+    resources: Option<&PipelineResources>,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+) -> Result<PipelineSpecResponse, Fail> {
+    let resources = resources.ok_or_else(no_cluster)?;
+    let (_, resource) = load_visible(resources, who, namespace, name).await?;
+    Ok(spec_response(&resource))
 }
 
 /// `GET …/runs/{run_id}`: the run and its tasks. The run is looked up through this pipeline's
@@ -3507,6 +3613,7 @@ pub(crate) fn router() -> Router<Arc<AppState>> {
             "/pipelines/{namespace}/{name}",
             get(detail).put(update).delete(remove),
         )
+        .route("/pipelines/{namespace}/{name}/spec", get(spec))
         .route("/pipelines/{namespace}/{name}/runs", post(trigger_run))
         .route("/pipelines/{namespace}/{name}/pause", post(pause))
         .route("/pipelines/{namespace}/{name}/resume", post(resume))
@@ -3753,6 +3860,39 @@ pub(crate) async fn remove(
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => e.into_response(),
     }
+}
+
+#[utoipa::path(
+    get,
+    operation_id = "pipelines_spec",
+    path = "/api/pipelines/{namespace}/{name}/spec",
+    tag = "public",
+    description = "The editable document of one pipeline, in the shape of the body of `pipelines_create`: `name`, `ownerGroup`, a `sql` statement or a `notebook` (file name, pinned object version, parameters), a `schedule` (`cron` and `timezone`; a resource without a zone is `UTC`), the `params` table (left out when empty) and the `options` with their defaults filled in. It is built from the resource alone, so it answers while the scheduler is down. `resourceVersion` is the resource's version; `managedBy` is `nova` or `other` (kubectl or GitOps); `editable` is true only for a pipeline Nova wrote that has one `run` task of kind `sql` or `notebook`. A pipeline that is not editable is still readable: its document then leaves out what the form cannot show. The document never holds status, annotations, a connection's secret or a token. A pipeline of another group answers 404. Answers `Cache-Control: no-store`.",
+    params(
+        ("namespace" = String, Path, description = "The Pipeline's namespace (Nova's own)"),
+        ("name" = String, Path, description = "Pipeline name"),
+    ),
+    responses(
+        (status = 200, description = "The document, its resource version, who manages it, and whether it is editable", body = PipelineSpecResponse),
+        (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such pipeline for this caller", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The cluster did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No cluster connection", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn spec(
+    signed: SignedIn,
+    Path((namespace, name)): Path<(String, String)>,
+) -> Response {
+    answer(
+        pipeline_spec(
+            resources(signed.state()).as_ref(),
+            signed.identity(),
+            &namespace,
+            &name,
+        )
+        .await,
+    )
 }
 
 #[utoipa::path(
@@ -8377,6 +8517,211 @@ mod tests {
             answers[0].0
         );
         assert_eq!(answers[0], answers[1], "validate refuses it the same way");
+    }
+
+    fn analytics_principal() -> [(&'static str, Value); 1] {
+        [(
+            "pipeline-analytics",
+            service_principal("pipeline-analytics", "analytics", Some(true)),
+        )]
+    }
+
+    #[tokio::test]
+    async fn spec_is_the_document_that_validate_accepts_unchanged() {
+        let mut stored = nova_pipeline("daily-trips", "analytics");
+        stored["spec"]["params"] = json!({ "day": "2026-11-01" });
+        stored["spec"]["tasks"][0]["sql"] = json!("select '${params.day}'");
+        let resources = memory_with(&[("daily-trips", stored)], &analytics_principal());
+        let ada = who("sub-ada", &["analytics"], false);
+        let namespace = crate::cluster::namespace();
+
+        let answer = pipeline_spec(Some(&resources), &ada, &namespace, "daily-trips")
+            .await
+            .expect("visible to its group");
+
+        assert_eq!(answer.managed_by, "nova");
+        assert!(answer.editable);
+        assert_eq!(answer.resource_version.as_deref(), Some("7"));
+        let document = answer.document;
+        assert_eq!(document.name, "daily-trips");
+        assert_eq!(document.owner_group.as_deref(), Some("analytics"));
+        assert_eq!(document.sql.as_deref(), Some("select '${params.day}'"));
+        assert_eq!(document.notebook, None);
+        assert_eq!(
+            document.schedule,
+            Some(ScheduleRequest {
+                cron: "0 3 * * *".into(),
+                timezone: "Europe/Berlin".into()
+            })
+        );
+        assert_eq!(
+            document.params,
+            BTreeMap::from([("day".to_string(), "2026-11-01".to_string())])
+        );
+        assert_eq!(document.options, default_options());
+
+        // Sent back as it is, the document is an update that changes nothing.
+        let body = CreatePipelineRequest {
+            name: document.name.clone(),
+            owner_group: document.owner_group.clone().unwrap(),
+            sql: document.sql.clone().unwrap(),
+            notebook: None,
+            schedule: document.schedule.clone(),
+            params: document.params.clone(),
+            options: Some(PipelineOptions {
+                retries: Some(document.options.retries),
+                backoff_minutes: Some(document.options.backoff_minutes),
+                timeout_minutes: Some(document.options.timeout_minutes),
+                concurrency: Some(document.options.concurrency.clone()),
+            }),
+        };
+        let verdict = validate_pipeline(Some(&resources), None, &ada, body)
+            .await
+            .expect("an answer");
+        assert!(verdict.ok, "{verdict:?}");
+        assert_eq!(verdict.action.as_deref(), Some("update"));
+        assert!(verdict.changes.is_empty(), "{:?}", verdict.changes);
+    }
+
+    #[tokio::test]
+    async fn spec_reads_a_notebook_and_a_zone_less_schedule() {
+        let mut stored = nova_pipeline("report", "analytics");
+        stored["spec"]["tasks"] = json!([{
+            "name": "run",
+            "kind": "notebook",
+            "config": {
+                "notebook": "report.ipynb",
+                "objectVersion": "v1",
+                "params": "{\"days\":\"7\"}"
+            }
+        }]);
+        stored["spec"]["schedule"] = json!({ "cron": "0 6 * * *" });
+        let resources = memory_with(&[("report", stored)], &analytics_principal());
+        let ada = who("sub-ada", &["analytics"], false);
+
+        let answer = pipeline_spec(
+            Some(&resources),
+            &ada,
+            &crate::cluster::namespace(),
+            "report",
+        )
+        .await
+        .expect("visible");
+
+        assert!(answer.editable);
+        assert_eq!(answer.document.sql, None);
+        assert_eq!(
+            answer.document.notebook,
+            Some(NotebookRequest {
+                name: "report.ipynb".into(),
+                object_version: "v1".into(),
+                params: BTreeMap::from([("days".to_string(), "7".to_string())]),
+            })
+        );
+        assert_eq!(
+            answer.document.schedule,
+            Some(ScheduleRequest {
+                cron: "0 6 * * *".into(),
+                timezone: "UTC".into()
+            }),
+            "no zone means UTC"
+        );
+    }
+
+    #[tokio::test]
+    async fn spec_shows_a_pipeline_it_does_not_let_you_edit() {
+        let mut legacy = nova_pipeline("legacy", "analytics");
+        legacy["metadata"]["labels"]
+            .as_object_mut()
+            .unwrap()
+            .remove(MANAGED_BY_LABEL);
+        let mut two_tasks = nova_pipeline("two-tasks", "analytics");
+        two_tasks["spec"]["tasks"] = json!([
+            { "name": "run", "kind": "sql", "sql": "select 1" },
+            { "name": "check", "kind": "sql", "sql": "select 2" }
+        ]);
+        let resources = memory_with(
+            &[("legacy", legacy), ("two-tasks", two_tasks)],
+            &analytics_principal(),
+        );
+        let ada = who("sub-ada", &["analytics"], false);
+        let namespace = crate::cluster::namespace();
+
+        let outside = pipeline_spec(Some(&resources), &ada, &namespace, "legacy")
+            .await
+            .expect("readable");
+        assert_eq!(outside.managed_by, "other");
+        assert!(!outside.editable, "Nova did not write it");
+        assert_eq!(outside.document.sql.as_deref(), Some("select 1"));
+
+        let odd = pipeline_spec(Some(&resources), &ada, &namespace, "two-tasks")
+            .await
+            .expect("readable");
+        assert_eq!(odd.managed_by, "nova");
+        assert!(!odd.editable, "the form edits exactly one run task");
+        assert_eq!(odd.document.sql, None, "no statement is claimed for it");
+        assert_eq!(odd.document.name, "two-tasks");
+    }
+
+    #[tokio::test]
+    async fn spec_of_another_groups_pipeline_is_404_and_needs_no_scheduler() {
+        let resources = memory_with(
+            &[("daily-trips", nova_pipeline("daily-trips", "analytics"))],
+            &analytics_principal(),
+        );
+        let eve = who("sub-eve", &["finance"], false);
+        let error = pipeline_spec(
+            Some(&resources),
+            &eve,
+            &crate::cluster::namespace(),
+            "daily-trips",
+        )
+        .await
+        .expect_err("not hers");
+        assert_eq!(error.status(), StatusCode::NOT_FOUND);
+
+        let error = pipeline_spec(None, &eve, &crate::cluster::namespace(), "daily-trips")
+            .await
+            .expect_err("no cluster");
+        assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn spec_route_answers_an_anonymous_caller_as_detail_does() {
+        let (store, _store_fake) = crate::secret_store::fake::start().await;
+        let (airflow, _airflow_fake) = fake_airflow::start().await;
+        let (trino, _fake) = fake_trino::start(None).await;
+        let app = router().with_state(test_state_at(None, airflow, store, &trino));
+
+        let mut answers = Vec::new();
+        for uri in [
+            "/pipelines/stardelt/daily",
+            "/pipelines/stardelt/daily/spec",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::CACHE_CONTROL)
+                    .and_then(|value| value.to_str().ok()),
+                Some("no-store"),
+                "{uri}"
+            );
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            answers.push((status, bytes));
+        }
+        assert_ne!(answers[0].0, StatusCode::NOT_FOUND, "detail is routed");
+        assert_eq!(
+            answers[0], answers[1],
+            "the spec route refuses it the same way"
+        );
     }
 
     #[tokio::test]
