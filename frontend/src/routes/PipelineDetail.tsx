@@ -6,6 +6,7 @@ import ErrorBox from '../components/ErrorBox'
 import ScheduleDialog, { DeletePipelineDialog } from '../components/ScheduleDialog'
 import StopRunDialog from '../components/StopRunDialog'
 import { shortVersion } from '../format'
+import { toYaml } from '../yaml'
 import {
   NOT_LOADED_NOTE,
   PipelineActions,
@@ -33,6 +34,7 @@ export default function PipelineDetail() {
   const [stopping, setStopping] = useState<RunView | null>(null)
   const [editing, setEditing] = useState(false)
   const [deleting, setDeleting] = useState(false)
+  const [showDefinition, setShowDefinition] = useState(false)
 
   const detail = useQuery({
     queryKey: ['pipeline', namespace, name],
@@ -41,6 +43,13 @@ export default function PipelineDetail() {
       const runs = query.state.data?.runs ?? []
       return runs.some((run) => run.state === 'queued' || run.state === 'running') ? 5_000 : false
     },
+  })
+
+  // The document is read when the person asks for it, not with every visit to the page.
+  const definition = useQuery({
+    queryKey: ['pipeline-spec', namespace, name],
+    queryFn: () => api.pipelineSpec(namespace, name),
+    enabled: showDefinition,
   })
 
   const actions = usePipelineActions(() =>
@@ -182,6 +191,49 @@ export default function PipelineDetail() {
               )
             })}
           </ul>
+        )}
+      </section>
+
+      <section className="card p-5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="min-w-0">
+            <h2 className="text-lg font-semibold">Definition</h2>
+            <p className="text-text-mute text-sm mt-1">The pipeline as the document that creates it. Read-only here.</p>
+          </div>
+          <button
+            type="button"
+            className="btn-ghost py-1.5 text-xs"
+            aria-expanded={showDefinition}
+            aria-controls="pipeline-definition"
+            onClick={() => setShowDefinition(!showDefinition)}
+          >
+            {showDefinition ? 'Hide definition' : 'Show definition'}
+          </button>
+        </div>
+        {showDefinition && (
+          <div id="pipeline-definition" className="mt-3 space-y-2">
+            {definition.isLoading && <p className="text-sm text-text-mute">Loading the definition…</p>}
+            {definition.isError && <ErrorBox error={definition.error} onRetry={() => void definition.refetch()} />}
+            {definition.data && (
+              <>
+                {!definition.data.editable && (
+                  <p className="text-sm text-text-dim break-words">
+                    {definition.data.managedBy === 'other'
+                      ? 'This pipeline is managed outside Nova (kubectl or GitOps); change it where it comes from.'
+                      : 'This pipeline has a shape the form cannot edit.'}
+                  </p>
+                )}
+                <pre
+                  role="region"
+                  aria-label="Definition as YAML"
+                  tabIndex={0}
+                  className="overflow-x-auto rounded border border-border bg-bg-soft p-3 font-mono text-xs"
+                >
+                  {toYaml(definition.data.document)}
+                </pre>
+              </>
+            )}
+          </div>
         )}
       </section>
 

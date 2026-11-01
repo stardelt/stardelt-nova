@@ -2022,6 +2022,145 @@ test.describe('pipelines', () => {
     await context.close()
   })
 
+  test('definition: the document as YAML, read only, read when asked for', async ({ browser }) => {
+    const detail = {
+      ...pipeline({ name: 'team-a', state: 'idle' }),
+      runs: [], params: {}, retries: null,
+    }
+    const spec = {
+      document: {
+        name: 'team-a',
+        ownerGroup: 'analytics',
+        sql: 'select a,\n       b\nfrom t',
+        schedule: { cron: '0 3 * * *', timezone: 'Europe/Berlin' },
+        params: { day: '2026-11-01' },
+        options: { retries: 1, backoffMinutes: 5, timeoutMinutes: 120, concurrency: 'Forbid' },
+      },
+      resourceVersion: '7',
+      managedBy: 'nova',
+      editable: true,
+    }
+    const { context, page, requests } = await open(browser, {
+      rows: [detail],
+      start: `/pipelines/${NS}/team-a`,
+      read: (route, path, method) => {
+        if (method !== 'GET') return false
+        if (path === `/api/pipelines/${NS}/team-a/spec`) {
+          json(route, spec)
+          return true
+        }
+        if (path === `/api/pipelines/${NS}/team-a`) {
+          json(route, detail)
+          return true
+        }
+        return false
+      },
+    })
+    const specGets = () =>
+      requests.filter((request) => request.method === 'GET' && pathOf(request).endsWith('/spec')).length
+
+    await expect(page.getByRole('heading', { name: 'team-a', exact: true })).toBeVisible()
+    expect(specGets(), 'nothing is read until the person asks').toBe(0)
+    await page.getByRole('button', { name: 'Show definition' }).click()
+    const yaml = page.getByRole('region', { name: 'Definition as YAML' })
+    await expect(yaml).toContainText('name: team-a')
+    expect(await yaml.textContent()).toBe([
+      'name: team-a',
+      'ownerGroup: analytics',
+      'sql: |-',
+      '  select a,',
+      '         b',
+      '  from t',
+      'schedule:',
+      '  cron: "0 3 * * *"',
+      '  timezone: Europe/Berlin',
+      'params:',
+      '  day: "2026-11-01"',
+      'options:',
+      '  retries: 1',
+      '  backoffMinutes: 5',
+      '  timeoutMinutes: 120',
+      '  concurrency: Forbid',
+      '',
+    ].join('\n'))
+    await expect(page.getByRole('button', { name: 'Hide definition' })).toHaveAttribute('aria-expanded', 'true')
+    expect(specGets()).toBe(1)
+    await expect(page.locator('main')).not.toContainText('managed outside Nova')
+    await expect(yaml.locator('textarea, input')).toHaveCount(0)
+
+    await page.getByRole('button', { name: 'Hide definition' }).click()
+    await expect(yaml).toHaveCount(0)
+    await page.getByRole('button', { name: 'Show definition' }).click()
+    await expect(yaml).toBeVisible()
+    expect(specGets(), 'the second opening uses what was read').toBe(1)
+    await context.close()
+  })
+
+  test('definition: a pipeline from outside Nova says so, hostile text stays text, a refusal shows its sentence', async ({ browser }) => {
+    const evil = '<img src=x onerror="window.__xss=1">'
+    const detailOf = (name: string) => ({
+      ...pipeline({ name, state: 'idle' }),
+      runs: [], params: {}, retries: null,
+    })
+    const outside = {
+      document: {
+        name: 'from-git',
+        ownerGroup: 'analytics',
+        sql: evil,
+        options: { retries: 1, backoffMinutes: 5, timeoutMinutes: 120, concurrency: 'Forbid' },
+      },
+      resourceVersion: '12',
+      managedBy: 'other',
+      editable: false,
+    }
+    const { context, page } = await open(browser, {
+      rows: [detailOf('from-git'), detailOf('hidden')],
+      start: `/pipelines/${NS}/from-git`,
+      init: () => { (window as unknown as { __xss: number }).__xss = 0 },
+      read: (route, path, method) => {
+        if (method !== 'GET') return false
+        if (path === `/api/pipelines/${NS}/from-git/spec`) {
+          json(route, outside)
+          return true
+        }
+        if (path === `/api/pipelines/${NS}/hidden/spec`) {
+          json(route, { error: 'no such pipeline' }, 404)
+          return true
+        }
+        if (path === `/api/pipelines/${NS}/from-git`) {
+          json(route, detailOf('from-git'))
+          return true
+        }
+        if (path === `/api/pipelines/${NS}/hidden`) {
+          json(route, detailOf('hidden'))
+          return true
+        }
+        return false
+      },
+    })
+
+    await page.setViewportSize({ width: 360, height: 740 })
+    await page.getByRole('button', { name: 'Show definition' }).click()
+    const yaml = page.getByRole('region', { name: 'Definition as YAML' })
+    await expect(yaml).toContainText(`sql: ${JSON.stringify(evil)}`)
+    await expect(page.locator('main')).toContainText(
+      'This pipeline is managed outside Nova (kubectl or GitOps); change it where it comes from.',
+    )
+    const state = await page.evaluate(() => ({
+      xss: (window as unknown as { __xss?: number }).__xss ?? 0,
+      imgs: document.querySelectorAll('img[src="x"]').length,
+      overflow: document.documentElement.scrollWidth - window.innerWidth,
+    }))
+    expect(state).toEqual({ xss: 0, imgs: 0, overflow: expect.any(Number) })
+    expect(state.overflow, 'the definition scrolls inside its box, not the page').toBeLessThanOrEqual(1)
+
+    await page.goto(`/pipelines/${NS}/hidden`)
+    await page.getByRole('button', { name: 'Show definition' }).click()
+    await expect(page.getByRole('alert')).toContainText('no such pipeline')
+    await expect(page.getByRole('region', { name: 'Definition as YAML' })).toHaveCount(0)
+    await context.close()
+  })
+
   test('log viewer', async ({ browser }) => {
     const failed = run({ state: 'failed', note: null })
     const detail = {
