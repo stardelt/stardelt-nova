@@ -5758,6 +5758,13 @@
               "null"
             ]
           },
+          "modified": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "`true` when the run, the schedule, the parameters or the options differ from what the last\ndeploy wrote: someone used the form, the YAML editor or `kubectl` since. Left out when they\nmatch, and for a pipeline stamped before the digest existed."
+          },
           "revision": {
             "type": [
               "string",

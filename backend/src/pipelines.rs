@@ -93,6 +93,7 @@ use futures::stream::{self, StreamExt};
 use kube::api::{Api, ApiResource, DynamicObject, GroupVersionKind};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 use crate::AppState;
 use crate::airflow::{
@@ -1728,6 +1729,11 @@ pub struct DeploymentView {
     pub deployed_by: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deployed_at: Option<String>,
+    /// `true` when the run, the schedule, the parameters or the options differ from what the last
+    /// deploy wrote: someone used the form, the YAML editor or `kubectl` since. Left out when they
+    /// match, and for a pipeline stamped before the digest existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modified: Option<bool>,
 }
 
 /// `POST /api/pipelines/check`: what the engine says about a statement, without running it.
@@ -3128,6 +3134,47 @@ const TARGET_LABEL: &str = "stardelt.io/target";
 const REVISION_NOTE: &str = "stardelt.io/revision";
 const DEPLOYED_BY_NOTE: &str = "stardelt.io/deployed-by";
 const DEPLOYED_AT_NOTE: &str = "stardelt.io/deployed-at";
+const DIGEST_NOTE: &str = "stardelt.io/spec-digest";
+
+/// `value` as text with the keys of every object in sorted order, so two spellings of one
+/// document give one text.
+fn canonical(value: &Value) -> String {
+    match value {
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            let parts: Vec<String> = keys
+                .into_iter()
+                .map(|key| format!("{}:{}", json!(key), canonical(&map[key])))
+                .collect();
+            format!("{{{}}}", parts.join(","))
+        }
+        Value::Array(items) => {
+            let parts: Vec<String> = items.iter().map(canonical).collect();
+            format!("[{}]", parts.join(","))
+        }
+        other => other.to_string(),
+    }
+}
+
+/// A fingerprint of what a deploy decides about a pipeline: the run, the schedule, the parameters
+/// and the options, the same fields `changes_of` compares. A deploy writes it; a later difference
+/// means someone changed the pipeline since.
+fn spec_digest(resource: &Value) -> String {
+    let spec = spec_of(resource);
+    let decided = json!([
+        spec.get("tasks"),
+        spec.get("schedule"),
+        spec.get("params"),
+        spec.get("concurrency"),
+        spec.get("retries"),
+        spec.get("timeout"),
+    ]);
+    Sha256::digest(canonical(&decided).as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
 
 /// Lower-case letters, digits and inner dashes, `shortest` to `longest` characters.
 fn dashed_name(text: &str, shortest: usize, longest: usize) -> bool {
@@ -3179,6 +3226,8 @@ fn stamp_provenance(resource: &mut Value, provenance: &Provenance, deployed_by: 
     }
     notes[DEPLOYED_BY_NOTE] = json!(deployed_by);
     notes[DEPLOYED_AT_NOTE] = json!(now_rfc3339());
+    let digest = spec_digest(resource);
+    resource["metadata"]["annotations"][DIGEST_NOTE] = json!(digest);
 }
 
 /// What a deploy stamped on a stored pipeline, if it did.
@@ -3204,6 +3253,9 @@ fn deployment_of(resource: &Value) -> Option<DeploymentView> {
         revision: note(REVISION_NOTE),
         deployed_by: note(DEPLOYED_BY_NOTE),
         deployed_at: note(DEPLOYED_AT_NOTE),
+        modified: note(DIGEST_NOTE)
+            .filter(|digest| *digest != spec_digest(resource))
+            .map(|_| true),
     })
 }
 
@@ -7693,6 +7745,95 @@ mod tests {
             assert_eq!(answer.errors[0].message, error.message());
         }
         assert!(resources.list().await.unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_digest_ignores_key_order_and_what_a_deploy_does_not_decide() {
+        let one = json!({"spec": {
+            "ownerGroup": "x",
+            "tasks": [{"kind": "run", "sql": "select 1"}],
+            "params": {"a": "1", "b": "2"},
+        }});
+        let same = json!({"spec": {
+            "params": {"b": "2", "a": "1"},
+            "tasks": [{"sql": "select 1", "kind": "run"}],
+            "ownerGroup": "y",
+        }});
+        let other = json!({"spec": {
+            "tasks": [{"kind": "run", "sql": "select 2"}],
+            "params": {"a": "1", "b": "2"},
+        }});
+        assert_eq!(
+            canonical(&json!({"b": [1, {"d": 1, "c": null}], "a": "x"})),
+            r#"{"a":"x","b":[1,{"c":null,"d":1}]}"#
+        );
+        assert_eq!(spec_digest(&one), spec_digest(&same));
+        assert_ne!(spec_digest(&one), spec_digest(&other));
+        for key in ["schedule", "params", "concurrency", "retries", "timeout"] {
+            let mut changed = one.clone();
+            changed["spec"][key] = json!("another");
+            assert_ne!(spec_digest(&one), spec_digest(&changed), "{key} is decided");
+        }
+        assert_eq!(spec_digest(&one).len(), 64);
+    }
+
+    #[tokio::test]
+    async fn a_change_after_the_deploy_shows_as_modified_and_the_next_deploy_clears_it() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        let namespace = crate::cluster::namespace();
+
+        let mut body = create_body("daily-trips", "analytics", "select 1");
+        body.provenance = Some(provenance("shop-etl", "prod", Some("aaaaaaa")));
+        let created = create_pipeline(Some(&resources), None, &create_limiter(), &ada, body)
+            .await
+            .expect("created");
+        assert_eq!(
+            created.deployment.expect("stamped").modified,
+            None,
+            "right after the deploy nothing differs"
+        );
+
+        // The form or the YAML editor: no stamp in the body, so the old stamp and digest stay.
+        update_pipeline(
+            Some(&resources),
+            None,
+            None,
+            &ada,
+            &namespace,
+            "daily-trips",
+            update_body("select 2"),
+        )
+        .await
+        .expect("updated");
+        let edited = stored_pipeline(&resources, "daily-trips").await.unwrap();
+        assert_eq!(deployment_of(&edited).expect("kept").modified, Some(true));
+
+        // The next deploy writes a new digest.
+        let mut deploy = update_body("select 2");
+        deploy.provenance = Some(provenance("shop-etl", "prod", Some("bbbbbbb")));
+        update_pipeline(
+            Some(&resources),
+            None,
+            None,
+            &ada,
+            &namespace,
+            "daily-trips",
+            deploy,
+        )
+        .await
+        .expect("updated");
+        let deployed = stored_pipeline(&resources, "daily-trips").await.unwrap();
+        assert_eq!(deployment_of(&deployed).expect("stamped").modified, None);
+
+        // A pipeline stamped before the digest existed says nothing either way.
+        let mut old = deployed.clone();
+        old["metadata"]["annotations"]
+            .as_object_mut()
+            .unwrap()
+            .remove("stardelt.io/spec-digest");
+        old["spec"]["schedule"] = json!({"cron": "5 4 * * *", "timezone": "UTC"});
+        assert_eq!(deployment_of(&old).expect("stamped").modified, None);
     }
 
     #[tokio::test]
