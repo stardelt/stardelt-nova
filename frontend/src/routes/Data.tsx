@@ -191,7 +191,7 @@ function LoadForm() {
           <li>The file is parsed and column types are inferred.</li>
           <li>A table is created (or replaced) in the selected schema; the schema is created if it does not exist.</li>
           <li>Rows are written through the engine into Iceberg.</li>
-          <li>The job appears under Jobs with a row count.</li>
+          <li>The load appears under Activity with a row count.</li>
         </ol>
         <div className="mt-4 pt-4 border-t border-border text-xs text-text-mute">
           CSV and JSON arrays of objects are supported. The whole file is sent in one request, so

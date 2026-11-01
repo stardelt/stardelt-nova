@@ -11,7 +11,7 @@ export default function Jobs() {
     <div className="max-w-6xl space-y-6">
       <header className="flex items-end justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">Jobs</h1>
+          <h1 className="text-2xl font-bold tracking-tight">Activity</h1>
           <p className="text-text-dim text-sm mt-1">Every query, load and transfer, newest first.</p>
         </div>
         <div className="text-xs text-text-mute flex items-center gap-2">
@@ -40,7 +40,7 @@ export default function Jobs() {
               <tr><td className="px-4 py-5" colSpan={6}><ErrorBox error={jobs.error} onRetry={() => jobs.refetch()} /></td></tr>
             )}
             {jobs.data && jobs.data.length === 0 && (
-              <tr><td className="px-4 py-5 text-text-mute" colSpan={6}>No jobs yet.</td></tr>
+              <tr><td className="px-4 py-5 text-text-mute" colSpan={6}>No activity yet.</td></tr>
             )}
             {(jobs.data ?? []).map(j => (
               <tr key={j.id} className="border-t border-border/70 hover:bg-bg-soft/30">
