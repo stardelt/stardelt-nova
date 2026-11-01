@@ -634,6 +634,18 @@ export type RunView = {
 }
 
 /** One pipeline in the list: the resource plus what the scheduler says about it. */
+/**
+ * Where `stardelt bundle deploy` published a pipeline from (stardelt-nova#397): the bundle, the
+ * target, the Git commit (`-dirty` appended for uncommitted changes), who deployed and when.
+ */
+export type DeploymentView = {
+  bundle: string
+  target: string
+  revision?: string
+  deployedBy?: string
+  deployedAt?: string
+}
+
 export type PipelineView = {
   name: string
   namespace: string
@@ -653,6 +665,8 @@ export type PipelineView = {
   /** `Allow`, `Forbid` or `Replace`. */
   concurrency: string
   createdAt: string | null
+  /** Absent for a pipeline made in the interface or with `stardelt apply`. */
+  deployment?: DeploymentView
 }
 
 /** `GET /api/pipelines/{namespace}/{name}`: the view plus the latest 20 runs. */

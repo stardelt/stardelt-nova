@@ -6,7 +6,7 @@ import ErrorBox from '../components/ErrorBox'
 import ScheduleDialog, { DeletePipelineDialog } from '../components/ScheduleDialog'
 import DefinitionEditor from '../components/DefinitionEditor'
 import StopRunDialog from '../components/StopRunDialog'
-import { shortVersion } from '../format'
+import { shortRevision, shortVersion } from '../format'
 import { toYaml } from '../yaml'
 import {
   NOT_LOADED_NOTE,
@@ -157,6 +157,24 @@ export default function PipelineDetail() {
         <Fact label="Concurrency">
           <span className="break-words">{pipeline.concurrency || '—'}</span>
         </Fact>
+        {pipeline.deployment && (
+          <Fact label="Deployed from">
+            <span className="font-mono text-xs break-words" title={pipeline.deployment.revision}>
+              {pipeline.deployment.bundle} · {pipeline.deployment.target}
+              {pipeline.deployment.revision ? ` · ${shortRevision(pipeline.deployment.revision)}` : ''}
+            </span>
+            {(pipeline.deployment.deployedBy || pipeline.deployment.deployedAt) && (
+              <p className="mt-0.5 text-xs text-text-mute break-words">
+                {[
+                  pipeline.deployment.deployedBy ? `by ${pipeline.deployment.deployedBy}` : '',
+                  pipeline.deployment.deployedAt ? formatWhen(pipeline.deployment.deployedAt).text : '',
+                ]
+                  .filter(Boolean)
+                  .join(' · ')}
+              </p>
+            )}
+          </Fact>
+        )}
       </dl>
 
       <section className="card p-5">
