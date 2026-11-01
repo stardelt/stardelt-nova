@@ -1675,6 +1675,12 @@ pub struct UpdatePipelineRequest {
     /// The whole option set; omitted means the defaults.
     #[serde(default)]
     pub options: Option<PipelineOptions>,
+    /// The `resourceVersion` the caller read (`pipelines_spec`). When it is given and is not the
+    /// stored one, somebody changed the pipeline in between: 409 `the pipeline changed while you
+    /// edited it: reload`, and nothing is written. Omitted keeps the old behaviour (the update
+    /// then only fails if the resource changes while the update itself runs).
+    #[serde(default)]
+    pub resource_version: Option<String>,
 }
 
 /// `POST /api/pipelines/check`: what the engine says about a statement, without running it.
@@ -3296,6 +3302,18 @@ async fn update_pipeline_inner(
         return Err(ActionError::refused("not-nova", managed_outside()));
     }
 
+    // An editor sends the version it read: a different stored version means somebody changed the
+    // pipeline meanwhile, and the person must reload before anything is written.
+    if let Some(read) = body.resource_version.as_deref() {
+        let stored = resource
+            .get("metadata")
+            .and_then(|metadata| metadata.get("resourceVersion"))
+            .and_then(Value::as_str);
+        if stored != Some(read) {
+            return Err(ActionError::refused("conflict", pipeline_changed()));
+        }
+    }
+
     // The pipeline's group: both the refusal sentence and the notebook's object key.
     let group = spec_of(&resource)
         .get("ownerGroup")
@@ -3791,7 +3809,7 @@ pub(crate) async fn validate(
     operation_id = "pipelines_update",
     path = "/api/pipelines/{namespace}/{name}",
     tag = "public",
-    description = "Change a pipeline Nova created (`app.kubernetes.io/managed-by: stardelt-nova`) and nothing else. A statement pipeline's body carries `sql`; a notebook pipeline's carries `notebook` (`{ name, objectVersion, params }`), and an update never changes which of the two it is: `sql` on a notebook pipeline is 400 `this pipeline runs a notebook`, a notebook on a statement pipeline 400 `this pipeline runs a statement`, and both or neither 400 `give a statement or a notebook`. The body describes the whole editable state: an omitted `schedule` removes it, an omitted `params` removes the table, an omitted option keeps its default, and a notebook body's file name, version and parameters replace the task's `config`. Refusals: a pipeline the caller may not act on 404; a pipeline Nova did not write, or one whose task shape is not exactly one `run` task of kind `sql` or `notebook` 409; the statement, a parameter, a placeholder, a notebook name, a parameter value or count, or a version that is not in the store (503 without `NOVA_S3_*`, 502 when S3 does not answer), an option, the cron or the timezone as on create 400; the group's principal no longer ready 409 with the `principals` route's message; a concurrent change to the resource 409 `the pipeline changed while you edited it: reload`. The audit line carries the statement's length, the cron and, for a notebook, the group, the file name and the pinned version — never the statement and never a parameter value. Answers `Cache-Control: no-store`.",
+    description = "Change a pipeline Nova created (`app.kubernetes.io/managed-by: stardelt-nova`) and nothing else. A statement pipeline's body carries `sql`; a notebook pipeline's carries `notebook` (`{ name, objectVersion, params }`), and an update never changes which of the two it is: `sql` on a notebook pipeline is 400 `this pipeline runs a notebook`, a notebook on a statement pipeline 400 `this pipeline runs a statement`, and both or neither 400 `give a statement or a notebook`. The body describes the whole editable state: an omitted `schedule` removes it, an omitted `params` removes the table, an omitted option keeps its default, and a notebook body's file name, version and parameters replace the task's `config`. Refusals: a pipeline the caller may not act on 404; a pipeline Nova did not write, or one whose task shape is not exactly one `run` task of kind `sql` or `notebook` 409; the statement, a parameter, a placeholder, a notebook name, a parameter value or count, or a version that is not in the store (503 without `NOVA_S3_*`, 502 when S3 does not answer), an option, the cron or the timezone as on create 400; the group's principal no longer ready 409 with the `principals` route's message; a concurrent change to the resource 409 `the pipeline changed while you edited it: reload`. A body may carry `resourceVersion` (the one `pipelines_spec` answered): when it is not the stored one, the answer is that same 409 and nothing is written; omitted, the update behaves as before. The audit line carries the statement's length, the cron and, for a notebook, the group, the file name and the pinned version — never the statement and never a parameter value. Answers `Cache-Control: no-store`.",
     params(
         ("namespace" = String, Path, description = "The Pipeline's namespace (Nova's own)"),
         ("name" = String, Path, description = "Pipeline name"),
@@ -6635,6 +6653,7 @@ mod tests {
             schedule: None,
             params: BTreeMap::new(),
             options: None,
+            resource_version: None,
         }
     }
 
@@ -7124,6 +7143,7 @@ mod tests {
                 timeout_minutes: Some(30),
                 ..PipelineOptions::default()
             }),
+            resource_version: None,
         };
         let view = update_pipeline(
             Some(&resources),
@@ -7183,6 +7203,7 @@ mod tests {
                 }),
                 params: BTreeMap::new(),
                 options: None,
+                resource_version: None,
             },
         )
         .await
@@ -7331,6 +7352,90 @@ mod tests {
         assert_eq!(
             fail.message(),
             "the pipeline changed while you edited it: reload"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_with_a_stale_version_is_refused_before_it_writes() {
+        let resources = memory_with(
+            &[("smoke", nova_pipeline("smoke", "analytics"))],
+            &analytics_principal(),
+        );
+        let ada = who("sub-ada", &["analytics"], false);
+        let namespace = crate::cluster::namespace();
+        let sql_of = |resource: Value| resource["spec"]["tasks"][0]["sql"].clone();
+
+        let mut stale = update_body("select 9");
+        stale.resource_version = Some("6".into());
+        let error = update_pipeline(
+            Some(&resources),
+            None,
+            None,
+            &ada,
+            &namespace,
+            "smoke",
+            stale,
+        )
+        .await
+        .expect_err("somebody wrote in between");
+        assert_eq!(error.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            error.message(),
+            "the pipeline changed while you edited it: reload"
+        );
+        assert_eq!(
+            sql_of(stored_pipeline(&resources, "smoke").await.unwrap()),
+            "select 1",
+            "a refused update writes nothing"
+        );
+
+        // The version the document route handed out is the one an update accepts, once.
+        let read = pipeline_spec(Some(&resources), &ada, &namespace, "smoke")
+            .await
+            .expect("readable")
+            .resource_version
+            .expect("a version");
+        let mut current = update_body("select 9");
+        current.resource_version = Some(read);
+        update_pipeline(
+            Some(&resources),
+            None,
+            None,
+            &ada,
+            &namespace,
+            "smoke",
+            current.clone(),
+        )
+        .await
+        .expect("the version it read");
+        assert_eq!(
+            sql_of(stored_pipeline(&resources, "smoke").await.unwrap()),
+            "select 9"
+        );
+
+        // Somebody else writes meanwhile (the test store does not bump versions by itself, the
+        // cluster does): the version the editor read is stale now.
+        if let PipelineResources::Memory(store) = &resources {
+            store.lock().unwrap().pipelines.get_mut("smoke").unwrap()["metadata"]["resourceVersion"] =
+                json!("8");
+        }
+        current.sql = "select 10".into();
+        let error = update_pipeline(
+            Some(&resources),
+            None,
+            None,
+            &ada,
+            &namespace,
+            "smoke",
+            current,
+        )
+        .await
+        .expect_err("the stored version moved on");
+        assert_eq!(error.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            sql_of(stored_pipeline(&resources, "smoke").await.unwrap()),
+            "select 9",
+            "the stale edit changed nothing"
         );
     }
 
@@ -8993,6 +9098,7 @@ mod tests {
             schedule: None,
             params: BTreeMap::new(),
             options: None,
+            resource_version: None,
         }
     }
 
