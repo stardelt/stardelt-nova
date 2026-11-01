@@ -810,6 +810,9 @@ pub struct PublishedNotebook {
     /// Lower-case hex SHA-256 of the stored bytes (outputs already stripped).
     pub sha256: String,
     pub size: u64,
+    /// `true` when the newest version already holds these exact bytes: nothing was stored and
+    /// `objectVersion` is that version.
+    pub unchanged: bool,
     pub parameters: Vec<NotebookParameter>,
 }
 
@@ -1131,14 +1134,14 @@ pub(crate) async fn no_store(request: Request, next: Next) -> Response {
     operation_id = "notebooks_publish",
     path = "/api/notebooks/{group}/{name}",
     tag = "public",
-    description = "Publish a notebook as a new immutable object version in the `notebooks` bucket. Needs a signed-in person whose groups include `{group}` (403 `you are not a member of the group <g>`; administrators are not exempt). `{name}` must match `^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}\\.ipynb$` and the body must be an nbformat 4 notebook of at most 5 MiB. Every cell's `outputs` and `execution_count` and the notebook's widget metadata are removed before storing — no cell output reaches the object store. `sha256` is of the stored (stripped) bytes. `parameters` are the `name = literal` lines of the first cell tagged `parameters`, at most 32; defaults are text and are never evaluated. A 61st publish by one person in an hour is 429. Unset `NOVA_S3_*` is 503 `notebook storage is not configured`; an S3 that is down or refuses is 502. Each publish writes one audit line with group, name, version and size, never content.",
+    description = "Publish a notebook as a new immutable object version in the `notebooks` bucket. Needs a signed-in person whose groups include `{group}` (403 `you are not a member of the group <g>`; administrators are not exempt). `{name}` must match `^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}\\.ipynb$` and the body must be an nbformat 4 notebook of at most 5 MiB. Every cell's `outputs` and `execution_count` and the notebook's widget metadata are removed before storing — no cell output reaches the object store. `sha256` is of the stored (stripped) bytes. `parameters` are the `name = literal` lines of the first cell tagged `parameters`, at most 32; defaults are text and are never evaluated. A 61st publish by one person in an hour is 429. Publishing bytes the newest version already holds stores nothing, uses no slot and writes no audit line: the answer names that version with `unchanged: true`. Unset `NOVA_S3_*` is 503 `notebook storage is not configured`; an S3 that is down or refuses is 502. Each publish that stores a version writes one audit line with group, name, version and size, never content.",
     params(
         ("group" = String, Path, description = "One of the caller's groups"),
         ("name" = String, Path, description = "Notebook file name, ending in .ipynb"),
     ),
     request_body = serde_json::Value,
     responses(
-        (status = 200, description = "The stored version and its parsed parameters", body = PublishedNotebook),
+        (status = 200, description = "The stored version and its parsed parameters; `unchanged: true` when the newest version already held these bytes", body = PublishedNotebook),
         (status = 400, description = "Bad name or not an nbformat 4 notebook", body = crate::openapi::ErrorResponse),
         (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
         (status = 403, description = "Not a member of the group", body = crate::openapi::ErrorResponse),
@@ -1208,12 +1211,29 @@ pub(crate) async fn publish(
     let sha256 = sha256_hex(&stored);
     let size = stored.len() as u64;
 
+    // The same bytes as the newest version: store nothing and use no slot, so publishing an
+    // unchanged file again (a repeated bundle deploy) leaves the version a schedule pins alone.
+    let key = object_key(&group, &name);
+    if let Ok(newest) = store.head(&key, None).await
+        && newest.sha256 == sha256
+    {
+        return Json(PublishedNotebook {
+            name,
+            group,
+            object_version: newest.object_version,
+            sha256,
+            size,
+            unchanged: true,
+            parameters,
+        })
+        .into_response();
+    }
+
     // A valid publish consumes a slot; every refusal above did not.
     if !store.take_publish_slot(&principal.identity.sub) {
         return too_many_publishes().into_response();
     }
 
-    let key = object_key(&group, &name);
     let version = match store
         .put(&key, stored, &principal.identity.display_name, &sha256)
         .await
@@ -1230,6 +1250,7 @@ pub(crate) async fn publish(
         object_version: version,
         sha256,
         size,
+        unchanged: false,
         parameters,
     })
     .into_response()
@@ -2046,6 +2067,66 @@ mod tests {
         );
         assert_eq!(object.sha256, sha256_hex(&object.body));
         assert_eq!(answer["parameters"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn publishing_the_same_bytes_again_stores_nothing() {
+        let s3 = FakeS3::start().await;
+        let state = state(Some(notebook_store(&s3.base)));
+        let app = app(state, Some(principal("idem-sam", &["analytics"], false)));
+        let path = "/notebooks/analytics/same.ipynb";
+        let first_body = body(&notebook(vec![code_cell(json!(["x = 1\n"]))]));
+
+        let (status, first) = call(&app, "PUT", path, Some(&first_body), &[]).await;
+        assert_eq!(status, StatusCode::OK, "{first}");
+        assert_eq!(first["objectVersion"], "v1");
+        assert_eq!(first["unchanged"], false);
+
+        let (status, again) = call(&app, "PUT", path, Some(&first_body), &[]).await;
+        assert_eq!(status, StatusCode::OK, "{again}");
+        assert_eq!(again["objectVersion"], "v1");
+        assert_eq!(again["unchanged"], true);
+        assert_eq!(again["sha256"], first["sha256"]);
+        assert_eq!(again["size"], first["size"]);
+        assert_eq!(s3.objects().len(), 1, "nothing was stored");
+
+        let changed_body = body(&notebook(vec![code_cell(json!(["x = 2\n"]))]));
+        let (status, changed) = call(&app, "PUT", path, Some(&changed_body), &[]).await;
+        assert_eq!(status, StatusCode::OK, "{changed}");
+        assert_eq!(changed["objectVersion"], "v2");
+        assert_eq!(changed["unchanged"], false);
+
+        // Only the NEWEST version counts: the first bytes again are a third version.
+        let (status, back) = call(&app, "PUT", path, Some(&first_body), &[]).await;
+        assert_eq!(status, StatusCode::OK, "{back}");
+        assert_eq!(back["objectVersion"], "v3");
+        assert_eq!(back["unchanged"], false);
+        assert_eq!(s3.objects().len(), 3);
+
+        // Three versions were stored, so there are three audit lines, not four.
+        let records = crate::audit::notebook_test_sink::take_for("idem-sam");
+        assert_eq!(records.len(), 3, "{records:?}");
+    }
+
+    #[tokio::test]
+    async fn publishing_unchanged_bytes_uses_no_publish_slot() {
+        let s3 = FakeS3::start().await;
+        let state = state(Some(notebook_store(&s3.base)));
+        let app = app(state, Some(principal("idem-kim", &["analytics"], false)));
+        let same_body = body(&notebook(vec![code_cell(json!(["x = 1\n"]))]));
+
+        for round in 0..=PUBLISHES_PER_HOUR {
+            let (status, answer) = call(
+                &app,
+                "PUT",
+                "/notebooks/analytics/slots.ipynb",
+                Some(&same_body),
+                &[],
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "round {round}: {answer}");
+        }
+        assert_eq!(s3.objects().len(), 1);
     }
 
     #[tokio::test]

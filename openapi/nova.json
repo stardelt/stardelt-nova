@@ -2612,7 +2612,7 @@
           "public"
         ],
         "summary": "`PUT /api/notebooks/{group}/{name}`: validate, strip, store one immutable version.",
-        "description": "Publish a notebook as a new immutable object version in the `notebooks` bucket. Needs a signed-in person whose groups include `{group}` (403 `you are not a member of the group <g>`; administrators are not exempt). `{name}` must match `^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}\\.ipynb$` and the body must be an nbformat 4 notebook of at most 5 MiB. Every cell's `outputs` and `execution_count` and the notebook's widget metadata are removed before storing — no cell output reaches the object store. `sha256` is of the stored (stripped) bytes. `parameters` are the `name = literal` lines of the first cell tagged `parameters`, at most 32; defaults are text and are never evaluated. A 61st publish by one person in an hour is 429. Unset `NOVA_S3_*` is 503 `notebook storage is not configured`; an S3 that is down or refuses is 502. Each publish writes one audit line with group, name, version and size, never content.",
+        "description": "Publish a notebook as a new immutable object version in the `notebooks` bucket. Needs a signed-in person whose groups include `{group}` (403 `you are not a member of the group <g>`; administrators are not exempt). `{name}` must match `^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}\\.ipynb$` and the body must be an nbformat 4 notebook of at most 5 MiB. Every cell's `outputs` and `execution_count` and the notebook's widget metadata are removed before storing — no cell output reaches the object store. `sha256` is of the stored (stripped) bytes. `parameters` are the `name = literal` lines of the first cell tagged `parameters`, at most 32; defaults are text and are never evaluated. A 61st publish by one person in an hour is 429. Publishing bytes the newest version already holds stores nothing, uses no slot and writes no audit line: the answer names that version with `unchanged: true`. Unset `NOVA_S3_*` is 503 `notebook storage is not configured`; an S3 that is down or refuses is 502. Each publish that stores a version writes one audit line with group, name, version and size, never content.",
         "operationId": "notebooks_publish",
         "parameters": [
           {
@@ -2644,7 +2644,7 @@
         },
         "responses": {
           "200": {
-            "description": "The stored version and its parsed parameters",
+            "description": "The stored version and its parsed parameters; `unchanged: true` when the newest version already held these bytes",
             "content": {
               "application/json": {
                 "schema": {
@@ -7447,6 +7447,7 @@
           "objectVersion",
           "sha256",
           "size",
+          "unchanged",
           "parameters"
         ],
         "properties": {
@@ -7474,6 +7475,10 @@
             "type": "integer",
             "format": "int64",
             "minimum": 0
+          },
+          "unchanged": {
+            "type": "boolean",
+            "description": "`true` when the newest version already holds these exact bytes: nothing was stored and\n`objectVersion` is that version."
           }
         }
       },
