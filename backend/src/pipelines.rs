@@ -1637,6 +1637,28 @@ pub struct PreviewScheduleResponse {
     pub runs: Vec<String>,
 }
 
+/// `POST /api/pipelines/validate`: what a create (or an apply) of this document would do, without doing it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ValidatePipelineResponse {
+    /// True when the document would be accepted.
+    pub ok: bool,
+    /// `create` when the name is free, `update` when it names a pipeline Nova wrote and the caller
+    /// may change; absent when `ok` is false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    /// Why not: one sentence per problem (today the first rule that refuses).
+    pub errors: Vec<ValidationIssue>,
+    /// The next five fire times (RFC 3339, in the schedule's zone) when the document is accepted
+    /// and has a schedule.
+    pub next_runs: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+pub struct ValidationIssue {
+    pub message: String,
+}
+
 /// One of the caller's groups and its pipeline principal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 pub struct PrincipalView {
@@ -2771,17 +2793,21 @@ async fn create_pipeline(
     result.map_err(|e| e.fail)
 }
 
-async fn create_pipeline_inner(
-    resources: Option<&PipelineResources>,
-    notebooks_store: Option<&NotebookStore>,
-    limiter: &CreateLimiter,
-    who: &Identity,
-    body: CreatePipelineRequest,
-) -> Result<PipelineView, ActionError> {
-    let resources = resources
-        .ok_or_else(no_cluster)
-        .map_err(ActionError::error)?;
+/// What a create writes once every rule has passed: the statement or notebook, the schedule, the options.
+struct Planned {
+    statement: Statement,
+    schedule: Option<(String, String)>,
+    options: PipelineOptionsView,
+}
 
+/// The rules every write of a new pipeline runs before it writes, in order (a create and the
+/// validate route share them, so "the check passed" and "the write succeeds" cannot drift apart).
+async fn plan_pipeline(
+    resources: &PipelineResources,
+    notebooks_store: Option<&NotebookStore>,
+    who: &Identity,
+    body: &CreatePipelineRequest,
+) -> Result<Planned, ActionError> {
     // 1. The name the CRD (and the loader) accepts.
     validate_name(&body.name).map_err(|message| {
         ActionError::refused("name", Fail::new(StatusCode::BAD_REQUEST, message))
@@ -2839,6 +2865,30 @@ async fn create_pipeline_inner(
         ActionError::refused("schedule", Fail::new(StatusCode::BAD_REQUEST, message))
     })?;
 
+    Ok(Planned {
+        statement,
+        schedule,
+        options,
+    })
+}
+
+async fn create_pipeline_inner(
+    resources: Option<&PipelineResources>,
+    notebooks_store: Option<&NotebookStore>,
+    limiter: &CreateLimiter,
+    who: &Identity,
+    body: CreatePipelineRequest,
+) -> Result<PipelineView, ActionError> {
+    let resources = resources
+        .ok_or_else(no_cluster)
+        .map_err(ActionError::error)?;
+
+    let Planned {
+        statement,
+        schedule,
+        options,
+    } = plan_pipeline(resources, notebooks_store, who, &body).await?;
+
     // 7. The name is free.
     if resources
         .get(&body.name)
@@ -2880,6 +2930,68 @@ async fn create_pipeline_inner(
     view.loaded = false;
     view.state = "loading".to_string();
     Ok(view)
+}
+
+/// The answer of a refused check: the sentence, nothing else.
+fn not_ok(message: &str) -> ValidatePipelineResponse {
+    ValidatePipelineResponse {
+        ok: false,
+        action: None,
+        errors: vec![ValidationIssue {
+            message: message.to_string(),
+        }],
+        next_runs: Vec::new(),
+    }
+}
+
+/// Run every rule of a create against `body` and say what would happen, writing nothing and
+/// taking no slot of the creation limit. A refusal of a rule is an answer (`ok: false`); an
+/// unreachable cluster or notebook store is still an error, as on create.
+async fn validate_pipeline(
+    resources: Option<&PipelineResources>,
+    notebooks_store: Option<&NotebookStore>,
+    who: &Identity,
+    body: CreatePipelineRequest,
+) -> Result<ValidatePipelineResponse, Fail> {
+    let resources = resources.ok_or_else(no_cluster)?;
+    let planned = match plan_pipeline(resources, notebooks_store, who, &body).await {
+        Ok(planned) => planned,
+        Err(e) if e.outcome.starts_with("refused:") => return Ok(not_ok(e.fail.message())),
+        Err(e) => return Err(e.fail),
+    };
+    let action = match resources.get(&body.name).await.map_err(resource_fail)? {
+        None => "create",
+        Some(existing) => {
+            if !may_act(who, spec_of(&existing)) {
+                return Ok(not_ok(pipeline_exists().message()));
+            }
+            if !nova_managed(&existing) {
+                return Ok(not_ok(managed_outside().message()));
+            }
+            if spec_of(&existing)["ownerGroup"].as_str() != Some(body.owner_group.as_str()) {
+                return Ok(not_ok("the group of an existing pipeline cannot change"));
+            }
+            "update"
+        }
+    };
+    let next_runs = planned
+        .schedule
+        .and_then(|(cron, timezone)| {
+            let request = PreviewScheduleRequest {
+                cron,
+                timezone,
+                count: Some(5),
+            };
+            preview_schedule(request, now_utc()).ok()
+        })
+        .map(|preview| preview.runs)
+        .unwrap_or_default();
+    Ok(ValidatePipelineResponse {
+        ok: true,
+        action: Some(action.to_string()),
+        errors: Vec::new(),
+        next_runs,
+    })
 }
 
 /// The view after a write: the DAG and last run when Airflow is configured (a failed lookup only
@@ -3325,6 +3437,7 @@ pub(crate) fn router() -> Router<Arc<AppState>> {
         // caller; placed before `{namespace}/{name}` like `principals`.
         .route("/pipelines/check", post(check))
         .route("/pipelines/preview-schedule", post(preview))
+        .route("/pipelines/validate", post(validate))
         .route(
             "/pipelines/{namespace}/{name}",
             get(detail).put(update).delete(remove),
@@ -3465,6 +3578,35 @@ pub(crate) async fn create(
             resources(signed.state()).as_ref(),
             signed.state().notebooks.as_ref(),
             &signed.state().pipeline_creates,
+            signed.identity(),
+            body,
+        )
+        .await,
+    )
+}
+
+#[utoipa::path(
+    post,
+    operation_id = "pipelines_validate",
+    path = "/api/pipelines/validate",
+    tag = "public",
+    description = "Check a pipeline document without writing it: the body is the body of `pipelines_create` (the document `stardelt apply` reads). It runs every rule a create runs (the name, the caller's own group, the group's ready principal, exactly one of a statement and a notebook with the rules of its kind, the options, the schedule) and then looks at the name: free means `create`; a pipeline Nova wrote that the caller may act on, in the same group, means `update`; a pipeline written outside Nova, someone else's, or in another group is a problem. A rule that refuses is an answer, `ok: false` with one sentence in `errors`, status 200; nothing is written and no creation slot is taken. An accepted document with a schedule lists its next five fire times. A cluster or notebook store that does not answer is 502 or 503 as on create. Answers `Cache-Control: no-store`.",
+    request_body = CreatePipelineRequest,
+    responses(
+        (status = 200, description = "The verdict: accepted (with the action) or the reason it is not", body = ValidatePipelineResponse),
+        (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The cluster did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No cluster connection", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn validate(
+    signed: SignedIn,
+    ApiJson(body): ApiJson<CreatePipelineRequest>,
+) -> Response {
+    answer(
+        validate_pipeline(
+            resources(signed.state()).as_ref(),
+            signed.state().notebooks.as_ref(),
             signed.identity(),
             body,
         )
@@ -7868,6 +8010,202 @@ mod tests {
             .expect_err("the engine is unreachable");
         assert_eq!(error.status(), StatusCode::BAD_GATEWAY);
         assert_eq!(error.message(), crate::trino::ENGINE_UNREACHABLE);
+    }
+
+    #[tokio::test]
+    async fn validate_accepts_a_new_pipeline_and_writes_nothing() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+
+        let answer = validate_pipeline(
+            Some(&resources),
+            None,
+            &ada,
+            create_body("daily-trips", "analytics", "select 1"),
+        )
+        .await
+        .expect("an answer");
+
+        assert!(answer.ok);
+        assert_eq!(answer.action.as_deref(), Some("create"));
+        assert!(answer.errors.is_empty());
+        assert_eq!(answer.next_runs.len(), 5, "the schedule is previewed");
+        assert!(
+            resources.list().await.unwrap().is_empty(),
+            "a check writes nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_says_what_create_says_when_a_rule_refuses() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+
+        let mut bad_cron = create_body("daily-trips", "analytics", "select 1");
+        bad_cron.schedule = Some(ScheduleRequest {
+            cron: "not a cron".into(),
+            timezone: "Europe/Berlin".into(),
+        });
+        for body in [
+            create_body("smoke", "finance", "select 1"),
+            create_body("daily-trips", "analytics", "  "),
+            bad_cron,
+        ] {
+            let refusal = create_pipeline(
+                Some(&resources),
+                None,
+                &create_limiter(),
+                &ada,
+                body.clone(),
+            )
+            .await
+            .expect_err("create refuses it");
+            let answer = validate_pipeline(Some(&resources), None, &ada, body)
+                .await
+                .expect("a refusal is an answer, not an error");
+            assert!(!answer.ok);
+            assert_eq!(answer.action, None);
+            assert!(answer.next_runs.is_empty());
+            assert_eq!(
+                answer.errors,
+                vec![ValidationIssue {
+                    message: refusal.message().to_string()
+                }]
+            );
+        }
+        assert!(resources.list().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn validate_names_an_update_only_for_a_pipeline_the_caller_may_change() {
+        let principals = [
+            (
+                "pipeline-analytics",
+                service_principal("pipeline-analytics", "analytics", Some(true)),
+            ),
+            (
+                "pipeline-finance",
+                service_principal("pipeline-finance", "finance", Some(true)),
+            ),
+        ];
+        let mut legacy = nova_pipeline("legacy", "analytics");
+        legacy["metadata"]["labels"]
+            .as_object_mut()
+            .unwrap()
+            .remove(MANAGED_BY_LABEL);
+        let resources = memory_with(
+            &[
+                ("daily-trips", nova_pipeline("daily-trips", "analytics")),
+                ("theirs", nova_pipeline("theirs", "finance")),
+                ("legacy", legacy),
+            ],
+            &principals,
+        );
+        let ada = who("sub-ada", &["analytics"], false);
+
+        let own = validate_pipeline(
+            Some(&resources),
+            None,
+            &ada,
+            create_body("daily-trips", "analytics", "select 2"),
+        )
+        .await
+        .expect("an answer");
+        assert!(own.ok);
+        assert_eq!(own.action.as_deref(), Some("update"));
+
+        for (name, group, sentence) in [
+            (
+                "theirs",
+                "analytics",
+                "a pipeline with this name already exists",
+            ),
+            (
+                "legacy",
+                "analytics",
+                "this pipeline is managed outside Nova (kubectl or Git); change it there",
+            ),
+        ] {
+            let answer = validate_pipeline(
+                Some(&resources),
+                None,
+                &ada,
+                create_body(name, group, "select 2"),
+            )
+            .await
+            .expect("an answer");
+            assert!(!answer.ok, "{name}");
+            assert_eq!(answer.errors[0].message, sentence, "{name}");
+        }
+
+        // A member of both groups still cannot move a pipeline to the other group.
+        let both = who("sub-bob", &["analytics", "finance"], false);
+        let moved = validate_pipeline(
+            Some(&resources),
+            None,
+            &both,
+            create_body("theirs", "analytics", "select 2"),
+        )
+        .await
+        .expect("an answer");
+        assert!(!moved.ok);
+        assert_eq!(
+            moved.errors[0].message,
+            "the group of an existing pipeline cannot change"
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_answers_an_anonymous_caller_as_create_does() {
+        let (store, _store_fake) = crate::secret_store::fake::start().await;
+        let (airflow, _airflow_fake) = fake_airflow::start().await;
+        let (trino, _fake) = fake_trino::start(None).await;
+        let app = router().with_state(test_state_at(None, airflow, store, &trino));
+        let body = json!({ "name": "daily-trips", "ownerGroup": "analytics", "sql": "select 1" });
+
+        let mut answers = Vec::new();
+        for uri in ["/pipelines", "/pipelines/validate"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::CACHE_CONTROL)
+                    .and_then(|value| value.to_str().ok()),
+                Some("no-store"),
+                "{uri}"
+            );
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            answers.push((status, bytes));
+        }
+        assert!(
+            answers[0].0.is_client_error() || answers[0].0 == StatusCode::SERVICE_UNAVAILABLE,
+            "create refuses an anonymous caller: {}",
+            answers[0].0
+        );
+        assert_eq!(answers[0], answers[1], "validate refuses it the same way");
+    }
+
+    #[tokio::test]
+    async fn validate_without_a_cluster_is_503() {
+        let ada = who("sub-ada", &["analytics"], false);
+        let error = validate_pipeline(None, None, &ada, create_body("x", "analytics", "select 1"))
+            .await
+            .expect_err("no cluster, no answer");
+        assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[test]

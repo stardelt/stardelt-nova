@@ -3106,6 +3106,67 @@
         }
       }
     },
+    "/api/pipelines/validate": {
+      "post": {
+        "tags": [
+          "public"
+        ],
+        "description": "Check a pipeline document without writing it: the body is the body of `pipelines_create` (the document `stardelt apply` reads). It runs every rule a create runs (the name, the caller's own group, the group's ready principal, exactly one of a statement and a notebook with the rules of its kind, the options, the schedule) and then looks at the name: free means `create`; a pipeline Nova wrote that the caller may act on, in the same group, means `update`; a pipeline written outside Nova, someone else's, or in another group is a problem. A rule that refuses is an answer, `ok: false` with one sentence in `errors`, status 200; nothing is written and no creation slot is taken. An accepted document with a schedule lists its next five fire times. A cluster or notebook store that does not answer is 502 or 503 as on create. Answers `Cache-Control: no-store`.",
+        "operationId": "pipelines_validate",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreatePipelineRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The verdict: accepted (with the action) or the reason it is not",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidatePipelineResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token to sign in with",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The cluster did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No cluster connection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/pipelines/{namespace}/{name}": {
       "get": {
         "tags": [
@@ -7590,6 +7651,53 @@
           "sql": {
             "type": "string",
             "description": "The statement of a statement pipeline; a notebook pipeline refuses it."
+          }
+        }
+      },
+      "ValidatePipelineResponse": {
+        "type": "object",
+        "description": "`POST /api/pipelines/validate`: what a create (or an apply) of this document would do, without doing it.",
+        "required": [
+          "ok",
+          "errors",
+          "nextRuns"
+        ],
+        "properties": {
+          "action": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`create` when the name is free, `update` when it names a pipeline Nova wrote and the caller\nmay change; absent when `ok` is false."
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ValidationIssue"
+            },
+            "description": "Why not: one sentence per problem (today the first rule that refuses)."
+          },
+          "nextRuns": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The next five fire times (RFC 3339, in the schedule's zone) when the document is accepted\nand has a schedule."
+          },
+          "ok": {
+            "type": "boolean",
+            "description": "True when the document would be accepted."
+          }
+        }
+      },
+      "ValidationIssue": {
+        "type": "object",
+        "required": [
+          "message"
+        ],
+        "properties": {
+          "message": {
+            "type": "string"
           }
         }
       },
