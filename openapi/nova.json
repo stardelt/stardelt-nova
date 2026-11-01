@@ -166,6 +166,147 @@
         }
       }
     },
+    "/api/apps": {
+      "get": {
+        "tags": [
+          "internal"
+        ],
+        "description": "Every service of the platform (`nova`, `trino`, `lakekeeper`, `superset`, `airflow`, `jupyterhub`) with its category, the address a browser opens (empty without a base domain and for an app with no browsable surface), `browsable`, the liveness `status` (`up`, `unreachable`, `unknown` or `not-installed`) and the images its workloads run, read from the cluster (empty in demo mode or when the app is not installed). Administrator-only: anybody else gets 403. Field names are snake_case.",
+        "operationId": "apps_list",
+        "responses": {
+          "200": {
+            "description": "One row per service, in the order the service catalog declares them",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PlatformApp"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not a platform administrator",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/apps/links": {
+      "get": {
+        "tags": [
+          "internal"
+        ],
+        "summary": "`GET /api/apps/links` — the header's app switcher, for every signed-in user.",
+        "description": "The apps the caller may open from the header's app switcher: `id`, `name`, `category` and the address a browser opens (`external_url`). For every signed-in user. No status and no workload data: liveness is operator information (`GET /api/apps`). Left out: Nova itself, apps with no browsable surface, apps whose address cannot be built because no base domain is configured, and the engine's own UI for everybody who is not an administrator. Field names are snake_case.",
+        "operationId": "apps_links",
+        "responses": {
+          "200": {
+            "description": "One entry per app the caller may open, in the order the service catalog declares them",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AppLink"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/apps/{id}": {
+      "get": {
+        "tags": [
+          "internal"
+        ],
+        "description": "Everything Nova can say about one service: the `app` row, the in-cluster `probe` address Nova checks for liveness, the ready and desired `replicas`, its `workloads`, `facts` read from the service's own API (an unreachable service contributes none), `links` into its UI and, for an app Nova frames, the `embed` report. Administrator-only: anybody else gets 403. An id that is not a service answers 404 with `error` and the list of `known` ids. Field names are snake_case.",
+        "operationId": "apps_detail",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The service's id: `nova`, `trino`, `lakekeeper`, `superset`, `airflow` or `jupyterhub`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The service",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not a platform administrator",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such service; the body also carries `known`, the list of ids",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/auth/config": {
       "get": {
         "tags": [
@@ -2237,6 +2378,40 @@
           },
           "503": {
             "description": "The secret store is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/embeds": {
+      "get": {
+        "tags": [
+          "internal"
+        ],
+        "description": "The apps Nova frames in its own pages (dashboards, notebooks), for every signed-in user: `id`, `name`, the address a browser opens, the liveness `status` and an `embed` report saying whether the app's own headers allow framing (`allowed`, `blocked` or `unknown`, with the header that blocks it). No workloads, images or replica counts: those stay behind the administrator-only `GET /api/apps`. Field names are snake_case.",
+        "operationId": "apps_embeds",
+        "responses": {
+          "200": {
+            "description": "One entry per app Nova can frame",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/EmbedApp"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
             "content": {
               "application/json": {
                 "schema": {
@@ -5030,6 +5205,86 @@
           }
         }
       },
+      "AppDetail": {
+        "type": "object",
+        "description": "`GET /api/apps/:id` — everything Nova can say about one service.",
+        "required": [
+          "app",
+          "probe",
+          "replicas",
+          "workloads",
+          "facts",
+          "links"
+        ],
+        "properties": {
+          "app": {
+            "$ref": "#/components/schemas/PlatformApp"
+          },
+          "embed": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Embed",
+                "description": "Whether a browser will let Nova frame the app's UI. Absent for apps Nova\ndoes not embed anywhere."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "facts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Fact"
+            }
+          },
+          "links": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Link"
+            },
+            "description": "Deep links into the app's UI; empty when it has none or Nova has no base\ndomain to build them from."
+          },
+          "probe": {
+            "type": "string",
+            "description": "In-cluster URL Nova probes for liveness, shown verbatim: it is the reason\nthe status is what it is."
+          },
+          "replicas": {
+            "$ref": "#/components/schemas/Replicas",
+            "description": "Ready/desired replicas across the app's workloads — a scale-to-zero\nworkload contributes `0/0`, which is a fact, not a failure."
+          },
+          "workloads": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Workload"
+            },
+            "description": "The app's workloads in Nova's namespace, with their images and replicas."
+          }
+        }
+      },
+      "AppLink": {
+        "type": "object",
+        "description": "One entry of the header's app switcher: enough to open the app, and nothing else.",
+        "required": [
+          "id",
+          "name",
+          "category",
+          "external_url"
+        ],
+        "properties": {
+          "category": {
+            "type": "string"
+          },
+          "external_url": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
       "AuthConfig": {
         "type": "object",
         "description": "`GET /api/auth/config`: what a client needs to start a sign-in of its own.",
@@ -5813,6 +6068,80 @@
           }
         }
       },
+      "Embed": {
+        "type": "object",
+        "description": "Whether Nova can frame an app, as observed from the app's own headers.",
+        "required": [
+          "url",
+          "state"
+        ],
+        "properties": {
+          "blocked_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The header that refuses framing, e.g. `content-security-policy`."
+          },
+          "checked": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The in-cluster page Nova read the headers from."
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "That header's value, verbatim — what the operator has to change."
+          },
+          "sign_in_host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Host a visitor without a session is sent to for sign-in, when the app's\nown page redirects off its hosts before it renders. That page (Keycloak\non this platform) refuses framing, so the frame stays empty until the\nvisitor signs in in a top-level tab; the UI turns this into a call to\naction. `None` when the app answers for itself — a login form on its own\nhost is part of the app and frames fine."
+          },
+          "state": {
+            "type": "string",
+            "description": "allowed | blocked | unknown"
+          },
+          "url": {
+            "type": "string",
+            "description": "The page a browser loads in the frame (external URL, empty without a base domain)."
+          }
+        }
+      },
+      "EmbedApp": {
+        "type": "object",
+        "description": "What the embedded pages (Dashboards, Notebooks) need, readable by every signed-in user:\nthe apps Nova frames, their address, liveness and framing state. No workloads, images or\nreplica counts; those stay behind the admin-only `/api/apps`.\n\nDeliberately not an admin route and deliberately not a filtered `/api/apps`: an ordinary\nuser needs to open the notebook and the dashboard, and nothing else on that payload.",
+        "required": [
+          "id",
+          "name",
+          "external_url",
+          "status",
+          "embed"
+        ],
+        "properties": {
+          "embed": {
+            "$ref": "#/components/schemas/Embed"
+          },
+          "external_url": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        }
+      },
       "ErrorResponse": {
         "type": "object",
         "description": "Every non-2xx answer under `/api/` is this envelope (see README \"HTTP\nconventions\"), so every error response in the document points here.",
@@ -5823,6 +6152,36 @@
           "error": {
             "type": "string",
             "description": "Human-readable sentence. Never contains tokens, URLs or stack traces."
+          }
+        }
+      },
+      "Fact": {
+        "type": "object",
+        "description": "One label/value pair about an app, as Nova can honestly observe it.",
+        "required": [
+          "label",
+          "value"
+        ],
+        "properties": {
+          "label": {
+            "type": "string"
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where the value comes from, e.g. `Trino /v1/info`. Facts without a source\nare those Nova knows from its own configuration."
+          },
+          "tone": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`ok` | `bad` when the value is a health judgement; absent otherwise."
+          },
+          "value": {
+            "type": "string"
           }
         }
       },
@@ -5840,6 +6199,22 @@
           "status": {
             "type": "string",
             "description": "Always `ok`."
+          }
+        }
+      },
+      "Link": {
+        "type": "object",
+        "description": "A deep link into an app's own UI.",
+        "required": [
+          "label",
+          "url"
+        ],
+        "properties": {
+          "label": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
           }
         }
       },
@@ -6634,6 +7009,52 @@
           }
         }
       },
+      "PlatformApp": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "description",
+          "category",
+          "external_url",
+          "browsable",
+          "status",
+          "images"
+        ],
+        "properties": {
+          "browsable": {
+            "type": "boolean",
+            "description": "Whether a browser has somewhere to go for this app. False for an app with\nno browsable surface of its own (an API-only catalog, say), which is\nindependent of whether the app is installed or reachable."
+          },
+          "category": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "external_url": {
+            "type": "string",
+            "description": "Reachable-from-the-browser URL. Empty when no base domain is configured,\nand empty for an app with no browsable surface (nothing serves its host —\nsee `public_url`)."
+          },
+          "id": {
+            "type": "string"
+          },
+          "images": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Images the app's workloads actually run, read from the cluster. Empty when\nthere is no cluster to read (demo mode, local run) or the app is not installed."
+          },
+          "name": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "description": "up | unreachable | unknown | not-installed"
+          }
+        }
+      },
       "PreviewScheduleRequest": {
         "type": "object",
         "description": "`POST /api/pipelines/preview-schedule`: the next fire times of a cron in its zone.",
@@ -7179,6 +7600,23 @@
           "accepted": {
             "type": "boolean",
             "description": "Always `true`: a `202` is the acceptance, and the round has already started."
+          }
+        }
+      },
+      "Replicas": {
+        "type": "object",
+        "required": [
+          "ready",
+          "desired"
+        ],
+        "properties": {
+          "desired": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "ready": {
+            "type": "integer",
+            "format": "int32"
           }
         }
       },
@@ -8008,6 +8446,38 @@
           "name": {
             "type": "string",
             "description": "The configured warehouse name (`NOVA_WAREHOUSE_NAME`)."
+          }
+        }
+      },
+      "Workload": {
+        "type": "object",
+        "description": "One workload in the namespace, flattened to what a human wants to see.",
+        "required": [
+          "name",
+          "kind",
+          "image",
+          "ready",
+          "desired"
+        ],
+        "properties": {
+          "desired": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "image": {
+            "type": "string",
+            "description": "Image reference as the cluster has it — tag or digest, verbatim."
+          },
+          "kind": {
+            "type": "string",
+            "description": "Deployment | StatefulSet"
+          },
+          "name": {
+            "type": "string"
+          },
+          "ready": {
+            "type": "integer",
+            "format": "int32"
           }
         }
       }

@@ -11,7 +11,7 @@ use axum::http::HeaderMap;
 use serde::Serialize;
 
 /// Whether Nova can frame an app, as observed from the app's own headers.
-#[derive(Serialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Clone, Debug, PartialEq, utoipa::ToSchema)]
 pub struct Embed {
     /// The page a browser loads in the frame (external URL, empty without a base domain).
     pub url: String,
