@@ -865,6 +865,17 @@ pub struct NotebookParameters {
     pub object_version: String,
 }
 
+/// The `?dryRun=` of the publish route: `true` checks everything a publish checks and stores
+/// nothing.
+#[derive(Debug, Clone, Default, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishQuery {
+    /// `true`: validate the notebook and say whether the newest version already holds these
+    /// bytes, without storing a version, using a publish slot or writing an audit line.
+    pub dry_run: Option<bool>,
+}
+
 /// The `?version=` of the parameters route: omitted means the latest version.
 #[derive(Debug, Clone, Default, Deserialize, utoipa::IntoParams)]
 #[into_params(parameter_in = Query)]
@@ -1134,14 +1145,15 @@ pub(crate) async fn no_store(request: Request, next: Next) -> Response {
     operation_id = "notebooks_publish",
     path = "/api/notebooks/{group}/{name}",
     tag = "public",
-    description = "Publish a notebook as a new immutable object version in the `notebooks` bucket. Needs a signed-in person whose groups include `{group}` (403 `you are not a member of the group <g>`; administrators are not exempt). `{name}` must match `^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}\\.ipynb$` and the body must be an nbformat 4 notebook of at most 5 MiB. Every cell's `outputs` and `execution_count` and the notebook's widget metadata are removed before storing — no cell output reaches the object store. `sha256` is of the stored (stripped) bytes. `parameters` are the `name = literal` lines of the first cell tagged `parameters`, at most 32; defaults are text and are never evaluated. A 61st publish by one person in an hour is 429. Publishing bytes the newest version already holds stores nothing, uses no slot and writes no audit line: the answer names that version with `unchanged: true`. Unset `NOVA_S3_*` is 503 `notebook storage is not configured`; an S3 that is down or refuses is 502. Each publish that stores a version writes one audit line with group, name, version and size, never content.",
+    description = "Publish a notebook as a new immutable object version in the `notebooks` bucket. Needs a signed-in person whose groups include `{group}` (403 `you are not a member of the group <g>`; administrators are not exempt). `{name}` must match `^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}\\.ipynb$` and the body must be an nbformat 4 notebook of at most 5 MiB. Every cell's `outputs` and `execution_count` and the notebook's widget metadata are removed before storing — no cell output reaches the object store. `sha256` is of the stored (stripped) bytes. `parameters` are the `name = literal` lines of the first cell tagged `parameters`, at most 32; defaults are text and are never evaluated. A 61st publish by one person in an hour is 429. Publishing bytes the newest version already holds stores nothing, uses no slot and writes no audit line: the answer names that version with `unchanged: true`. With `?dryRun=true` the same checks run and nothing is stored, no slot is used and no audit line is written: the answer says `unchanged: true` with the newest version, or `unchanged: false` with an empty `objectVersion` when a publish would store a new one. Unset `NOVA_S3_*` is 503 `notebook storage is not configured`; an S3 that is down or refuses is 502. Each publish that stores a version writes one audit line with group, name, version and size, never content.",
     params(
         ("group" = String, Path, description = "One of the caller's groups"),
         ("name" = String, Path, description = "Notebook file name, ending in .ipynb"),
+        PublishQuery,
     ),
     request_body = serde_json::Value,
     responses(
-        (status = 200, description = "The stored version and its parsed parameters; `unchanged: true` when the newest version already held these bytes", body = PublishedNotebook),
+        (status = 200, description = "The stored version and its parsed parameters; `unchanged: true` when the newest version already held these bytes; an empty `objectVersion` only on a dry run that would store a new version", body = PublishedNotebook),
         (status = 400, description = "Bad name or not an nbformat 4 notebook", body = crate::openapi::ErrorResponse),
         (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
         (status = 403, description = "Not a member of the group", body = crate::openapi::ErrorResponse),
@@ -1155,6 +1167,7 @@ pub(crate) async fn publish(
     State(state): State<Arc<AppState>>,
     principal: Option<Extension<Principal>>,
     Path((group, name)): Path<(String, String)>,
+    Query(query): Query<PublishQuery>,
     request: Request,
 ) -> Response {
     let Some(store) = state.notebooks.as_ref() else {
@@ -1224,6 +1237,21 @@ pub(crate) async fn publish(
             sha256,
             size,
             unchanged: true,
+            parameters,
+        })
+        .into_response();
+    }
+
+    // A dry run stops here: nothing is stored and no slot or audit line is used. There is no
+    // version yet, so `objectVersion` is empty.
+    if query.dry_run == Some(true) {
+        return Json(PublishedNotebook {
+            name,
+            group,
+            object_version: String::new(),
+            sha256,
+            size,
+            unchanged: false,
             parameters,
         })
         .into_response();
@@ -2127,6 +2155,114 @@ mod tests {
             assert_eq!(status, StatusCode::OK, "round {round}: {answer}");
         }
         assert_eq!(s3.objects().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_stores_nothing_and_says_what_a_publish_would_do() {
+        let s3 = FakeS3::start().await;
+        let state = state(Some(notebook_store(&s3.base)));
+        let app = app(state, Some(principal("dry-sam", &["analytics"], false)));
+        let path = "/notebooks/analytics/dry.ipynb";
+        let dry = "/notebooks/analytics/dry.ipynb?dryRun=true";
+        let first_body = body(&notebook(vec![code_cell(json!(["x = 1\n"]))]));
+
+        // Nothing is published yet: a dry run would store a version, so it names none.
+        let (status, would) = call(&app, "PUT", dry, Some(&first_body), &[]).await;
+        assert_eq!(status, StatusCode::OK, "{would}");
+        assert_eq!(would["objectVersion"], "");
+        assert_eq!(would["unchanged"], false);
+        assert!(!would["sha256"].as_str().unwrap().is_empty());
+        assert!(s3.is_empty(), "a dry run stores nothing");
+
+        let (status, stored) = call(&app, "PUT", path, Some(&first_body), &[]).await;
+        assert_eq!(status, StatusCode::OK, "{stored}");
+        assert_eq!(stored["objectVersion"], "v1");
+        assert_eq!(
+            stored["sha256"], would["sha256"],
+            "the dry run hashed what a publish stores"
+        );
+
+        // The same bytes: the dry run names the newest version.
+        let (status, same) = call(&app, "PUT", dry, Some(&first_body), &[]).await;
+        assert_eq!(status, StatusCode::OK, "{same}");
+        assert_eq!(same["objectVersion"], "v1");
+        assert_eq!(same["unchanged"], true);
+
+        // Other bytes: a publish would store a new version, the dry run does not.
+        let changed_body = body(&notebook(vec![code_cell(json!(["x = 2\n"]))]));
+        let (status, change) = call(&app, "PUT", dry, Some(&changed_body), &[]).await;
+        assert_eq!(status, StatusCode::OK, "{change}");
+        assert_eq!(change["objectVersion"], "");
+        assert_eq!(change["unchanged"], false);
+        assert_ne!(change["sha256"], stored["sha256"]);
+        assert_eq!(s3.objects().len(), 1, "still the one stored version");
+
+        // `dryRun=false` is an ordinary publish.
+        let (status, real) = call(
+            &app,
+            "PUT",
+            "/notebooks/analytics/dry.ipynb?dryRun=false",
+            Some(&changed_body),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{real}");
+        assert_eq!(real["objectVersion"], "v2");
+
+        // Two versions were stored, so there are two audit lines: the dry runs wrote none.
+        let records = crate::audit::notebook_test_sink::take_for("dry-sam");
+        assert_eq!(records.len(), 2, "{records:?}");
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_uses_no_slot_and_refuses_what_a_publish_refuses() {
+        let s3 = FakeS3::start().await;
+        let state = state(Some(notebook_store(&s3.base)));
+        let app = app(state, Some(principal("dry-kim", &["analytics"], false)));
+        let good = body(&notebook(vec![code_cell(json!(["x = 1\n"]))]));
+
+        for round in 0..=PUBLISHES_PER_HOUR {
+            let (status, answer) = call(
+                &app,
+                "PUT",
+                "/notebooks/analytics/slots.ipynb?dryRun=true",
+                Some(&good),
+                &[],
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "round {round}: {answer}");
+        }
+
+        let (status, answer) = call(
+            &app,
+            "PUT",
+            "/notebooks/other/x.ipynb?dryRun=true",
+            Some(&good),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{answer}");
+        for bad in ["{not json", r#"{"nbformat":3,"cells":[]}"#] {
+            let (status, answer) = call(
+                &app,
+                "PUT",
+                "/notebooks/analytics/x.ipynb?dryRun=true",
+                Some(bad),
+                &[],
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}: {answer}");
+        }
+        let (status, _) = call(
+            &app,
+            "PUT",
+            "/notebooks/analytics/x.ipynb?dryRun=maybe",
+            Some(&good),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(s3.is_empty(), "nothing was stored");
     }
 
     #[tokio::test]
