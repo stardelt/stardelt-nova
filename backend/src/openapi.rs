@@ -114,6 +114,10 @@ pub struct ErrorResponse {
         crate::statements::cancel,
         crate::admin_catalogs::list,
         crate::admin_catalogs::update_access,
+        crate::apps::list,
+        crate::apps::links,
+        crate::apps::detail,
+        crate::apps::embeds,
     ),
     components(schemas(
         crate::Me,
@@ -319,10 +323,6 @@ mod tests {
     /// shrinks: document a route (add its `#[utoipa::path]`) and delete its
     /// line here. Adding a route without either fails the test below.
     const UNDOCUMENTED: &[&str] = &[
-        "/api/apps",
-        "/api/apps/links",
-        "/api/apps/{id}",
-        "/api/embeds",
         "/api/ingest/upload",
         "/api/jobs",
         "/api/transfer",
@@ -510,6 +510,24 @@ mod tests {
             bad.is_empty(),
             "path parameters differ from the path: {bad:#?}"
         );
+    }
+
+    /// The service inventory is for the interface and for operators, not a promise to tools:
+    /// all four routes are `internal`, and the two that show cluster data can answer 403.
+    #[test]
+    fn the_service_inventory_is_internal_and_only_the_operator_routes_can_answer_403() {
+        let value = serde_json::to_value(document()).expect("the document is JSON");
+        for (path, id, forbidden) in [
+            ("/api/apps", "apps_list", true),
+            ("/api/apps/{id}", "apps_detail", true),
+            ("/api/apps/links", "apps_links", false),
+            ("/api/embeds", "apps_embeds", false),
+        ] {
+            let op = &value["paths"][path]["get"];
+            assert_eq!(op["operationId"], id, "{path}");
+            assert_eq!(op["tags"], serde_json::json!(["internal"]), "{path}");
+            assert_eq!(op["responses"].get("403").is_some(), forbidden, "{path}");
+        }
     }
 
     /// A setting's value is any JSON (a string, a number, a list), so the schema

@@ -22,7 +22,7 @@ use tokio::sync::RwLock;
 use crate::AppState;
 
 /// One workload in the namespace, flattened to what a human wants to see.
-#[derive(Serialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Clone, Debug, PartialEq, utoipa::ToSchema)]
 pub struct Workload {
     pub name: String,
     /// Deployment | StatefulSet

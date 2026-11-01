@@ -25,7 +25,7 @@ use crate::AppState;
 use crate::cluster::{self, Workload};
 use crate::embed::{self, Embed};
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, utoipa::ToSchema)]
 pub struct PlatformApp {
     pub id: String,
     pub name: String,
@@ -47,7 +47,7 @@ pub struct PlatformApp {
 }
 
 /// One label/value pair about an app, as Nova can honestly observe it.
-#[derive(Serialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Clone, Debug, PartialEq, utoipa::ToSchema)]
 pub struct Fact {
     pub label: String,
     pub value: String,
@@ -84,14 +84,14 @@ impl Fact {
 }
 
 /// A deep link into an app's own UI.
-#[derive(Serialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Clone, Debug, PartialEq, utoipa::ToSchema)]
 pub struct Link {
     pub label: String,
     pub url: String,
 }
 
 /// `GET /api/apps/:id` — everything Nova can say about one service.
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct AppDetail {
     pub app: PlatformApp,
     /// In-cluster URL Nova probes for liveness, shown verbatim: it is the reason
@@ -112,7 +112,7 @@ pub struct AppDetail {
     pub embed: Option<Embed>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct Replicas {
     pub ready: i32,
     pub desired: i32,
@@ -360,7 +360,7 @@ async fn describe(
 }
 
 /// One entry of the header's app switcher: enough to open the app, and nothing else.
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct AppLink {
     pub id: String,
     pub name: String,
@@ -400,6 +400,17 @@ fn links_for(base: &str, admin: bool) -> Vec<AppLink> {
 /// Deliberately no status: liveness comes from cluster probes, which is operator
 /// information (see `apps::list`), and this endpoint is called by people who are
 /// not operators.
+#[utoipa::path(
+    get,
+    operation_id = "apps_links",
+    path = "/api/apps/links",
+    tag = "internal",
+    description = "The apps the caller may open from the header's app switcher: `id`, `name`, `category` and the address a browser opens (`external_url`). For every signed-in user. No status and no workload data: liveness is operator information (`GET /api/apps`). Left out: Nova itself, apps with no browsable surface, apps whose address cannot be built because no base domain is configured, and the engine's own UI for everybody who is not an administrator. Field names are snake_case.",
+    responses(
+        (status = 200, description = "One entry per app the caller may open, in the order the service catalog declares them", body = [AppLink]),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
+    )
+)]
 pub async fn links(principal: Option<Extension<crate::auth::Principal>>) -> Json<Vec<AppLink>> {
     let base = std::env::var("NOVA_BASE_DOMAIN").unwrap_or_default();
     // No principal means the static-dev mode, where everybody acts as an administrator.
@@ -410,6 +421,18 @@ pub async fn links(principal: Option<Extension<crate::auth::Principal>>) -> Json
     Json(links_for(&base, admin))
 }
 
+#[utoipa::path(
+    get,
+    operation_id = "apps_list",
+    path = "/api/apps",
+    tag = "internal",
+    description = "Every service of the platform (`nova`, `trino`, `lakekeeper`, `superset`, `airflow`, `jupyterhub`) with its category, the address a browser opens (empty without a base domain and for an app with no browsable surface), `browsable`, the liveness `status` (`up`, `unreachable`, `unknown` or `not-installed`) and the images its workloads run, read from the cluster (empty in demo mode or when the app is not installed). Administrator-only: anybody else gets 403. Field names are snake_case.",
+    responses(
+        (status = 200, description = "One row per service, in the order the service catalog declares them", body = [PlatformApp]),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller is not a platform administrator", body = crate::openapi::ErrorResponse),
+    )
+)]
 pub async fn list(State(s): State<Arc<AppState>>) -> Json<Vec<PlatformApp>> {
     let base = std::env::var("NOVA_BASE_DOMAIN").unwrap_or_default();
     let snapshot = s.workloads.snapshot(s.kube.as_ref(), s.demo).await;
@@ -428,7 +451,7 @@ pub async fn list(State(s): State<Arc<AppState>>) -> Json<Vec<PlatformApp>> {
 ///
 /// Deliberately not an admin route and deliberately not a filtered `/api/apps`: an ordinary
 /// user needs to open the notebook and the dashboard, and nothing else on that payload.
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct EmbedApp {
     pub id: String,
     pub name: String,
@@ -437,6 +460,17 @@ pub struct EmbedApp {
     pub embed: Embed,
 }
 
+#[utoipa::path(
+    get,
+    operation_id = "apps_embeds",
+    path = "/api/embeds",
+    tag = "internal",
+    description = "The apps Nova frames in its own pages (dashboards, notebooks), for every signed-in user: `id`, `name`, the address a browser opens, the liveness `status` and an `embed` report saying whether the app's own headers allow framing (`allowed`, `blocked` or `unknown`, with the header that blocks it). No workloads, images or replica counts: those stay behind the administrator-only `GET /api/apps`. Field names are snake_case.",
+    responses(
+        (status = 200, description = "One entry per app Nova can frame", body = [EmbedApp]),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
+    )
+)]
 pub async fn embeds(State(s): State<Arc<AppState>>) -> Json<Vec<EmbedApp>> {
     let base = std::env::var("NOVA_BASE_DOMAIN").unwrap_or_default();
     let snapshot = s.workloads.snapshot(s.kube.as_ref(), s.demo).await;
@@ -456,6 +490,20 @@ pub async fn embeds(State(s): State<Arc<AppState>>) -> Json<Vec<EmbedApp>> {
     Json(out)
 }
 
+#[utoipa::path(
+    get,
+    operation_id = "apps_detail",
+    path = "/api/apps/{id}",
+    tag = "internal",
+    description = "Everything Nova can say about one service: the `app` row, the in-cluster `probe` address Nova checks for liveness, the ready and desired `replicas`, its `workloads`, `facts` read from the service's own API (an unreachable service contributes none), `links` into its UI and, for an app Nova frames, the `embed` report. Administrator-only: anybody else gets 403. An id that is not a service answers 404 with `error` and the list of `known` ids. Field names are snake_case.",
+    params(("id" = String, Path, description = "The service's id: `nova`, `trino`, `lakekeeper`, `superset`, `airflow` or `jupyterhub`")),
+    responses(
+        (status = 200, description = "The service", body = AppDetail),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller is not a platform administrator", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such service; the body also carries `known`, the list of ids", body = crate::openapi::ErrorResponse),
+    )
+)]
 pub async fn detail(State(s): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
     let Some(spec) = spec(&id) else {
         return (
