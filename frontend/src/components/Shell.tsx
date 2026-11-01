@@ -14,33 +14,28 @@ type NavGroup = { label: string; items: NavItem[]; admin?: boolean }
 
 const groups: NavGroup[] = [
   {
-    label: 'Workspace',
+    label: 'Explore',
     items: [
       { to: '/', label: 'Overview', icon: 'grid', end: true },
       { to: '/catalog', label: 'Catalog', icon: 'database' },
+      { to: '/query', label: 'SQL editor', icon: 'terminal' },
+      { to: '/queries', label: 'Query log', icon: 'table' },
+      { to: '/lineage', label: 'Lineage', icon: 'lineage' },
     ],
   },
   {
-    label: 'Data',
+    label: 'Build',
     items: [
-      { to: '/query', label: 'SQL editor', icon: 'terminal' },
       { to: '/data', label: 'Load & transfer', icon: 'upload' },
       { to: '/connections', label: 'Connections', icon: 'key' },
-      { to: '/queries', label: 'Query log', icon: 'table' },
-      { to: '/jobs', label: 'Jobs', icon: 'clock' },
       { to: '/pipelines', label: 'Pipelines', icon: 'play' },
-    ],
-  },
-  {
-    label: 'Governance',
-    items: [{ to: '/lineage', label: 'Lineage', icon: 'lineage' }],
-  },
-  {
-    label: 'Analytics',
-    items: [
-      { to: '/dashboards', label: 'Dashboards', icon: 'chart' },
+      { to: '/jobs', label: 'Jobs', icon: 'clock' },
       { to: '/notebooks', label: 'Notebooks', icon: 'notebook' },
     ],
+  },
+  {
+    label: 'Share',
+    items: [{ to: '/dashboards', label: 'Dashboards', icon: 'chart' }],
   },
   {
     // Operating the platform is not a data-engineering task: an analyst has no use for
