@@ -2746,10 +2746,13 @@ mod tests {
         assert_eq!(ttl(Some(json!(300)), "opaque"), Duration::from_secs(300));
         // RFC 6749 says a number; a string happens in the wild.
         assert_eq!(ttl(Some(json!("120")), "opaque"), Duration::from_secs(120));
-        // No `expires_in`: the access token's own `exp` is used.
-        assert_eq!(
-            ttl(None, &sign(&json!({ "exp": now() + 90 }), Some("k1"))),
-            Duration::from_secs(90)
+        // No `expires_in`: the access token's own `exp` is used. The clock is read once to build
+        // the token and again to measure it, and signing takes a few milliseconds in between: when
+        // a second ticks over meanwhile, the answer is 89, which is the same answer.
+        let from_exp = ttl(None, &sign(&json!({ "exp": now() + 90 }), Some("k1")));
+        assert!(
+            (Duration::from_secs(89)..=Duration::from_secs(90)).contains(&from_exp),
+            "{from_exp:?}"
         );
         // Neither: a conservative default, not a refresh per request.
         assert_eq!(ttl(Some(json!(null)), "opaque"), DEFAULT_ACCESS_TTL);
