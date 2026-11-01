@@ -644,6 +644,8 @@ export type DeploymentView = {
   revision?: string
   deployedBy?: string
   deployedAt?: string
+  /** True when the pipeline was changed after its last deploy (stardelt-nova drift check). */
+  modified?: boolean
 }
 
 export type PipelineView = {
