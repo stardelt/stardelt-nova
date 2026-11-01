@@ -41,7 +41,7 @@ export default function Settings() {
   return (
     <div className="max-w-5xl space-y-6">
       <header>
-        <h1 className="text-2xl font-bold tracking-tight">Settings</h1>
+        <h1 className="text-2xl font-bold tracking-tight">Platform settings</h1>
         <p className="text-text-dim text-sm mt-1">
           What this Nova knows about the platform it runs on.
         </p>
