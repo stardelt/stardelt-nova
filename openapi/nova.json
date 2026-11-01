@@ -7660,6 +7660,7 @@
         "required": [
           "ok",
           "errors",
+          "changes",
           "nextRuns"
         ],
         "properties": {
@@ -7669,6 +7670,13 @@
               "null"
             ],
             "description": "`create` when the name is free, `update` when it names a pipeline Nova wrote and the caller\nmay change; absent when `ok` is false."
+          },
+          "changes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "What an `update` would change, from `statement` (or `notebook`), `schedule`, `params` and\n`options`; empty for a `create`, for a refusal and for an update that changes nothing."
           },
           "errors": {
             "type": "array",

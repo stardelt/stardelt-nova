@@ -1436,6 +1436,83 @@ fn pipeline_resource(
     })
 }
 
+/// The resource an update writes: `resource` with the statement or the pinned notebook, the
+/// options, the parameters and the schedule replaced by the body's (the body describes the whole
+/// editable state, nothing is merged), and nothing else touched. The update and the validation
+/// both build it here, so what is checked is what is written.
+fn updated_resource(
+    resource: &Value,
+    statement: &Statement,
+    options: &PipelineOptionsView,
+    params: &BTreeMap<String, String>,
+    schedule: Option<&(String, String)>,
+) -> Value {
+    let mut updated = resource.clone();
+    match statement {
+        Statement::Sql(sql) => updated["spec"]["tasks"][0]["sql"] = json!(sql),
+        Statement::Notebook {
+            name,
+            object_version,
+            params,
+        } => {
+            updated["spec"]["tasks"][0]["config"] = json!({
+                "notebook": name,
+                "objectVersion": object_version,
+                "params": params,
+            });
+        }
+    }
+    updated["spec"]["concurrency"] = json!(options.concurrency);
+    updated["spec"]["retries"] = json!({
+        "attempts": options.retries,
+        "backoff": format!("{}m", options.backoff_minutes),
+    });
+    updated["spec"]["timeout"] = json!(format!("{}m", options.timeout_minutes));
+    if params.is_empty() {
+        if let Some(spec) = updated.get_mut("spec").and_then(Value::as_object_mut) {
+            spec.remove("params");
+        }
+    } else {
+        updated["spec"]["params"] = json!(params);
+    }
+    match schedule {
+        Some((cron, timezone)) => {
+            updated["spec"]["schedule"] = json!({ "cron": cron, "timezone": timezone });
+        }
+        None => {
+            if let Some(spec) = updated.get_mut("spec").and_then(Value::as_object_mut) {
+                spec.remove("schedule");
+            }
+        }
+    }
+    updated
+}
+
+/// What differs between a stored pipeline and the resource an update would write, in the words
+/// of the form: `statement` or `notebook`, `schedule`, `params`, `options` (any of the
+/// concurrency, retries and time limit).
+fn changes_of(before: &Value, after: &Value) -> Vec<String> {
+    let (before, after) = (spec_of(before), spec_of(after));
+    let run = if after["tasks"][0]["kind"] == "notebook" {
+        "notebook"
+    } else {
+        "statement"
+    };
+    let options = ["concurrency", "retries", "timeout"]
+        .iter()
+        .any(|key| before.get(key) != after.get(key));
+    [
+        (run, before.get("tasks") != after.get("tasks")),
+        ("schedule", before.get("schedule") != after.get("schedule")),
+        ("params", before.get("params") != after.get("params")),
+        ("options", options),
+    ]
+    .into_iter()
+    .filter(|(_, changed)| *changed)
+    .map(|(name, _)| name.to_string())
+    .collect()
+}
+
 /// The in-memory create rate limit (`AppState::pipeline_creates`): per signed-in `sub`, the
 /// creation times inside the last hour.
 pub type CreateLimiter = std::sync::Mutex<HashMap<String, VecDeque<Instant>>>;
@@ -1649,6 +1726,9 @@ pub struct ValidatePipelineResponse {
     pub action: Option<String>,
     /// Why not: one sentence per problem (today the first rule that refuses).
     pub errors: Vec<ValidationIssue>,
+    /// What an `update` would change, from `statement` (or `notebook`), `schedule`, `params` and
+    /// `options`; empty for a `create`, for a refusal and for an update that changes nothing.
+    pub changes: Vec<String>,
     /// The next five fire times (RFC 3339, in the schedule's zone) when the document is accepted
     /// and has a schedule.
     pub next_runs: Vec<String>,
@@ -2940,6 +3020,7 @@ fn not_ok(message: &str) -> ValidatePipelineResponse {
         errors: vec![ValidationIssue {
             message: message.to_string(),
         }],
+        changes: Vec::new(),
         next_runs: Vec::new(),
     }
 }
@@ -2959,8 +3040,8 @@ async fn validate_pipeline(
         Err(e) if e.outcome.starts_with("refused:") => return Ok(not_ok(e.fail.message())),
         Err(e) => return Err(e.fail),
     };
-    let action = match resources.get(&body.name).await.map_err(resource_fail)? {
-        None => "create",
+    let (action, changes) = match resources.get(&body.name).await.map_err(resource_fail)? {
+        None => ("create", Vec::new()),
         Some(existing) => {
             if !may_act(who, spec_of(&existing)) {
                 return Ok(not_ok(pipeline_exists().message()));
@@ -2971,7 +3052,24 @@ async fn validate_pipeline(
             if spec_of(&existing)["ownerGroup"].as_str() != Some(body.owner_group.as_str()) {
                 return Ok(not_ok("the group of an existing pipeline cannot change"));
             }
-            "update"
+            // The rules only an update has: the form edits one `run` task and never turns a
+            // statement into a notebook or back.
+            match (run_task_kind(&existing), &planned.statement) {
+                (None, _) => return Ok(not_ok(shape_not_editable().message())),
+                (Some("notebook"), Statement::Sql(_)) => return Ok(not_ok(NOTEBOOK_PIPELINE)),
+                (Some("sql"), Statement::Notebook { .. }) => {
+                    return Ok(not_ok(STATEMENT_PIPELINE));
+                }
+                _ => {}
+            }
+            let updated = updated_resource(
+                &existing,
+                &planned.statement,
+                &planned.options,
+                &body.params,
+                planned.schedule.as_ref(),
+            );
+            ("update", changes_of(&existing, &updated))
         }
     };
     let next_runs = planned
@@ -2990,6 +3088,7 @@ async fn validate_pipeline(
         ok: true,
         action: Some(action.to_string()),
         errors: Vec::new(),
+        changes,
         next_runs,
     })
 }
@@ -3167,47 +3266,13 @@ async fn update_pipeline_inner(
         return Err(ActionError::refused("shape", shape_not_editable()));
     }
 
-    let mut updated = resource.clone();
-    match &statement {
-        Statement::Sql(sql) => updated["spec"]["tasks"][0]["sql"] = json!(sql),
-        // The body describes the whole notebook state: the version and the parameters are
-        // written, not merged.
-        Statement::Notebook {
-            name,
-            object_version,
-            params,
-        } => {
-            updated["spec"]["tasks"][0]["config"] = json!({
-                "notebook": name,
-                "objectVersion": object_version,
-                "params": params,
-            });
-        }
-    }
-    // The body describes the whole editable state: the options are written, not merged.
-    updated["spec"]["concurrency"] = json!(options.concurrency);
-    updated["spec"]["retries"] = json!({
-        "attempts": options.retries,
-        "backoff": format!("{}m", options.backoff_minutes),
-    });
-    updated["spec"]["timeout"] = json!(format!("{}m", options.timeout_minutes));
-    if body.params.is_empty() {
-        if let Some(spec) = updated.get_mut("spec").and_then(Value::as_object_mut) {
-            spec.remove("params");
-        }
-    } else {
-        updated["spec"]["params"] = json!(body.params);
-    }
-    match &schedule {
-        Some((cron, timezone)) => {
-            updated["spec"]["schedule"] = json!({ "cron": cron, "timezone": timezone });
-        }
-        None => {
-            if let Some(spec) = updated.get_mut("spec").and_then(Value::as_object_mut) {
-                spec.remove("schedule");
-            }
-        }
-    }
+    let updated = updated_resource(
+        &resource,
+        &statement,
+        &options,
+        &body.params,
+        schedule.as_ref(),
+    );
 
     // The resource still carries the `resourceVersion` read above: a concurrent change is a
     // conflict, not a silent overwrite.
@@ -8153,6 +8218,121 @@ mod tests {
             moved.errors[0].message,
             "the group of an existing pipeline cannot change"
         );
+    }
+
+    #[tokio::test]
+    async fn validate_lists_what_an_update_would_change() {
+        let resources = memory_with(
+            &[("daily-trips", nova_pipeline("daily-trips", "analytics"))],
+            &[(
+                "pipeline-analytics",
+                service_principal("pipeline-analytics", "analytics", Some(true)),
+            )],
+        );
+        let ada = who("sub-ada", &["analytics"], false);
+        let tuned = PipelineOptions {
+            retries: Some(3),
+            ..PipelineOptions::default()
+        };
+
+        let same = create_body("daily-trips", "analytics", "select 1");
+        let mut unscheduled = same.clone();
+        unscheduled.schedule = None;
+        let mut retried = same.clone();
+        retried.options = Some(tuned.clone());
+        let mut everything = create_body("daily-trips", "analytics", "select 2");
+        everything.schedule = None;
+        everything.options = Some(tuned);
+        let mut parametrised = create_body("daily-trips", "analytics", "select '${params.day}'");
+        parametrised.params = BTreeMap::from([("day".to_string(), "2026-11-01".to_string())]);
+
+        for (body, expected) in [
+            (same, vec![]),
+            (
+                create_body("daily-trips", "analytics", "select 2"),
+                vec!["statement"],
+            ),
+            (unscheduled, vec!["schedule"]),
+            (retried, vec!["options"]),
+            (everything, vec!["statement", "schedule", "options"]),
+            (parametrised, vec!["statement", "params"]),
+        ] {
+            let answer = validate_pipeline(Some(&resources), None, &ada, body)
+                .await
+                .expect("an answer");
+            assert!(answer.ok, "{answer:?}");
+            assert_eq!(answer.action.as_deref(), Some("update"));
+            assert_eq!(answer.changes, expected);
+        }
+        assert_eq!(
+            stored_pipeline(&resources, "daily-trips").await.unwrap()["spec"]["tasks"][0]["sql"],
+            "select 1",
+            "a check writes nothing"
+        );
+
+        let new = validate_pipeline(
+            Some(&resources),
+            None,
+            &ada,
+            create_body("other", "analytics", "select 1"),
+        )
+        .await
+        .expect("an answer");
+        assert_eq!(new.action.as_deref(), Some("create"));
+        assert!(
+            new.changes.is_empty(),
+            "a create changes nothing that exists"
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_refuses_the_updates_that_update_refuses() {
+        let mut notebook = nova_pipeline("report", "analytics");
+        notebook["spec"]["tasks"] = json!([{
+            "name": "run",
+            "kind": "notebook",
+            "config": { "notebook": "report.ipynb", "objectVersion": "v1", "params": "{}" }
+        }]);
+        let mut two_tasks = nova_pipeline("two-tasks", "analytics");
+        two_tasks["spec"]["tasks"] = json!([
+            { "name": "run", "kind": "sql", "sql": "select 1" },
+            { "name": "check", "kind": "sql", "sql": "select 2" }
+        ]);
+        let resources = memory_with(
+            &[("report", notebook), ("two-tasks", two_tasks)],
+            &[(
+                "pipeline-analytics",
+                service_principal("pipeline-analytics", "analytics", Some(true)),
+            )],
+        );
+        let ada = who("sub-ada", &["analytics"], false);
+        let namespace = crate::cluster::namespace();
+
+        for name in ["report", "two-tasks"] {
+            let refusal = update_pipeline(
+                Some(&resources),
+                None,
+                None,
+                &ada,
+                &namespace,
+                name,
+                update_body("select 2"),
+            )
+            .await
+            .expect_err("update refuses it");
+            let answer = validate_pipeline(
+                Some(&resources),
+                None,
+                &ada,
+                create_body(name, "analytics", "select 2"),
+            )
+            .await
+            .expect("a refusal is an answer");
+            assert!(!answer.ok, "{name}");
+            assert_eq!(answer.action, None, "{name}");
+            assert!(answer.changes.is_empty(), "{name}");
+            assert_eq!(answer.errors[0].message, refusal.message(), "{name}");
+        }
     }
 
     #[tokio::test]
