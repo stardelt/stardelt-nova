@@ -5,7 +5,7 @@ import { formatTime, relativeTime, setTimeDisplay, sqlTableRef } from '../src/fo
 
 // Rules U1–U13 are written down in stardelt-internal/design/ui-conformance.md.
 
-const ROUTES = ['/', '/catalog', '/query', '/data', '/connections', '/jobs', '/pipelines', '/queries',
+const ROUTES = ['/', '/catalog', '/query', '/data', '/connections', '/jobs', '/pipelines', '/deployments', '/queries',
   '/apps', '/admin/catalogs', '/lineage', '/dashboards', '/notebooks', '/health', '/settings', '/preferences', '/profile',
   '/no-such-page']
 const VARIANTS = [
@@ -2403,6 +2403,70 @@ test.describe('pipelines', () => {
     await expect(page.getByRole('heading', { name: 'by-hand', exact: true })).toBeVisible()
     await expect(page.getByText('Deployed from', { exact: true })).toHaveCount(0)
     await context.close()
+  })
+
+  test('deployments: what bundles published is grouped by bundle and stage, a pipeline made by hand is left out', async ({ browser }) => {
+    const commit = '0123abcdef0123abcdef0123abcdef0123abcdef'
+    const other = 'fedcba9876543210fedcba9876543210fedcba98'
+    const evil = '<img src=x onerror="window.__xss=1">'
+    const rows = [
+      pipeline({ name: 'nightly', deployment: { bundle: 'shop-etl', target: 'prod', revision: commit, deployedBy: evil, deployedAt: '2026-11-01T08:00:00Z' } }),
+      pipeline({ name: 'load', deployment: { bundle: 'shop-etl', target: 'prod', revision: commit, deployedBy: 'ada', deployedAt: '2026-11-01T08:00:01Z', modified: true } }),
+      pipeline({ name: 'dev-ada-load', deployment: { bundle: 'shop-etl', target: 'dev', revision: `${other}-dirty` } }),
+      pipeline({ name: 'ab-one', deployment: { bundle: 'shop-etl', target: 'test', revision: commit } }),
+      pipeline({ name: 'ab-two', deployment: { bundle: 'shop-etl', target: 'test', revision: other } }),
+      pipeline({ name: 'by-hand' }),
+    ]
+    const { context, page } = await open(browser, {
+      rows,
+      start: '/deployments',
+      init: () => { (window as unknown as { __xss: number }).__xss = 0 },
+    })
+    await expect(page.getByRole('heading', { name: 'Deployments', exact: true })).toBeVisible()
+    await expect(page).toHaveTitle('Deployments · stardelt Nova')
+    expect(await page.getByRole('heading', { level: 2 }).allTextContents()).toEqual(['shop-etl · dev', 'shop-etl · prod', 'shop-etl · test'])
+
+    const prod = page.locator('section', { has: page.getByRole('heading', { name: 'shop-etl · prod' }) })
+    await expect(prod).toContainText('2 pipelines · commit 0123abc')
+    expect(await prod.locator('tbody tr td:first-child').allTextContents()).toEqual(['load', 'nightly'])
+    await expect(prod.locator('tr', { hasText: 'load' })).toContainText('Changed since deploy')
+    await expect(prod.locator('tr', { hasText: 'nightly' })).not.toContainText('Changed since deploy')
+    await expect(prod.locator('tr', { hasText: 'nightly' })).toContainText(evil)
+    await expect(prod.getByRole('link', { name: 'nightly' })).toHaveAttribute('href', `/pipelines/${NS}/nightly`)
+    expect(await page.evaluate(() => ({
+      xss: (window as unknown as { __xss?: number }).__xss ?? 0,
+      imgs: document.querySelectorAll('img[src="x"]').length,
+    }))).toEqual({ xss: 0, imgs: 0 })
+
+    const mixed = page.locator('section', { has: page.getByRole('heading', { name: 'shop-etl · test' }) })
+    await expect(mixed).toContainText('2 pipelines · 2 different commits')
+    const dev = page.locator('section', { has: page.getByRole('heading', { name: 'shop-etl · dev' }) })
+    await expect(dev).toContainText('1 pipeline · commit fedcba9 (uncommitted changes)')
+    await expect(page.getByText('by-hand')).toHaveCount(0)
+
+    // The populated page obeys the same rules as the empty one, on a desktop and on a phone.
+    expect(await auditPage(page), 'desktop').toEqual([])
+    await page.setViewportSize({ width: 360, height: 740 })
+    expect(await auditPage(page), 'phone').toEqual([])
+    await context.close()
+  })
+
+  test('deployments: with nothing deployed the page says so and points to Pipelines; an unreachable scheduler shows its sentence', async ({ browser }) => {
+    const empty = await open(browser, { rows: [pipeline({ name: 'by-hand' })], start: '/deployments' })
+    await expect(empty.page.locator('main')).toContainText('Nothing was deployed from a bundle yet.')
+    await expect(empty.page.getByRole('link', { name: 'Pipelines', exact: true }).last()).toHaveAttribute('href', '/pipelines')
+    await empty.context.close()
+
+    const down = await open(browser, {
+      start: '/deployments',
+      read: (route, path) => {
+        if (path !== '/api/pipelines') return false
+        json(route, { error: 'the scheduler is not reachable' }, 503)
+        return true
+      },
+    })
+    await expect(down.page.locator('main')).toContainText('the scheduler is not reachable')
+    await down.context.close()
   })
 
   test('log viewer', async ({ browser }) => {
