@@ -5678,6 +5678,17 @@
               "type": "string"
             }
           },
+          "provenance": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Provenance",
+                "description": "Which bundle, target and commit this pipeline is deployed from (`stardelt bundle deploy`)."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "schedule": {
             "oneOf": [
               {
@@ -5720,6 +5731,40 @@
             "type": "string"
           },
           "name": {
+            "type": "string"
+          }
+        }
+      },
+      "DeploymentView": {
+        "type": "object",
+        "description": "What `view_of` shows of a [`Provenance`], with who deployed and when.",
+        "required": [
+          "bundle",
+          "target"
+        ],
+        "properties": {
+          "bundle": {
+            "type": "string"
+          },
+          "deployedAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "deployedBy": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "revision": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target": {
             "type": "string"
           }
         }
@@ -6510,6 +6555,17 @@
             ],
             "description": "`metadata.creationTimestamp` as the cluster wrote it (RFC 3339); `None` for a malformed\nresource."
           },
+          "deployment": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/DeploymentView",
+                "description": "The bundle, target and commit a deploy stamped on the pipeline; absent for one that was\nmade in the interface or with `stardelt apply`."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "lastRun": {
             "oneOf": [
               {
@@ -6653,6 +6709,31 @@
             "items": {
               "$ref": "#/components/schemas/PrincipalView"
             }
+          }
+        }
+      },
+      "Provenance": {
+        "type": "object",
+        "description": "Where a pipeline came from when `stardelt bundle deploy` published it. It names things and\ndecides nothing: it is shown on the pipeline page and lets a later deploy find what a bundle\nowns. Written as the labels `stardelt.io/bundle` and `stardelt.io/target` and the annotation\n`stardelt.io/revision`, plus who deployed and when.",
+        "required": [
+          "bundle",
+          "target"
+        ],
+        "properties": {
+          "bundle": {
+            "type": "string",
+            "description": "The bundle's name: 3 to 40 lower-case letters, digits and dashes."
+          },
+          "revision": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The commit the bundle was read at: 7 to 64 hex digits, with `-dirty` appended when the\nworking tree had uncommitted changes. Omitted when the bundle is not in a Git checkout."
+          },
+          "target": {
+            "type": "string",
+            "description": "The target of the bundle: 1 to 32 lower-case letters, digits and dashes."
           }
         }
       },
@@ -7807,6 +7888,17 @@
             "propertyNames": {
               "type": "string"
             }
+          },
+          "provenance": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Provenance",
+                "description": "Which bundle, target and commit this update deploys. Omitted leaves what the pipeline\nalready says untouched; given, it replaces it."
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "resourceVersion": {
             "type": [
