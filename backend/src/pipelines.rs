@@ -1490,9 +1490,10 @@ fn updated_resource(
 
 /// What differs between a stored pipeline and the resource an update would write, in the words
 /// of the form: `statement` or `notebook`, `schedule`, `params`, `options` (any of the
-/// concurrency, retries and time limit).
-fn changes_of(before: &Value, after: &Value) -> Vec<String> {
-    let (before, after) = (spec_of(before), spec_of(after));
+/// concurrency, retries and time limit), and `deployment` when the bundle, the target or the
+/// commit a deploy stamped differs.
+fn changes_of(before_resource: &Value, after_resource: &Value) -> Vec<String> {
+    let (before, after) = (spec_of(before_resource), spec_of(after_resource));
     let run = if after["tasks"][0]["kind"] == "notebook" {
         "notebook"
     } else {
@@ -1501,11 +1502,19 @@ fn changes_of(before: &Value, after: &Value) -> Vec<String> {
     let options = ["concurrency", "retries", "timeout"]
         .iter()
         .any(|key| before.get(key) != after.get(key));
+    // Who deployed and when change with every deploy; the bundle, the target and the commit are
+    // what a person means by "the deployment changed".
+    let deployed =
+        |resource: &Value| deployment_of(resource).map(|d| (d.bundle, d.target, d.revision));
     [
         (run, before.get("tasks") != after.get("tasks")),
         ("schedule", before.get("schedule") != after.get("schedule")),
         ("params", before.get("params") != after.get("params")),
         ("options", options),
+        (
+            "deployment",
+            deployed(before_resource) != deployed(after_resource),
+        ),
     ]
     .into_iter()
     .filter(|(_, changed)| *changed)
@@ -1650,6 +1659,9 @@ pub struct CreatePipelineRequest {
     /// defaults.
     #[serde(default)]
     pub options: Option<PipelineOptions>,
+    /// Which bundle, target and commit this pipeline is deployed from (`stardelt bundle deploy`).
+    #[serde(default)]
+    pub provenance: Option<Provenance>,
 }
 
 /// `PUT /api/pipelines/{namespace}/{name}`: change the statement, the schedule, the parameters
@@ -1681,6 +1693,41 @@ pub struct UpdatePipelineRequest {
     /// then only fails if the resource changes while the update itself runs).
     #[serde(default)]
     pub resource_version: Option<String>,
+    /// Which bundle, target and commit this update deploys. Omitted leaves what the pipeline
+    /// already says untouched; given, it replaces it.
+    #[serde(default)]
+    pub provenance: Option<Provenance>,
+}
+
+/// Where a pipeline came from when `stardelt bundle deploy` published it. It names things and
+/// decides nothing: it is shown on the pipeline page and lets a later deploy find what a bundle
+/// owns. Written as the labels `stardelt.io/bundle` and `stardelt.io/target` and the annotation
+/// `stardelt.io/revision`, plus who deployed and when.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Provenance {
+    /// The bundle's name: 3 to 40 lower-case letters, digits and dashes.
+    pub bundle: String,
+    /// The target of the bundle: 1 to 32 lower-case letters, digits and dashes.
+    pub target: String,
+    /// The commit the bundle was read at: 7 to 64 hex digits, with `-dirty` appended when the
+    /// working tree had uncommitted changes. Omitted when the bundle is not in a Git checkout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+}
+
+/// What `view_of` shows of a [`Provenance`], with who deployed and when.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DeploymentView {
+    pub bundle: String,
+    pub target: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deployed_by: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deployed_at: Option<String>,
 }
 
 /// `POST /api/pipelines/check`: what the engine says about a statement, without running it.
@@ -1851,6 +1898,10 @@ pub struct PipelineView {
     /// `metadata.creationTimestamp` as the cluster wrote it (RFC 3339); `None` for a malformed
     /// resource.
     pub created_at: Option<String>,
+    /// The bundle, target and commit a deploy stamped on the pipeline; absent for one that was
+    /// made in the interface or with `stardelt apply`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deployment: Option<DeploymentView>,
 }
 
 /// One DagRun. `type` is Airflow's `run_type` under the name the UI uses.
@@ -1999,6 +2050,7 @@ fn view_of(
             .unwrap_or("Forbid")
             .to_string(),
         created_at: created_at_of(resource).map(str::to_string),
+        deployment: deployment_of(resource),
     }
 }
 
@@ -3057,10 +3109,101 @@ async fn plan_pipeline(
         ActionError::refused("schedule", Fail::new(StatusCode::BAD_REQUEST, message))
     })?;
 
+    // 6b. What a deploy says about where the pipeline came from, when it says anything.
+    if let Some(provenance) = &body.provenance {
+        check_provenance(provenance).map_err(|message| {
+            ActionError::refused("provenance", Fail::new(StatusCode::BAD_REQUEST, message))
+        })?;
+    }
+
     Ok(Planned {
         statement,
         schedule,
         options,
+    })
+}
+
+const BUNDLE_LABEL: &str = "stardelt.io/bundle";
+const TARGET_LABEL: &str = "stardelt.io/target";
+const REVISION_NOTE: &str = "stardelt.io/revision";
+const DEPLOYED_BY_NOTE: &str = "stardelt.io/deployed-by";
+const DEPLOYED_AT_NOTE: &str = "stardelt.io/deployed-at";
+
+/// Lower-case letters, digits and inner dashes, `shortest` to `longest` characters.
+fn dashed_name(text: &str, shortest: usize, longest: usize) -> bool {
+    (shortest..=longest).contains(&text.len())
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && !text.starts_with('-')
+        && !text.ends_with('-')
+}
+
+/// The rules for what a deploy may stamp on a pipeline: short, plain words that are valid label
+/// values. `Err` is the sentence the caller sees.
+fn check_provenance(provenance: &Provenance) -> Result<(), String> {
+    if !dashed_name(&provenance.bundle, 3, 40) {
+        return Err("the bundle name must be 3 to 40 lower-case letters, digits and dashes".into());
+    }
+    if !dashed_name(&provenance.target, 1, 32) {
+        return Err("the target must be 1 to 32 lower-case letters, digits and dashes".into());
+    }
+    if let Some(revision) = &provenance.revision {
+        let hex = revision.strip_suffix("-dirty").unwrap_or(revision);
+        let plain = (7..=64).contains(&hex.len())
+            && hex
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+        if !plain {
+            return Err(
+                "the revision must be 7 to 64 hex digits, with -dirty appended when the working tree had uncommitted changes"
+                    .into(),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Write a deploy's provenance on `resource`: the two labels, the revision (or none), who and when.
+fn stamp_provenance(resource: &mut Value, provenance: &Provenance, deployed_by: &str) {
+    resource["metadata"]["labels"][BUNDLE_LABEL] = json!(provenance.bundle);
+    resource["metadata"]["labels"][TARGET_LABEL] = json!(provenance.target);
+    let notes = &mut resource["metadata"]["annotations"];
+    match &provenance.revision {
+        Some(revision) => notes[REVISION_NOTE] = json!(revision),
+        None => {
+            if let Some(map) = notes.as_object_mut() {
+                map.remove(REVISION_NOTE);
+            }
+        }
+    }
+    notes[DEPLOYED_BY_NOTE] = json!(deployed_by);
+    notes[DEPLOYED_AT_NOTE] = json!(now_rfc3339());
+}
+
+/// What a deploy stamped on a stored pipeline, if it did.
+fn deployment_of(resource: &Value) -> Option<DeploymentView> {
+    let metadata = resource.get("metadata")?;
+    let label = |key: &str| {
+        metadata
+            .get("labels")?
+            .get(key)?
+            .as_str()
+            .map(str::to_string)
+    };
+    let note = |key: &str| {
+        metadata
+            .get("annotations")?
+            .get(key)?
+            .as_str()
+            .map(str::to_string)
+    };
+    Some(DeploymentView {
+        bundle: label(BUNDLE_LABEL)?,
+        target: label(TARGET_LABEL)?,
+        revision: note(REVISION_NOTE),
+        deployed_by: note(DEPLOYED_BY_NOTE),
+        deployed_at: note(DEPLOYED_AT_NOTE),
     })
 }
 
@@ -3096,7 +3239,7 @@ async fn create_pipeline_inner(
         return Err(ActionError::refused("rate-limited", too_many_creates()));
     }
 
-    let resource = pipeline_resource(
+    let mut resource = pipeline_resource(
         &body.name,
         &body.owner_group,
         &statement,
@@ -3105,6 +3248,9 @@ async fn create_pipeline_inner(
         &options,
         &who.display_name,
     );
+    if let Some(provenance) = &body.provenance {
+        stamp_provenance(&mut resource, provenance, &who.display_name);
+    }
     let written = resources.create(resource).await.map_err(|e| match e {
         // Another Nova or a `kubectl apply` won the race between the read and the create.
         ResourceError::Exists => ActionError::refused("exists", pipeline_exists()),
@@ -3174,13 +3320,16 @@ async fn validate_pipeline(
                 }
                 _ => {}
             }
-            let updated = updated_resource(
+            let mut updated = updated_resource(
                 &existing,
                 &planned.statement,
                 &planned.options,
                 &body.params,
                 planned.schedule.as_ref(),
             );
+            if let Some(provenance) = &body.provenance {
+                stamp_provenance(&mut updated, provenance, &who.display_name);
+            }
             ("update", changes_of(&existing, &updated))
         }
     };
@@ -3371,6 +3520,12 @@ async fn update_pipeline_inner(
         ActionError::refused("schedule", Fail::new(StatusCode::BAD_REQUEST, message))
     })?;
 
+    if let Some(provenance) = &body.provenance {
+        check_provenance(provenance).map_err(|message| {
+            ActionError::refused("provenance", Fail::new(StatusCode::BAD_REQUEST, message))
+        })?;
+    }
+
     // The principal of the pipeline's own group must still be ready, or the change would make a
     // pipeline the loader refuses.
     let principals = resources
@@ -3390,13 +3545,16 @@ async fn update_pipeline_inner(
         return Err(ActionError::refused("shape", shape_not_editable()));
     }
 
-    let updated = updated_resource(
+    let mut updated = updated_resource(
         &resource,
         &statement,
         &options,
         &body.params,
         schedule.as_ref(),
     );
+    if let Some(provenance) = &body.provenance {
+        stamp_provenance(&mut updated, provenance, &who.display_name);
+    }
 
     // The resource still carries the `resourceVersion` read above: a concurrent change is a
     // conflict, not a silent overwrite.
@@ -6643,6 +6801,7 @@ mod tests {
             }),
             params: BTreeMap::new(),
             options: None,
+            provenance: None,
         }
     }
 
@@ -6654,6 +6813,7 @@ mod tests {
             params: BTreeMap::new(),
             options: None,
             resource_version: None,
+            provenance: None,
         }
     }
 
@@ -7144,6 +7304,7 @@ mod tests {
                 ..PipelineOptions::default()
             }),
             resource_version: None,
+            provenance: None,
         };
         let view = update_pipeline(
             Some(&resources),
@@ -7204,6 +7365,7 @@ mod tests {
                 params: BTreeMap::new(),
                 options: None,
                 resource_version: None,
+                provenance: None,
             },
         )
         .await
@@ -7436,6 +7598,172 @@ mod tests {
             sql_of(stored_pipeline(&resources, "smoke").await.unwrap()),
             "select 9",
             "the stale edit changed nothing"
+        );
+    }
+
+    fn provenance(bundle: &str, target: &str, revision: Option<&str>) -> Provenance {
+        Provenance {
+            bundle: bundle.into(),
+            target: target.into(),
+            revision: revision.map(str::to_string),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_deploy_stamps_where_the_pipeline_came_from_and_the_view_shows_it() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+
+        let mut body = create_body("daily-trips", "analytics", "select 1");
+        body.provenance = Some(provenance("shop-etl", "prod", Some("0123abc-dirty")));
+        let view = create_pipeline(Some(&resources), None, &create_limiter(), &ada, body)
+            .await
+            .expect("created");
+        let deployment = view.deployment.expect("the view shows it");
+        assert_eq!(
+            (
+                deployment.bundle.as_str(),
+                deployment.target.as_str(),
+                deployment.revision.as_deref()
+            ),
+            ("shop-etl", "prod", Some("0123abc-dirty"))
+        );
+        assert!(deployment.deployed_by.is_some() && deployment.deployed_at.is_some());
+
+        let stored = stored_pipeline(&resources, "daily-trips").await.unwrap();
+        assert_eq!(
+            stored["metadata"]["labels"]["stardelt.io/bundle"],
+            "shop-etl"
+        );
+        assert_eq!(stored["metadata"]["labels"]["stardelt.io/target"], "prod");
+        assert_eq!(
+            stored["metadata"]["annotations"]["stardelt.io/revision"],
+            "0123abc-dirty"
+        );
+        assert_eq!(
+            stored["metadata"]["labels"]["app.kubernetes.io/managed-by"], "stardelt-nova",
+            "the labels that were there stay"
+        );
+        assert!(stored["metadata"]["annotations"]["stardelt.io/created-by"].is_string());
+
+        let plain = create_pipeline(
+            Some(&resources),
+            None,
+            &create_limiter(),
+            &ada,
+            create_body("by-hand", "analytics", "select 1"),
+        )
+        .await
+        .expect("created");
+        assert_eq!(
+            plain.deployment, None,
+            "a pipeline made by hand says nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_deploy_that_names_something_odd_is_refused_before_anything_is_written() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        for (bundle, target, revision, sentence) in [
+            ("Shop", "prod", None, "the bundle name must be"),
+            ("ab", "prod", None, "the bundle name must be"),
+            ("shop-etl", "Prod", None, "the target must be"),
+            ("shop-etl", "", None, "the target must be"),
+            ("shop-etl", "prod", Some("main"), "the revision must be"),
+            ("shop-etl", "prod", Some("abc"), "the revision must be"),
+        ] {
+            let mut body = create_body("daily-trips", "analytics", "select 1");
+            body.provenance = Some(provenance(bundle, target, revision));
+            let error = create_pipeline(
+                Some(&resources),
+                None,
+                &create_limiter(),
+                &ada,
+                body.clone(),
+            )
+            .await
+            .expect_err("refused");
+            assert_eq!(error.status(), StatusCode::BAD_REQUEST, "{bundle} {target}");
+            assert!(error.message().starts_with(sentence), "{}", error.message());
+            let answer = validate_pipeline(Some(&resources), None, &ada, body)
+                .await
+                .expect("an answer");
+            assert!(!answer.ok);
+            assert_eq!(answer.errors[0].message, error.message());
+        }
+        assert!(resources.list().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_update_replaces_the_stamp_when_it_names_one_and_keeps_it_when_it_does_not() {
+        let mut stored = nova_pipeline("daily-trips", "analytics");
+        stamp_provenance(
+            &mut stored,
+            &provenance("shop-etl", "prod", Some("aaaaaaa")),
+            "ada",
+        );
+        let resources = memory_with(&[("daily-trips", stored)], &analytics_principal());
+        let ada = who("sub-ada", &["analytics"], false);
+        let namespace = crate::cluster::namespace();
+
+        // The check: the same stamp is no change, another commit is, and saying nothing is not.
+        let mut body = create_body("daily-trips", "analytics", "select 1");
+        body.provenance = Some(provenance("shop-etl", "prod", Some("aaaaaaa")));
+        let same = validate_pipeline(Some(&resources), None, &ada, body.clone())
+            .await
+            .expect("an answer");
+        assert!(same.changes.is_empty(), "{:?}", same.changes);
+        body.provenance = Some(provenance("shop-etl", "prod", Some("bbbbbbb")));
+        let newer = validate_pipeline(Some(&resources), None, &ada, body.clone())
+            .await
+            .expect("an answer");
+        assert_eq!(newer.changes, vec!["deployment"]);
+        body.provenance = None;
+        let silent = validate_pipeline(Some(&resources), None, &ada, body)
+            .await
+            .expect("an answer");
+        assert!(silent.changes.is_empty());
+
+        // The write: no stamp in the body leaves the stored one alone.
+        update_pipeline(
+            Some(&resources),
+            None,
+            None,
+            &ada,
+            &namespace,
+            "daily-trips",
+            update_body("select 2"),
+        )
+        .await
+        .expect("updated");
+        let kept = stored_pipeline(&resources, "daily-trips").await.unwrap();
+        assert_eq!(kept["metadata"]["labels"]["stardelt.io/target"], "prod");
+        assert_eq!(
+            kept["metadata"]["annotations"]["stardelt.io/revision"],
+            "aaaaaaa"
+        );
+
+        // A stamp in the body replaces it, and a stamp without a commit removes the old commit.
+        let mut deploy = update_body("select 3");
+        deploy.provenance = Some(provenance("shop-etl", "dev", None));
+        update_pipeline(
+            Some(&resources),
+            None,
+            None,
+            &ada,
+            &namespace,
+            "daily-trips",
+            deploy,
+        )
+        .await
+        .expect("updated");
+        let replaced = stored_pipeline(&resources, "daily-trips").await.unwrap();
+        assert_eq!(replaced["metadata"]["labels"]["stardelt.io/target"], "dev");
+        assert!(
+            replaced["metadata"]["annotations"]
+                .get("stardelt.io/revision")
+                .is_none()
         );
     }
 
@@ -8679,6 +9007,7 @@ mod tests {
                 timeout_minutes: Some(document.options.timeout_minutes),
                 concurrency: Some(document.options.concurrency.clone()),
             }),
+            provenance: None,
         };
         let verdict = validate_pipeline(Some(&resources), None, &ada, body)
             .await
@@ -9084,6 +9413,7 @@ mod tests {
             }),
             params: BTreeMap::new(),
             options: None,
+            provenance: None,
         }
     }
 
@@ -9099,6 +9429,7 @@ mod tests {
             params: BTreeMap::new(),
             options: None,
             resource_version: None,
+            provenance: None,
         }
     }
 
