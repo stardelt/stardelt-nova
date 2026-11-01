@@ -9,6 +9,7 @@ import Connections from './routes/Connections'
 import Jobs from './routes/Jobs'
 import Pipelines from './routes/Pipelines'
 import PipelineDetail from './routes/PipelineDetail'
+import Deployments from './routes/Deployments'
 import QueryLog from './routes/QueryLog'
 import Apps from './routes/Apps'
 import AppDetail from './routes/AppDetail'
@@ -34,6 +35,7 @@ export default function App() {
         <Route path="/jobs"       element={<Jobs       />} />
         <Route path="/pipelines"  element={<Pipelines  />} />
         <Route path="/pipelines/:namespace/:name" element={<PipelineDetail />} />
+        <Route path="/deployments" element={<Deployments />} />
         <Route path="/queries"    element={<QueryLog   />} />
         <Route path="/apps"       element={<RequireAdmin><Apps      /></RequireAdmin>} />
         <Route path="/apps/:id"   element={<RequireAdmin><AppDetail /></RequireAdmin>} />
