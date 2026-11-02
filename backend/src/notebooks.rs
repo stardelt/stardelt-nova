@@ -17,10 +17,12 @@
 //!   (`NOVA_S3_*`), and the *only* thing that reaches S3 from a request is the checked
 //!   `{group}/<name>` key.
 //! - **Outputs never reach the store.** A notebook is parsed as nbformat 4 and every
-//!   cell's `outputs` and `execution_count`, plus the notebook's widget metadata, are
-//!   removed before the bytes are written. A cell that printed `os.environ` (the
+//!   code cell's `outputs` is emptied and its `execution_count` cleared (both keys are
+//!   required on a code cell, so they stay, as `[]` and `null`), plus the notebook's widget
+//!   metadata is removed, before the bytes are written. A cell that printed `os.environ` (the
 //!   platform#268 canary: a token and a client secret) therefore stores no trace of it.
-//!   The stored bytes are compact JSON, and the answer's `sha256` identifies them.
+//!   The stored bytes are compact JSON, and the answer's `sha256` identifies them. They stay
+//!   valid nbformat: a cell of an nbformat 4.5 notebook without an `id` gets a stable one.
 //! - **Parameters** are the `name = literal` lines of the first cell tagged
 //!   `parameters` (papermill's convention): at most 32, the default exactly as it would
 //!   run (a string literal without its quotes), never evaluated. The Schedule dialog
@@ -992,18 +994,43 @@ fn no_such_version() -> Fail {
 // Notebook transformation
 // ---------------------------------------------------------------------------
 
-/// Strip what must never reach the object store: every cell's `outputs` and
-/// `execution_count`, and the notebook's widget metadata (whose state can hold the
-/// output of a widget). The source, tags and the rest of the metadata stay.
+/// Strip what must never reach the object store: the output of every code cell and its
+/// execution count, and the notebook's widget metadata (whose state can hold the output of a
+/// widget). nbformat 4 requires `outputs` and `execution_count` on a code cell, so a code cell
+/// keeps both keys, empty (`[]` and `null`); a markdown or raw cell has neither and keeps
+/// neither. A cell of an nbformat 4.5 notebook that has no `id` gets one (`cell-<position>`,
+/// made unique): the stored document validates, and publishing the same bytes twice still
+/// stores one version. The source, tags and the rest of the metadata stay.
 fn strip_outputs(notebook: &mut serde_json::Value) {
+    let ids_required = notebook
+        .get("nbformat_minor")
+        .and_then(|minor| minor.as_u64())
+        .is_some_and(|minor| minor >= 5);
     if let Some(cells) = notebook
         .get_mut("cells")
         .and_then(|cells| cells.as_array_mut())
     {
-        for cell in cells {
-            if let Some(cell) = cell.as_object_mut() {
+        let mut taken: std::collections::HashSet<String> = cells
+            .iter()
+            .filter_map(|cell| cell.get("id").and_then(|id| id.as_str()).map(str::to_owned))
+            .collect();
+        for (position, cell) in cells.iter_mut().enumerate() {
+            let Some(cell) = cell.as_object_mut() else {
+                continue;
+            };
+            if cell.get("cell_type").and_then(|kind| kind.as_str()) == Some("code") {
+                cell.insert("outputs".into(), serde_json::json!([]));
+                cell.insert("execution_count".into(), serde_json::Value::Null);
+            } else {
                 cell.remove("outputs");
                 cell.remove("execution_count");
+            }
+            if ids_required && !cell.get("id").is_some_and(|id| id.is_string()) {
+                let mut id = format!("cell-{position}");
+                while !taken.insert(id.clone()) {
+                    id.push('x');
+                }
+                cell.insert("id".into(), serde_json::Value::String(id));
             }
         }
     }
@@ -1145,7 +1172,7 @@ pub(crate) async fn no_store(request: Request, next: Next) -> Response {
     operation_id = "notebooks_publish",
     path = "/api/notebooks/{group}/{name}",
     tag = "public",
-    description = "Publish a notebook as a new immutable object version in the `notebooks` bucket. Needs a signed-in person whose groups include `{group}` (403 `you are not a member of the group <g>`; administrators are not exempt). `{name}` must match `^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}\\.ipynb$` and the body must be an nbformat 4 notebook of at most 5 MiB. Every cell's `outputs` and `execution_count` and the notebook's widget metadata are removed before storing — no cell output reaches the object store. `sha256` is of the stored (stripped) bytes. `parameters` are the `name = literal` lines of the first cell tagged `parameters`, at most 32; defaults are text and are never evaluated. A 61st publish by one person in an hour is 429. Publishing bytes the newest version already holds stores nothing, uses no slot and writes no audit line: the answer names that version with `unchanged: true`. With `?dryRun=true` the same checks run and nothing is stored, no slot is used and no audit line is written: the answer says `unchanged: true` with the newest version, or `unchanged: false` with an empty `objectVersion` when a publish would store a new one. Unset `NOVA_S3_*` is 503 `notebook storage is not configured`; an S3 that is down or refuses is 502. Each publish that stores a version writes one audit line with group, name, version and size, never content.",
+    description = "Publish a notebook as a new immutable object version in the `notebooks` bucket. Needs a signed-in person whose groups include `{group}` (403 `you are not a member of the group <g>`; administrators are not exempt). `{name}` must match `^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}\\.ipynb$` and the body must be an nbformat 4 notebook of at most 5 MiB. Every code cell's `outputs` is emptied and its `execution_count` set to null, and the notebook's widget metadata is removed, before storing — no cell output reaches the object store. A cell of an nbformat 4.5 notebook without an `id` gets one (`cell-<position>`), so the stored notebook stays valid nbformat. `sha256` is of the stored (stripped) bytes. `parameters` are the `name = literal` lines of the first cell tagged `parameters`, at most 32; defaults are text and are never evaluated. A 61st publish by one person in an hour is 429. Publishing bytes the newest version already holds stores nothing, uses no slot and writes no audit line: the answer names that version with `unchanged: true`. With `?dryRun=true` the same checks run and nothing is stored, no slot is used and no audit line is written: the answer says `unchanged: true` with the newest version, or `unchanged: false` with an empty `objectVersion` when a publish would store a new one. Unset `NOVA_S3_*` is 503 `notebook storage is not configured`; an S3 that is down or refuses is 502. Each publish that stores a version writes one audit line with group, name, version and size, never content.",
     params(
         ("group" = String, Path, description = "One of the caller's groups"),
         ("name" = String, Path, description = "Notebook file name, ending in .ipynb"),
@@ -2068,13 +2095,23 @@ mod tests {
             stored["cells"][0]["source"],
             json!(["import os\n", "print(os.environ)\n"])
         );
-        assert!(
-            stored["cells"][0].get("outputs").is_none(),
-            "outputs are gone"
+        assert_eq!(
+            stored["cells"][0]["outputs"],
+            json!([]),
+            "the output is gone, the required key stays"
+        );
+        assert_eq!(
+            stored["cells"][0]["execution_count"],
+            Value::Null,
+            "the count is cleared, the required key stays"
         );
         assert!(
-            stored["cells"][0].get("execution_count").is_none(),
-            "execution_count is gone"
+            stored["cells"][1].get("outputs").is_none(),
+            "a markdown cell has no outputs"
+        );
+        assert!(
+            stored["cells"][1].get("execution_count").is_none(),
+            "a markdown cell has no execution_count"
         );
         assert!(
             stored["metadata"].get("widgets").is_none(),
@@ -2095,6 +2132,73 @@ mod tests {
         );
         assert_eq!(object.sha256, sha256_hex(&object.body));
         assert_eq!(answer["parameters"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn publish_gives_a_cell_without_an_id_a_unique_one_for_nbformat_4_5() {
+        let s3 = FakeS3::start().await;
+        let state = state(Some(notebook_store(&s3.base)));
+        let app = app(state, Some(principal("alice", &["analytics"], false)));
+        let mut first = code_cell(json!(["x = 1\n"]));
+        first["id"] = json!("intro");
+        let mut third = code_cell(json!(["z = 3\n"]));
+        third["id"] = json!("cell-1");
+        let published = notebook(vec![
+            first,
+            code_cell(json!(["y = 2\n"])),
+            json!({"cell_type": "markdown", "metadata": {}, "source": ["# Notes\n"]}),
+            third,
+        ]);
+        let (status, answer) = call(
+            &app,
+            "PUT",
+            "/notebooks/analytics/ids.ipynb",
+            Some(&body(&published)),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        let stored: Value =
+            serde_json::from_slice(&s3.object("analytics/ids.ipynb").body).expect("stored JSON");
+        let ids: Vec<String> = stored["cells"]
+            .as_array()
+            .expect("cells")
+            .iter()
+            .map(|cell| {
+                cell["id"]
+                    .as_str()
+                    .expect("every cell has an id")
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(ids, ["intro", "cell-1x", "cell-2", "cell-1"]);
+        let unique: std::collections::HashSet<&String> = ids.iter().collect();
+        assert_eq!(unique.len(), ids.len(), "ids are unique");
+    }
+
+    #[tokio::test]
+    async fn publish_adds_no_cell_id_before_nbformat_4_5() {
+        let s3 = FakeS3::start().await;
+        let state = state(Some(notebook_store(&s3.base)));
+        let app = app(state, Some(principal("alice", &["analytics"], false)));
+        let mut published = notebook(vec![code_cell(json!(["x = 1\n"]))]);
+        published["nbformat_minor"] = json!(4);
+        let (status, answer) = call(
+            &app,
+            "PUT",
+            "/notebooks/analytics/old.ipynb",
+            Some(&body(&published)),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        let stored: Value =
+            serde_json::from_slice(&s3.object("analytics/old.ipynb").body).expect("stored JSON");
+        assert!(
+            stored["cells"][0].get("id").is_none(),
+            "4.4 has no cell ids"
+        );
+        assert_eq!(stored["cells"][0]["outputs"], json!([]));
     }
 
     #[tokio::test]
