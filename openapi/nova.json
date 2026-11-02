@@ -6993,6 +6993,13 @@
               "options"
             ],
             "properties": {
+              "airflowUrl": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The public Airflow DAG URL, `None` when `NOVA_BASE_DOMAIN` is unset; the route is already visibility-gated, so no second permission check."
+              },
               "options": {
                 "$ref": "#/components/schemas/PipelineOptionsView",
                 "description": "Retries, the wait between them, the time limit and the run mode as the resource carries\nthem, with the defaults filled in when a field is absent."
