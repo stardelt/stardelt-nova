@@ -681,6 +681,7 @@ export type PipelineDetail = PipelineView & {
    * sends nothing; the dialog then starts from the defaults.
    */
   options?: PipelineOptionsView | null
+  airflowUrl?: string | null
 }
 
 /** `POST /api/pipelines/validate`: what a create or an update of this document would do, without doing it. */
