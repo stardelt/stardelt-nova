@@ -13,6 +13,10 @@ const ME = {
   user: 'alice', auth_mode: 'oidc', demo: false, warehouse: 'warehouse',
   is_admin: false, groups: ['analytics', 'finance', 'ops'],
 }
+const JUPYTER = {
+  id: 'jupyterhub', name: 'JupyterHub', external_url: 'https://jupyter.example.test',
+  status: 'up', embed: {},
+}
 const V3 = '4f9c2a1b7e6d5c4b3a29180706050403020100ffaa'
 const V2 = '9b8a7c6d5e4f30211203f4e5d6c7b8a990817263'
 const V1 = '1a2b3c4d5e6f708192a3b4c5d6e7f809a1b2c3d4'
@@ -87,6 +91,7 @@ async function open(browser: Browser, {
     const url = new URL(route.request().url())
     const path = url.pathname
     if (path === '/api/me') return json(route, ME)
+    if (path === '/api/embeds') return json(route, [JUPYTER])
     if (path === '/api/pipelines/principals') {
       return principalsStatus === 200
         ? json(route, { groups: principals })
@@ -187,7 +192,8 @@ test.describe('published notebooks', () => {
     const section = page.getByRole('region', { name: 'Published notebooks' })
     await expect(section.getByRole('alert')).toHaveText('The notebook store is not configured.')
     await expect(section.getByRole('button', { name: 'Retry' })).toHaveCount(0)
-    await expect(page.getByRole('button', { name: 'My server' })).toBeVisible()
+    await expect(page.getByRole('link', { name: 'My server' })).toBeVisible()
+    await expect(page.getByRole('link', { name: 'Open JupyterHub ↗' })).toBeVisible()
     await context.close()
   })
 
