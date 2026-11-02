@@ -16,7 +16,7 @@ const NOVA_ROUTES: Record<string, Array<{ to: string; label: string }>> = {
   ],
   trino: [{ to: '/query', label: 'Run SQL' }],
   superset: [{ to: '/dashboards', label: 'Embedded Superset' }],
-  jupyterhub: [{ to: '/notebooks', label: 'Embedded JupyterHub' }],
+  jupyterhub: [{ to: '/notebooks', label: 'Published notebooks' }],
 }
 
 export default function AppDetail() {

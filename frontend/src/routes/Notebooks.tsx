@@ -1,8 +1,6 @@
-import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { api, errorMessage } from '../api'
 import { isAdmin } from '../roles'
-import { EmbedBadge, EmbedNotice, SignInNotice } from '../components/EmbedNotice'
 import PublishedNotebooks from '../components/PublishedNotebooks'
 import { safeHttpUrl, statusLabel } from '../format'
 
@@ -16,122 +14,127 @@ const FALLBACK = (import.meta.env.VITE_JUPYTERHUB_URL as string | undefined) ?? 
 // "JupyterLab" entry cannot work. `/hub/` is the hub *root* and the right default:
 // it redirects a signed-in person to their own server (JupyterLab — or the spawn
 // page when they have none), while `/hub/home` is the control panel and stays put.
-const ENTRY_PATHS: Array<{ label: string; path: string }> = [
-  { label: 'My server', path: '/hub/'     },
-  { label: 'Hub home',  path: '/hub/home' },
+const HUBS: Array<{ label: string; path: string }> = [
+  { label: 'My server', path: '/hub/'      },
   { label: 'Start server', path: '/hub/spawn' },
   { label: 'API tokens', path: '/hub/token'  },
+  { label: 'Hub home', path: '/hub/home'    },
 ]
 
+/**
+ * Notebooks: the published notebooks of the caller's groups, and the way into
+ * JupyterHub. The embedded frame is gone on purpose (2026-11-02) — JupyterHub is
+ * a first-class app in the launcher (`/apps`), and an app the browser frames badly
+ * is worse than a button that opens it properly. What stays here is what this page
+ * is for: the published notebooks, and the three things a person needs first —
+ * how to open their server, how to connect VS Code, and where the API tokens are.
+ */
 export default function Notebooks() {
   const apps = useQuery({ queryKey: ['embeds'], queryFn: api.embeds, refetchInterval: 15_000 })
   const me = useQuery({ queryKey: ['me'], queryFn: api.me })
   const admin = isAdmin(me.data)
   const jupyter = apps.data?.find(a => a.id === 'jupyterhub')
   const up = jupyter?.status === 'up'
-  // Only http(s) URLs may reach `href` / iframe `src`; anything else falls back, then to nothing.
-  const base = safeHttpUrl(jupyter?.external_url) ?? safeHttpUrl(FALLBACK)
-
-
-  const [path, setPath] = useState('/hub/')
-  // Only address the app when it is actually up: the fallback is a developer's
-  // port-forward, and the deployed host answers 503 when nothing is behind the ingress.
-  const src = up && base ? `${base.replace(/\/+$/, '')}${path}` : undefined
+  // Only http(s) URLs may reach `href`; anything else falls back, then to nothing.
+  const base = (safeHttpUrl(jupyter?.external_url) ?? safeHttpUrl(FALLBACK))?.replace(/\/+$/, '')
+  const at = (path: string) => (up && base ? `${base}${path}` : undefined)
+  const open = at('/hub/')
+  const user = me.data?.user
 
   return (
-    <div className="h-full flex flex-col gap-4">
-      <header className="flex items-center justify-between gap-4 flex-wrap">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight">Notebooks</h1>
+    <div className="space-y-5">
+      <header className="flex flex-wrap items-start justify-between gap-4">
+        <div className="min-w-0">
+          <h1 className="text-2xl font-bold tracking-tight">Notebooks</h1>
           <p className="text-text-dim text-sm mt-1">
-            JupyterHub, embedded — one notebook server per user, on the same catalog.
-            {up
-              ? <> Signed in through Keycloak, same account as Nova; the hub sends you on to your own JupyterLab.</>
-              : apps.isLoading
-                ? <> Checking whether it is deployed…</>
-                : apps.isError
-                  ? <> Could not read the app list ({errorMessage(apps.error)}).</>
-                  : admin
-                    ? <> Not deployed yet — add it with <span className="font-mono">make install-notebooks</span>.</>
-                    : <> Notebooks are not available yet. Ask your platform administrator to enable them.</>}
+            Published notebooks from your groups. Write and run them in JupyterHub — same Keycloak
+            account, same catalog.
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <EmbedBadge embed={jupyter?.embed} />
           <span className={['badge', up ? 'border-success/40 bg-success/10 text-success' : 'border-border bg-bg-soft text-text-mute'].join(' ')}>
             <span className={['w-1.5 h-1.5 rounded-full', up ? 'bg-success' : 'bg-text-mute'].join(' ')} />
             {statusLabel(jupyter?.status ?? 'unknown')}
           </span>
-          {src && (
-            <a
-              href={src}
-              target="_blank"
-              rel="noreferrer"
-              className={jupyter?.embed?.sign_in_host ? 'btn-primary py-1.5' : 'btn-ghost py-1.5'}
-            >
-              Open in new tab ↗
+          {open && (
+            <a href={open} target="_blank" rel="noreferrer" className="btn-primary py-1.5">
+              Open JupyterHub ↗
             </a>
           )}
         </div>
       </header>
 
+      {up && base ? (
+        <div className="flex flex-wrap items-center gap-2 text-sm">
+          {HUBS.map(hub => (
+            <a
+              key={hub.path}
+              href={at(hub.path)}
+              target="_blank"
+              rel="noreferrer"
+              className="px-3 py-1 rounded-[10px] border border-border bg-bg-elev/40 text-text-dim hover:text-text"
+            >
+              {hub.label}
+            </a>
+          ))}
+          <span className="ml-auto text-xs text-text-mute font-mono">{base}</span>
+        </div>
+      ) : (
+        <div className="card px-5 py-4 text-sm text-text-dim">
+          {apps.isLoading
+            ? 'Checking whether JupyterHub is deployed…'
+            : apps.isError
+              ? <>Could not read the app list ({errorMessage(apps.error)}).</>
+              : admin
+                ? <>JupyterHub is not installed in this platform. Add it with <span className="font-mono">make install-notebooks</span>.</>
+                : 'Notebooks are not available yet. Ask your platform administrator to enable them.'}
+        </div>
+      )}
+
       <PublishedNotebooks />
 
-      <div className="flex items-center gap-2 flex-wrap">
-        {ENTRY_PATHS.map(e => (
-          <button
-            key={e.path}
-            onClick={() => setPath(e.path)}
-            aria-pressed={path === e.path}
-            className={[
-              'px-3 py-1 rounded-[10px] text-sm border',
-              path === e.path
-                ? 'bg-accent/15 border-accent/30 text-text'
-                : 'bg-bg-elev/40 border-border text-text-dim hover:text-text',
-            ].join(' ')}
-          >
-            {e.label}
-          </button>
-        ))}
-        <span className="ml-auto text-xs text-text-mute font-mono">{base ?? 'no valid JupyterHub URL'}</span>
-      </div>
-
-      <EmbedNotice app="JupyterHub" embed={jupyter?.embed} />
-      <SignInNotice app="JupyterHub" embed={jupyter?.embed} url={src} />
-
-      {up && src ? (
-        // Same trade-off as the Superset frame: scripts + its own origin's cookies, forms, popups,
-        // modals and downloads, but no top-navigation. JupyterLab copies / pastes, hence clipboard.
-        <iframe
-          title="JupyterHub"
-          src={src}
-          sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads"
-          allow="fullscreen; clipboard-read; clipboard-write"
-          className="flex-1 min-h-[28rem] w-full rounded-[14px] border border-border bg-white"
-        />
-      ) : (
-        <div className="card flex-1 min-h-[16rem] grid place-items-center text-center p-10">
-          <div>
-            <div className="text-text-dim">
-              {apps.isLoading ? 'Checking JupyterHub…' : admin ? 'JupyterHub is not installed in this platform.' : 'Notebooks are not available yet.'}
-            </div>
-            {admin ? (
-              <>
-                <div className="text-text-mute text-sm mt-1 max-w-md">
-                  It fits on the dev node next to the core stack: it installs the hub, the
-                  configurable-http-proxy, a user scheduler and a placeholder StatefulSet — and it
-                  reaches the same Iceberg catalog every other workload does.
-                </div>
-                <div className="mt-4 rounded-[10px] border border-border bg-bg-soft/60 px-3 py-2 font-mono text-xs">
-                  make install-notebooks
-                </div>
-              </>
-            ) : (
-              <div className="text-text-mute text-sm mt-1 max-w-md">Ask your platform administrator to enable them.</div>
-            )}
-            {up && base && <a href={base} className="btn-ghost mt-4">Open {base}</a>}
+      {up && base && (
+        <details className="card px-5 py-3 text-sm">
+          <summary className="cursor-pointer text-text-dim">
+            Connect from VS Code, start your own server, API tokens
+          </summary>
+          <div className="grid gap-6 pt-4 md:grid-cols-2">
+            <section>
+              <h2 className="font-semibold">VS Code</h2>
+              <ol className="list-decimal ml-5 mt-2 space-y-1 text-text-dim">
+                <li>
+                  Create a token under{' '}
+                  <a className="text-accent" href={at('/hub/token')} target="_blank" rel="noreferrer">API tokens</a>.
+                </li>
+                <li>
+                  In VS Code run <em>Jupyter: Specify Jupyter Server for Connections</em>, then choose <em>Existing</em>.
+                </li>
+                <li>
+                  Server URL <code>{base}/user/{user ?? '<you>'}/</code>, and paste the token.
+                </li>
+              </ol>
+              <p className="text-text-mute mt-2">
+                The hub sends you to your own server first; the URL is the one in the address bar
+                after <em>My server</em>. A token is a password for that server — revoke it on the
+                same page.
+              </p>
+            </section>
+            <section>
+              <h2 className="font-semibold">Your server and tokens</h2>
+              <p className="text-text-dim mt-2">
+                <a className="text-accent" href={at('/hub/spawn')} target="_blank" rel="noreferrer">Start server</a>{' '}
+                creates or restarts your JupyterLab.{' '}
+                <a className="text-accent" href={at('/hub/home')} target="_blank" rel="noreferrer">Hub home</a>{' '}
+                shows its status, stops it and holds the server list.
+              </p>
+              <p className="text-text-dim mt-2">
+                <a className="text-accent" href={at('/hub/token')} target="_blank" rel="noreferrer">API tokens</a>{' '}
+                are what VS Code, the <code>jupyter</code> CLI and REST calls use; they are per person,
+                not per notebook.
+              </p>
+            </section>
           </div>
-        </div>
+        </details>
       )}
     </div>
   )
