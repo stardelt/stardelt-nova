@@ -1,8 +1,10 @@
 import { Fragment, useId, useMemo, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
-import { ApiError, api, type PublishedNotebook } from '../api'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { Link } from 'react-router-dom'
+import { ApiError, api, errorMessage, type PipelinePrincipal, type PipelineView, type PublishedNotebook } from '../api'
 import { formatBytes, formatTime, shortVersion } from '../format'
 import ErrorBox from './ErrorBox'
+import ScheduleDialog from './ScheduleDialog'
 
 const EMPTY =
   'No notebook is published in your groups yet. Publish one from JupyterLab with stardelt.publish("file.ipynb").'
@@ -11,10 +13,17 @@ const EMPTY =
  * The notebooks the caller's groups have published (`GET /api/notebooks`, stardelt-nova#225): the
  * newest version of each, with a row that opens the versions and the parameters. The API scopes the
  * list to the caller's groups; the filter only chooses among the groups the answer contains.
+ *
+ * Every member of the owning group may schedule a notebook of the group (stardelt-nova#439). It runs
+ * as the group's principal (`GET /api/pipelines/principals`), not as the person who published it.
  */
 export default function PublishedNotebooks() {
   const list = useQuery({ queryKey: ['notebooks'], queryFn: api.notebooks })
+  const principals = useQuery({ queryKey: ['pipeline-principals'], queryFn: api.pipelinePrincipals })
+  const queryClient = useQueryClient()
   const [group, setGroup] = useState('')
+  const [scheduling, setScheduling] = useState<PublishedNotebook | null>(null)
+  const [scheduled, setScheduled] = useState<PipelineView | null>(null)
   const rows = useMemo(() => (Array.isArray(list.data) ? list.data : []), [list.data])
   const groups = useMemo(() => [...new Set(rows.map((row) => row.group))].sort(), [rows])
   const shown = useMemo(
@@ -30,11 +39,16 @@ export default function PublishedNotebooks() {
   const filterId = useId()
 
   return (
+    <>
     <section aria-labelledby={`${filterId}-title`} className="card">
       <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-3">
         <div className="min-w-0">
           <h2 id={`${filterId}-title`} className="text-lg font-semibold tracking-tight">Published notebooks</h2>
-          <p className="text-xs text-text-mute">The newest version of every notebook your groups have published.</p>
+          <p className="text-xs text-text-mute">
+            The newest version of every notebook your groups have published. Every member of the owning
+            group may schedule it. A schedule runs as the group&apos;s service principal, not as the person
+            who published the notebook, and reads only what the catalogs grant to that principal.
+          </p>
         </div>
         {groups.length > 1 && (
           <div className="flex items-center gap-2 text-sm">
@@ -51,6 +65,17 @@ export default function PublishedNotebooks() {
           </div>
         )}
       </div>
+      {scheduled && (
+        <p role="status" className="px-5 pb-3 text-sm">
+          Scheduled {scheduled.name}.{' '}
+          <Link
+            to={`/pipelines/${encodeURIComponent(scheduled.namespace)}/${encodeURIComponent(scheduled.name)}`}
+            className="underline"
+          >
+            Open it
+          </Link>
+        </p>
+      )}
       {list.isLoading && <p className="px-5 pb-4 text-sm text-text-mute">Loading published notebooks…</p>}
       {failed && (
         <div className="px-5 pb-4">
@@ -70,22 +95,60 @@ export default function PublishedNotebooks() {
                 <th scope="col" className="th px-3 py-2.5">Size</th>
                 <th scope="col" className="th px-3 py-2.5">Published</th>
                 <th scope="col" className="th px-3 py-2.5">Published by</th>
-                <th scope="col" className="th px-3 py-2.5"><span className="sr-only">Details</span></th>
+                <th scope="col" className="th px-3 py-2.5">Runs as</th>
+                <th scope="col" className="th px-3 py-2.5"><span className="sr-only">Actions</span></th>
               </tr>
             </thead>
             <tbody>
-              {shown.map((row) => <NotebookRow key={`${row.group}/${row.name}`} row={row} />)}
+              {shown.map((row) => (
+                <NotebookRow
+                  key={`${row.group}/${row.name}`}
+                  row={row}
+                  principal={principals.data?.groups.find((candidate) => candidate.group === row.group) ?? null}
+                  principalsPending={principals.isLoading}
+                  principalsError={principals.isError ? principals.error : null}
+                  onSchedule={setScheduling}
+                />
+              ))}
             </tbody>
           </table>
         </div>
       )}
     </section>
+    {scheduling && (
+      <ScheduleDialog
+        mode="create"
+        initialKind="notebook"
+        initialNotebook={{ group: scheduling.group, name: scheduling.name, objectVersion: scheduling.objectVersion }}
+        onClose={() => setScheduling(null)}
+        onScheduled={(view) => {
+          setScheduling(null)
+          setScheduled(view)
+          void queryClient.invalidateQueries({ queryKey: ['pipelines'] })
+        }}
+      />
+    )}
+    </>
   )
 }
 
-function NotebookRow({ row }: { row: PublishedNotebook }) {
+function NotebookRow({
+  row,
+  principal,
+  principalsPending,
+  principalsError,
+  onSchedule,
+}: {
+  row: PublishedNotebook
+  principal: PipelinePrincipal | null
+  principalsPending: boolean
+  principalsError: unknown
+  onSchedule: (row: PublishedNotebook) => void
+}) {
   const [open, setOpen] = useState(false)
   const detailId = useId()
+  const runsAsId = useId()
+  const ready = principal?.ready === true
   return (
     <Fragment>
       <tr className="border-t border-border/70 hover:bg-bg-soft/30">
@@ -97,21 +160,53 @@ function NotebookRow({ row }: { row: PublishedNotebook }) {
         <td className="td px-3 tabular-nums">{formatBytes(row.size)}</td>
         <td className="td px-3">{formatTime(row.uploadedAt)}</td>
         <td className="td px-3">{row.uploadedBy}</td>
+        <td className="td px-3">
+          <div id={runsAsId} className="text-xs">
+            {principalsPending ? (
+              <span className="text-text-mute">Checking…</span>
+            ) : principalsError ? (
+              <span className="text-text-mute break-words">{errorMessage(principalsError)}</span>
+            ) : ready ? (
+              <>
+                <span className="font-mono">{principal?.principal}</span>{' '}
+                <span className="badge border-emerald-400/40 bg-emerald-400/10 text-ok">ready</span>
+              </>
+            ) : (
+              <>
+                <span className="badge border-border bg-bg-soft text-text-mute">not ready</span>
+                <span className="block text-text-mute break-words">
+                  {principal?.message ?? 'This group has no pipeline principal yet.'}
+                </span>
+              </>
+            )}
+          </div>
+        </td>
         <td className="td px-3 text-right">
-          <button
-            type="button"
-            className="btn-ghost py-1 text-xs"
-            aria-expanded={open}
-            aria-controls={detailId}
-            onClick={() => setOpen((value) => !value)}
-          >
-            Versions<span className="sr-only"> of {row.name} in {row.group}</span>
-          </button>
+          <div className="flex justify-end gap-1">
+            <button
+              type="button"
+              className="btn-ghost py-1 text-xs"
+              aria-expanded={open}
+              aria-controls={detailId}
+              onClick={() => setOpen((value) => !value)}
+            >
+              Versions<span className="sr-only"> of {row.name} in {row.group}</span>
+            </button>
+            <button
+              type="button"
+              className="btn-primary py-1 text-xs"
+              disabled={!ready}
+              aria-describedby={runsAsId}
+              onClick={() => onSchedule(row)}
+            >
+              Schedule<span className="sr-only"> {row.name} in {row.group}</span>
+            </button>
+          </div>
         </td>
       </tr>
       {open && (
         <tr id={detailId} className="border-t border-border/70 bg-bg-soft/20">
-          <td colSpan={7} className="px-5 py-3"><NotebookDetail row={row} /></td>
+          <td colSpan={8} className="px-5 py-3"><NotebookDetail row={row} /></td>
         </tr>
       )}
     </Fragment>

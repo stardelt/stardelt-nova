@@ -3,14 +3,15 @@ import { auditPage, focusAudit } from './audit'
 
 // The "Published notebooks" section of the Notebooks page (stardelt-nova#438): the newest version
 // of every notebook the caller's groups have published, a group filter, and a row that opens the
-// versions and the parameters. Every `/api/**` call is stubbed.
+// versions and the parameters; and (stardelt-nova#439) who may schedule a notebook and as whom it
+// runs: the group's principal, a Schedule button per row. Every `/api/**` call is stubbed.
 
 const json = (route: Route, body: unknown, status = 200) =>
   route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
 
 const ME = {
   user: 'alice', auth_mode: 'oidc', demo: false, warehouse: 'warehouse',
-  is_admin: false, groups: ['analytics', 'finance'],
+  is_admin: false, groups: ['analytics', 'finance', 'ops'],
 }
 const V3 = '4f9c2a1b7e6d5c4b3a29180706050403020100ffaa'
 const V2 = '9b8a7c6d5e4f30211203f4e5d6c7b8a990817263'
@@ -23,6 +24,16 @@ const FINANCE = {
   group: 'finance', name: 'finance.ipynb', objectVersion: V1, size: 1024,
   uploadedAt: '2026-10-18T10:00:00Z', uploadedBy: 'bob',
 }
+const OPS = {
+  group: 'ops', name: 'ops.ipynb', objectVersion: V2, size: 512,
+  uploadedAt: '2026-10-19T09:30:00Z', uploadedBy: 'carol',
+}
+const READY = { group: 'analytics', principal: 'pipeline-analytics', ready: true, message: null }
+const READY_OPS = { group: 'ops', principal: 'pipeline-ops', ready: true, message: null }
+const NOT_READY = {
+  group: 'finance', principal: null, ready: false,
+  message: 'Group finance has no pipeline principal yet. Ask an administrator to create it.',
+}
 const SMOKE_VERSIONS = [
   { objectVersion: V3, size: 2048, uploadedAt: '2026-10-20T08:00:00Z', uploadedBy: 'alice', sha256: 'aaaaaaaaaaaabbbb' },
   { objectVersion: V2, size: 2000, uploadedAt: '2026-10-19T09:30:00Z', uploadedBy: 'bob', sha256: 'ccccccccccccdddd' },
@@ -31,17 +42,30 @@ const SMOKE_PARAMS = {
   parameters: [{ name: 'days', default: '1' }, { name: 'region', default: 'eu' }],
   objectVersion: V3,
 }
-const EMPTY_SENTENCE = 
+const OPS_VERSIONS = [
+  { objectVersion: V2, size: 512, uploadedAt: '2026-10-19T09:30:00Z', uploadedBy: 'carol', sha256: 'eeeeeeeeeeeeffff' },
+]
+const OPS_PARAMS = { parameters: [{ name: 'limit', default: '10' }], objectVersion: V2 }
+/** What the notebook routes answer, by `group/name`. */
+const NOTEBOOK_ROUTES: Record<string, { versions: unknown[]; parameters: unknown }> = {
+  'analytics/smoke.ipynb': { versions: SMOKE_VERSIONS, parameters: SMOKE_PARAMS },
+  'ops/ops.ipynb': { versions: OPS_VERSIONS, parameters: OPS_PARAMS },
+}
+const EMPTY_SENTENCE =
   'No notebook is published in your groups yet. Publish one from JupyterLab with stardelt.publish("file.ipynb").'
 
 async function open(browser: Browser, {
   notebooks = [ANALYTICS, FINANCE] as unknown[],
   listStatus = 200,
+  principals = [READY, NOT_READY, READY_OPS] as unknown[],
+  principalsStatus = 200,
   viewport = { width: 1280, height: 800 },
   theme = 'dark',
 }: {
   notebooks?: unknown[]
   listStatus?: number
+  principals?: unknown[]
+  principalsStatus?: number
   viewport?: { width: number; height: number }
   theme?: string
 } = {}) {
@@ -54,6 +78,7 @@ async function open(browser: Browser, {
   }, theme)
   const page = await context.newPage()
   const requests: string[] = []
+  const posted: Array<Record<string, unknown>> = []
   page.on('request', (request) => {
     const url = new URL(request.url())
     if (url.pathname.startsWith('/api/notebooks')) requests.push(url.pathname + url.search)
@@ -62,6 +87,21 @@ async function open(browser: Browser, {
     const url = new URL(route.request().url())
     const path = url.pathname
     if (path === '/api/me') return json(route, ME)
+    if (path === '/api/pipelines/principals') {
+      return principalsStatus === 200
+        ? json(route, { groups: principals })
+        : json(route, { error: 'The principals could not be read.' }, principalsStatus)
+    }
+    if (path === '/api/pipelines' && route.request().method() === 'GET') return json(route, { pipelines: [] })
+    if (path === '/api/pipelines' && route.request().method() === 'POST') {
+      const body = JSON.parse(route.request().postData() ?? '{}') as Record<string, unknown>
+      posted.push(body)
+      return json(route, {
+        name: body.name, namespace: 'stardelt', ownerGroup: body.ownerGroup, schedule: null, paused: false,
+        loaded: false, nextRun: null, state: 'loading', lastRun: null, tasks: [], runAs: null,
+        concurrency: 'Forbid', createdAt: null,
+      }, 201)
+    }
     if (path === '/api/notebooks') {
       return listStatus === 200
         ? json(route, notebooks)
@@ -69,14 +109,14 @@ async function open(browser: Browser, {
     }
     const notebookRoute = /^\/api\/notebooks\/([^/]+)\/([^/]+)\/(versions|parameters)$/.exec(path)
     if (notebookRoute) {
-      const smoke = notebookRoute[1] === 'analytics' && notebookRoute[2] === 'smoke.ipynb'
-      if (notebookRoute[3] === 'versions') return json(route, smoke ? SMOKE_VERSIONS : [])
-      return json(route, smoke ? SMOKE_PARAMS : { parameters: [], objectVersion: '' })
+      const known = NOTEBOOK_ROUTES[`${notebookRoute[1]}/${decodeURIComponent(notebookRoute[2])}`]
+      if (notebookRoute[3] === 'versions') return json(route, known ? known.versions : [])
+      return json(route, known ? known.parameters : { parameters: [], objectVersion: '' })
     }
     return json(route, [])
   })
   await page.goto('/notebooks')
-  return { context, page, requests }
+  return { context, page, requests, posted }
 }
 
 test.describe('published notebooks', () => {
@@ -157,6 +197,65 @@ test.describe('published notebooks', () => {
     const section = page.getByRole('region', { name: 'Published notebooks' })
     await expect(section.getByText(evil, { exact: true })).toBeVisible()
     expect(await page.evaluate(() => (window as unknown as { __xss?: number }).__xss)).toBeUndefined()
+    await context.close()
+  })
+
+  test('the Runs as column names the principal of the group and whether it is ready', async ({ browser }) => {
+    const { context, page } = await open(browser)
+    const section = page.getByRole('region', { name: 'Published notebooks' })
+    const smoke = section.getByRole('row', { name: /smoke\.ipynb/ })
+    await expect(smoke).toContainText('pipeline-analytics')
+    await expect(smoke).toContainText('ready')
+    const finance = section.getByRole('row', { name: /finance\.ipynb/ })
+    await expect(finance).toContainText('not ready')
+    await expect(finance).toContainText(NOT_READY.message)
+    await expect(finance).not.toContainText('pipeline-finance')
+    await context.close()
+  })
+
+  test('the section says who may schedule a notebook and as whom it runs', async ({ browser }) => {
+    const { context, page } = await open(browser)
+    const section = page.getByRole('region', { name: 'Published notebooks' })
+    await expect(section).toContainText('Every member of the owning group may schedule it.')
+    await expect(section).toContainText("runs as the group's service principal, not as the person who published the notebook")
+    await context.close()
+  })
+
+  test('Schedule waits for a ready principal and says why it does not', async ({ browser }) => {
+    const { context, page } = await open(browser)
+    const section = page.getByRole('region', { name: 'Published notebooks' })
+    await expect(section.getByRole('button', { name: 'Schedule smoke.ipynb in analytics' })).toBeEnabled()
+    const blocked = section.getByRole('button', { name: 'Schedule finance.ipynb in finance' })
+    await expect(blocked).toBeDisabled()
+    await expect(blocked).toHaveAccessibleDescription(new RegExp(NOT_READY.message))
+    await context.close()
+  })
+
+  test('Schedule opens the dialog on that notebook and version and creates it for the group', async ({ browser }) => {
+    const { context, page, posted } = await open(browser, { notebooks: [ANALYTICS, OPS] })
+    const section = page.getByRole('region', { name: 'Published notebooks' })
+    await section.getByRole('button', { name: 'Schedule ops.ipynb in ops' }).click()
+    const dialog = page.getByRole('dialog', { name: 'Schedule this notebook' })
+    await expect(dialog.getByRole('combobox', { name: 'Group', exact: true })).toHaveValue('ops')
+    await expect(dialog.getByRole('combobox', { name: 'Notebook', exact: true })).toHaveValue('ops.ipynb')
+    await expect(dialog.getByRole('combobox', { name: 'Version', exact: true })).toHaveValue(V2)
+    await dialog.getByRole('button', { name: 'Create schedule' }).click()
+    await expect.poll(() => posted.length).toBe(1)
+    expect(posted[0].ownerGroup).toBe('ops')
+    expect(posted[0].notebook).toMatchObject({ name: 'ops.ipynb', objectVersion: V2 })
+    await expect(page.getByRole('dialog')).toHaveCount(0)
+    const notice = section.getByRole('status')
+    await expect(notice).toContainText('Scheduled')
+    await expect(notice.getByRole('link', { name: 'Open it' }))
+      .toHaveAttribute('href', new RegExp('^/pipelines/stardelt/'))
+    await context.close()
+  })
+
+  test('an unreadable principal list keeps the notebooks and blocks Schedule', async ({ browser }) => {
+    const { context, page } = await open(browser, { principalsStatus: 503 })
+    const section = page.getByRole('region', { name: 'Published notebooks' })
+    await expect(section.getByRole('row', { name: /smoke\.ipynb/ })).toContainText('The principals could not be read.')
+    await expect(section.getByRole('button', { name: 'Schedule smoke.ipynb in analytics' })).toBeDisabled()
     await context.close()
   })
 
