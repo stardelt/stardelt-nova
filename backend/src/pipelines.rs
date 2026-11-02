@@ -1977,6 +1977,7 @@ pub struct PipelineListResponse {
 /// `GET /api/pipelines/{namespace}/{name}`: the view, the latest runs and the resource's
 /// parameters, retry policy and options.
 #[derive(Debug, Clone, PartialEq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct PipelineDetail {
     #[serde(flatten)]
     pub pipeline: PipelineView,
