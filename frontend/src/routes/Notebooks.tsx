@@ -2,7 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { api, errorMessage } from '../api'
 import { isAdmin } from '../roles'
 import PublishedNotebooks from '../components/PublishedNotebooks'
-import { safeHttpUrl, statusLabel } from '../format'
+import { safeHttpUrl } from '../format'
 
 // JupyterHub runs as its own app. Prefer the deployed app URL (from /api/apps,
 // which derives it from NOVA_BASE_DOMAIN); fall back to a port-forward
@@ -52,10 +52,6 @@ export default function Notebooks() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <span className={['badge', up ? 'border-success/40 bg-success/10 text-success' : 'border-border bg-bg-soft text-text-mute'].join(' ')}>
-            <span className={['w-1.5 h-1.5 rounded-full', up ? 'bg-success' : 'bg-text-mute'].join(' ')} />
-            {statusLabel(jupyter?.status ?? 'unknown')}
-          </span>
           {open && (
             <a href={open} target="_blank" rel="noreferrer" className="btn-primary py-1.5">
               Open JupyterHub ↗
