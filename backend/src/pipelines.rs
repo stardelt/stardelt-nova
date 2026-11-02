@@ -1986,6 +1986,9 @@ pub struct PipelineDetail {
     /// Retries, the wait between them, the time limit and the run mode as the resource carries
     /// them, with the defaults filled in when a field is absent.
     pub options: PipelineOptionsView,
+    /// The public Airflow DAG URL, `None` when `NOVA_BASE_DOMAIN` is unset; the route is already visibility-gated, so no second permission check.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub airflow_url: Option<String>,
 }
 
 /// `GET …/runs/{run_id}`: one run and its task instances.
@@ -2484,12 +2487,15 @@ async fn pipeline_detail(
     // The statement goes only on the detail route: the list stays small, and the caller has
     // already passed the same visibility rule that `load_visible` applies to an edit.
     view.tasks = task_specs(spec, true);
+    let base = std::env::var("NOVA_BASE_DOMAIN").unwrap_or_default();
+    let airflow_url = (!base.is_empty()).then(|| format!("https://airflow.{base}/dags/{dag_id}"));
     Ok(PipelineDetail {
         pipeline: view,
         runs: runs.iter().map(run_view).collect(),
         params: params_of(spec),
         retries: retries_of(spec),
         options: options_of(spec),
+        airflow_url,
     })
 }
 
@@ -6034,6 +6040,54 @@ mod tests {
 
         assert_eq!(detail.pipeline.tasks.len(), 1);
         assert_eq!(detail.pipeline.tasks[0].sql.as_deref(), Some("select 1"));
+    }
+
+    #[tokio::test]
+    async fn detail_includes_airflow_url_from_base_domain() {
+        unsafe {
+            std::env::set_var("NOVA_BASE_DOMAIN", "alpha.dev.stardelt.io");
+        }
+        let resources = memory(&[("smoke", resource("smoke", Some("analytics")))]);
+        let (airflow, _fake) = fake_airflow::start().await;
+
+        let detail = pipeline_detail(
+            Some(&resources),
+            Some(&airflow),
+            &admin(),
+            &crate::cluster::namespace(),
+            "smoke",
+        )
+        .await
+        .expect("the detail is readable");
+
+        assert_eq!(
+            detail.airflow_url.as_deref(),
+            Some("https://airflow.alpha.dev.stardelt.io/dags/stardelt__smoke")
+        );
+        unsafe {
+            std::env::remove_var("NOVA_BASE_DOMAIN");
+        }
+    }
+
+    #[tokio::test]
+    async fn detail_airflow_url_none_when_base_domain_unset() {
+        unsafe {
+            std::env::remove_var("NOVA_BASE_DOMAIN");
+        }
+        let resources = memory(&[("smoke", resource("smoke", Some("analytics")))]);
+        let (airflow, _fake) = fake_airflow::start().await;
+
+        let detail = pipeline_detail(
+            Some(&resources),
+            Some(&airflow),
+            &admin(),
+            &crate::cluster::namespace(),
+            "smoke",
+        )
+        .await
+        .expect("the detail is readable");
+
+        assert!(detail.airflow_url.is_none());
     }
 
     #[tokio::test]

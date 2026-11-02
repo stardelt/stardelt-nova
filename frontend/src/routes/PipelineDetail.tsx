@@ -118,7 +118,19 @@ export default function PipelineDetail() {
           <div className="mb-1 text-xs">
             <Link to="/pipelines" className="underline text-text-dim">All pipelines</Link>
           </div>
-          <h1 className="text-2xl font-bold tracking-tight break-words">{pipeline.name}</h1>
+          <div className="flex flex-wrap items-center gap-2">
+            <h1 className="text-2xl font-bold tracking-tight break-words">{pipeline.name}</h1>
+            {(pipeline as PipelineDetailView & { airflowUrl?: string | null }).airflowUrl && (
+              <a
+                className="btn-secondary py-1.5 text-xs"
+                href={(pipeline as PipelineDetailView & { airflowUrl?: string | null }).airflowUrl as string}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Open in Airflow
+              </a>
+            )}
+          </div>
           <p className="text-text-dim text-sm mt-1">The runs, tasks and logs of this pipeline.</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
