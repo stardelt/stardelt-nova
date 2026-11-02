@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { api, errorMessage } from '../api'
 import { isAdmin } from '../roles'
 import { EmbedBadge, EmbedNotice, SignInNotice } from '../components/EmbedNotice'
+import PublishedNotebooks from '../components/PublishedNotebooks'
 import { safeHttpUrl, statusLabel } from '../format'
 
 // JupyterHub runs as its own app. Prefer the deployed app URL (from /api/apps,
@@ -74,6 +75,8 @@ export default function Notebooks() {
         </div>
       </header>
 
+      <PublishedNotebooks />
+
       <div className="flex items-center gap-2 flex-wrap">
         {ENTRY_PATHS.map(e => (
           <button
@@ -104,10 +107,10 @@ export default function Notebooks() {
           src={src}
           sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads"
           allow="fullscreen; clipboard-read; clipboard-write"
-          className="flex-1 w-full rounded-[14px] border border-border bg-white"
+          className="flex-1 min-h-[28rem] w-full rounded-[14px] border border-border bg-white"
         />
       ) : (
-        <div className="card flex-1 grid place-items-center text-center p-10">
+        <div className="card flex-1 min-h-[16rem] grid place-items-center text-center p-10">
           <div>
             <div className="text-text-dim">
               {apps.isLoading ? 'Checking JupyterHub…' : admin ? 'JupyterHub is not installed in this platform.' : 'Notebooks are not available yet.'}
