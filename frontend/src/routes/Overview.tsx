@@ -326,7 +326,7 @@ function CellNumber({ pending, children }: { pending: boolean; children: ReactNo
  */
 function FirstRunCard({ group, onDismiss }: { group: string; onDismiss: () => void }) {
   const commands = [
-    'pip install stardelt',
+    'pip install "stardelt @ git+https://github.com/stardelt/stardelt-python@v0.2.0"',
     `export STARDELT_NOVA_URL=${window.location.origin}`,
     'stardelt login',
     `stardelt bundle init shop --name shop-etl --group ${group}`,
