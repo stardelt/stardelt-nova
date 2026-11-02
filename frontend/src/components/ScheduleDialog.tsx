@@ -265,6 +265,7 @@ export default function ScheduleDialog({
   sql,
   pipeline,
   initialKind = 'sql',
+  initialNotebook,
   onClose,
   onScheduled,
 }: {
@@ -275,6 +276,8 @@ export default function ScheduleDialog({
   pipeline?: PipelineDetail
   /** Create mode: the Pipelines page opens a Notebook schedule (#238). */
   initialKind?: RunKind
+  /** Create mode: the Notebooks page opens a schedule for this published version (#439). */
+  initialNotebook?: { group: string; name: string; objectVersion: string }
   onClose: () => void
   onScheduled: (view: PipelineView) => void
 }) {
@@ -320,11 +323,11 @@ export default function ScheduleDialog({
 
   const [name, setName] = useState(() => (editing ? pipeline?.name ?? '' : suggestName(sql ?? '')))
   const [nameTouched, setNameTouched] = useState(editing)
-  const [group, setGroup] = useState(() => (editing ? pipeline?.ownerGroup ?? '' : ''))
+  const [group, setGroup] = useState(() => (editing ? pipeline?.ownerGroup ?? '' : initialNotebook?.group ?? ''))
   const [hoveredGroup, setHoveredGroup] = useState<string | null>(null)
   const [runKind, setRunKind] = useState<RunKind>(() => (editing ? runKindFrom(pipeline) : initialKind))
-  const [notebookName, setNotebookName] = useState(() => storedNotebook?.name ?? '')
-  const [version, setVersion] = useState(() => storedNotebook?.objectVersion ?? '')
+  const [notebookName, setNotebookName] = useState(() => storedNotebook?.name ?? initialNotebook?.name ?? '')
+  const [version, setVersion] = useState(() => storedNotebook?.objectVersion ?? initialNotebook?.objectVersion ?? '')
   const [notebookValues, setNotebookValues] = useState<Record<string, string>>({})
   const [when, setWhen] = useState<WhenPreset>(seed.preset)
   const [time, setTime] = useState(seed.time)
