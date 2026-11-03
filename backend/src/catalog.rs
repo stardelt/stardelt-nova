@@ -37,8 +37,7 @@ use crate::{
     AppState,
     api_json::ApiJson,
     auth::{self, Principal},
-    catalog_docs,
-    data,
+    catalog_docs, data,
     trino::error_status,
 };
 
@@ -1040,15 +1039,13 @@ pub async fn table_rollback(
             .get_opt(&catalog)
             .await
         {
-            Ok(Some(object)) => serde_json::to_value(object)
-                .ok()
-                .and_then(|value| {
-                    value
-                        .get("spec")?
-                        .get("owner")?
-                        .as_str()
-                        .map(|s| s.to_string())
-                }),
+            Ok(Some(object)) => serde_json::to_value(object).ok().and_then(|value| {
+                value
+                    .get("spec")?
+                    .get("owner")?
+                    .as_str()
+                    .map(|s| s.to_string())
+            }),
             _ => None,
         }
     } else {

@@ -453,7 +453,9 @@ pub fn rollback_rule(identity: &Identity, catalog_owner: Option<&str>) -> String
             return "You can roll back because you are an administrator.".into();
         }
         if let Some(owner) = catalog_owner {
-            return format!("You can roll back because you belong to the catalog owner group {owner}.");
+            return format!(
+                "You can roll back because you belong to the catalog owner group {owner}."
+            );
         }
     }
     if let Some(owner) = catalog_owner {
@@ -464,7 +466,12 @@ pub fn rollback_rule(identity: &Identity, catalog_owner: Option<&str>) -> String
 }
 
 /// Build the read answer from a load-table result. The rule is evaluated for `who`.
-fn documentation(loaded: &Loaded, who: &Identity, can_rollback: bool, rollback_rule: String) -> TableDocumentation {
+fn documentation(
+    loaded: &Loaded,
+    who: &Identity,
+    can_rollback: bool,
+    rollback_rule: String,
+) -> TableDocumentation {
     let owner = property(&loaded.properties, "stardelt.owner");
     let can_edit = may_edit(who, owner.as_deref()).is_ok();
     TableDocumentation {
