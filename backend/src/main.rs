@@ -1198,7 +1198,7 @@ mod router_tests {
         assert_eq!(body["default"], "warehouse");
         assert_eq!(
             body["catalogs"],
-            serde_json::json!([{ "name": "warehouse", "id": "demo" }])
+            serde_json::json!([{ "name": "warehouse", "id": "demo", "canWrite": true }])
         );
     }
 

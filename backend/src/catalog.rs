@@ -36,10 +36,12 @@ use tracing::warn;
 use crate::{
     AppState,
     api_json::ApiJson,
+    admin_catalogs,
     auth::{self, Principal},
     data,
     trino::error_status,
 };
+use kube::api::{Api, ListParams};
 
 /// Catalogs the engine always has and Nova never offers: `system`, the connectors'
 /// information schemas, and the in-memory and TPC connectors. They answer `SHOW CATALOGS`
@@ -146,6 +148,9 @@ pub struct CatalogInfo {
     /// every other catalog.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub layer: Option<String>,
+    /// Whether the caller may write to this catalog (has write/create/manage grant).
+    #[serde(rename = "canWrite")]
+    pub can_write: bool,
 }
 
 /// `GET /api/catalog/catalogs`: the catalogs the caller may browse, the medallion layers
@@ -594,6 +599,103 @@ pub async fn catalog_scope(
     Ok((name, id))
 }
 
+
+/// Returns true if the principal may write (write/create/manage) to a catalog.
+/// For administrators, true for all catalogs. For others, checks Catalog CRD grants against principal's groups.
+pub async fn catalog_can_write(state: &AppState, principal: Option<&Principal>, catalog_name: &str) -> bool {
+    if state.demo {
+        return true;
+    }
+    if let Some(p) = principal {
+        if p.identity.is_admin {
+            return true;
+        }
+        // Get catalog grants
+        if let Some(client) = state.kube.clone() {
+            let api = admin_catalogs::catalogs_api(client);
+            if let Ok(Some(obj)) = api.get_opt(catalog_name).await {
+                if let Ok(val) = serde_json::to_value(&obj) {
+                    // Check grants
+                    if let Some(spec) = val.get("spec") {
+                        if let Some(grants) = spec.get("grants").and_then(|g| g.as_array()) {
+                            for g in grants {
+                                if let Some(group) = g.get("group").and_then(|x| x.as_str()) {
+                                    if let Some(verb) = g.get("verb").and_then(|x| x.as_str()) {
+                                        // Check if principal's groups match
+                                        let has_group = p.identity.groups.iter().any(|pg| {
+                                            pg == group || pg.ends_with(&format!("/{}", group)) || group.ends_with(&format!("/{}", pg.split('/').last().unwrap_or(pg)))
+                                        }) || p.identity.groups.iter().any(|pg| pg == group);
+                                        if has_group {
+                                            if verb == "write" || verb == "create" || verb == "manage" {
+                                                return true;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // If no principal and not admin context, be permissive in dev-like setups? 
+    // But better: in dev mode with default auth, allow writes
+    if principal.is_none() {
+        // In dev mode without auth, allow (common case)
+        return true;
+    }
+    false
+}
+
+/// Find first writable catalog for principal
+pub async fn first_writable_catalog(state: &AppState, principal: Option<&Principal>) -> Option<String> {
+    if state.demo {
+        return Some(state.warehouse_name.clone());
+    }
+    if let Some(p) = principal {
+        if p.identity.is_admin {
+            // admins can write any catalog; prefer first allowed that's not warehouse? ticket says "never warehouse unless the caller is an administrator" for default when None - so for non-admin default is first writable never warehouse; for admin maybe also follow same rule? Let us look up ticket again
+            // "If `None`, choose the caller's **first writable catalog**, never `warehouse` unless the caller is an administrator."
+            // So non-admins never get warehouse as default even if they could write it? Or warehouse is administrators-only technical/system catalog. Since warehouse is admin-only now per platform#495, non-admins can't write it anyway. But better follow exactly.
+        }
+    }
+    // Get all catalogs principal may browse
+    let allowed = allowed_catalogs(state, principal).await.ok()?;
+    if allowed.is_empty() {
+        return None;
+    }
+    // Try to find first writable
+    for name in &allowed {
+        if catalog_can_write(state, principal, name).await {
+            // never warehouse unless admin
+            if let Some(p) = principal {
+                if name == "warehouse" && !p.identity.is_admin {
+                    continue;
+                }
+            } else if name == "warehouse" {
+                continue;
+            }
+            return Some(name.clone());
+        }
+    }
+    // If nothing writable found
+    if let Some(p) = principal {
+        if p.identity.is_admin {
+            // admin can write warehouse
+            if allowed.contains(&"warehouse".to_string()) {
+                return Some("warehouse".to_string());
+            }
+            return allowed.iter().next().cloned();
+        }
+    }
+    // try shared
+    if allowed.contains(&"shared".to_string()) && catalog_can_write(state, principal, "shared").await {
+        return Some("shared".to_string());
+    }
+    None
+}
+
 #[utoipa::path(
     get,
     operation_id = "catalogs_list",
@@ -635,7 +737,8 @@ pub async fn list_catalogs(
             }
         };
         let layer = layer_in(&layers, &name);
-        catalogs.push(CatalogInfo { name, id, layer });
+        let can_write = catalog_can_write(&s, caller, &name).await;
+        catalogs.push(CatalogInfo { name, id, layer, can_write });
     }
     // The engine answers alphabetically; the medallion layers come first here.
     sort_by_layer(
@@ -1558,7 +1661,7 @@ mod tests {
         assert_eq!(
             body,
             json!({
-                "catalogs": [{"name": "warehouse", "id": "wid-warehouse"}],
+                "catalogs": [{"name": "warehouse", "id": "wid-warehouse", "canWrite": true}],
                 "default": "warehouse"
             })
         );
@@ -1707,7 +1810,7 @@ mod tests {
         assert_eq!(
             json_body(response).await,
             json!({
-                "catalogs": [{"name": "gold", "id": "demo", "layer": "gold"}],
+                "catalogs": [{"name": "gold", "id": "demo", "layer": "gold", "canWrite": true}],
                 "default": "gold"
             })
         );

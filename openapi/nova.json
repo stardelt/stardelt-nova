@@ -2450,7 +2450,7 @@
         "tags": [
           "internal"
         ],
-        "description": "Load a CSV or JSON text into the table `namespace.table` of the `warehouse` catalog: the whole file is the string `content` of the request. `format` is `csv` (the default; any value except `json` is read as CSV) or `json` (an array of objects). Column types are inferred from the values. The rows are built in a staging table first and then replace the target, so an existing table of that name is replaced, not appended to. The statements run with the caller's own identity, so the engine's permissions apply. Every call is recorded as a job (`job_id`, listed by `GET /api/jobs`). A file that cannot be read or a statement the engine refuses is a 400 with a sentence, and the job is recorded as failed. In demo mode the rows go into an in-memory lakehouse.",
+        "description": "Load a CSV or JSON text into the table `catalog.namespace.table` (default: the caller's first writable catalog, otherwise `shared`; `warehouse` is administrators-only). `catalog` is optional. The whole file is the string `content` of the request. `format` is `csv` (the default; any value except `json` is read as CSV) or `json` (an array of objects). Column types are inferred from the values. The rows are built in a staging table first and then replace the target, so an existing table of that name is replaced, not appended to. The statements run with the caller's own identity, so the engine's permissions apply. Every call is recorded as a job (`job_id`, listed by `GET /api/jobs`). A file that cannot be read or a statement the engine refuses is a 400 with a sentence, and the job is recorded as failed. In demo mode the rows go into an in-memory lakehouse.",
         "operationId": "ingest_upload",
         "requestBody": {
           "content": {
@@ -2485,6 +2485,26 @@
           },
           "401": {
             "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not write that catalog",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Catalog not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -5152,7 +5172,7 @@
         "tags": [
           "internal"
         ],
-        "description": "Copy one table of the `warehouse` catalog into another. `source` and `target` are `namespace.table`. `mode` is `overwrite` (the default: the target is dropped and rebuilt from the source) or `append` (rows are added to the target). Overwriting a table with itself is refused, because the copy would read from a table that no longer exists; appending to itself is allowed. The statements run with the caller's own identity, so the engine's permissions apply. The answer counts the rows now in the target. Every call is recorded as a job (`job_id`, listed by `GET /api/jobs`). A refusal or an engine error is a 400 with a sentence, and the job is recorded as failed.",
+        "description": "Copy tables between catalogs (defaulting to the caller's first writable catalog). `catalog` (or `source_catalog`/`target_catalog`) may be used; source and target must be in the same catalog for now. `source` and `target` are `namespace.table`. `mode` is `overwrite` (the default: the target is dropped and rebuilt from the source) or `append` (rows are added to the target). Overwriting a table with itself is refused, because the copy would read from a table that no longer exists; appending to itself is allowed. The statements run with the caller's own identity, so the engine's permissions apply. The answer counts the rows now in the target. Every call is recorded as a job (`job_id`, listed by `GET /api/jobs`). A refusal or an engine error is a 400 with a sentence, and the job is recorded as failed.",
         "operationId": "tables_transfer",
         "requestBody": {
           "content": {
@@ -5187,6 +5207,16 @@
           },
           "401": {
             "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may not write that catalog",
             "content": {
               "application/json": {
                 "schema": {
@@ -5737,9 +5767,14 @@
         "description": "One catalog the caller may browse, with its Lakekeeper warehouse id and its medallion\nlayer when it has one.",
         "required": [
           "name",
-          "id"
+          "id",
+          "canWrite"
         ],
         "properties": {
+          "canWrite": {
+            "type": "boolean",
+            "description": "Whether the caller may write to this catalog (has write/create/manage grant)."
+          },
           "id": {
             "type": "string",
             "description": "The Lakekeeper warehouse id behind that name."
@@ -8636,6 +8671,12 @@
           "target"
         ],
         "properties": {
+          "catalog": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "mode": {
             "type": "string"
           },
@@ -8666,8 +8707,20 @@
           "source": {
             "type": "string"
           },
+          "source_catalog": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "target": {
             "type": "string"
+          },
+          "target_catalog": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -8750,6 +8803,12 @@
           "content"
         ],
         "properties": {
+          "catalog": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "content": {
             "type": "string"
           },
@@ -8773,6 +8832,12 @@
           "job_id"
         ],
         "properties": {
+          "catalog": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "job_id": {
             "type": "string"
           },

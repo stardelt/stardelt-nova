@@ -10,13 +10,18 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use kube::api::{Api, ListParams};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{AppState, api_json::ApiJson, demo, jobs, trino};
+use crate::{AppState, api_json::ApiJson, admin_catalogs, catalog, demo, jobs, trino};
+use crate::auth::Principal;
 
 #[derive(Clone, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct UploadRequest {
+    #[serde(default)]
+    pub catalog: Option<String>,
     pub namespace: String,
     pub table: String,
     #[serde(default = "default_format")]
@@ -30,6 +35,8 @@ fn default_format() -> String {
 
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct UploadResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub catalog: Option<String>,
     pub namespace: String,
     pub table: String,
     pub rows_loaded: usize,
@@ -37,7 +44,10 @@ pub struct UploadResult {
 }
 
 #[derive(Clone, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct TransferRequest {
+    #[serde(default)]
+    pub catalog: Option<String>,
     pub source: String,
     pub target: String,
     #[serde(default = "default_mode")]
@@ -50,6 +60,10 @@ fn default_mode() -> String {
 
 #[derive(Serialize, utoipa::ToSchema)]
 pub struct TransferResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_catalog: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_catalog: Option<String>,
     pub source: String,
     pub target: String,
     pub rows: usize,
@@ -61,22 +75,80 @@ pub struct TransferResult {
     operation_id = "ingest_upload",
     path = "/api/ingest/upload",
     tag = "internal",
-    description = "Load a CSV or JSON text into the table `namespace.table` of the `warehouse` catalog: the whole file is the string `content` of the request. `format` is `csv` (the default; any value except `json` is read as CSV) or `json` (an array of objects). Column types are inferred from the values. The rows are built in a staging table first and then replace the target, so an existing table of that name is replaced, not appended to. The statements run with the caller's own identity, so the engine's permissions apply. Every call is recorded as a job (`job_id`, listed by `GET /api/jobs`). A file that cannot be read or a statement the engine refuses is a 400 with a sentence, and the job is recorded as failed. In demo mode the rows go into an in-memory lakehouse.",
+    description = "Load a CSV or JSON text into the table `catalog.namespace.table` (default: the caller's first writable catalog, otherwise `shared`; `warehouse` is administrators-only). `catalog` is optional. The whole file is the string `content` of the request. `format` is `csv` (the default; any value except `json` is read as CSV) or `json` (an array of objects). Column types are inferred from the values. The rows are built in a staging table first and then replace the target, so an existing table of that name is replaced, not appended to. The statements run with the caller's own identity, so the engine's permissions apply. Every call is recorded as a job (`job_id`, listed by `GET /api/jobs`). A file that cannot be read or a statement the engine refuses is a 400 with a sentence, and the job is recorded as failed. In demo mode the rows go into an in-memory lakehouse.",
     request_body = UploadRequest,
     responses(
         (status = 200, description = "The table was loaded", body = UploadResult),
         (status = 400, description = "The file could not be read or the engine refused a statement", body = crate::openapi::ErrorResponse),
         (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller may not write that catalog", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "Catalog not found", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn upload(
     State(s): State<Arc<AppState>>,
-    caller: Option<axum::Extension<crate::auth::Principal>>,
+    caller: Option<axum::Extension<Principal>>,
     // The body extractor has to be last: axum consumes the request for it.
     ApiJson(req): ApiJson<UploadRequest>,
 ) -> Response {
+    let p = caller.as_ref().map(|c| &c.0);
+    let catalog_name = if let Some(ref c) = req.catalog {
+        if c.trim().is_empty() {
+            None
+        } else {
+            Some(c.trim().to_string())
+        }
+    } else {
+        None
+    };
+
+    let catalog_name = match catalog_name {
+        Some(name) => {
+            if !catalog::valid_catalog(&name) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": "catalog name must be lower-case letters and digits" })),
+                )
+                    .into_response();
+            }
+            // Check if caller may write
+            if !catalog::catalog_can_write(&s, p, &name).await {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({ "error": format!("you cannot write catalog '{name}'") })),
+                )
+                    .into_response();
+            }
+            // Check if catalog exists/browsable? Also ensure it's in allowed set
+            let allowed = match catalog::allowed_catalogs(&s, p).await {
+                Ok(a) => a,
+                Err(e) => return (crate::trino::error_status(&e), Json(serde_json::json!({ "error": e }))).into_response(),
+            };
+            if !allowed.contains(&name) {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({ "error": format!("you cannot browse catalog '{name}'") })),
+                )
+                    .into_response();
+            }
+            name
+        }
+        None => {
+            match catalog::first_writable_catalog(&s, p).await {
+                Some(name) => name,
+                None => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({ "error": "no catalog you may write — ask an administrator for a group catalog" })),
+                    )
+                        .into_response();
+                }
+            }
+        }
+    };
+
     let fmt = req.format.to_lowercase();
-    let title = format!("{}.{}", req.namespace, req.table);
+    let title = format!("{}.{}.{}", catalog_name, req.namespace, req.table);
     let (user, owner) = caller
         .as_ref()
         .map(|c| (c.0.identity.display_name.clone(), c.0.identity.sub.clone()))
@@ -84,7 +156,7 @@ pub async fn upload(
 
     if s.demo {
         let mut demo = s.demo_state.write().expect("demo state poisoned");
-        return match demo.upload(&req.namespace, &req.table, &fmt, &req.content) {
+        return match demo.upload_in_catalog(&catalog_name, &req.namespace, &req.table, &fmt, &req.content) {
             Ok(n) => {
                 let job = jobs::record(
                     &s.jobs,
@@ -97,6 +169,7 @@ pub async fn upload(
                     &owner,
                 );
                 Json(UploadResult {
+                    catalog: Some(catalog_name.clone()),
                     namespace: req.namespace,
                     table: req.table,
                     rows_loaded: n,
@@ -125,8 +198,9 @@ pub async fn upload(
     }
 
     let (s2, req2, fmt2) = (s.clone(), req.clone(), fmt.clone());
-    let p = caller.map(|c| c.0);
-    let outcome = tokio::spawn(async move { real_upload(&s2, &req2, &fmt2, p.as_ref()).await })
+    let p2 = caller.map(|c| c.0);
+    let cat2 = catalog_name.clone();
+    let outcome = tokio::spawn(async move { real_upload(&s2, &req2, &fmt2, p2.as_ref(), &cat2).await })
         .await
         .map_err(|e| e.to_string())
         .and_then(|r| r);
@@ -143,6 +217,7 @@ pub async fn upload(
                 &owner,
             );
             Json(UploadResult {
+                catalog: Some(catalog_name.clone()),
                 namespace: req.namespace,
                 table: req.table,
                 rows_loaded: n,
@@ -175,20 +250,70 @@ pub async fn upload(
     operation_id = "tables_transfer",
     path = "/api/transfer",
     tag = "internal",
-    description = "Copy one table of the `warehouse` catalog into another. `source` and `target` are `namespace.table`. `mode` is `overwrite` (the default: the target is dropped and rebuilt from the source) or `append` (rows are added to the target). Overwriting a table with itself is refused, because the copy would read from a table that no longer exists; appending to itself is allowed. The statements run with the caller's own identity, so the engine's permissions apply. The answer counts the rows now in the target. Every call is recorded as a job (`job_id`, listed by `GET /api/jobs`). A refusal or an engine error is a 400 with a sentence, and the job is recorded as failed.",
+    description = "Copy tables between catalogs (defaulting to the caller's first writable catalog). `catalog` (or `source_catalog`/`target_catalog`) may be used; source and target must be in the same catalog for now. `source` and `target` are `namespace.table`. `mode` is `overwrite` (the default: the target is dropped and rebuilt from the source) or `append` (rows are added to the target). Overwriting a table with itself is refused, because the copy would read from a table that no longer exists; appending to itself is allowed. The statements run with the caller's own identity, so the engine's permissions apply. The answer counts the rows now in the target. Every call is recorded as a job (`job_id`, listed by `GET /api/jobs`). A refusal or an engine error is a 400 with a sentence, and the job is recorded as failed.",
     request_body = TransferRequest,
     responses(
         (status = 200, description = "The table was copied", body = TransferResult),
         (status = 400, description = "The mode, a table name or the copy was refused", body = crate::openapi::ErrorResponse),
         (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller may not write that catalog", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn transfer(
     State(s): State<Arc<AppState>>,
-    caller: Option<axum::Extension<crate::auth::Principal>>,
+    caller: Option<axum::Extension<Principal>>,
     // The body extractor has to be last: axum consumes the request for it.
     ApiJson(req): ApiJson<TransferRequest>,
 ) -> Response {
+    let p = caller.as_ref().map(|c| &c.0);
+    // Resolve catalog
+    let catalog_name = if let Some(ref c) = req.catalog {
+        if c.trim().is_empty() { None } else { Some(c.trim().to_string()) }
+    } else { None };
+
+    let catalog_name = match catalog_name {
+        Some(name) => {
+            if !catalog::valid_catalog(&name) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": "catalog name must be lower-case letters and digits" })),
+                )
+                    .into_response();
+            }
+            if !catalog::catalog_can_write(&s, p, &name).await {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({ "error": format!("you cannot write catalog '{name}'") })),
+                )
+                    .into_response();
+            }
+            let allowed = match catalog::allowed_catalogs(&s, p).await {
+                Ok(a) => a,
+                Err(e) => return (crate::trino::error_status(&e), Json(serde_json::json!({ "error": e }))).into_response(),
+            };
+            if !allowed.contains(&name) {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(serde_json::json!({ "error": format!("you cannot browse catalog '{name}'") })),
+                )
+                    .into_response();
+            }
+            name
+        }
+        None => {
+            match catalog::first_writable_catalog(&s, p).await {
+                Some(name) => name,
+                None => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({ "error": "no catalog you may write — ask an administrator for a group catalog" })),
+                    )
+                        .into_response();
+                }
+            }
+        }
+    };
+
     let title = format!("{} → {}", req.source, req.target);
     let (user, owner) = caller
         .as_ref()
@@ -197,7 +322,7 @@ pub async fn transfer(
 
     if s.demo {
         let mut demo = s.demo_state.write().expect("demo state poisoned");
-        return match demo.transfer(&req.source, &req.target, &req.mode) {
+        return match demo.transfer_in_catalogs(&catalog_name, &req.source, &catalog_name, &req.target, &req.mode) {
             Ok(n) => {
                 let job = jobs::record(
                     &s.jobs,
@@ -210,6 +335,8 @@ pub async fn transfer(
                     &owner,
                 );
                 Json(TransferResult {
+                    source_catalog: Some(catalog_name.clone()),
+                    target_catalog: Some(catalog_name.clone()),
                     source: req.source,
                     target: req.target,
                     rows: n,
@@ -238,8 +365,10 @@ pub async fn transfer(
     }
 
     let (s2, req2) = (s.clone(), req.clone());
-    let p = caller.map(|c| c.0);
-    let outcome = tokio::spawn(async move { real_transfer(&s2, &req2, p.as_ref()).await })
+    let p2 = caller.map(|c| c.0);
+    let cat2 = catalog_name.clone();
+    let cat2_clone = cat2.clone();
+    let outcome = tokio::spawn(async move { real_transfer(&s2, &req2, p2.as_ref(), &cat2).await })
         .await
         .map_err(|e| e.to_string())
         .and_then(|r| r);
@@ -256,6 +385,8 @@ pub async fn transfer(
                 &owner,
             );
             Json(TransferResult {
+                source_catalog: Some(cat2_clone.clone()),
+                target_catalog: Some(cat2_clone.clone()),
                 source: req.source,
                 target: req.target,
                 rows: n,
@@ -330,6 +461,7 @@ async fn real_upload(
     req: &UploadRequest,
     fmt: &str,
     caller: Option<&crate::auth::Principal>,
+    catalog: &str,
 ) -> Result<usize, String> {
     let (columns, rows) = if fmt == "json" {
         demo::parse_json_table(&req.content)?
@@ -344,14 +476,16 @@ async fn real_upload(
     trino::execute(
         state,
         format!(
-            "CREATE SCHEMA IF NOT EXISTS warehouse.{}",
+            "CREATE SCHEMA IF NOT EXISTS {}.{}",
+            quote_ident(catalog),
             quote_ident(&req.namespace)
         ),
         caller,
     )
     .await?;
     let target = format!(
-        "warehouse.{}.{}",
+        "{}.{}.{}",
+        quote_ident(catalog),
         quote_ident(&req.namespace),
         quote_ident(&req.table)
     );
@@ -363,7 +497,8 @@ async fn real_upload(
         .join(", ");
 
     let staging = format!(
-        "warehouse.{}.{}",
+        "{}.{}.{}",
+        quote_ident(catalog),
         quote_ident(&req.namespace),
         quote_ident(&staging_name(&req.table, crate::jobs::now_ms()))
     );
@@ -390,11 +525,12 @@ async fn real_transfer(
     state: &AppState,
     req: &TransferRequest,
     caller: Option<&crate::auth::Principal>,
+    catalog: &str,
 ) -> Result<usize, String> {
     let (sns, stbl) = demo::parse_ref(&req.source)?;
     let (tns, ttbl) = demo::parse_ref(&req.target)?;
-    let source = format!("warehouse.{}.{}", quote_ident(&sns), quote_ident(&stbl));
-    let target = format!("warehouse.{}.{}", quote_ident(&tns), quote_ident(&ttbl));
+    let source = format!("{}.{}.{}", quote_ident(catalog), quote_ident(&sns), quote_ident(&stbl));
+    let target = format!("{}.{}.{}", quote_ident(catalog), quote_ident(&tns), quote_ident(&ttbl));
     check_transfer(&req.mode, (&sns, &stbl), (&tns, &ttbl))?;
 
     if req.mode.eq_ignore_ascii_case("append") {
@@ -408,7 +544,8 @@ async fn real_transfer(
         trino::execute(
             state,
             format!(
-                "CREATE SCHEMA IF NOT EXISTS warehouse.{}",
+                "CREATE SCHEMA IF NOT EXISTS {}.{}",
+                quote_ident(catalog),
                 quote_ident(&tns)
             ),
             caller,

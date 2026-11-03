@@ -544,7 +544,12 @@ mod tests {
             let op = &value["paths"][path][method];
             assert_eq!(op["operationId"], id, "{path}");
             assert_eq!(op["tags"], serde_json::json!(["internal"]), "{path}");
-            assert!(op["responses"].get("403").is_none(), "{path}");
+            // Catalog-scoped writes may return 403 when the caller may not write a catalog.
+            if path == "/api/jobs" {
+                assert!(op["responses"].get("403").is_none(), "{path}");
+            } else {
+                assert!(op["responses"].get("403").is_some(), "{path}");
+            }
             assert!(op["responses"].get("401").is_some(), "{path}");
         }
     }

@@ -82,7 +82,7 @@ export type SqlWarehouse = {
  * resource or the catalog's own name. The API omits it for every other catalog, and
  * sends the list already ordered bronze, silver, gold, then alphabetically.
  */
-export type Catalog = { name: string; id: string; layer?: string | null }
+export type Catalog = { name: string; id: string; layer?: string | null; canWrite?: boolean }
 
 export type CatalogList = { catalogs: Catalog[]; default: string }
 
@@ -215,12 +215,14 @@ export type Job = {
 }
 
 export type UploadRequest = {
+  catalog?: string
   namespace: string
   table: string
   format: 'csv' | 'json' | string
   content: string
 }
 export type UploadResult = {
+  catalog?: string
   namespace: string
   table: string
   rows_loaded: number
@@ -228,11 +230,14 @@ export type UploadResult = {
 }
 
 export type TransferRequest = {
+  catalog?: string
   source: string
   target: string
   mode: 'overwrite' | 'append' | string
 }
 export type TransferResult = {
+  source_catalog?: string
+  target_catalog?: string
   source: string
   target: string
   rows: number
