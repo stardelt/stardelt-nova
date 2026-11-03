@@ -109,6 +109,14 @@ pub struct TableDocumentation {
     #[serde(rename = "editRule")]
     #[schema(rename = "editRule")]
     pub edit_rule: String,
+    /// Whether this caller may roll the table back (catalog owner group or administrator).
+    #[serde(rename = "canRollback")]
+    #[schema(rename = "canRollback")]
+    pub can_rollback: bool,
+    /// One sentence for a person: why `canRollback` has the value it has.
+    #[serde(rename = "rollbackRule")]
+    #[schema(rename = "rollbackRule")]
+    pub rollback_rule: String,
 }
 
 /// `PUT /api/catalog/tables/{ns}/{tbl}/documentation` body.
@@ -427,8 +435,42 @@ fn split_tags(raw: &str) -> Vec<String> {
         .collect()
 }
 
+/// The interim rule: who may roll back this table.
+pub fn may_rollback(identity: &Identity, catalog_owner: Option<&str>) -> bool {
+    if identity.is_admin {
+        return true;
+    }
+    match catalog_owner {
+        Some(owner) => in_group(&identity.groups, owner),
+        None => false,
+    }
+}
+
+pub fn rollback_rule(identity: &Identity, catalog_owner: Option<&str>) -> String {
+    if may_rollback(identity, catalog_owner) {
+        if identity.is_admin {
+            return "You can roll back because you are an administrator.".into();
+        }
+        if let Some(owner) = catalog_owner {
+            return format!(
+                "You can roll back because you belong to the catalog owner group {owner}."
+            );
+        }
+    }
+    if let Some(owner) = catalog_owner {
+        format!("Rolling a table back needs the catalog owner group {owner} or an administrator.")
+    } else {
+        "Rolling a table back needs the catalog owner group or an administrator.".into()
+    }
+}
+
 /// Build the read answer from a load-table result. The rule is evaluated for `who`.
-fn documentation(loaded: &Loaded, who: &Identity) -> TableDocumentation {
+fn documentation(
+    loaded: &Loaded,
+    who: &Identity,
+    can_rollback: bool,
+    rollback_rule: String,
+) -> TableDocumentation {
     let owner = property(&loaded.properties, "stardelt.owner");
     let can_edit = may_edit(who, owner.as_deref()).is_ok();
     TableDocumentation {
@@ -449,6 +491,8 @@ fn documentation(loaded: &Loaded, who: &Identity) -> TableDocumentation {
             .collect(),
         can_edit,
         edit_rule: edit_rule(who, owner.as_deref()),
+        can_rollback,
+        rollback_rule,
     }
 }
 
@@ -653,15 +697,52 @@ fn table_lock(state: &AppState, catalog: &str, ns: &str, tbl: &str) -> Arc<tokio
     )
 }
 
+async fn catalog_owner_from_kube(state: &AppState, catalog_name: &str) -> Option<String> {
+    let client = state.kube.clone()?;
+    match crate::admin_catalogs::catalogs_api(client)
+        .get_opt(catalog_name)
+        .await
+    {
+        Ok(Some(object)) => {
+            let value = serde_json::to_value(object).ok()?;
+            value
+                .get("spec")?
+                .get("owner")?
+                .as_str()
+                .map(|s| s.to_string())
+        }
+        _ => None,
+    }
+}
+
+fn catalog_owner_demo(state: &AppState, catalog_name: &str) -> Option<String> {
+    if catalog_name == state.warehouse_name {
+        let demo = state.demo_state.read().ok()?;
+        if let Some(row) = &demo.admin_catalog {
+            return row.owner.clone();
+        }
+        return Some("stardelt-admins".to_string());
+    }
+    None
+}
+
 /// `GET /api/catalog/tables/{ns}/{tbl}/documentation`.
 async fn read_documentation(
+    state: &AppState,
     catalog: &Catalog<'_>,
     who: &Identity,
     ns: &str,
     tbl: &str,
 ) -> Result<TableDocumentation, DocError> {
     let loaded = catalog.load(ns, tbl).await.map_err(catalog_fail)?;
-    Ok(documentation(&loaded, who))
+    let catalog_owner = if state.demo {
+        catalog_owner_demo(state, catalog.name)
+    } else {
+        catalog_owner_from_kube(state, catalog.name).await
+    };
+    let can_rollback_v = may_rollback(who, catalog_owner.as_deref());
+    let rollback_rule_v = rollback_rule(who, catalog_owner.as_deref());
+    Ok(documentation(&loaded, who, can_rollback_v, rollback_rule_v))
 }
 
 /// `PUT /api/catalog/tables/{ns}/{tbl}/documentation`.
@@ -681,7 +762,14 @@ async fn write_documentation(
     let _guard = lock.lock().await;
 
     let loaded = catalog.load(ns, tbl).await.map_err(catalog_fail)?;
-    let current = documentation(&loaded, who);
+    let catalog_owner = if state.demo {
+        catalog_owner_demo(state, catalog.name)
+    } else {
+        catalog_owner_from_kube(state, catalog.name).await
+    };
+    let can_rollback_v = may_rollback(who, catalog_owner.as_deref());
+    let rollback_rule_v = rollback_rule(who, catalog_owner.as_deref());
+    let current = documentation(&loaded, who, can_rollback_v, rollback_rule_v);
     may_edit(who, current.owner.as_deref()).map_err(|e| DocError::new(StatusCode::FORBIDDEN, e))?;
     if !claim_allowed(who, current.owner.as_deref(), &requested.owner) {
         return Err(DocError::new(
@@ -755,7 +843,14 @@ async fn write_documentation(
 
     audit::catalog_doc_event(who, &format!("{ns}.{tbl}"), &changed);
     let loaded = catalog.load(ns, tbl).await.map_err(catalog_fail)?;
-    Ok(documentation(&loaded, who))
+    let catalog_owner = if state.demo {
+        catalog_owner_demo(state, catalog.name)
+    } else {
+        catalog_owner_from_kube(state, catalog.name).await
+    };
+    let can_rollback_v = may_rollback(who, catalog_owner.as_deref());
+    let rollback_rule_v = rollback_rule(who, catalog_owner.as_deref());
+    Ok(documentation(&loaded, who, can_rollback_v, rollback_rule_v))
 }
 
 /// `PUT /api/catalog/tables/{ns}/{tbl}/columns/{column}/description`.
@@ -792,7 +887,14 @@ where
     let _guard = lock.lock().await;
 
     let loaded = catalog.load(ns, tbl).await.map_err(catalog_fail)?;
-    let current = documentation(&loaded, who);
+    let catalog_owner = if state.demo {
+        catalog_owner_demo(state, catalog.name)
+    } else {
+        catalog_owner_from_kube(state, catalog.name).await
+    };
+    let can_rollback_v = may_rollback(who, catalog_owner.as_deref());
+    let rollback_rule_v = rollback_rule(who, catalog_owner.as_deref());
+    let current = documentation(&loaded, who, can_rollback_v, rollback_rule_v);
     may_edit(who, current.owner.as_deref()).map_err(|e| DocError::new(StatusCode::FORBIDDEN, e))?;
 
     let Some(field) = loaded.columns.iter().find(|c| c.name == column) else {
@@ -813,7 +915,14 @@ where
             catalog.load(ns, tbl).await.map_err(catalog_fail)?
         }
     };
-    Ok(documentation(&loaded, who))
+    let catalog_owner = if state.demo {
+        catalog_owner_demo(state, catalog.name)
+    } else {
+        catalog_owner_from_kube(state, catalog.name).await
+    };
+    let can_rollback_v = may_rollback(who, catalog_owner.as_deref());
+    let rollback_rule_v = rollback_rule(who, catalog_owner.as_deref());
+    Ok(documentation(&loaded, who, can_rollback_v, rollback_rule_v))
 }
 
 /// The only escaping a Trino string literal needs at these sizes: `'` doubles, and nothing
@@ -847,7 +956,7 @@ fn comment_on_column_sql(
 
 /// The caller's identity: the principal in `oidc` mode, the static user as an administrator
 /// in `dev` mode (the same convention as `apps.rs` and the break-glass log).
-fn caller_identity(state: &AppState, caller: Option<&Principal>) -> Identity {
+pub fn caller_identity(state: &AppState, caller: Option<&Principal>) -> Identity {
     match caller {
         Some(principal) => principal.identity.clone(),
         None => Identity {
@@ -944,7 +1053,7 @@ pub async fn read(
         authorization: authorization.as_deref(),
         name: &name,
     };
-    match read_documentation(&catalog, &who, &ns, &tbl).await {
+    match read_documentation(&s, &catalog, &who, &ns, &tbl).await {
         Ok(doc) => Json(doc).into_response(),
         Err(e) => e.into_response(),
     }
@@ -1364,7 +1473,7 @@ mod tests {
         let catalog = catalog(&state, &addr);
         let member = who("ada", &["data-eng"], false);
 
-        let doc = read_documentation(&catalog, &member, "sales", "orders")
+        let doc = read_documentation(&state, &catalog, &member, "sales", "orders")
             .await
             .expect("the table loads");
         assert_eq!(doc.columns.len(), 4, "schema 1 is the current one");
@@ -1381,7 +1490,7 @@ mod tests {
         let mut older = load_fixture();
         older["metadata"]["current-schema-id"] = json!(0);
         _fake.set_load(older);
-        let doc = read_documentation(&catalog, &member, "sales", "orders")
+        let doc = read_documentation(&state, &catalog, &member, "sales", "orders")
             .await
             .expect("the older schema also loads");
         assert_eq!(doc.columns.len(), 3, "schema 0 is current now");
@@ -1402,7 +1511,7 @@ mod tests {
         let catalog = catalog(&state, &addr);
         let member = who("ada", &["data-eng"], false);
 
-        let doc = read_documentation(&catalog, &member, "sales", "orders")
+        let doc = read_documentation(&state, &catalog, &member, "sales", "orders")
             .await
             .expect("the table loads");
         assert_eq!(
@@ -1625,7 +1734,7 @@ mod tests {
         let catalog = catalog(&state, &addr);
         let member = who("ada", &["data-eng"], false);
 
-        let error = read_documentation(&catalog, &member, "sales", "orders")
+        let error = read_documentation(&state, &catalog, &member, "sales", "orders")
             .await
             .expect_err("no such table");
         assert_eq!(error.status(), StatusCode::NOT_FOUND);
@@ -1932,7 +2041,7 @@ mod tests {
                         loaded.properties.remove("stardelt.owner");
                     }
                 }
-                let doc = documentation(&loaded, identity);
+                let doc = documentation(&loaded, identity, false, "".to_string());
                 assert_eq!(
                     doc.can_edit,
                     may_edit(identity, owner).is_ok(),

@@ -179,6 +179,8 @@ export type TableDocumentation = {
   columns: ColumnDoc[]
   canEdit: boolean
   editRule: string
+  canRollback: boolean
+  rollbackRule: string
 }
 
 /**
