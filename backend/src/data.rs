@@ -10,12 +10,11 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use kube::api::{Api, ListParams};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::auth::Principal;
-use crate::{AppState, admin_catalogs, api_json::ApiJson, catalog, demo, jobs, trino};
+use crate::{AppState, api_json::ApiJson, catalog, demo, jobs, trino};
 
 #[derive(Clone, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]

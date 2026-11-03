@@ -40,7 +40,6 @@ use crate::{
     data,
     trino::error_status,
 };
-use kube::api::{Api, ListParams};
 
 /// Catalogs the engine always has and Nova never offers: `system`, the connectors'
 /// information schemas, and the in-memory and TPC connectors. They answer `SHOW CATALOGS`
@@ -598,8 +597,8 @@ pub async fn catalog_scope(
     Ok((name, id))
 }
 
-/// Returns true if the principal may write (write/create/manage) to a catalog.
-/// For administrators, true for all catalogs. For others, checks Catalog CRD grants against principal's groups.
+/// Whether the principal may write (write/create/manage) a catalog: administrators always;
+/// everyone else through the `Catalog` object's grants for one of their groups.
 pub async fn catalog_can_write(
     state: &AppState,
     principal: Option<&Principal>,
@@ -608,58 +607,45 @@ pub async fn catalog_can_write(
     if state.demo {
         return true;
     }
-    if let Some(p) = principal {
-        if p.identity.is_admin {
-            return true;
-        }
-        // Get catalog grants
-        if let Some(client) = state.kube.clone() {
-            let api = admin_catalogs::catalogs_api(client);
-            if let Ok(Some(obj)) = api.get_opt(catalog_name).await {
-                if let Ok(val) = serde_json::to_value(&obj) {
-                    // Check grants
-                    if let Some(spec) = val.get("spec") {
-                        if let Some(grants) = spec.get("grants").and_then(|g| g.as_array()) {
-                            for g in grants {
-                                if let Some(group) = g.get("group").and_then(|x| x.as_str()) {
-                                    if let Some(verb) = g.get("verb").and_then(|x| x.as_str()) {
-                                        // Check if principal's groups match
-                                        let has_group =
-                                            p.identity.groups.iter().any(|pg| {
-                                                pg == group
-                                                    || pg.ends_with(&format!("/{}", group))
-                                                    || group.ends_with(&format!(
-                                                        "/{}",
-                                                        pg.split('/').last().unwrap_or(pg)
-                                                    ))
-                                            }) || p.identity.groups.iter().any(|pg| pg == group);
-                                        if has_group {
-                                            if verb == "write"
-                                                || verb == "create"
-                                                || verb == "manage"
-                                            {
-                                                return true;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    // If no principal and not admin context, be permissive in dev-like setups?
-    // But better: in dev mode with default auth, allow writes
-    if principal.is_none() {
-        // In dev mode without auth, allow (common case)
+    let Some(p) = principal else {
+        // No principal: the dev/static mode, where there is nothing to check against.
+        return true;
+    };
+    if p.identity.is_admin {
         return true;
     }
-    false
+    let Some(client) = state.kube.clone() else {
+        return false;
+    };
+    let Ok(Some(obj)) = admin_catalogs::catalogs_api(client)
+        .get_opt(catalog_name)
+        .await
+    else {
+        return false;
+    };
+    let Ok(val) = serde_json::to_value(&obj) else {
+        return false;
+    };
+    let Some(grants) = val.pointer("/spec/grants").and_then(|g| g.as_array()) else {
+        return false;
+    };
+    grants.iter().any(|g| {
+        let group = g.get("group").and_then(|x| x.as_str());
+        let verb = g.get("verb").and_then(|x| x.as_str());
+        let Some(group) = group else { return false };
+        let Some(verb) = verb else { return false };
+        let writes = matches!(verb, "write" | "create" | "manage");
+        let member = p
+            .identity
+            .groups
+            .iter()
+            .any(|pg| pg == group || pg.ends_with(&format!("/{group}")));
+        writes && member
+    })
 }
 
-/// Find first writable catalog for principal
+/// The caller's first writable catalog, never `warehouse` for a non-administrator
+/// (platform#495: it is the platform's technical catalog).
 pub async fn first_writable_catalog(
     state: &AppState,
     principal: Option<&Principal>,
@@ -667,47 +653,15 @@ pub async fn first_writable_catalog(
     if state.demo {
         return Some(state.warehouse_name.clone());
     }
-    if let Some(p) = principal {
-        if p.identity.is_admin {
-            // admins can write any catalog; prefer first allowed that's not warehouse? ticket says "never warehouse unless the caller is an administrator" for default when None - so for non-admin default is first writable never warehouse; for admin maybe also follow same rule? Let us look up ticket again
-            // "If `None`, choose the caller's **first writable catalog**, never `warehouse` unless the caller is an administrator."
-            // So non-admins never get warehouse as default even if they could write it? Or warehouse is administrators-only technical/system catalog. Since warehouse is admin-only now per platform#495, non-admins can't write it anyway. But better follow exactly.
-        }
-    }
-    // Get all catalogs principal may browse
     let allowed = allowed_catalogs(state, principal).await.ok()?;
-    if allowed.is_empty() {
-        return None;
-    }
-    // Try to find first writable
+    let is_admin = principal.map(|p| p.identity.is_admin).unwrap_or(false);
     for name in &allowed {
+        if name == "warehouse" && !is_admin {
+            continue;
+        }
         if catalog_can_write(state, principal, name).await {
-            // never warehouse unless admin
-            if let Some(p) = principal {
-                if name == "warehouse" && !p.identity.is_admin {
-                    continue;
-                }
-            } else if name == "warehouse" {
-                continue;
-            }
             return Some(name.clone());
         }
-    }
-    // If nothing writable found
-    if let Some(p) = principal {
-        if p.identity.is_admin {
-            // admin can write warehouse
-            if allowed.contains(&"warehouse".to_string()) {
-                return Some("warehouse".to_string());
-            }
-            return allowed.iter().next().cloned();
-        }
-    }
-    // try shared
-    if allowed.contains(&"shared".to_string())
-        && catalog_can_write(state, principal, "shared").await
-    {
-        return Some("shared".to_string());
     }
     None
 }
