@@ -1298,7 +1298,7 @@
         "tags": [
           "public"
         ],
-        "description": "Move the table's current pointer back to an earlier snapshot (`ALTER TABLE … EXECUTE rollback_to_snapshot`), run as the caller, so the engine's permissions decide. Nothing is deleted: the newer snapshots stay until they are expired.",
+        "description": "Move the table's current pointer back to an earlier snapshot (`ALTER TABLE … EXECUTE rollback_to_snapshot`), run as the caller, so the engine's permissions decide. Nothing is deleted: the newer snapshots stay until they are expired. Only the catalog owner group or an administrator may roll back; others are refused with that sentence before the engine is called.",
         "operationId": "table_rollback",
         "parameters": [
           {
@@ -1361,7 +1361,7 @@
             }
           },
           "403": {
-            "description": "The caller may not browse that catalog",
+            "description": "Only the catalog owner group or administrators may roll back",
             "content": {
               "application/json": {
                 "schema": {
@@ -8437,12 +8437,18 @@
           "tags",
           "columns",
           "canEdit",
-          "editRule"
+          "editRule",
+          "canRollback",
+          "rollbackRule"
         ],
         "properties": {
           "canEdit": {
             "type": "boolean",
             "description": "Whether the interim rule lets this caller edit (see the module docs)."
+          },
+          "canRollback": {
+            "type": "boolean",
+            "description": "Whether this caller may roll the table back (catalog owner group or administrator)."
           },
           "columns": {
             "type": "array",
@@ -8475,6 +8481,10 @@
               "null"
             ],
             "description": "The `stardelt.owner` property: a group name, or `null`."
+          },
+          "rollbackRule": {
+            "type": "string",
+            "description": "One sentence for a person: why `canRollback` has the value it has."
           },
           "tags": {
             "type": "array",

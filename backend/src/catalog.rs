@@ -37,6 +37,7 @@ use crate::{
     AppState,
     api_json::ApiJson,
     auth::{self, Principal},
+    catalog_docs,
     data,
     trino::error_status,
 };
@@ -995,7 +996,7 @@ pub async fn table_history(
     operation_id = "table_rollback",
     path = "/api/catalog/tables/{ns}/{tbl}/rollback",
     tag = "public",
-    description = "Move the table's current pointer back to an earlier snapshot (`ALTER TABLE … EXECUTE rollback_to_snapshot`), run as the caller, so the engine's permissions decide. Nothing is deleted: the newer snapshots stay until they are expired.",
+    description = "Move the table's current pointer back to an earlier snapshot (`ALTER TABLE … EXECUTE rollback_to_snapshot`), run as the caller, so the engine's permissions decide. Nothing is deleted: the newer snapshots stay until they are expired. Only the catalog owner group or an administrator may roll back; others are refused with that sentence before the engine is called.",
     params(
         ("ns" = String, Path, description = "Namespace (schema) name"),
         ("tbl" = String, Path, description = "Table name"),
@@ -1005,7 +1006,7 @@ pub async fn table_history(
     responses(
         (status = 200, description = "The engine's answer to the statement", body = crate::trino::QueryResult),
         (status = 400, description = "A name or the body is not valid, the snapshot is unknown, or the engine refused the statement", body = crate::openapi::ErrorResponse),
-        (status = 403, description = "The caller may not browse that catalog", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "Only the catalog owner group or administrators may roll back", body = crate::openapi::ErrorResponse),
         (status = 404, description = "No such catalog", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The catalog or the engine is not reachable", body = crate::openapi::ErrorResponse),
     )
@@ -1017,8 +1018,9 @@ pub async fn table_rollback(
     caller: Option<axum::Extension<auth::Principal>>,
     ApiJson(req): ApiJson<RollbackRequest>,
 ) -> Response {
-    let caller = caller.as_ref().map(|c| &c.0);
-    let (catalog, _) = match catalog_scope(&s, caller, q.catalog.as_deref()).await {
+    let caller_ref = caller.as_ref().map(|c| &c.0);
+    let who = catalog_docs::caller_identity(&s, caller_ref);
+    let (catalog, _) = match catalog_scope(&s, caller_ref, q.catalog.as_deref()).await {
         Ok(scope) => scope,
         Err(response) => return response,
     };
@@ -1032,10 +1034,40 @@ pub async fn table_rollback(
     if path_segment(&ns).is_none() || path_segment(&tbl).is_none() {
         return bad_segment(&format!("{ns}.{tbl}"));
     }
+
+    let catalog_owner = if let Some(client) = s.kube.clone() {
+        match crate::admin_catalogs::catalogs_api(client)
+            .get_opt(&catalog)
+            .await
+        {
+            Ok(Some(object)) => serde_json::to_value(object)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("spec")?
+                        .get("owner")?
+                        .as_str()
+                        .map(|s| s.to_string())
+                }),
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    if !catalog_docs::may_rollback(&who, catalog_owner.as_deref()) {
+        let rule = catalog_docs::rollback_rule(&who, catalog_owner.as_deref());
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": rule})),
+        )
+            .into_response();
+    }
+
     match crate::trino::execute(
         &s,
         rollback_sql(&catalog, &ns, &tbl, req.snapshot_id),
-        caller,
+        caller_ref,
     )
     .await
     {

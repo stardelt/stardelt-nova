@@ -486,7 +486,13 @@ function HistoryTab({ ns, tbl, catalog }: Sel & { catalog?: string }) {
     },
   })
 
+  const docs = useQuery({
+    queryKey: ['catalog', 'table-docs', catalog, ns, tbl],
+    queryFn: () => api.tableDocs(ns, tbl, catalog),
+  })
   const admin = isAdmin(me.data)
+  const canRollback = docs.data?.canRollback === true
+  const rollbackRule = docs.data?.rollbackRule
   const cols = history.data?.columns ?? []
   const idx = (name: string) => cols.findIndex(c => c.name === name)
   const iTime = idx('committed_at')
@@ -494,13 +500,18 @@ function HistoryTab({ ns, tbl, catalog }: Sel & { catalog?: string }) {
   const iOp = idx('operation')
   const iSummary = idx('summary')
 
-  if (history.isLoading) return <div className="card p-6 text-text-mute text-sm">loading history…</div>
+  if (history.isLoading || docs.isLoading) return <div className="card p-6 text-text-mute text-sm">loading history…</div>
   if (history.isError) return <div className="card p-6"><ErrorBox error={history.error} onRetry={() => history.refetch()} /></div>
   const rows = history.data?.rows ?? []
   if (rows.length === 0) {
     return (
-      <div className="card p-6 text-text-mute text-sm">
-        No snapshots recorded. {me.data?.demo ? 'Demo mode has no table history.' : 'The table has no snapshots yet.'}
+      <div className="space-y-4">
+        <div className="card p-6 text-text-mute text-sm">
+          No snapshots recorded. {me.data?.demo ? 'Demo mode has no table history.' : 'The table has no snapshots yet.'}
+        </div>
+        {!canRollback && rollbackRule && (
+          <p className="text-text-mute text-xs break-words">{rollbackRule}</p>
+        )}
       </div>
     )
   }
@@ -564,7 +575,7 @@ function HistoryTab({ ns, tbl, catalog }: Sel & { catalog?: string }) {
                         Preview
                       </button>
                     )}
-                    {admin && id !== null && (
+                    {(canRollback || admin) && id !== null && (
                       <button
                         onClick={() => { setRollbackTarget(id); setConfirmText(''); setRollbackOk(null); rollback.reset() }}
                         className="btn-ghost py-1 px-2 text-xs text-bad ml-2"
@@ -579,6 +590,10 @@ function HistoryTab({ ns, tbl, catalog }: Sel & { catalog?: string }) {
           </tbody>
         </table>
       </div>
+
+      {!canRollback && rollbackRule && (
+        <p className="text-text-mute text-xs break-words">{rollbackRule}</p>
+      )}
 
       {rollbackTarget !== null && (
         <div className="card p-5 border-red-500/40" role="dialog" aria-label="Confirm rollback">
