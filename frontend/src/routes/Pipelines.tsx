@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useEffect, useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
-import { ApiError, api, errorMessage, type PipelineView } from '../api'
+import { ApiError, api, type PipelineView } from '../api'
 import ErrorBox from '../components/ErrorBox'
 import { Icon } from '../components/Icon'
 import ScheduleDialog from '../components/ScheduleDialog'
@@ -9,16 +9,15 @@ import { formatDurationMs, formatTime, relativeTime } from '../format'
 
 /**
  * Pipelines (J1): the scheduled `Pipeline` resources of the caller's groups, what each
- * one last did, and the two actions that make sense from a list — run now, pause or
- * resume. The detail page (`PipelineDetail.tsx`) owns runs, tasks, logs and stopping a
- * run.
+ * one last did. Actions live in Airflow — use the Open in Airflow link on the detail
+ * page.
  *
  * The API is the policy point: it already refuses what the scheduler would silently
  * misbehave on (a paused pipeline, an active run under `Forbid`). This page shows the
  * API's sentence verbatim; it never invents a rule of its own.
  */
 
-type PipelineAction = 'run' | 'pause' | 'resume'
+
 
 type StateLook = { word: string; icon: string; cls: string }
 
@@ -87,52 +86,7 @@ export function runDuration(seconds: number | null | undefined): string {
   return formatDurationMs(seconds == null ? null : seconds * 1000)
 }
 
-/**
- * Run now / pause / resume, shared by the list and the detail so the two cannot drift.
- * One request per press: a second press while one is in flight is ignored.
- */
-export function usePipelineActions(refetch: () => Promise<unknown> | void) {
-  const [notice, setNotice] = useState<string | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const [pending, setPending] = useState<string | null>(null)
-  const inFlight = useRef(false)
-
-  async function act(pipeline: PipelineView, action: PipelineAction) {
-    if (inFlight.current) return
-    inFlight.current = true
-    setPending(`${action}:${pipeline.name}`)
-    setError(null)
-    setNotice(null)
-    try {
-      if (action === 'run') {
-        await api.startPipelineRun(pipeline.namespace, pipeline.name)
-        setNotice(`Started a run of ${pipeline.name}.`)
-      } else if (action === 'pause') {
-        await api.pausePipeline(pipeline.namespace, pipeline.name)
-      } else {
-        await api.resumePipeline(pipeline.namespace, pipeline.name)
-      }
-      await refetch()
-    } catch (e: unknown) {
-      // The API's own sentence — the paused and already-active refusals are written for
-      // this page and are not paraphrased here.
-      setError(errorMessage(e))
-    } finally {
-      inFlight.current = false
-      setPending(null)
-    }
-  }
-
-  return {
-    notice,
-    error,
-    pending,
-    act,
-    /** Say something a control outside `act` did (the stop dialog). */
-    announce: setNotice,
-    clearError: () => setError(null),
-  }
-}
+/** Pipeline feedback notices and errors shown on the list/detail pages. */
 
 export function PipelineFeedback({ notice, error }: { notice: string | null; error: string | null }) {
   return (
@@ -147,56 +101,9 @@ export function PipelineFeedback({ notice, error }: { notice: string | null; err
   )
 }
 
-export function PipelineActions({
-  pipeline,
-  pending,
-  onAct,
-}: {
-  pipeline: PipelineView
-  pending: string | null
-  onAct: (pipeline: PipelineView, action: PipelineAction) => void | Promise<void>
-}) {
-  const disabled = pending !== null
-  return (
-    <div className="flex flex-wrap items-center gap-2">
-      <button
-        type="button"
-        className="btn-ghost py-1.5 text-xs"
-        aria-label={`Run now ${pipeline.name}`}
-        disabled={disabled || pipeline.paused}
-        title={pipeline.paused ? 'Resume the pipeline first' : undefined}
-        onClick={() => void onAct(pipeline, 'run')}
-      >
-        <Icon name="play" className="w-3.5 h-3.5" />
-        Run now
-      </button>
-      {pipeline.paused ? (
-        <button
-          type="button"
-          className="btn-ghost py-1.5 text-xs"
-          aria-label={`Resume ${pipeline.name}`}
-          disabled={disabled}
-          onClick={() => void onAct(pipeline, 'resume')}
-        >
-          Resume
-        </button>
-      ) : (
-        <button
-          type="button"
-          className="btn-ghost py-1.5 text-xs"
-          aria-label={`Pause ${pipeline.name}`}
-          disabled={disabled}
-          onClick={() => void onAct(pipeline, 'pause')}
-        >
-          Pause
-        </button>
-      )}
-    </div>
-  )
-}
+
 
 export default function Pipelines() {
-  const queryClient = useQueryClient()
   const location = useLocation()
   const navigate = useNavigate()
   const [routedNotice, setRoutedNotice] = useState<string | null>(null)
@@ -210,8 +117,6 @@ export default function Pipelines() {
       return rows.some((p) => p.state === 'running' || p.state === 'loading') ? 10_000 : 30_000
     },
   })
-  const actions = usePipelineActions(() => queryClient.invalidateQueries({ queryKey: ['pipelines'] }))
-
   // A delete on the detail page comes back here with its notice in the route state; show it
   // once, then replace the entry so Back does not bring the sentence along.
   useEffect(() => {
@@ -240,7 +145,7 @@ export default function Pipelines() {
         </button>
       </header>
 
-      <PipelineFeedback notice={routedNotice ?? actions.notice} error={actions.error} />
+      <PipelineFeedback notice={routedNotice} error={null} />
 
       <div className="card relative overflow-x-auto">
         {list.isLoading && <p className="px-5 py-5 text-sm text-text-mute">Loading pipelines…</p>}
@@ -275,9 +180,6 @@ export default function Pipelines() {
                 <th scope="col" className="th px-3 py-2.5">State</th>
                 <th scope="col" className="th px-3 py-2.5">Last run</th>
                 <th scope="col" className="th px-3 py-2.5">Next run</th>
-                <th scope="col" className="th w-[11rem] px-3 py-2.5">
-                  <span className="sr-only">Actions</span>
-                </th>
               </tr>
             </thead>
             <tbody>
@@ -285,8 +187,6 @@ export default function Pipelines() {
                 <Row
                   key={`${pipeline.namespace}/${pipeline.name}`}
                   pipeline={pipeline}
-                  pending={actions.pending}
-                  onAct={actions.act}
                 />
               ))}
             </tbody>
@@ -301,9 +201,7 @@ export default function Pipelines() {
           onClose={() => setScheduling(false)}
           onScheduled={(view) => {
             setScheduling(false)
-            actions.clearError()
-            actions.announce(`Scheduled ${view.name}.`)
-            void queryClient.invalidateQueries({ queryKey: ['pipelines'] })
+            navigate('/pipelines', { state: { notice: `Scheduled ${view.name}.` } })
           }}
         />
       )}
@@ -313,12 +211,8 @@ export default function Pipelines() {
 
 function Row({
   pipeline,
-  pending,
-  onAct,
 }: {
   pipeline: PipelineView
-  pending: string | null
-  onAct: (pipeline: PipelineView, action: PipelineAction) => void | Promise<void>
 }) {
   const last = pipeline.lastRun
   const lastWhen = last ? formatWhen(last.startedAt ?? last.logicalDate ?? last.endedAt) : null
@@ -361,11 +255,6 @@ function Row({
       </td>
       <td className="td px-3 text-text-dim text-xs whitespace-nowrap">
         <span title={next.title}>{next.text}</span>
-      </td>
-      <td className="td px-3">
-        <div className="flex justify-end">
-          <PipelineActions pipeline={pipeline} pending={pending} onAct={onAct} />
-        </div>
       </td>
     </tr>
   )
