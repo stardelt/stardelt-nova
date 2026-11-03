@@ -5,24 +5,21 @@ import { ApiError, api, type LogLine, type PipelineDetail as PipelineDetailView,
 import ErrorBox from '../components/ErrorBox'
 import ScheduleDialog, { DeletePipelineDialog } from '../components/ScheduleDialog'
 import DefinitionEditor from '../components/DefinitionEditor'
-import StopRunDialog from '../components/StopRunDialog'
 import { shortRevision, shortVersion } from '../format'
 import { toYaml } from '../yaml'
 import {
   NOT_LOADED_NOTE,
-  PipelineActions,
   PipelineFeedback,
   PipelineStateBadge,
   RunStateBadge,
   formatWhen,
   runDuration,
-  usePipelineActions,
 } from './Pipelines'
 
 /**
  * One pipeline: its owner's facts, the declared tasks, the latest runs and — under a
- * run — its task instances and their logs. Run now, pause, resume and stop live here
- * too, sharing their implementation with the list.
+ * run — its task instances and their logs. Run, pause and stop live in Airflow — use
+ * Open in Airflow.
  *
  * A run that is still `queued` or `running` is read again every 5 s. A log is read in
  * pages and rendered as plain text: no markup, no links made from log text.
@@ -32,11 +29,11 @@ export default function PipelineDetail() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const [openRun, setOpenRun] = useState<string | null>(null)
-  const [stopping, setStopping] = useState<RunView | null>(null)
   const [editing, setEditing] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [showDefinition, setShowDefinition] = useState(false)
   const [editingDefinition, setEditingDefinition] = useState(false)
+  const [notice, setNotice] = useState<string | null>(null)
 
   const detail = useQuery({
     queryKey: ['pipeline', namespace, name],
@@ -53,22 +50,6 @@ export default function PipelineDetail() {
     queryFn: () => api.pipelineSpec(namespace, name),
     enabled: showDefinition,
   })
-
-  const actions = usePipelineActions(() =>
-    Promise.all([
-      queryClient.invalidateQueries({ queryKey: ['pipeline', namespace, name] }),
-      queryClient.invalidateQueries({ queryKey: ['pipelines'] }),
-    ]),
-  )
-
-  function stopped(runId: string) {
-    setStopping(null)
-    actions.announce(`Stopped run ${runId}.`)
-    actions.clearError()
-    void queryClient.invalidateQueries({ queryKey: ['pipeline', namespace, name] })
-    void queryClient.invalidateQueries({ queryKey: ['pipeline-run', namespace, name, runId] })
-    void queryClient.invalidateQueries({ queryKey: ['pipelines'] })
-  }
 
   if (detail.isLoading) {
     return (
@@ -134,7 +115,6 @@ export default function PipelineDetail() {
           <p className="text-text-dim text-sm mt-1">The runs, tasks and logs of this pipeline.</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <PipelineActions pipeline={pipeline} pending={actions.pending} onAct={actions.act} />
           <button type="button" className="btn-ghost py-1.5 text-xs" onClick={() => setEditing(true)}>
             Edit schedule
           </button>
@@ -148,7 +128,8 @@ export default function PipelineDetail() {
         </div>
       </header>
 
-      <PipelineFeedback notice={actions.notice} error={actions.error} />
+      <PipelineFeedback notice={notice} error={null} />
+      <p className="text-sm text-text-dim">Run, pause and stop live in Airflow — use Open in Airflow.</p>
 
       <dl className="grid grid-cols-1 gap-x-6 gap-y-3 text-sm sm:grid-cols-2 lg:grid-cols-5">
         <Fact label="State">
@@ -276,8 +257,7 @@ export default function PipelineDetail() {
                     onReload={() => void definition.refetch()}
                     onSaved={(view) => {
                       setEditingDefinition(false)
-                      actions.clearError()
-                      actions.announce(`Saved ${view.name}.`)
+                      setNotice(`Saved ${view.name}.`)
                       void queryClient.invalidateQueries({ queryKey: ['pipeline', namespace, name] })
                       void queryClient.invalidateQueries({ queryKey: ['pipeline-spec', namespace, name] })
                       void queryClient.invalidateQueries({ queryKey: ['pipelines'] })
@@ -338,7 +318,6 @@ export default function PipelineDetail() {
               const open = openRun === run.runId
               const panelId = `run-panel-${index}`
               const started = formatWhen(run.startedAt ?? run.logicalDate)
-              const active = run.state === 'queued' || run.state === 'running'
               return (
                 <RunRow
                   key={run.runId}
@@ -347,9 +326,7 @@ export default function PipelineDetail() {
                   open={open}
                   panelId={panelId}
                   started={started}
-                  active={active}
                   onToggle={() => setOpenRun(open ? null : run.runId)}
-                  onStop={() => setStopping(run)}
                 />
               )
             })}
@@ -358,15 +335,6 @@ export default function PipelineDetail() {
       </section>
       </div>
 
-      {stopping && (
-        <StopRunDialog
-          pipeline={pipeline}
-          run={stopping}
-          onClose={() => setStopping(null)}
-          onStopped={stopped}
-        />
-      )}
-
       {editing && (
         <ScheduleDialog
           mode="edit"
@@ -374,8 +342,7 @@ export default function PipelineDetail() {
           onClose={() => setEditing(false)}
           onScheduled={(view) => {
             setEditing(false)
-            actions.clearError()
-            actions.announce(`Saved ${view.name}.`)
+            setNotice(`Saved ${view.name}.`)
             void queryClient.invalidateQueries({ queryKey: ['pipeline', namespace, name] })
             void queryClient.invalidateQueries({ queryKey: ['pipelines'] })
           }}
@@ -412,18 +379,14 @@ function RunRow({
   open,
   panelId,
   started,
-  active,
   onToggle,
-  onStop,
 }: {
   pipeline: PipelineDetailView
   run: RunView
   open: boolean
   panelId: string
   started: { text: string; title?: string }
-  active: boolean
   onToggle: () => void
-  onStop: () => void
 }) {
   return (
     <>
@@ -451,18 +414,7 @@ function RunRow({
         <td className="td px-3">
           {run.note ? <span className="break-words">{run.note}</span> : <span className="text-text-mute">—</span>}
         </td>
-        <td className="td px-3">
-          {active && (
-            <button
-              type="button"
-              className="btn-ghost py-1 px-2 text-xs text-bad whitespace-nowrap"
-              aria-label={`Stop run ${run.runId}`}
-              onClick={onStop}
-            >
-              Stop run
-            </button>
-          )}
-        </td>
+        <td className="td px-3" />
       </tr>
       {open && (
         <tr id={panelId} className="bg-bg-soft/20">
