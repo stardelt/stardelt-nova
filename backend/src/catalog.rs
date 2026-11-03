@@ -34,9 +34,8 @@ use serde::Deserialize;
 use tracing::warn;
 
 use crate::{
-    AppState,
+    AppState, admin_catalogs,
     api_json::ApiJson,
-    admin_catalogs,
     auth::{self, Principal},
     data,
     trino::error_status,
@@ -599,10 +598,13 @@ pub async fn catalog_scope(
     Ok((name, id))
 }
 
-
 /// Returns true if the principal may write (write/create/manage) to a catalog.
 /// For administrators, true for all catalogs. For others, checks Catalog CRD grants against principal's groups.
-pub async fn catalog_can_write(state: &AppState, principal: Option<&Principal>, catalog_name: &str) -> bool {
+pub async fn catalog_can_write(
+    state: &AppState,
+    principal: Option<&Principal>,
+    catalog_name: &str,
+) -> bool {
     if state.demo {
         return true;
     }
@@ -622,11 +624,20 @@ pub async fn catalog_can_write(state: &AppState, principal: Option<&Principal>, 
                                 if let Some(group) = g.get("group").and_then(|x| x.as_str()) {
                                     if let Some(verb) = g.get("verb").and_then(|x| x.as_str()) {
                                         // Check if principal's groups match
-                                        let has_group = p.identity.groups.iter().any(|pg| {
-                                            pg == group || pg.ends_with(&format!("/{}", group)) || group.ends_with(&format!("/{}", pg.split('/').last().unwrap_or(pg)))
-                                        }) || p.identity.groups.iter().any(|pg| pg == group);
+                                        let has_group =
+                                            p.identity.groups.iter().any(|pg| {
+                                                pg == group
+                                                    || pg.ends_with(&format!("/{}", group))
+                                                    || group.ends_with(&format!(
+                                                        "/{}",
+                                                        pg.split('/').last().unwrap_or(pg)
+                                                    ))
+                                            }) || p.identity.groups.iter().any(|pg| pg == group);
                                         if has_group {
-                                            if verb == "write" || verb == "create" || verb == "manage" {
+                                            if verb == "write"
+                                                || verb == "create"
+                                                || verb == "manage"
+                                            {
                                                 return true;
                                             }
                                         }
@@ -639,7 +650,7 @@ pub async fn catalog_can_write(state: &AppState, principal: Option<&Principal>, 
             }
         }
     }
-    // If no principal and not admin context, be permissive in dev-like setups? 
+    // If no principal and not admin context, be permissive in dev-like setups?
     // But better: in dev mode with default auth, allow writes
     if principal.is_none() {
         // In dev mode without auth, allow (common case)
@@ -649,7 +660,10 @@ pub async fn catalog_can_write(state: &AppState, principal: Option<&Principal>, 
 }
 
 /// Find first writable catalog for principal
-pub async fn first_writable_catalog(state: &AppState, principal: Option<&Principal>) -> Option<String> {
+pub async fn first_writable_catalog(
+    state: &AppState,
+    principal: Option<&Principal>,
+) -> Option<String> {
     if state.demo {
         return Some(state.warehouse_name.clone());
     }
@@ -690,7 +704,9 @@ pub async fn first_writable_catalog(state: &AppState, principal: Option<&Princip
         }
     }
     // try shared
-    if allowed.contains(&"shared".to_string()) && catalog_can_write(state, principal, "shared").await {
+    if allowed.contains(&"shared".to_string())
+        && catalog_can_write(state, principal, "shared").await
+    {
         return Some("shared".to_string());
     }
     None
@@ -738,7 +754,12 @@ pub async fn list_catalogs(
         };
         let layer = layer_in(&layers, &name);
         let can_write = catalog_can_write(&s, caller, &name).await;
-        catalogs.push(CatalogInfo { name, id, layer, can_write });
+        catalogs.push(CatalogInfo {
+            name,
+            id,
+            layer,
+            can_write,
+        });
     }
     // The engine answers alphabetically; the medallion layers come first here.
     sort_by_layer(

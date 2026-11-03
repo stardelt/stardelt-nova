@@ -14,8 +14,8 @@ use kube::api::{Api, ListParams};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{AppState, api_json::ApiJson, admin_catalogs, catalog, demo, jobs, trino};
 use crate::auth::Principal;
+use crate::{AppState, admin_catalogs, api_json::ApiJson, catalog, demo, jobs, trino};
 
 #[derive(Clone, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -122,7 +122,13 @@ pub async fn upload(
             // Check if catalog exists/browsable? Also ensure it's in allowed set
             let allowed = match catalog::allowed_catalogs(&s, p).await {
                 Ok(a) => a,
-                Err(e) => return (crate::trino::error_status(&e), Json(serde_json::json!({ "error": e }))).into_response(),
+                Err(e) => {
+                    return (
+                        crate::trino::error_status(&e),
+                        Json(serde_json::json!({ "error": e })),
+                    )
+                        .into_response();
+                }
             };
             if !allowed.contains(&name) {
                 return (
@@ -133,18 +139,16 @@ pub async fn upload(
             }
             name
         }
-        None => {
-            match catalog::first_writable_catalog(&s, p).await {
-                Some(name) => name,
-                None => {
-                    return (
+        None => match catalog::first_writable_catalog(&s, p).await {
+            Some(name) => name,
+            None => {
+                return (
                         StatusCode::BAD_REQUEST,
                         Json(serde_json::json!({ "error": "no catalog you may write — ask an administrator for a group catalog" })),
                     )
                         .into_response();
-                }
             }
-        }
+        },
     };
 
     let fmt = req.format.to_lowercase();
@@ -156,7 +160,13 @@ pub async fn upload(
 
     if s.demo {
         let mut demo = s.demo_state.write().expect("demo state poisoned");
-        return match demo.upload_in_catalog(&catalog_name, &req.namespace, &req.table, &fmt, &req.content) {
+        return match demo.upload_in_catalog(
+            &catalog_name,
+            &req.namespace,
+            &req.table,
+            &fmt,
+            &req.content,
+        ) {
             Ok(n) => {
                 let job = jobs::record(
                     &s.jobs,
@@ -200,10 +210,11 @@ pub async fn upload(
     let (s2, req2, fmt2) = (s.clone(), req.clone(), fmt.clone());
     let p2 = caller.map(|c| c.0);
     let cat2 = catalog_name.clone();
-    let outcome = tokio::spawn(async move { real_upload(&s2, &req2, &fmt2, p2.as_ref(), &cat2).await })
-        .await
-        .map_err(|e| e.to_string())
-        .and_then(|r| r);
+    let outcome =
+        tokio::spawn(async move { real_upload(&s2, &req2, &fmt2, p2.as_ref(), &cat2).await })
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|r| r);
     match outcome {
         Ok(n) => {
             let job = jobs::record(
@@ -268,8 +279,14 @@ pub async fn transfer(
     let p = caller.as_ref().map(|c| &c.0);
     // Resolve catalog
     let catalog_name = if let Some(ref c) = req.catalog {
-        if c.trim().is_empty() { None } else { Some(c.trim().to_string()) }
-    } else { None };
+        if c.trim().is_empty() {
+            None
+        } else {
+            Some(c.trim().to_string())
+        }
+    } else {
+        None
+    };
 
     let catalog_name = match catalog_name {
         Some(name) => {
@@ -289,7 +306,13 @@ pub async fn transfer(
             }
             let allowed = match catalog::allowed_catalogs(&s, p).await {
                 Ok(a) => a,
-                Err(e) => return (crate::trino::error_status(&e), Json(serde_json::json!({ "error": e }))).into_response(),
+                Err(e) => {
+                    return (
+                        crate::trino::error_status(&e),
+                        Json(serde_json::json!({ "error": e })),
+                    )
+                        .into_response();
+                }
             };
             if !allowed.contains(&name) {
                 return (
@@ -300,18 +323,16 @@ pub async fn transfer(
             }
             name
         }
-        None => {
-            match catalog::first_writable_catalog(&s, p).await {
-                Some(name) => name,
-                None => {
-                    return (
+        None => match catalog::first_writable_catalog(&s, p).await {
+            Some(name) => name,
+            None => {
+                return (
                         StatusCode::BAD_REQUEST,
                         Json(serde_json::json!({ "error": "no catalog you may write — ask an administrator for a group catalog" })),
                     )
                         .into_response();
-                }
             }
-        }
+        },
     };
 
     let title = format!("{} → {}", req.source, req.target);
@@ -322,7 +343,13 @@ pub async fn transfer(
 
     if s.demo {
         let mut demo = s.demo_state.write().expect("demo state poisoned");
-        return match demo.transfer_in_catalogs(&catalog_name, &req.source, &catalog_name, &req.target, &req.mode) {
+        return match demo.transfer_in_catalogs(
+            &catalog_name,
+            &req.source,
+            &catalog_name,
+            &req.target,
+            &req.mode,
+        ) {
             Ok(n) => {
                 let job = jobs::record(
                     &s.jobs,
@@ -529,8 +556,18 @@ async fn real_transfer(
 ) -> Result<usize, String> {
     let (sns, stbl) = demo::parse_ref(&req.source)?;
     let (tns, ttbl) = demo::parse_ref(&req.target)?;
-    let source = format!("{}.{}.{}", quote_ident(catalog), quote_ident(&sns), quote_ident(&stbl));
-    let target = format!("{}.{}.{}", quote_ident(catalog), quote_ident(&tns), quote_ident(&ttbl));
+    let source = format!(
+        "{}.{}.{}",
+        quote_ident(catalog),
+        quote_ident(&sns),
+        quote_ident(&stbl)
+    );
+    let target = format!(
+        "{}.{}.{}",
+        quote_ident(catalog),
+        quote_ident(&tns),
+        quote_ident(&ttbl)
+    );
     check_transfer(&req.mode, (&sns, &stbl), (&tns, &ttbl))?;
 
     if req.mode.eq_ignore_ascii_case("append") {

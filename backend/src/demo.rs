@@ -421,7 +421,14 @@ impl DemoState {
         self.transfer_in_catalogs("warehouse", source, "warehouse", target, mode)
     }
 
-    pub fn transfer_in_catalogs(&mut self, _source_catalog: &str, source: &str, _target_catalog: &str, target: &str, mode: &str) -> Result<usize, String> {
+    pub fn transfer_in_catalogs(
+        &mut self,
+        _source_catalog: &str,
+        source: &str,
+        _target_catalog: &str,
+        target: &str,
+        mode: &str,
+    ) -> Result<usize, String> {
         crate::data::check_transfer_mode(mode)?;
         let (sns, stbl) = parse_ref(source)?;
         let (tns, ttbl) = parse_ref(target)?;
