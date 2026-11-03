@@ -34,7 +34,7 @@ use serde::Deserialize;
 use tracing::warn;
 
 use crate::{
-    AppState,
+    AppState, admin_catalogs,
     api_json::ApiJson,
     auth::{self, Principal},
     catalog_docs, data,
@@ -146,6 +146,9 @@ pub struct CatalogInfo {
     /// every other catalog.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub layer: Option<String>,
+    /// Whether the caller may write to this catalog (has write/create/manage grant).
+    #[serde(rename = "canWrite")]
+    pub can_write: bool,
 }
 
 /// `GET /api/catalog/catalogs`: the catalogs the caller may browse, the medallion layers
@@ -594,6 +597,75 @@ pub async fn catalog_scope(
     Ok((name, id))
 }
 
+/// Whether the principal may write (write/create/manage) a catalog: administrators always;
+/// everyone else through the `Catalog` object's grants for one of their groups.
+pub async fn catalog_can_write(
+    state: &AppState,
+    principal: Option<&Principal>,
+    catalog_name: &str,
+) -> bool {
+    if state.demo {
+        return true;
+    }
+    let Some(p) = principal else {
+        // No principal: the dev/static mode, where there is nothing to check against.
+        return true;
+    };
+    if p.identity.is_admin {
+        return true;
+    }
+    let Some(client) = state.kube.clone() else {
+        return false;
+    };
+    let Ok(Some(obj)) = admin_catalogs::catalogs_api(client)
+        .get_opt(catalog_name)
+        .await
+    else {
+        return false;
+    };
+    let Ok(val) = serde_json::to_value(&obj) else {
+        return false;
+    };
+    let Some(grants) = val.pointer("/spec/grants").and_then(|g| g.as_array()) else {
+        return false;
+    };
+    grants.iter().any(|g| {
+        let group = g.get("group").and_then(|x| x.as_str());
+        let verb = g.get("verb").and_then(|x| x.as_str());
+        let Some(group) = group else { return false };
+        let Some(verb) = verb else { return false };
+        let writes = matches!(verb, "write" | "create" | "manage");
+        let member = p
+            .identity
+            .groups
+            .iter()
+            .any(|pg| pg == group || pg.ends_with(&format!("/{group}")));
+        writes && member
+    })
+}
+
+/// The caller's first writable catalog, never `warehouse` for a non-administrator
+/// (platform#495: it is the platform's technical catalog).
+pub async fn first_writable_catalog(
+    state: &AppState,
+    principal: Option<&Principal>,
+) -> Option<String> {
+    if state.demo {
+        return Some(state.warehouse_name.clone());
+    }
+    let allowed = allowed_catalogs(state, principal).await.ok()?;
+    let is_admin = principal.map(|p| p.identity.is_admin).unwrap_or(false);
+    for name in &allowed {
+        if name == "warehouse" && !is_admin {
+            continue;
+        }
+        if catalog_can_write(state, principal, name).await {
+            return Some(name.clone());
+        }
+    }
+    None
+}
+
 #[utoipa::path(
     get,
     operation_id = "catalogs_list",
@@ -635,7 +707,13 @@ pub async fn list_catalogs(
             }
         };
         let layer = layer_in(&layers, &name);
-        catalogs.push(CatalogInfo { name, id, layer });
+        let can_write = catalog_can_write(&s, caller, &name).await;
+        catalogs.push(CatalogInfo {
+            name,
+            id,
+            layer,
+            can_write,
+        });
     }
     // The engine answers alphabetically; the medallion layers come first here.
     sort_by_layer(
@@ -1587,7 +1665,7 @@ mod tests {
         assert_eq!(
             body,
             json!({
-                "catalogs": [{"name": "warehouse", "id": "wid-warehouse"}],
+                "catalogs": [{"name": "warehouse", "id": "wid-warehouse", "canWrite": true}],
                 "default": "warehouse"
             })
         );
@@ -1736,7 +1814,7 @@ mod tests {
         assert_eq!(
             json_body(response).await,
             json!({
-                "catalogs": [{"name": "gold", "id": "demo", "layer": "gold"}],
+                "catalogs": [{"name": "gold", "id": "demo", "layer": "gold", "canWrite": true}],
                 "default": "gold"
             })
         );

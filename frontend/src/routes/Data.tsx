@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { api, allTables, errorMessage, type UploadResult, type TransferResult } from '../api'
+import { api, allTables, errorMessage, type UploadResult, type TransferResult, type Catalog } from '../api'
 import ErrorBox from '../components/ErrorBox'
 import { Icon } from '../components/Icon'
 import { rowsLabel } from '../format'
@@ -69,12 +69,15 @@ function Tab({ active, onClick, icon, label }: {
 
 function LoadForm() {
   const qc = useQueryClient()
+  const catalogs = useQuery({ queryKey: ['catalogs'], queryFn: api.catalogs })
   const [namespace, setNamespace] = useState('nyc_taxi')
   const [table, setTable] = useState('yellow_trips_copy')
   const [format, setFormat] = useState<'csv' | 'json'>('csv')
   const [content, setContent] = useState(SAMPLE_CSV)
   const [result, setResult] = useState<UploadResult | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const writable = (catalogs.data?.catalogs ?? []).filter((c: Catalog) => c.canWrite !== false)
+  const [catalog, setCatalog] = useState('')
 
   const upload = useMutation({
     mutationFn: api.upload,
@@ -90,7 +93,15 @@ function LoadForm() {
   return (
     <div className="grid lg:grid-cols-[minmax(0,1fr)_320px] gap-4">
       <div className="card p-5 space-y-4 min-w-0">
-        <div className="grid sm:grid-cols-2 gap-4">
+        <div className="grid sm:grid-cols-3 gap-4">
+          <Field label="Catalog">
+            <select value={catalog} onChange={e => setCatalog(e.target.value)} className="input">
+              <option value="">Default (first writable)</option>
+              {(writable.length ? writable : catalogs.data?.catalogs ?? []).map((c: Catalog) => (
+                <option key={c.name} value={c.name}>{c.name}</option>
+              ))}
+            </select>
+          </Field>
           <Field label="Schema">
             <input value={namespace} onChange={e => setNamespace(e.target.value)} className="input" placeholder="nyc_taxi" />
           </Field>
@@ -156,7 +167,7 @@ function LoadForm() {
           <button
             className="btn-primary"
             disabled={upload.isPending || !namespace.trim() || !table.trim() || !content.trim()}
-            onClick={() => upload.mutate({ namespace: namespace.trim(), table: table.trim(), format, content })}
+            onClick={() => upload.mutate({ catalog: catalog || undefined, namespace: namespace.trim(), table: table.trim(), format, content })}
           >
             <Icon name="upload" className="w-4 h-4" />
             {upload.isPending ? 'Loading…' : 'Load into table'}
@@ -170,11 +181,11 @@ function LoadForm() {
         {result && (
           <div className="rounded-[10px] border border-emerald-400/30 bg-emerald-400/10 p-4 text-sm">
             <div className="font-medium text-ok">
-              Loaded {rowsLabel(result.rows_loaded)} into {result.namespace}.{result.table}
+              Loaded {rowsLabel(result.rows_loaded)} into {(result.catalog ? result.catalog + '.' : '') + result.namespace}.{result.table}
             </div>
             <div className="text-text-dim mt-1 flex gap-3">
               <Link
-                to={`/catalog?ns=${encodeURIComponent(result.namespace)}&tbl=${encodeURIComponent(result.table)}`}
+                to={`/catalog?ns=${encodeURIComponent(result.namespace)}&tbl=${encodeURIComponent(result.table)}${result.catalog ? `&catalog=${encodeURIComponent(result.catalog)}` : ''}`}
                 className="hover:text-text"
               >
                 Open in catalog →
@@ -205,12 +216,15 @@ function LoadForm() {
 function TransferForm() {
   const qc = useQueryClient()
   const tables = useQuery({ queryKey: ['catalog', 'all'], queryFn: () => allTables() })
+  const catalogs = useQuery({ queryKey: ['catalogs'], queryFn: api.catalogs })
   const [source, setSource] = useState('')
   const [targetNs, setTargetNs] = useState('analytics')
   const [targetTable, setTargetTable] = useState('trips_copy')
   const [mode, setMode] = useState<'overwrite' | 'append'>('overwrite')
   const [result, setResult] = useState<TransferResult | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [catalog, setCatalog] = useState('')
+  const writable = (catalogs.data?.catalogs ?? []).filter((c: Catalog) => c.canWrite !== false)
 
   const transfer = useMutation({
     mutationFn: api.transfer,
@@ -228,6 +242,14 @@ function TransferForm() {
   return (
     <div className="grid lg:grid-cols-[minmax(0,1fr)_320px] gap-4">
       <div className="card p-5 space-y-4 min-w-0">
+        <Field label="Catalog">
+          <select value={catalog} onChange={e => setCatalog(e.target.value)} className="input">
+            <option value="">Default (first writable)</option>
+            {(writable.length ? writable : catalogs.data?.catalogs ?? []).map((c: Catalog) => (
+              <option key={c.name} value={c.name}>{c.name}</option>
+            ))}
+          </select>
+        </Field>
         <Field label="Source table">
           <select value={source} onChange={e => setSource(e.target.value)} className="input">
             <option value="">Select a table…</option>
@@ -270,7 +292,7 @@ function TransferForm() {
         <button
           className="btn-primary"
           disabled={transfer.isPending || !source || !targetNs.trim() || !targetTable.trim()}
-          onClick={() => transfer.mutate({ source, target: `${targetNs.trim()}.${targetTable.trim()}`, mode })}
+          onClick={() => transfer.mutate({ catalog: catalog || undefined, source, target: `${targetNs.trim()}.${targetTable.trim()}`, mode })}
         >
           <Icon name="arrow" className="w-4 h-4" />
           {transfer.isPending ? 'Transferring…' : 'Transfer table'}
@@ -280,7 +302,7 @@ function TransferForm() {
         {result && (
           <div className="rounded-[10px] border border-emerald-400/30 bg-emerald-400/10 p-4 text-sm">
             <div className="font-medium text-ok">
-              Transferred {rowsLabel(result.rows)} → {result.target}
+              Transferred {rowsLabel(result.rows)} → {(result.target_catalog ? result.target_catalog + '.' : result.source_catalog ? result.source_catalog + '.' : '') + result.target}
             </div>
             <Link to="/jobs" className="text-text-dim mt-1 inline-block hover:text-text">View job →</Link>
           </div>

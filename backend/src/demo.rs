@@ -373,6 +373,18 @@ impl DemoState {
         format: &str,
         content: &str,
     ) -> Result<usize, String> {
+        self.upload_in_catalog("warehouse", namespace, table, format, content)
+    }
+
+    pub fn upload_in_catalog(
+        &mut self,
+        catalog: &str,
+        namespace: &str,
+        table: &str,
+        format: &str,
+        content: &str,
+    ) -> Result<usize, String> {
+        let _ = catalog;
         let (columns, rows) = if format.eq_ignore_ascii_case("json") {
             parse_json_table(content)?
         } else {
@@ -406,6 +418,17 @@ impl DemoState {
     }
 
     pub fn transfer(&mut self, source: &str, target: &str, mode: &str) -> Result<usize, String> {
+        self.transfer_in_catalogs("warehouse", source, "warehouse", target, mode)
+    }
+
+    pub fn transfer_in_catalogs(
+        &mut self,
+        _source_catalog: &str,
+        source: &str,
+        _target_catalog: &str,
+        target: &str,
+        mode: &str,
+    ) -> Result<usize, String> {
         crate::data::check_transfer_mode(mode)?;
         let (sns, stbl) = parse_ref(source)?;
         let (tns, ttbl) = parse_ref(target)?;

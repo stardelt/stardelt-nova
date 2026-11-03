@@ -4411,6 +4411,10 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::{Arc, Mutex};
 
+    /// Serialises the tests that set/remove NOVA_BASE_DOMAIN: the environment is process-global.
+    /// Tokio's mutex, because the guard is held across the test's awaits.
+    static BASE_DOMAIN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     use axum::{
         Extension,
         body::Body,
@@ -6045,6 +6049,7 @@ mod tests {
 
     #[tokio::test]
     async fn detail_includes_airflow_url_from_base_domain() {
+        let _base_domain = BASE_DOMAIN_LOCK.lock().await;
         unsafe {
             std::env::set_var("NOVA_BASE_DOMAIN", "alpha.dev.stardelt.io");
         }
@@ -6072,6 +6077,7 @@ mod tests {
 
     #[tokio::test]
     async fn detail_airflow_url_none_when_base_domain_unset() {
+        let _base_domain = BASE_DOMAIN_LOCK.lock().await;
         unsafe {
             std::env::remove_var("NOVA_BASE_DOMAIN");
         }
