@@ -63,7 +63,6 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use kube::api::{Api, ApiResource, DynamicObject, GroupVersionKind};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
 use tracing::warn;
@@ -738,10 +737,8 @@ async fn read_documentation(
     let loaded = catalog.load(ns, tbl).await.map_err(catalog_fail)?;
     let catalog_owner = if state.demo {
         catalog_owner_demo(state, catalog.name)
-    } else if let Some(owner) = catalog_owner_from_kube(state, catalog.name).await {
-        Some(owner)
     } else {
-        None
+        catalog_owner_from_kube(state, catalog.name).await
     };
     let can_rollback_v = may_rollback(who, catalog_owner.as_deref());
     let rollback_rule_v = rollback_rule(who, catalog_owner.as_deref());
@@ -767,10 +764,8 @@ async fn write_documentation(
     let loaded = catalog.load(ns, tbl).await.map_err(catalog_fail)?;
     let catalog_owner = if state.demo {
         catalog_owner_demo(state, catalog.name)
-    } else if let Some(owner) = catalog_owner_from_kube(state, catalog.name).await {
-        Some(owner)
     } else {
-        None
+        catalog_owner_from_kube(state, catalog.name).await
     };
     let can_rollback_v = may_rollback(who, catalog_owner.as_deref());
     let rollback_rule_v = rollback_rule(who, catalog_owner.as_deref());
@@ -850,10 +845,8 @@ async fn write_documentation(
     let loaded = catalog.load(ns, tbl).await.map_err(catalog_fail)?;
     let catalog_owner = if state.demo {
         catalog_owner_demo(state, catalog.name)
-    } else if let Some(owner) = catalog_owner_from_kube(state, catalog.name).await {
-        Some(owner)
     } else {
-        None
+        catalog_owner_from_kube(state, catalog.name).await
     };
     let can_rollback_v = may_rollback(who, catalog_owner.as_deref());
     let rollback_rule_v = rollback_rule(who, catalog_owner.as_deref());
@@ -896,10 +889,8 @@ where
     let loaded = catalog.load(ns, tbl).await.map_err(catalog_fail)?;
     let catalog_owner = if state.demo {
         catalog_owner_demo(state, catalog.name)
-    } else if let Some(owner) = catalog_owner_from_kube(state, catalog.name).await {
-        Some(owner)
     } else {
-        None
+        catalog_owner_from_kube(state, catalog.name).await
     };
     let can_rollback_v = may_rollback(who, catalog_owner.as_deref());
     let rollback_rule_v = rollback_rule(who, catalog_owner.as_deref());
@@ -926,10 +917,8 @@ where
     };
     let catalog_owner = if state.demo {
         catalog_owner_demo(state, catalog.name)
-    } else if let Some(owner) = catalog_owner_from_kube(state, catalog.name).await {
-        Some(owner)
     } else {
-        None
+        catalog_owner_from_kube(state, catalog.name).await
     };
     let can_rollback_v = may_rollback(who, catalog_owner.as_deref());
     let rollback_rule_v = rollback_rule(who, catalog_owner.as_deref());
