@@ -1869,7 +1869,18 @@ test.describe('pipelines', () => {
       pipeline({ name: 'team-a' }),
       pipeline({ name: 'team-paused', paused: true, state: 'paused' }),
     ]
-    const { context, page } = await open(browser, { rows })
+    const detail = { ...pipeline({ name: 'team-a' }), runs: [], params: {}, retries: null, airflowUrl: 'https://airflow.example/dags/team-a' }
+    const { context, page } = await open(browser, {
+      rows,
+      read: (route, path, method) => {
+        if (method !== 'GET') return false
+        if (path === `/api/pipelines/${NS}/team-a`) {
+          json(route, detail)
+          return true
+        }
+        return false
+      },
+    })
 
     await expect(page.getByRole('button', { name: /Run now/ })).toHaveCount(0)
     await expect(page.getByRole('button', { name: /Pause/ })).toHaveCount(0)
