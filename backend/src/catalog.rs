@@ -449,12 +449,19 @@ async fn proxy(state: &AppState, path: String) -> Response {
         Ok(r) => {
             let status = r.status();
             let body = r.bytes().await.unwrap_or_default();
-            (
-                StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
-                [("content-type", "application/json")],
-                body,
-            )
-                .into_response()
+            if status.is_success() {
+                (
+                    StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+                    [("content-type", "application/json")],
+                    body,
+                )
+                    .into_response()
+            } else {
+                upstream_error(
+                    StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+                    &body,
+                )
+            }
         }
         Err(e) => {
             // The reqwest error names the Lakekeeper URL it tried; log that and answer
@@ -471,6 +478,36 @@ async fn proxy(state: &AppState, path: String) -> Response {
 
 /// One error sentence, the envelope every `/api/` failure uses.
 fn sentence(status: StatusCode, message: &str) -> Response {
+    (status, Json(serde_json::json!({ "error": message }))).into_response()
+}
+
+/// Lakekeeper answers every failure with the Iceberg envelope
+/// `{"error":{"message":…,"type":…,"code":…}}`; Nova's routes answer
+/// `{"error":"<sentence>"}` (frontend/src/api.ts::errorText reads only a string).
+/// Translate the envelope, and name the one failure a person can act on.
+fn upstream_error(status: StatusCode, body: &[u8]) -> Response {
+    let envelope: Option<serde_json::Value> = serde_json::from_slice(body).ok();
+    let error = envelope.as_ref().and_then(|v| v.get("error"));
+    let message = error
+        .and_then(|e| e.get("message"))
+        .and_then(|m| m.as_str());
+    let Some(message) = message else {
+        // Not an envelope Nova knows: forward it unchanged, as today.
+        return (
+            status,
+            [("content-type", "application/json")],
+            body.to_vec(),
+        )
+            .into_response();
+    };
+    let store_down = error.and_then(|e| e.get("type")).and_then(|t| t.as_str())
+        == Some("AuthorizationBackendError");
+    if store_down {
+        return sentence(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the permission store is unavailable; the catalog cannot answer reads until it is back",
+        );
+    }
     (status, Json(serde_json::json!({ "error": message }))).into_response()
 }
 
@@ -1292,6 +1329,22 @@ mod tests {
         format!("http://{addr}")
     }
 
+    async fn fake_lakekeeper_namespace_error(status_code: StatusCode, body: Value) -> String {
+        let app = Router::new().route(
+            "/catalog/v1/wid-warehouse/namespaces",
+            get(move || {
+                let body = body.clone();
+                async move { (status_code, Json(body)) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
     /// A `Catalog` object as the API server hands it over: a name, and optionally the
     /// `stardelt.io/layer` label.
     fn catalog_object(name: &str, label: Option<&str>) -> Value {
@@ -1641,6 +1694,39 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::BAD_GATEWAY);
         assert_eq!(sentence, "the catalog is not reachable");
+    }
+
+    #[tokio::test]
+    async fn a_lakekeeper_error_becomes_a_sentence() {
+        let lakekeeper = fake_lakekeeper_namespace_error(
+            StatusCode::NOT_FOUND,
+            json!({"error": {"message": "Namespace does not exist", "type": "NoSuchNamespaceException", "code": 404}}),
+        )
+        .await;
+        let state =
+            crate::router_tests::catalog_scope_test_state("http://127.0.0.1:1", &lakekeeper);
+        let response = proxy(&state, "/catalog/v1/wid-warehouse/namespaces".into()).await;
+        let (status, sentence) = error_sentence(response).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(sentence, "Namespace does not exist");
+    }
+
+    #[tokio::test]
+    async fn a_permission_store_outage_says_so() {
+        let lakekeeper = fake_lakekeeper_namespace_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({"error": {"type": "AuthorizationBackendError", "code": 503, "message": "Authorization service is unavailable"}}),
+        )
+        .await;
+        let state =
+            crate::router_tests::catalog_scope_test_state("http://127.0.0.1:1", &lakekeeper);
+        let response = proxy(&state, "/catalog/v1/wid-warehouse/namespaces".into()).await;
+        let (status, sentence) = error_sentence(response).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            sentence,
+            "the permission store is unavailable; the catalog cannot answer reads until it is back"
+        );
     }
 
     #[tokio::test]
