@@ -88,6 +88,9 @@ mod db;
 mod demo;
 mod embed;
 mod jobs;
+mod lineage_api;
+mod lineage_event;
+mod lineage_store;
 mod notebooks;
 mod openapi;
 mod people;
@@ -621,6 +624,9 @@ fn api_router() -> Router<Arc<AppState>> {
         // The query log: the caller's own queries, everybody's for administrators (state store).
         .route("/query-log", get(query_log_api::list))
         .route("/query-log/{id}", get(query_log_api::detail))
+        // Lineage graph (D40)
+        .route("/lineage", get(lineage_api::graph))
+        .route("/lineage/runs/{run_id}", get(lineage_api::run_detail))
         // The caller's own settings: one JSON value per key (state store).
         .route("/settings", get(user_settings::list))
         .route(
@@ -979,7 +985,8 @@ async fn main() -> anyhow::Result<()> {
     // Second listener for the engine's event feed; off unless NOVA_INTERNAL_ADDR is set.
     query_log_collector::start(state.db.clone()).await?;
     if let Some(pool) = state.db.clone() {
-        query_log_store::spawn_retention(pool);
+        query_log_store::spawn_retention(pool.clone());
+        lineage_store::spawn_retention(pool);
     }
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     axum::serve(listener, app).await?;

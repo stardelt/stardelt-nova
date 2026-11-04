@@ -21,14 +21,17 @@ use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
+use crate::lineage_event;
 use crate::query_log_event::{self, QueryLogRecord};
 
 /// Largest accepted body. A completed event carries the query plan and is routinely
 /// larger than axum's 2 MiB default (a trivial query measured 290 KB).
 const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
+const MAX_LINEAGE_BODY_BYTES: usize = 8 * 1024 * 1024;
 
 /// Records waiting for the consumer. A full queue answers `503`, which the engine retries.
 pub const QUEUE_LEN: usize = 10_000;
+pub const LINEAGE_QUEUE_LEN: usize = 10_000;
 
 /// A parsed record and the warehouse whose engine sent it.
 #[derive(Debug)]
@@ -37,9 +40,11 @@ pub struct Accepted {
     pub warehouse: String,
 }
 
+#[derive(Clone)]
 struct Collector {
     token_digest: [u8; 32],
     tx: mpsc::Sender<Accepted>,
+    lineage_tx: mpsc::Sender<lineage_event::LineageEvent>,
 }
 
 fn digest(text: &str) -> [u8; 32] {
@@ -112,15 +117,49 @@ async fn ingest(State(c): State<Arc<Collector>>, headers: HeaderMap, body: Bytes
     }
 }
 
+async fn ingest_lineage(
+    State(c): State<Arc<Collector>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    match bearer(&headers) {
+        Some(token) if same(&digest(token), &c.token_digest) => {}
+        _ => return unauthorized(),
+    }
+    let event = match lineage_event::parse(&body) {
+        Ok(event) => event,
+        Err(e) => return error(StatusCode::BAD_REQUEST, e.to_string()),
+    };
+    match c.lineage_tx.try_send(event) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(_) => error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "collector queue is full".into(),
+        ),
+    }
+}
+
 /// The collector's routes. `token` is the shared bearer token.
-pub fn router(token: &str, tx: mpsc::Sender<Accepted>) -> Router {
+pub fn router(
+    token: &str,
+    tx: mpsc::Sender<Accepted>,
+    lineage_tx: mpsc::Sender<lineage_event::LineageEvent>,
+) -> Router {
+    let state = Arc::new(Collector {
+        token_digest: digest(token),
+        tx,
+        lineage_tx,
+    });
     Router::new()
-        .route("/internal/trino-events", post(ingest))
-        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
-        .with_state(Arc::new(Collector {
-            token_digest: digest(token),
-            tx,
-        }))
+        .route(
+            "/internal/trino-events",
+            post(ingest).layer(DefaultBodyLimit::max(MAX_BODY_BYTES)),
+        )
+        .route(
+            "/internal/lineage",
+            post(ingest_lineage).layer(DefaultBodyLimit::max(MAX_LINEAGE_BODY_BYTES)),
+        )
+        .with_state(state)
 }
 
 fn env_nonempty(name: &str) -> Option<String> {
@@ -140,7 +179,10 @@ pub async fn start(db: Option<sqlx::PgPool>) -> anyhow::Result<()> {
         return Ok(());
     };
     let (tx, mut rx) = mpsc::channel::<Accepted>(QUEUE_LEN);
+    let (lineage_tx, mut lineage_rx) =
+        mpsc::channel::<lineage_event::LineageEvent>(LINEAGE_QUEUE_LEN);
     // The consumer: store every record when there is a state store, otherwise just log it.
+    let db_clone = db.clone();
     tokio::spawn(async move {
         while let Some(a) = rx.recv().await {
             info!(
@@ -150,17 +192,27 @@ pub async fn start(db: Option<sqlx::PgPool>) -> anyhow::Result<()> {
                 warehouse = %a.warehouse,
                 "query event"
             );
-            if let Some(pool) = &db
+            if let Some(pool) = &db_clone
                 && let Err(e) = crate::query_log_store::upsert(pool, &a).await
             {
                 warn!(error = %e, query_id = %a.record.query_id, "could not store a query-log row");
             }
         }
     });
+    // Lineage consumer
+    tokio::spawn(async move {
+        while let Some(ev) = lineage_rx.recv().await {
+            if let Some(pool) = &db
+                && let Err(e) = crate::lineage_store::insert_event(pool, &ev).await
+            {
+                warn!(error = %e, "could not store a lineage event");
+            }
+        }
+    });
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     info!(addr = %addr, "query-log collector listening");
     tokio::spawn(async move {
-        if let Err(e) = axum::serve(listener, router(&token, tx)).await {
+        if let Err(e) = axum::serve(listener, router(&token, tx, lineage_tx)).await {
             warn!(error = %e, "query-log collector stopped");
         }
     });
@@ -208,7 +260,8 @@ mod tests {
     #[tokio::test]
     async fn a_missing_or_wrong_token_is_401_with_a_challenge() {
         let (tx, _rx) = mpsc::channel(4);
-        let app = router("s3cret", tx);
+        let (ltx, _lrx) = mpsc::channel(4);
+        let app = router("s3cret", tx, ltx);
         let (status, challenge, _) =
             call(app.clone(), post_event(None, None, CREATED.into())).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -220,7 +273,8 @@ mod tests {
     #[tokio::test]
     async fn a_good_event_is_204_and_reaches_the_consumer_with_its_warehouse() {
         let (tx, mut rx) = mpsc::channel(4);
-        let app = router("s3cret", tx);
+        let (ltx, _lrx) = mpsc::channel(4);
+        let app = router("s3cret", tx, ltx);
         let (status, _, _) = call(
             app.clone(),
             post_event(Some("s3cret"), None, CREATED.into()),
@@ -246,7 +300,8 @@ mod tests {
     #[tokio::test]
     async fn a_bad_warehouse_or_body_is_400_and_not_queued() {
         let (tx, mut rx) = mpsc::channel(4);
-        let app = router("s3cret", tx);
+        let (ltx, _lrx) = mpsc::channel(4);
+        let app = router("s3cret", tx, ltx);
         let (status, _, _) = call(
             app.clone(),
             post_event(Some("s3cret"), Some("Bad Name!"), CREATED.into()),
@@ -268,7 +323,8 @@ mod tests {
     #[tokio::test]
     async fn a_full_queue_is_503_so_the_engine_retries() {
         let (tx, _rx) = mpsc::channel(1);
-        let app = router("s3cret", tx);
+        let (ltx, _lrx) = mpsc::channel(4);
+        let app = router("s3cret", tx, ltx);
         let (first, _, _) = call(
             app.clone(),
             post_event(Some("s3cret"), None, CREATED.into()),
@@ -282,7 +338,8 @@ mod tests {
     #[tokio::test]
     async fn a_body_over_the_axum_default_of_two_mebibytes_is_accepted() {
         let (tx, mut rx) = mpsc::channel(4);
-        let app = router("s3cret", tx);
+        let (ltx, _lrx) = mpsc::channel(4);
+        let app = router("s3cret", tx, ltx);
         let mut event: serde_json::Value = serde_json::from_str(SELECT).unwrap();
         event["metadata"]["plan"] = serde_json::Value::String("x".repeat(3 * 1024 * 1024));
         let (status, _, _) = call(app, post_event(Some("s3cret"), None, event.to_string())).await;
@@ -293,12 +350,13 @@ mod tests {
     #[tokio::test]
     async fn get_is_not_allowed() {
         let (tx, _rx) = mpsc::channel(1);
+        let (ltx, _lrx) = mpsc::channel(4);
         let req = Request::builder()
             .method("GET")
             .uri("/internal/trino-events")
             .body(Body::empty())
             .unwrap();
-        let (status, _, _) = call(router("s3cret", tx), req).await;
+        let (status, _, _) = call(router("s3cret", tx, ltx), req).await;
         assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
     }
 
