@@ -961,6 +961,24 @@ export type QueryLogParams = {
 /** One page of a task's log; `tryNumber` and `token` are optional, as the backend's own query. */
 export type PipelineLogParams = { tryNumber?: number; token?: string }
 
+export type LineageNodeView = {
+  id: string
+  namespace: string
+  name: string
+  visible: boolean
+  label?: string | null
+}
+export type LineageEdgeView = {
+  from: string
+  to: string
+  jobNamespace: string
+  jobName: string
+  runId: string
+  eventTime: string
+}
+export type LineageGraph = { nodes: LineageNodeView[]; edges: LineageEdgeView[] }
+export type LineageParams = { catalog: string; schema: string; table: string; depth?: number }
+
 function pipelineLogUrl(
   namespace: string,
   name: string,
@@ -1035,6 +1053,10 @@ export const api = {
   jobs:         ()                            => jget<Job[]>('/api/jobs'),
   queryLog:     (p: QueryLogParams)           => jget<QueryLogPage>(queryLogUrl(p)),
   queryLogDetail: (id: string)                => jget<QueryLogDetail>(`/api/query-log/${seg(id)}`),
+  lineage: (p: LineageParams) => {
+    const qs = new URLSearchParams({ catalog: p.catalog, schema: p.schema, table: p.table, depth: String(p.depth ?? 2) })
+    return jget<LineageGraph>(`/api/lineage?${qs.toString()}`)
+  },
   pipelines:    ()                            => jget<{ pipelines: PipelineView[] }>('/api/pipelines'),
   /** The caller's own groups and their principals (`Schedule`, #210). */
   pipelinePrincipals: ()                      => jget<{ groups: PipelinePrincipal[] }>('/api/pipelines/principals'),
