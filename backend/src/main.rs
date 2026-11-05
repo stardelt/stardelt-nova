@@ -2036,7 +2036,9 @@ mod router_tests {
     }
 
     fn lineage_state(pool: sqlx::PgPool, allowed: &[&str], sub: &str) -> Arc<AppState> {
-        let state = test_state_with_db(Some(pool));
+        let mut state = test_state_with_db(Some(pool));
+        let s = Arc::get_mut(&mut state).expect("fresh state");
+        s.demo = false;
         let mut access = HashMap::new();
         access.insert(
             sub.to_string(),
@@ -2048,7 +2050,7 @@ mod router_tests {
                     .collect::<std::collections::BTreeSet<_>>(),
             ),
         );
-        *state.catalog_access.lock().unwrap() = access;
+        *s.catalog_access.lock().unwrap() = access;
         state
     }
 
