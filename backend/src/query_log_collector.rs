@@ -375,4 +375,72 @@ mod tests {
         assert!(same(&digest("a"), &digest("a")));
         assert!(!same(&digest("a"), &digest("b")));
     }
+
+    // --- lineage receiver tests (D40, WP-34a) ---
+
+    fn post_lineage(token: Option<&str>, body: String) -> Request<Body> {
+        let mut req = Request::builder().method("POST").uri("/internal/lineage");
+        if let Some(t) = token {
+            req = req.header("authorization", format!("Bearer {t}"));
+        }
+        req = req.header("content-type", "application/json");
+        req.body(Body::from(body)).unwrap()
+    }
+
+    fn valid_lineage_event() -> String {
+        serde_json::json!({
+            "eventType": "COMPLETE",
+            "eventTime": "2026-01-01T00:00:00Z",
+            "producer": "test",
+            "schemaURL": "https://openlineage.io/spec/1-0-5/OpenLineage.json",
+            "job": { "namespace": "default", "name": "test_job" },
+            "run": { "runId": "00000000-0000-0000-0000-000000000001" },
+            "inputs": [
+                { "namespace": "mobility.gold", "name": "trips" }
+            ],
+            "outputs": [
+                { "namespace": "mobility.gold", "name": "kpis" }
+            ]
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn lineage_receiver_missing_or_wrong_token_is_401() {
+        let (tx, _rx) = mpsc::channel(4);
+        let (ltx, _lrx) = mpsc::channel(4);
+        let app = router("s3cret", tx, ltx);
+        let (status, challenge, _) =
+            call(app.clone(), post_lineage(None, valid_lineage_event())).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(challenge.as_deref(), Some("Bearer"));
+        let (status, _, _) = call(app, post_lineage(Some("wrong"), valid_lineage_event())).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn lineage_receiver_malformed_event_is_400_with_a_sentence() {
+        let (tx, _rx) = mpsc::channel(4);
+        let (ltx, mut lrx) = mpsc::channel(4);
+        let app = router("s3cret", tx, ltx);
+        let (status, _, json) = call(app, post_lineage(Some("s3cret"), "not json".into())).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let msg = json.unwrap()["error"].as_str().unwrap().to_string();
+        assert!(!msg.is_empty(), "400 must carry a sentence: {msg}");
+        assert!(lrx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn lineage_receiver_valid_event_is_204_and_reaches_consumer() {
+        let (tx, _rx) = mpsc::channel(4);
+        let (ltx, mut lrx) = mpsc::channel(4);
+        let app = router("s3cret", tx, ltx);
+        let (status, _, _) = call(app, post_lineage(Some("s3cret"), valid_lineage_event())).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let ev = lrx.recv().await.unwrap();
+        assert_eq!(ev.job_name, "test_job");
+        assert_eq!(ev.run_id, "00000000-0000-0000-0000-000000000001");
+        assert_eq!(ev.inputs.len(), 1);
+        assert_eq!(ev.outputs.len(), 1);
+    }
 }

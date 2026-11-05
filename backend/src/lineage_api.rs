@@ -176,8 +176,10 @@ pub async fn graph(
 
     let mut result_nodes: HashMap<String, LineageNode> = HashMap::new();
     let mut result_edges: Vec<LineageEdge> = Vec::new();
+    let mut hidden_ids: HashMap<String, String> = HashMap::new(); // real id -> opaque id
+    let mut hidden_seq: usize = 0;
 
-    // Add start node
+    // Add start node (must be visible, checked above)
     result_nodes.insert(
         start_id.clone(),
         LineageNode {
@@ -189,11 +191,11 @@ pub async fn graph(
         },
     );
 
-    let mut to_visit = vec![(start_ns.clone(), start_name.clone(), 0i32)];
+    let mut to_visit = vec![(start_ns.clone(), start_name.clone(), 0i32, start_id.clone())];
     let mut visited = HashSet::new();
     visited.insert((start_ns.clone(), start_name.clone()));
 
-    while let Some((cur_ns, cur_name, d)) = to_visit.pop() {
+    while let Some((cur_ns, cur_name, d, cur_id)) = to_visit.pop() {
         if d >= depth {
             continue;
         }
@@ -208,24 +210,32 @@ pub async fn graph(
                 if dns == &cur_ns && dname == &cur_name {
                     continue;
                 }
-                let nds_id = dataset_id(dns, dname);
+                let real_id = dataset_id(dns, dname);
+                let ds_catalog = dns.split('.').next().unwrap_or("");
+                let is_visible = allowed.is_empty()
+                    || allowed.contains(ds_catalog)
+                    || (catalog_name.is_some()
+                        && allowed
+                            .iter()
+                            .any(|a| dns.starts_with(&format!("{a}.")) || dns == a));
+                let nds_id = if is_visible {
+                    real_id.clone()
+                } else if let Some(id) = hidden_ids.get(&real_id) {
+                    id.clone()
+                } else {
+                    hidden_seq += 1;
+                    let id = format!("hidden-{hidden_seq}");
+                    hidden_ids.insert(real_id.clone(), id.clone());
+                    id
+                };
                 if !visited.contains(&(dns.clone(), dname.clone())) {
-                    let ds_catalog = dns.split('.').next().unwrap_or("");
-                    let is_visible = if catalog_name.is_some() {
-                        allowed.contains(ds_catalog)
-                            || allowed.is_empty()
-                            || allowed.iter().any(|a| dns.contains(a))
-                    } else {
-                        allowed.is_empty() || allowed.contains(ds_catalog)
-                    };
                     if !is_visible {
-                        // For hidden datasets, don't add full name details - add as hidden
                         result_nodes.insert(
                             nds_id.clone(),
                             LineageNode {
                                 id: nds_id.clone(),
-                                namespace: dns.clone(),
-                                name: dname.clone(),
+                                namespace: String::new(),
+                                name: String::new(),
                                 visible: false,
                                 label: Some(hidden_label()),
                             },
@@ -243,12 +253,12 @@ pub async fn graph(
                         );
                     }
                     if d + 1 < depth {
-                        to_visit.push((dns.clone(), dname.clone(), d + 1));
+                        to_visit.push((dns.clone(), dname.clone(), d + 1, nds_id.clone()));
                         visited.insert((dns.clone(), dname.clone()));
                     }
                 }
                 result_edges.push(LineageEdge {
-                    from: dataset_id(&cur_ns, &cur_name),
+                    from: cur_id.clone(),
                     to: nds_id.clone(),
                     job_namespace: job_ns.clone(),
                     job_name: job_name.clone(),

@@ -1993,4 +1993,275 @@ mod router_tests {
             StatusCode::SERVICE_UNAVAILABLE
         );
     }
+
+    // --- lineage API tests (D40, WP-34a) ---
+
+    async fn seed_lineage_edge(
+        pool: &sqlx::PgPool,
+        run_id: &str,
+        job_ns: &str,
+        job_name: &str,
+        direction: &str,
+        ds_ns: &str,
+        ds_name: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO lineage_edges (run_id, job_namespace, job_name, dataset_namespace, dataset_name, direction, event_time) \
+             VALUES ($1::uuid, $2, $3, $4, $5, $6, '2026-01-01T00:00:00Z'::timestamptz) \
+             ON CONFLICT (run_id, dataset_namespace, dataset_name, direction) DO NOTHING",
+        )
+        .bind(run_id).bind(job_ns).bind(job_name).bind(ds_ns).bind(ds_name).bind(direction)
+        .execute(pool).await.unwrap();
+    }
+
+    async fn seed_lineage_event(
+        pool: &sqlx::PgPool,
+        run_id: &str,
+        job_ns: &str,
+        job_name: &str,
+        inputs: serde_json::Value,
+        outputs: serde_json::Value,
+    ) {
+        let payload = serde_json::json!({
+            "eventType": "COMPLETE", "eventTime": "2026-01-01T00:00:00Z",
+            "job": {"namespace": job_ns, "name": job_name}, "run": {"runId": run_id},
+            "inputs": inputs, "outputs": outputs
+        });
+        sqlx::query(
+            "INSERT INTO lineage_events (event_time, event_type, job_namespace, job_name, run_id, producer, payload) \
+             VALUES ('2026-01-01T00:00:00Z'::timestamptz, 'COMPLETE', $1, $2, $3::uuid, 'test', $4)",
+        )
+        .bind(job_ns).bind(job_name).bind(run_id).bind(&payload)
+        .execute(pool).await.unwrap();
+    }
+
+    fn lineage_state(pool: sqlx::PgPool, allowed: &[&str], sub: &str) -> Arc<AppState> {
+        let state = test_state_with_db(Some(pool));
+        let mut access = HashMap::new();
+        access.insert(
+            sub.to_string(),
+            (
+                std::time::Instant::now(),
+                allowed
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<std::collections::BTreeSet<_>>(),
+            ),
+        );
+        *state.catalog_access.lock().unwrap() = access;
+        state
+    }
+
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn lineage_api_visible_dataset_returns_graph() {
+        let pool = db::test_support::migrated_pool().await;
+        let run_id = "00000000-0000-0000-0000-000000000081";
+        sqlx::query("DELETE FROM lineage_edges WHERE run_id = $1::uuid")
+            .bind(run_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        seed_lineage_edge(
+            &pool,
+            run_id,
+            "default",
+            "j1",
+            "input",
+            "mobility.gold",
+            "trips",
+        )
+        .await;
+        seed_lineage_edge(
+            &pool,
+            run_id,
+            "default",
+            "j1",
+            "output",
+            "mobility.gold",
+            "kpis",
+        )
+        .await;
+
+        let state = lineage_state(pool, &["mobility"], "alice");
+        let q = crate::lineage_api::GraphQuery {
+            catalog: Some("mobility".into()),
+            schema: Some("gold".into()),
+            table: Some("kpis".into()),
+            depth: 2,
+        };
+        let resp = crate::lineage_api::graph(
+            axum::extract::State(state),
+            axum::Extension(Some(signed_in("alice"))),
+            axum::extract::Query(q),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(!v["nodes"].as_array().unwrap().is_empty());
+        assert!(v["edges"].as_array().is_some());
+    }
+
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn lineage_api_hidden_dataset_name_never_appears() {
+        let pool = db::test_support::migrated_pool().await;
+        let run_id = "00000000-0000-0000-0000-000000000082";
+        sqlx::query("DELETE FROM lineage_edges WHERE run_id = $1::uuid")
+            .bind(run_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        seed_lineage_edge(
+            &pool,
+            run_id,
+            "default",
+            "j2",
+            "input",
+            "retail.gold",
+            "secret_sales",
+        )
+        .await;
+        seed_lineage_edge(
+            &pool,
+            run_id,
+            "default",
+            "j2",
+            "output",
+            "mobility.gold",
+            "kpis",
+        )
+        .await;
+
+        let state = lineage_state(pool, &["mobility"], "alice");
+        let q = crate::lineage_api::GraphQuery {
+            catalog: Some("mobility".into()),
+            schema: Some("gold".into()),
+            table: Some("kpis".into()),
+            depth: 2,
+        };
+        let resp = crate::lineage_api::graph(
+            axum::extract::State(state),
+            axum::Extension(Some(signed_in("alice"))),
+            axum::extract::Query(q),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(
+            !text.contains("secret_sales"),
+            "hidden dataset name must not appear: {text}"
+        );
+        assert!(
+            !text.contains("retail"),
+            "hidden catalog/namespace must not appear: {text}"
+        );
+        assert!(
+            text.contains("a dataset you cannot see"),
+            "hidden node must use generic label: {text}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn lineage_api_depth_1_vs_2() {
+        let pool = db::test_support::migrated_pool().await;
+        let r1 = "00000000-0000-0000-0000-000000000083";
+        let r2 = "00000000-0000-0000-0000-000000000084";
+        for rid in [r1, r2] {
+            sqlx::query("DELETE FROM lineage_edges WHERE run_id = $1::uuid")
+                .bind(rid)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        seed_lineage_edge(&pool, r1, "d", "j", "input", "mobility.gold", "A").await;
+        seed_lineage_edge(&pool, r1, "d", "j", "output", "mobility.gold", "B").await;
+        seed_lineage_edge(&pool, r2, "d", "j", "input", "mobility.gold", "B").await;
+        seed_lineage_edge(&pool, r2, "d", "j", "output", "mobility.gold", "C").await;
+
+        let state1 = lineage_state(pool.clone(), &["mobility"], "alice");
+        let q1 = crate::lineage_api::GraphQuery {
+            catalog: Some("mobility".into()),
+            schema: Some("gold".into()),
+            table: Some("A".into()),
+            depth: 1,
+        };
+        let b1 = axum::body::to_bytes(
+            crate::lineage_api::graph(
+                axum::extract::State(state1),
+                axum::Extension(Some(signed_in("alice"))),
+                axum::extract::Query(q1),
+            )
+            .await
+            .into_body(),
+            1024 * 1024,
+        )
+        .await
+        .unwrap();
+        let t1 = String::from_utf8(b1.to_vec()).unwrap();
+        assert!(
+            t1.contains("\"B\"") || t1.contains("|B") || t1.contains("mobility.gold"),
+            "depth 1 reaches B: {t1}"
+        );
+        assert!(!t1.contains("\"C\""), "depth 1 must not reach C: {t1}");
+
+        let state2 = lineage_state(pool, &["mobility"], "alice");
+        let q2 = crate::lineage_api::GraphQuery {
+            catalog: Some("mobility".into()),
+            schema: Some("gold".into()),
+            table: Some("A".into()),
+            depth: 2,
+        };
+        let b2 = axum::body::to_bytes(
+            crate::lineage_api::graph(
+                axum::extract::State(state2),
+                axum::Extension(Some(signed_in("alice"))),
+                axum::extract::Query(q2),
+            )
+            .await
+            .into_body(),
+            1024 * 1024,
+        )
+        .await
+        .unwrap();
+        let t2 = String::from_utf8(b2.to_vec()).unwrap();
+        assert!(t2.contains("\"C\""), "depth 2 reaches C: {t2}");
+    }
+
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn lineage_api_run_endpoint_404_for_hidden_run() {
+        let pool = db::test_support::migrated_pool().await;
+        let run_id = "00000000-0000-0000-0000-000000000085";
+        sqlx::query("DELETE FROM lineage_events WHERE run_id = $1::uuid")
+            .bind(run_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        seed_lineage_event(
+            &pool,
+            run_id,
+            "default",
+            "hidden_job",
+            serde_json::json!([{"namespace": "retail.gold", "name": "secret"}]),
+            serde_json::json!([{"namespace": "retail.gold", "name": "secret_out"}]),
+        )
+        .await;
+
+        let state = lineage_state(pool, &["mobility"], "alice");
+        let resp = crate::lineage_api::run_detail(
+            axum::extract::State(state),
+            axum::Extension(Some(signed_in("alice"))),
+            axum::extract::Path(run_id.to_string()),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
 }
