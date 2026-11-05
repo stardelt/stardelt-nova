@@ -2550,6 +2550,95 @@
         }
       }
     },
+    "/api/lineage": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "operationId": "lineage_graph",
+        "parameters": [
+          {
+            "name": "catalog",
+            "in": "query",
+            "description": "Catalog",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "schema",
+            "in": "query",
+            "description": "Schema",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "table",
+            "in": "query",
+            "description": "Table",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "depth",
+            "in": "query",
+            "description": "Depth 1-5, default 2",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Lineage graph",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LineageGraph"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not visible"
+          }
+        }
+      }
+    },
+    "/api/lineage/runs/{run_id}": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "operationId": "lineage_run_detail",
+        "parameters": [
+          {
+            "name": "run_id",
+            "in": "path",
+            "description": "Run ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Run detail"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        }
+      }
+    },
     "/api/me": {
       "get": {
         "tags": [
@@ -6517,6 +6606,87 @@
           },
           "user": {
             "type": "string"
+          }
+        }
+      },
+      "LineageEdge": {
+        "type": "object",
+        "required": [
+          "from",
+          "to",
+          "jobNamespace",
+          "jobName",
+          "runId",
+          "eventTime"
+        ],
+        "properties": {
+          "eventTime": {
+            "type": "string"
+          },
+          "from": {
+            "type": "string"
+          },
+          "jobName": {
+            "type": "string"
+          },
+          "jobNamespace": {
+            "type": "string"
+          },
+          "runId": {
+            "type": "string"
+          },
+          "to": {
+            "type": "string"
+          }
+        }
+      },
+      "LineageGraph": {
+        "type": "object",
+        "required": [
+          "nodes",
+          "edges"
+        ],
+        "properties": {
+          "edges": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LineageEdge"
+            }
+          },
+          "nodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LineageNode"
+            }
+          }
+        }
+      },
+      "LineageNode": {
+        "type": "object",
+        "required": [
+          "id",
+          "namespace",
+          "name",
+          "visible"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "visible": {
+            "type": "boolean"
           }
         }
       },
