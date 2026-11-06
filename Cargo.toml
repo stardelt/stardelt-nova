@@ -31,6 +31,7 @@ axum-extra = { version = "0.12", default-features = false, features = ["cookie-s
 base64 = "0.23"
 getrandom = "0.4"
 sha2 = "0.11"
+uuid = { version = "1", features = ["v5"] }
 url = "2"
 percent-encoding = "2"
 # IANA time zones for a pipeline's schedule (stardelt-nova#210): a typo is a 400 sentence,
