@@ -88,6 +88,61 @@ fn error(status: StatusCode, message: String) -> Response {
     (status, Json(json!({ "error": message }))).into_response()
 }
 
+fn dataset(dotted: &str) -> Option<crate::lineage_event::LineageDataset> {
+    let mut parts = dotted.splitn(3, '.');
+    let catalog = parts.next()?;
+    let schema = parts.next()?;
+    let table = parts.next()?;
+    Some(crate::lineage_event::LineageDataset {
+        namespace: format!("{catalog}.{schema}"),
+        name: table.to_string(),
+        facets: None,
+    })
+}
+
+fn lineage_from_query(
+    record: &crate::query_log_event::QueryLogRecord,
+    raw: serde_json::Value,
+) -> Option<crate::lineage_event::LineageEvent> {
+    use crate::query_log_event::QueryState;
+    if record.state != QueryState::Finished {
+        return None;
+    }
+    if record.tables_read.is_empty() && record.tables_written.is_empty() {
+        return None;
+    }
+    let run_id =
+        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, record.query_id.as_bytes()).to_string();
+    let event_time = record
+        .ended_at
+        .clone()
+        .or_else(|| Some(record.created_at.clone()))?;
+    let inputs = record
+        .tables_read
+        .iter()
+        .filter_map(|d| dataset(d))
+        .collect();
+    let outputs = record
+        .tables_written
+        .iter()
+        .filter_map(|d| dataset(d))
+        .collect();
+    Some(crate::lineage_event::LineageEvent {
+        event_type: "COMPLETE".to_string(),
+        event_time,
+        producer: Some("https://github.com/stardelt/stardelt-nova".to_string()),
+        schema_url: Some(
+            "https://openlineage.io/spec/2-0-2/OpenLineage.json#/$defs/RunEvent".to_string(),
+        ),
+        job_namespace: "trino".to_string(),
+        job_name: record.query_id.clone(),
+        run_id,
+        inputs,
+        outputs,
+        raw,
+    })
+}
+
 async fn ingest(State(c): State<Arc<Collector>>, headers: HeaderMap, body: Bytes) -> Response {
     match bearer(&headers) {
         Some(token) if same(&digest(token), &c.token_digest) => {}
@@ -108,6 +163,12 @@ async fn ingest(State(c): State<Arc<Collector>>, headers: HeaderMap, body: Bytes
         Ok(record) => record,
         Err(e) => return error(StatusCode::BAD_REQUEST, e.to_string()),
     };
+    let raw = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+    if let Some(event) = lineage_from_query(&record, raw)
+        && c.lineage_tx.try_send(event).is_err()
+    {
+        tracing::warn!("lineage queue is full; dropped one derived event");
+    }
     match c.tx.try_send(Accepted { record, warehouse }) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(_) => error(
@@ -227,6 +288,7 @@ mod tests {
 
     const CREATED: &str = include_str!("testdata/query_log/created.json");
     const SELECT: &str = include_str!("testdata/query_log/completed_select.json");
+    const FAILED: &str = include_str!("testdata/query_log/completed_failed.json");
 
     fn post_event(token: Option<&str>, warehouse: Option<&str>, body: String) -> Request<Body> {
         let mut req = Request::builder()
@@ -442,5 +504,114 @@ mod tests {
         assert_eq!(ev.run_id, "00000000-0000-0000-0000-000000000001");
         assert_eq!(ev.inputs.len(), 1);
         assert_eq!(ev.outputs.len(), 1);
+    }
+
+    fn finished_hive_event() -> String {
+        let mut event: serde_json::Value = serde_json::from_str(SELECT).unwrap();
+        event["ioMetadata"] = serde_json::json!({
+            "inputs": [{"catalogName": "hive", "schema": "tpch", "table": "orders"}],
+            "output": {"catalogName": "hive", "schema": "tpch", "table": "daily"}
+        });
+        event.to_string()
+    }
+
+    #[tokio::test]
+    async fn finished_query_becomes_one_lineage_event() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let (ltx, mut lrx) = mpsc::channel(4);
+        let app = router("s3cret", tx, ltx);
+        let body = finished_hive_event();
+        let (status, _, _) = call(app, post_event(Some("s3cret"), None, body)).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let _a = rx.recv().await.unwrap();
+        let ev = lrx.recv().await.unwrap();
+        assert_eq!(ev.job_namespace, "trino");
+        assert_eq!(ev.job_name, "20261019_113323_00000_tnvu4");
+        assert_eq!(ev.event_type, "COMPLETE");
+        assert_eq!(ev.inputs.len(), 1);
+        assert_eq!(ev.inputs[0].namespace, "hive.tpch");
+        assert_eq!(ev.inputs[0].name, "orders");
+        assert_eq!(ev.outputs.len(), 1);
+        assert_eq!(ev.outputs[0].namespace, "hive.tpch");
+        assert_eq!(ev.outputs[0].name, "daily");
+        assert!(uuid::Uuid::parse_str(&ev.run_id).is_ok());
+    }
+
+    #[tokio::test]
+    async fn posting_the_same_body_twice_yields_the_same_run_id() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let (ltx, mut lrx) = mpsc::channel(4);
+        let app = router("s3cret", tx, ltx);
+        let body = finished_hive_event();
+        let (s1, _, _) = call(app.clone(), post_event(Some("s3cret"), None, body.clone())).await;
+        assert_eq!(s1, StatusCode::NO_CONTENT);
+        let (s2, _, _) = call(app, post_event(Some("s3cret"), None, body)).await;
+        assert_eq!(s2, StatusCode::NO_CONTENT);
+        let _ = rx.recv().await.unwrap();
+        let _ = rx.recv().await.unwrap();
+        let ev1 = lrx.recv().await.unwrap();
+        let ev2 = lrx.recv().await.unwrap();
+        assert_eq!(ev1.run_id, ev2.run_id);
+    }
+
+    #[tokio::test]
+    async fn a_finished_event_with_no_io_metadata_yields_no_lineage_event() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let (ltx, mut lrx) = mpsc::channel(4);
+        let app = router("s3cret", tx, ltx);
+        let mut event: serde_json::Value = serde_json::from_str(SELECT).unwrap();
+        event.as_object_mut().unwrap().remove("ioMetadata");
+        let (status, _, _) = call(app, post_event(Some("s3cret"), None, event.to_string())).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(rx.recv().await.is_some());
+        assert!(lrx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn a_failed_event_yields_no_lineage_event() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let (ltx, mut lrx) = mpsc::channel(4);
+        let app = router("s3cret", tx, ltx);
+        let (status, _, _) = call(app, post_event(Some("s3cret"), None, FAILED.into())).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(rx.recv().await.is_some());
+        assert!(lrx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn an_input_named_orders_no_dots_is_skipped_and_the_response_is_still_204() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let (ltx, mut lrx) = mpsc::channel(4);
+        let app = router("s3cret", tx, ltx);
+        let (status, _, _) =
+            call(app, post_event(Some("s3cret"), None, finished_hive_event())).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(rx.recv().await.is_some());
+        assert!(lrx.try_recv().is_ok());
+
+        let record = crate::query_log_event::QueryLogRecord {
+            query_id: "q-nodots".to_string(),
+            state: crate::query_log_event::QueryState::Finished,
+            principal: "alice".to_string(),
+            source: None,
+            client_tags: vec![],
+            catalog: None,
+            schema: None,
+            query_type: Some("SELECT".to_string()),
+            sql_text: "select 1".to_string(),
+            sql_hash: "x".to_string(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            started_at: None,
+            ended_at: Some("2026-01-01T00:00:01Z".to_string()),
+            stats: None,
+            error_code: None,
+            error_message: None,
+            tables_read: vec!["orders".to_string(), "hive.tpch.ok".to_string()],
+            tables_written: vec![],
+        };
+        let ev = lineage_from_query(&record, serde_json::json!({})).unwrap();
+        assert_eq!(ev.inputs.len(), 1);
+        assert_eq!(ev.inputs[0].namespace, "hive.tpch");
+        assert_eq!(ev.inputs[0].name, "ok");
     }
 }
