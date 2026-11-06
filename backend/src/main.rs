@@ -625,6 +625,10 @@ fn api_router() -> Router<Arc<AppState>> {
         // The query log: the caller's own queries, everybody's for administrators (state store).
         .route("/query-log", get(query_log_api::list))
         .route("/query-log/{id}", get(query_log_api::detail))
+        // Lineage graph (D40): the edges the OpenLineage consumer wrote, scoped to what the
+        // caller may see. Restored after #482's merge dropped the routes (nova#483).
+        .route("/lineage", get(lineage_api::graph))
+        .route("/lineage/runs/{run_id}", get(lineage_api::run_detail))
         // The caller's own settings: one JSON value per key (state store).
         .route("/settings", get(user_settings::list))
         .route(
@@ -1185,6 +1189,25 @@ mod router_tests {
             .headers()
             .get(name)
             .and_then(|value| value.to_str().ok())
+    }
+
+    /// D40's lineage routes are wired into the API table. A request must reach a handler
+    /// (it answers with whatever the extractor does), never the JSON 404 of an unknown
+    /// path: nova#482's merge dropped the two `route` lines while the handlers stayed.
+    #[tokio::test]
+    async fn the_lineage_routes_are_registered() {
+        let (app, _dir) = test_app("lineage-registered");
+        for uri in [
+            "/api/lineage",
+            "/api/lineage/runs/00000000-0000-0000-0000-000000000000",
+        ] {
+            let response = get(app.clone(), uri).await;
+            assert_ne!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "{uri} is not registered in api_router"
+            );
+        }
     }
 
     /// `GET /api/catalog/catalogs` is wired next to `/catalog/warehouse` and answers the

@@ -100,6 +100,8 @@ pub struct ErrorResponse {
         crate::saved_queries::remove,
         crate::query_log_api::list,
         crate::query_log_api::detail,
+        crate::lineage_api::graph,
+        crate::lineage_api::run_detail,
         crate::user_settings::list,
         crate::user_settings::put,
         crate::user_settings::remove,
