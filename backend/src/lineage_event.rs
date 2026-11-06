@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! OpenLineage event parsing for the internal lineage receiver (D40, WP-34a).
 //!
 //! Accepts a typed subset of OpenLineage 1.x. Unknown fields are preserved in the

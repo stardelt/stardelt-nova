@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! OpenLineage store (D40, WP-34a): persist raw events and derive edges.
 
 use std::time::Duration;
