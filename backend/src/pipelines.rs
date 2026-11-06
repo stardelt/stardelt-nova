@@ -1355,6 +1355,61 @@ fn principal_view(principals: &[Value], group: &str) -> PrincipalView {
     }
 }
 
+/// Every principal the caller may see, sorted by name. The visibility rule is `visible()`,
+/// the same one the pipelines list uses; a resource without `metadata.name` is skipped.
+fn visible_principals(principals: &[Value], who: &Identity) -> Vec<ServicePrincipalView> {
+    let mut views: Vec<ServicePrincipalView> = principals
+        .iter()
+        .filter_map(|principal| {
+            let name = pipeline_name(principal);
+            if name.is_empty() {
+                return None;
+            }
+            let spec = spec_of(principal);
+            if !visible(who, spec) {
+                return None;
+            }
+            let purpose = spec
+                .get("purpose")
+                .and_then(Value::as_str)
+                .unwrap_or("pipeline")
+                .to_string();
+            // The CRD defaults `audiences` to trino+lakekeeper, so an empty list only
+            // happens for a resource that bypassed the schema.
+            let audiences = spec
+                .get("audiences")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let ready = principal
+                .get("status")
+                .and_then(|status| status.get("ready"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            Some(ServicePrincipalView {
+                name: name.to_string(),
+                owner_group: spec
+                    .get("ownerGroup")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                purpose,
+                audiences,
+                ready,
+                message: (!ready).then(|| principal_message(principal)),
+            })
+        })
+        .collect();
+    views.sort_by(|a, b| a.name.cmp(&b.name));
+    views
+}
+
 /// Whether Nova wrote this pipeline (and may therefore change or delete it).
 fn nova_managed(resource: &Value) -> bool {
     resource
@@ -1857,6 +1912,25 @@ pub struct PrincipalView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 pub struct PrincipalsResponse {
     pub groups: Vec<PrincipalView>,
+}
+
+/// One `ServicePrincipal` the caller may see (#479).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ServicePrincipalView {
+    pub name: String,
+    pub owner_group: String,
+    pub purpose: String,
+    pub audiences: Vec<String>,
+    pub ready: bool,
+    /// `null` when ready; otherwise the same sentence the Schedule dialog would refuse with.
+    pub message: Option<String>,
+}
+
+/// `GET /api/service-principals`: the principals the caller may see.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+pub struct ServicePrincipalsResponse {
+    pub principals: Vec<ServicePrincipalView>,
 }
 
 // ---------------------------------------------------------------------------
@@ -2940,6 +3014,17 @@ async fn principal_views(
     })
 }
 
+async fn service_principal_views(
+    resources: Option<&PipelineResources>,
+    who: &Identity,
+) -> Result<ServicePrincipalsResponse, Fail> {
+    let resources = resources.ok_or_else(no_cluster)?;
+    let principals = resources.principals().await.map_err(resource_fail)?;
+    Ok(ServicePrincipalsResponse {
+        principals: visible_principals(&principals, who),
+    })
+}
+
 /// The name an audit line can carry: the request's, capped so a malformed one cannot flood the
 /// log (the rest of the request is refused by [`validate_name`] anyway).
 fn audit_name(name: &str) -> String {
@@ -3848,6 +3933,9 @@ pub(crate) fn router() -> Router<Arc<AppState>> {
         // The caller's groups and their pipeline principals, before any `{namespace}/{name}`
         // route can see the word "principals" as a name.
         .route("/pipelines/principals", get(principals))
+        // The caller's service principals (operator#63): a group's jobs, maintenance and
+        // collector identities, which the Schedule dialog's `pipeline-<group>` check does not show.
+        .route("/service-principals", get(service_principals))
         // The Schedule dialog's two helpers (#223): no resource and no store, but a signed-in
         // caller; placed before `{namespace}/{name}` like `principals`.
         .route("/pipelines/check", post(check))
@@ -3923,6 +4011,23 @@ pub(crate) async fn list(signed: SignedIn) -> Response {
 )]
 pub(crate) async fn principals(signed: SignedIn) -> Response {
     answer(principal_views(resources(signed.state()).as_ref(), signed.identity()).await)
+}
+
+#[utoipa::path(
+    get,
+    operation_id = "service_principals_list",
+    path = "/api/service-principals",
+    tag = "public",
+    description = "The service principals the caller may see: every `ServicePrincipal` of their groups, and all of them for an administrator. `purpose` is the resource's `spec.purpose` (default `pipeline`); `audiences` are the resource's audiences; `ready` is `status.ready`; `message` is `null` when ready, otherwise the `Ready` condition's message, or `no status yet`. Credentials are never part of an answer. Answers `Cache-Control: no-store`.",
+    responses(
+        (status = 200, description = "The caller's principals, sorted by name", body = ServicePrincipalsResponse),
+        (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The cluster did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No cluster connection", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn service_principals(signed: SignedIn) -> Response {
+    answer(service_principal_views(resources(signed.state()).as_ref(), signed.identity()).await)
 }
 
 #[utoipa::path(
@@ -8212,6 +8317,98 @@ mod tests {
             ],
             "one entry per group, sorted, with the sentence of the ticket"
         );
+    }
+
+    #[tokio::test]
+    async fn service_principals_route_is_group_scoped() {
+        let resources = memory_with(
+            &[],
+            &[
+                (
+                    "pipeline-analytics",
+                    service_principal("pipeline-analytics", "analytics", Some(true)),
+                ),
+                (
+                    "collector-finance",
+                    service_principal("collector-finance", "finance", Some(false)),
+                ),
+            ],
+        );
+        let who = who("sub-ada", &["analytics"], false);
+        let answer = service_principal_views(Some(&resources), &who)
+            .await
+            .expect("the service principals are readable");
+        assert_eq!(answer.principals.len(), 1);
+        let view = &answer.principals[0];
+        assert_eq!(view.name, "pipeline-analytics");
+        assert_eq!(view.owner_group, "analytics");
+        assert_eq!(view.purpose, "pipeline");
+        assert!(view.audiences.is_empty());
+        assert!(view.ready);
+        assert_eq!(view.message, None);
+    }
+
+    #[tokio::test]
+    async fn service_principals_route_shows_everything_to_an_administrator() {
+        let resources = memory_with(
+            &[],
+            &[
+                (
+                    "pipeline-analytics",
+                    service_principal("pipeline-analytics", "analytics", Some(true)),
+                ),
+                (
+                    "collector-finance",
+                    service_principal("collector-finance", "finance", Some(false)),
+                ),
+            ],
+        );
+        let answer = service_principal_views(Some(&resources), &admin())
+            .await
+            .expect("the service principals are readable");
+        let names: Vec<&str> = answer
+            .principals
+            .iter()
+            .map(|principal| principal.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["collector-finance", "pipeline-analytics"]);
+    }
+
+    #[tokio::test]
+    async fn service_principals_route_reports_purpose_and_why_not_ready() {
+        let principal = json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "ServicePrincipal",
+            "metadata": {
+                "name": "collector-analytics",
+                "namespace": crate::cluster::namespace(),
+            },
+            "spec": {
+                "ownerGroup": "analytics",
+                "purpose": "collector",
+                "audiences": ["trino", "lakekeeper"]
+            },
+            "status": {
+                "ready": false,
+                "conditions": [{
+                    "type": "Ready",
+                    "status": "False",
+                    "reason": "Pending",
+                    "message": NOT_READY_MESSAGE,
+                }],
+            }
+        });
+        let resources = memory_with(&[], &[("collector-analytics", principal)]);
+        let who = who("sub-ada", &["analytics"], false);
+        let answer = service_principal_views(Some(&resources), &who)
+            .await
+            .expect("the service principals are readable");
+        assert_eq!(answer.principals.len(), 1);
+        let view = &answer.principals[0];
+        assert_eq!(view.purpose, "collector");
+        assert_eq!(view.audiences, vec!["trino", "lakekeeper"]);
+        assert!(!view.ready);
+        assert_eq!(view.message.as_deref(), Some(NOT_READY_MESSAGE));
     }
 
     #[tokio::test]

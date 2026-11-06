@@ -555,6 +555,19 @@ export type PipelinePrincipal = {
   message: string | null
 }
 
+/** One service principal of the caller's groups (`GET /api/service-principals`). */
+export type ServicePrincipal = {
+  name: string
+  ownerGroup: string
+  /** `pipeline`, `maintenance` or `collector`; it decides nothing by itself. */
+  purpose: string
+  /** What the principal's tokens are valid for: `trino`, `lakekeeper`. */
+  audiences: string[]
+  ready: boolean
+  /** `null` when ready; otherwise why not. */
+  message: string | null
+}
+
 /** `POST /api/pipelines` (`Schedule`, stardelt-nova#210, options stardelt-nova#223). */
 export type CreatePipelineRequest = {
   name: string
@@ -961,24 +974,6 @@ export type QueryLogParams = {
 /** One page of a task's log; `tryNumber` and `token` are optional, as the backend's own query. */
 export type PipelineLogParams = { tryNumber?: number; token?: string }
 
-export type LineageNodeView = {
-  id: string
-  namespace: string
-  name: string
-  visible: boolean
-  label?: string | null
-}
-export type LineageEdgeView = {
-  from: string
-  to: string
-  jobNamespace: string
-  jobName: string
-  runId: string
-  eventTime: string
-}
-export type LineageGraph = { nodes: LineageNodeView[]; edges: LineageEdgeView[] }
-export type LineageParams = { catalog: string; schema: string; table: string; depth?: number }
-
 function pipelineLogUrl(
   namespace: string,
   name: string,
@@ -1053,13 +1048,10 @@ export const api = {
   jobs:         ()                            => jget<Job[]>('/api/jobs'),
   queryLog:     (p: QueryLogParams)           => jget<QueryLogPage>(queryLogUrl(p)),
   queryLogDetail: (id: string)                => jget<QueryLogDetail>(`/api/query-log/${seg(id)}`),
-  lineage: (p: LineageParams) => {
-    const qs = new URLSearchParams({ catalog: p.catalog, schema: p.schema, table: p.table, depth: String(p.depth ?? 2) })
-    return jget<LineageGraph>(`/api/lineage?${qs.toString()}`)
-  },
   pipelines:    ()                            => jget<{ pipelines: PipelineView[] }>('/api/pipelines'),
   /** The caller's own groups and their principals (`Schedule`, #210). */
   pipelinePrincipals: ()                      => jget<{ groups: PipelinePrincipal[] }>('/api/pipelines/principals'),
+  servicePrincipals: ()                       => jget<{ principals: ServicePrincipal[] }>('/api/service-principals'),
   /** The latest published versions of the notebooks in the caller's groups (#225). */
   notebooks:    ()                            => jget<PublishedNotebook[]>('/api/notebooks'),
   /** One notebook's published versions, newest first, at most 50. */
