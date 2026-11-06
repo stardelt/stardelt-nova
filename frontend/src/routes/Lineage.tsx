@@ -1,5 +1,5 @@
 import { useMemo, useState, type FormEvent } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { api, errorMessage, type LineageEdgeView, type LineageNodeView } from '../api'
 
@@ -14,6 +14,9 @@ export default function Lineage() {
   const table = params.get('table') ?? ''
   const depth = Number(params.get('depth') ?? '2') || 2
   const hasSelection = Boolean(catalog && schema && table)
+  const catalogHref = hasSelection
+    ? `/catalog?${new URLSearchParams({ catalog, ns: schema, tbl: table }).toString()}`
+    : ''
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['lineage', catalog, schema, table],
@@ -25,7 +28,18 @@ export default function Lineage() {
   return (
     <div className="max-w-6xl space-y-6">
       <header>
-        <h1 className="text-2xl font-bold tracking-tight">Lineage</h1>
+        <div className="flex items-start justify-between gap-4">
+          <h1 className="text-2xl font-bold tracking-tight">Lineage</h1>
+          {catalogHref && (
+            <Link
+              to={catalogHref}
+              className="btn-ghost"
+              title="Open this table in the catalog explorer"
+            >
+              Open in catalog
+            </Link>
+          )}
+        </div>
         <p className="text-text-dim text-sm mt-1">
           Table lineage across the lakehouse, drawn from recorded OpenLineage events.
         </p>
