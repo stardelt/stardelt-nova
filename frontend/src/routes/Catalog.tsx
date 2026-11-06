@@ -205,6 +205,13 @@ function TableDetail({ ns, tbl, catalog }: Sel & { catalog?: string }) {
     if (catalog) query.set('catalog', catalog)
     return `/query?${query.toString()}`
   }
+  // The lineage page takes the identifier as URL params. The catalog may be implicit
+  // (`?catalog=` absent), so resolve the API's default the same way CatalogSelect does.
+  const catalogs = useCatalogs()
+  const catalogName = catalog ?? catalogs.data?.default ?? ''
+  const lineageHref = catalogName
+    ? `/lineage?${new URLSearchParams({ catalog: catalogName, schema: ns, table: tbl }).toString()}`
+    : ''
 
   const m = meta.data?.metadata
   const schemaId = m?.['current-schema-id'] ?? m?.schemas[0]?.['schema-id'] ?? 0
@@ -225,6 +232,9 @@ function TableDetail({ ns, tbl, catalog }: Sel & { catalog?: string }) {
           <Link to={queryHref(`SELECT * FROM ${sqlTableRef(ns, tbl, catalog)} LIMIT 100`)} className="btn-primary">
             Query table
           </Link>
+          {lineageHref && (
+            <Link to={lineageHref} className="btn-ghost" title="Show this table's lineage">Lineage</Link>
+          )}
           <Link to="/data" className="btn-ghost">Load data</Link>
         </div>
       </header>

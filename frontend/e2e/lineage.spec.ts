@@ -55,3 +55,52 @@ test('a forbidden table says so', async ({ page }) => {
   await expect(page.locator('main')).toContainText('forbidden')
   await expect(page.locator('main')).not.toContainText('/api/lineage')
 })
+
+test('the table header links to its lineage', async ({ page }) => {
+  const lineageRequests: string[] = []
+  page.on('request', (r) => {
+    if (r.url().includes('/api/lineage')) lineageRequests.push(r.url())
+  })
+  await page.route('**/api/**', (r) => {
+    const path = new URL(r.request().url()).pathname
+    if (path === '/api/me') {
+      return json(r, { user: 'alice', auth_mode: 'oidc', demo: false, warehouse: 'warehouse', is_admin: true, groups: ['admins'] })
+    }
+    if (path === '/api/catalog/catalogs') {
+      return json(r, { catalogs: [{ name: 'warehouse', id: '1' }], default: 'warehouse' })
+    }
+    if (path === '/api/catalog/namespaces') return json(r, { namespaces: [] })
+    if (path === '/api/catalog/tables/sales/orders') {
+      return json(r, {
+        'metadata-location': '',
+        metadata: { 'table-uuid': 'u', location: '', 'last-updated-ms': 0, schemas: [], 'partition-specs': [] },
+      })
+    }
+    if (path === '/api/catalog/tables/sales/orders/documentation') {
+      return json(r, { description: null, tags: [], owner: null, domain: null, columns: [], canEdit: false, editRule: '', canRollback: false, rollbackRule: '' })
+    }
+    if (path === '/api/catalog/tables/sales/orders/history') {
+      return json(r, { snapshots: [], columns: [], rows: [] })
+    }
+    if (path === '/api/query') {
+      return json(r, { columns: [], rows: [], row_count: 0 })
+    }
+    if (path === '/api/lineage') return json(r, { nodes: [], edges: [] })
+    return json(r, {})
+  })
+
+  // With ?catalog= in the URL the link carries it...
+  await page.goto('/catalog?catalog=warehouse&ns=sales&tbl=orders')
+  // `main` excludes the sidebar, which also has a link named "Lineage".
+  const link = page.locator('main').getByRole('link', { name: 'Lineage' })
+  await expect(link).toHaveAttribute('href', '/lineage?catalog=warehouse&schema=sales&table=orders')
+
+  // ...and without it, the API's default catalog.
+  await page.goto('/catalog?ns=sales&tbl=orders')
+  await expect(page.locator('main').getByRole('link', { name: 'Lineage' }))
+    .toHaveAttribute('href', '/lineage?catalog=warehouse&schema=sales&table=orders')
+
+  await page.locator('main').getByRole('link', { name: 'Lineage' }).click()
+  await expect(page).toHaveURL(/\/lineage\?catalog=warehouse&schema=sales&table=orders/)
+  await expect.poll(() => lineageRequests.length).toBeGreaterThan(0)
+})
