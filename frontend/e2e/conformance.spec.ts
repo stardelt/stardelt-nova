@@ -327,7 +327,7 @@ test.describe('errors', () => {
   test('U11 a failed load says why and offers Retry', async ({ browser }) => {
     // The first Retry on each page belongs to this endpoint, in the order the page renders them.
     const failing: Record<string, string> = {
-      '/catalog': '/api/catalog/namespaces',
+      '/catalog': '/api/catalog/catalogs',
       '/jobs': '/api/jobs',
       '/queries': '/api/query-log',
       '/health': '/api/apps',
@@ -1213,6 +1213,7 @@ test.describe('table documentation', () => {
       const path = new URL(request.url()).pathname
       const method = request.method()
       if (path === '/api/me' && method === 'GET') return json(route, me)
+      if (path === '/api/catalog/catalogs' && method === 'GET') return json(route, { catalogs: [{ name: 'warehouse', id: 'w' }], default: 'warehouse' })
       if (path === '/api/catalog/warehouse' && method === 'GET') return json(route, { name: 'warehouse', id: 'w' })
       if (path === '/api/catalog/namespaces' && method === 'GET') return json(route, { namespaces: [['sales']] })
       if (path === '/api/catalog/namespaces/sales/tables' && method === 'GET') {
@@ -1471,8 +1472,8 @@ test.describe('table documentation', () => {
   })
 })
 
-test.describe('catalog switcher', () => {
-  // Several catalogs (stardelt-nova#234): the switcher offers exactly what the API says
+test.describe('catalog explorer', () => {
+  // Several catalogs (stardelt-nova#234): the tree offers exactly what the API says
   // the person may browse, the choice lives in the URL, and every catalog request names
   // the chosen catalog. A catalog they may not browse is never offered — it is not in
   // the list the engine answers for them.
@@ -1534,7 +1535,7 @@ test.describe('catalog switcher', () => {
     return { context, page, seen }
   }
 
-  test('switcher_groups_by_layer_in_order', async ({ browser }) => {
+  test('every_catalog_is_a_row_and_the_default_is_open', async ({ browser }) => {
     const { context, page } = await open(browser, {
       body: {
         catalogs: [
@@ -1548,66 +1549,40 @@ test.describe('catalog switcher', () => {
       },
     })
     await page.goto('/catalog')
-    const select = page.getByRole('combobox', { name: 'Catalog' })
-    await expect(select).toBeVisible()
+    const tree = page.getByRole('list', { name: 'Catalogs' })
+    await expect(tree).toBeVisible()
+    await expect(tree.getByRole('button', { name: /bronze|silver|gold|warehouse|shared/ })).toHaveCount(5)
+    // the default catalog is expanded, the others are not
+    await expect(page.getByRole('button', { name: /warehouse/ })).toHaveAttribute('aria-expanded', 'true')
+    await expect(page.getByRole('button', { name: /gold/ })).toHaveAttribute('aria-expanded', 'false')
 
-    // The three medallion layers come first, in bronze → silver → gold order, and every
-    // catalog without a layer follows in the API's order under Other.
-    const groups = select.locator('optgroup')
-    await expect(groups).toHaveCount(4)
-    expect(await groups.evaluateAll((elements) => elements.map((group) => group.getAttribute('label'))))
-      .toEqual(['Bronze', 'Silver', 'Gold', 'Other'])
-    await expect(select.locator('option')).toHaveText(['bronze', 'silver', 'gold', 'warehouse', 'shared'])
-    await expect(select).toHaveValue('warehouse')
-
-    // A grouped option still selects and names the catalog, as the flat list does.
-    await select.selectOption('gold')
-    await expect(page).toHaveURL(/[?&]catalog=gold\b/)
+    // A deep link opens the named catalog and shows its schemas.
+    await page.goto('/catalog?catalog=gold')
+    await expect(page.getByRole('button', { name: /gold/ })).toHaveAttribute('aria-expanded', 'true')
     await expect(page.getByRole('button', { name: /nyc_taxi/ })).toBeVisible()
     judge('/catalog', await auditPage(page))
-    await context.close()
-  })
-
-  test('no_layer_no_group_headers', async ({ browser }) => {
-    const { context, page } = await open(browser, { body: TWO })
-    await page.goto('/catalog')
-    const select = page.getByRole('combobox', { name: 'Catalog' })
-    await expect(select).toBeVisible()
-    // No catalog has a layer: the switcher stays the flat list it was before layers.
-    await expect(select.locator('optgroup')).toHaveCount(0)
-    await expect(select.locator('option')).toHaveText(['finance', 'warehouse'])
     await context.close()
   })
 
   test('the second catalog is what every request then names', async ({ browser }) => {
     const { context, page, seen } = await open(browser, { body: TWO })
     await page.goto('/catalog')
-    const select = page.getByRole('combobox', { name: 'Catalog' })
-    await expect(select).toBeVisible()
-    await expect(select.locator('option')).toHaveText(['finance', 'warehouse'])
-    await expect(select).toHaveValue('warehouse')
     await expect(page.getByRole('button', { name: /nyc_taxi/ })).toBeVisible()
 
-    await select.selectOption('finance')
+    await page.getByRole('button', { name: /finance/ }).click()
     // The choice is in the URL, so a reload or a pasted link opens the same catalog …
     await expect(page).toHaveURL(/[?&]catalog=finance\b/)
     // … and the table list is asked for in that catalog, not the default one.
     await expect.poll(() => seen.at(-1) ?? '', { message: 'the next namespaces request names the catalog' })
       .toContain('catalog=finance')
     await expect(page.getByRole('button', { name: /seed/ })).toBeVisible()
-    await expect(page.getByRole('button', { name: /nyc_taxi/ })).toHaveCount(0)
 
     // A generated statement names the chosen catalog, never the historical default.
+    await page.getByRole('button', { name: /seed/ }).click()
     await page.getByRole('button', { name: /nation/ }).click()
     const link = page.getByRole('link', { name: 'Query table' })
     const sql = await link.evaluate((a) => new URL((a as HTMLAnchorElement).href).searchParams.get('sql'))
     expect(sql).toBe('SELECT * FROM finance.seed.nation LIMIT 100')
-
-    // Escape leaves the switcher alone and the page on the catalog the person chose.
-    await select.focus()
-    await page.keyboard.press('Escape')
-    await expect(select).toBeFocused()
-    await expect(page).toHaveURL(/[?&]catalog=finance\b/)
 
     // The same U rules as every other page: headings, landmarks, labels, contrast, text.
     judge('/catalog', await auditPage(page))

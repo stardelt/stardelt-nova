@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
 import { ApiError, api, errorMessage, formatCell, type IcebergField, type QueryResult, type TableDocumentation, type TableMetadata } from '../api'
-import CatalogSelect, { useCatalogs } from '../components/CatalogSelect'
+import { useCatalogs } from '../components/CatalogSelect'
+import CatalogTree from '../components/CatalogTree'
 import ErrorBox from '../components/ErrorBox'
 import TableAbout, { type DocsState } from '../components/TableAbout'
 import { formatTime, sqlTableRef, rowsLabel } from '../format'
@@ -12,7 +13,8 @@ type Sel = { ns: string; tbl: string }
 
 /** A 403 says no: the person's grants do not change by asking again. */
 function forbidden(error: unknown): boolean {
-  return error instanceof ApiError && error.status === 403
+  if (error instanceof ApiError) return error.status === 403
+  return !!error && typeof error === 'object' && 'status' in error && (error as { status?: unknown }).status === 403
 }
 
 export default function Catalog() {
@@ -40,12 +42,7 @@ export default function Catalog() {
   // No catalog is open to this person: the API's own sentence, and no Retry — the list
   // can only change when an administrator grants a catalog (stardelt-nova#234).
   const denied = catalogs.isError && forbidden(catalogs.error)
-
-  const namespaces = useQuery({
-    queryKey: ['catalog', 'namespaces', catalog],
-    queryFn: () => api.namespaces(catalog),
-    enabled: !denied,
-  })
+  const noCatalogs = catalogs.data != null && (catalogs.data.catalogs?.length ?? 0) === 0
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-[300px_minmax(0,1fr)] gap-5 h-full min-h-0">
@@ -53,8 +50,6 @@ export default function Catalog() {
       {!selected && <h1 className="sr-only">Catalog</h1>}
       <aside className="card p-3 flex flex-col min-h-0">
         <div className="px-1 pb-2">
-          <div className="label mb-1.5">Catalog</div>
-          <CatalogSelect className="mb-2" />
           <input
             value={filter}
             onChange={e => setFilter(e.target.value)}
@@ -66,36 +61,23 @@ export default function Catalog() {
         <div className="overflow-auto flex-1">
           {denied ? (
             <div className="p-2"><ErrorBox error={catalogs.error} /></div>
+          ) : noCatalogs ? (
+            <div className="p-2">
+              <div role="alert" className="text-bad text-sm flex flex-wrap items-center gap-x-3 gap-y-1">
+                <span className="break-words">no catalog is open to you yet; ask an administrator for access</span>
+              </div>
+            </div>
+          ) : catalogs.isError ? (
+            <div className="p-2"><ErrorBox error={catalogs.error} onRetry={() => void catalogs.refetch()} /></div>
           ) : (
-            <>
-              {namespaces.isLoading && <div className="text-text-mute text-sm p-2">loading…</div>}
-              {namespaces.isError && (
-                <div className="p-2">
-                  <ErrorBox
-                    error={namespaces.error}
-                    onRetry={forbidden(namespaces.error) ? undefined : () => void namespaces.refetch()}
-                  />
-                </div>
-              )}
-              {namespaces.data && namespaces.data.namespaces.length === 0 && (
-                <p className="text-text-mute text-sm p-2">This catalog has no schemas yet.</p>
-              )}
-              <ul className="space-y-1">
-                {namespaces.data?.namespaces.map(parts => {
-                  const ns = parts.join('.')
-                  return (
-                    <NamespaceItem
-                      key={ns}
-                      ns={ns}
-                      catalog={catalog}
-                      filter={filter}
-                      onSelect={setSelected}
-                      selected={selected}
-                    />
-                  )
-                })}
-              </ul>
-            </>
+            <CatalogTree
+              key={catalogs.data?.default ?? ''}
+              catalogs={catalogs.data?.catalogs ?? []}
+              defaultCatalog={catalogs.data?.default ?? ''}
+              filter={filter}
+              selected={selected}
+              onSelect={setSelected}
+            />
           )}
         </div>
       </aside>
@@ -114,63 +96,6 @@ export default function Catalog() {
         )}
       </section>
     </div>
-  )
-}
-
-function NamespaceItem({ ns, catalog, filter, onSelect, selected }: {
-  ns: string
-  catalog?: string
-  filter: string
-  onSelect: (sel: Sel) => void
-  selected: Sel | null
-}) {
-  const [open, setOpen] = useState(true)
-  const tables = useQuery({
-    queryKey: ['catalog', 'tables', catalog, ns],
-    queryFn: () => api.tables(ns, catalog),
-    enabled: open,
-  })
-
-  const matches = (name: string) => {
-    if (!filter.trim()) return true
-    return `${ns}.${name}`.toLowerCase().includes(filter.toLowerCase())
-  }
-  const visible = (tables.data?.identifiers ?? []).filter(id => matches(id.name))
-
-  if (filter.trim() && visible.length === 0) return null
-
-  return (
-    <li>
-      <button onClick={() => setOpen(o => !o)} className="w-full flex items-center gap-2 text-left px-2 py-1.5 rounded-[8px] hover:bg-bg-soft/40">
-        <span className="text-text-mute text-xs">{open ? '▾' : '▸'}</span>
-        <span className="text-sm font-medium">{ns}</span>
-        <span className="ml-auto text-[11px] text-text-mute">{visible.length}</span>
-      </button>
-      {open && (
-        <ul className="ml-3 mt-0.5 space-y-0.5">
-          {tables.isLoading && <li className="text-text-mute text-xs px-2 py-1">loading…</li>}
-          {tables.isError && !tables.data && <li className="px-2 py-1"><ErrorBox error={tables.error} onRetry={() => tables.refetch()} /></li>}
-          {visible.map(id => {
-            const sel = selected?.ns === ns && selected?.tbl === id.name
-            return (
-              <li key={id.name}>
-                <button
-                  onClick={() => onSelect({ ns, tbl: id.name })}
-                  aria-current={sel ? 'true' : undefined}
-                  className={[
-                    'w-full text-left px-2 py-1.5 rounded-[8px] text-sm flex items-center gap-2',
-                    sel ? 'bg-accent/15 text-text border border-accent/30' : 'text-text-dim hover:text-text hover:bg-bg-soft/40 border border-transparent',
-                  ].join(' ')}
-                >
-                  <span className="text-text-mute">◇</span>
-                  <span className="truncate">{id.name}</span>
-                </button>
-              </li>
-            )
-          })}
-        </ul>
-      )}
-    </li>
   )
 }
 
