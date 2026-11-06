@@ -104,3 +104,46 @@ test('the table header links to its lineage', async ({ page }) => {
   await expect(page).toHaveURL(/\/lineage\?catalog=warehouse&schema=sales&table=orders/)
   await expect.poll(() => lineageRequests.length).toBeGreaterThan(0)
 })
+
+test('the selected table opens in the catalog', async ({ page }) => {
+  await page.route('**/api/**', (r) => {
+    const path = new URL(r.request().url()).pathname
+    if (path === '/api/me') {
+      return json(r, { user: 'alice', auth_mode: 'oidc', demo: false, warehouse: 'warehouse', is_admin: true, groups: ['admins'] })
+    }
+    if (path === '/api/catalog/catalogs') {
+      return json(r, { catalogs: [{ name: 'warehouse', id: '1' }], default: 'warehouse' })
+    }
+    if (path === '/api/catalog/namespaces') return json(r, { namespaces: [] })
+    if (path === '/api/catalog/tables/sales/orders') {
+      return json(r, {
+        'metadata-location': '',
+        metadata: { 'table-uuid': 'u', location: '', 'last-updated-ms': 0, schemas: [], 'partition-specs': [] },
+      })
+    }
+    if (path === '/api/catalog/tables/sales/orders/documentation') {
+      return json(r, { description: null, tags: [], owner: null, domain: null, columns: [], canEdit: false, editRule: '', canRollback: false, rollbackRule: '' })
+    }
+    if (path === '/api/catalog/tables/sales/orders/history') {
+      return json(r, { snapshots: [], columns: [], rows: [] })
+    }
+    if (path === '/api/query') return json(r, { columns: [], rows: [], row_count: 0 })
+    if (path === '/api/lineage') {
+      return json(r, {
+        nodes: [
+          { id: 'a', namespace: 'warehouse.sales', name: 'orders', visible: true },
+          { id: 'b', namespace: 'warehouse.sales', name: 'trips', visible: true },
+        ],
+        edges: [{ from: 'b', to: 'a', jobNamespace: 'jobs', jobName: 'nightly_load', runId: 'r1', eventTime: '2026-01-01T00:00:00Z' }],
+      })
+    }
+    return json(r, {})
+  })
+
+  await page.goto('/lineage?catalog=warehouse&schema=sales&table=orders')
+  const link = page.locator('main').getByRole('link', { name: 'Open in catalog' })
+  await expect(link).toHaveAttribute('href', '/catalog?catalog=warehouse&ns=sales&tbl=orders')
+  await link.click()
+  await expect(page).toHaveURL(/\/catalog\?catalog=warehouse&ns=sales&tbl=orders/)
+  await expect(page.locator('main')).toContainText('orders')
+})
