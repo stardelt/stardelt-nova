@@ -974,6 +974,28 @@ export type QueryLogParams = {
 /** One page of a task's log; `tryNumber` and `token` are optional, as the backend's own query. */
 export type PipelineLogParams = { tryNumber?: number; token?: string }
 
+export type LineageNodeView = {
+  id: string
+  namespace: string
+  name: string
+  visible: boolean
+  label?: string | null
+}
+
+export type LineageEdgeView = {
+  from: string
+  to: string
+  jobNamespace: string
+  jobName: string
+  runId: string
+  eventTime: string
+}
+
+export type LineageGraphView = {
+  nodes: LineageNodeView[]
+  edges: LineageEdgeView[]
+}
+
 function pipelineLogUrl(
   namespace: string,
   name: string,
@@ -1096,6 +1118,15 @@ export const api = {
     jpost<{ namespace: string }>(catalogPath('/api/catalog/namespaces', catalog), { namespace }),
   upload:       (req: UploadRequest)          => jpost<UploadResult>('/api/ingest/upload', req),
   transfer:     (req: TransferRequest)        => jpost<TransferResult>('/api/transfer', req),
+  lineage:      (params: { catalog?: string; schema?: string; table?: string; depth?: number }) => {
+    const qs = new URLSearchParams()
+    if (params.catalog) qs.set('catalog', params.catalog)
+    if (params.schema) qs.set('schema', params.schema)
+    if (params.table) qs.set('table', params.table)
+    if (params.depth != null) qs.set('depth', String(params.depth))
+    const query = qs.toString()
+    return jget<LineageGraphView>(query ? `/api/lineage?${query}` : '/api/lineage')
+  },
 }
 
 /**
