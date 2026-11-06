@@ -117,6 +117,11 @@ export default function Pipelines() {
       return rows.some((p) => p.state === 'running' || p.state === 'loading') ? 10_000 : 30_000
     },
   })
+  const principals = useQuery({
+    queryKey: ['service-principals'],
+    queryFn: api.servicePrincipals,
+    refetchInterval: 60_000,
+  })
   // A delete on the detail page comes back here with its notice in the route state; show it
   // once, then replace the entry so Back does not bring the sentence along.
   useEffect(() => {
@@ -191,6 +196,89 @@ export default function Pipelines() {
               ))}
             </tbody>
           </table>
+        )}
+      </div>
+
+      <div className="card relative overflow-x-auto">
+        <div className="px-5 pt-5">
+          <h2 className="text-lg font-semibold">Service principals</h2>
+          <p className="text-text-dim text-sm">
+            How your groups' jobs and maintenance tasks sign in without a person.
+          </p>
+        </div>
+        {principals.isLoading && (
+          <p className="px-5 py-5 text-sm text-text-mute">Loading service principals…</p>
+        )}
+        {principals.isError && (
+          <div className="px-5 py-5">
+            <ErrorBox error={principals.error} onRetry={() => void principals.refetch()} />
+          </div>
+        )}
+        {principals.data && (
+          <>
+            {(() => {
+              const rows = principals.data?.principals ?? []
+              if (rows.length === 0) {
+                return (
+                  <p className="px-5 py-5 text-sm text-text-mute">
+                    No service principals in your groups yet. An administrator creates one when a group needs a non-human identity.
+                  </p>
+                )
+              }
+              return (
+                <table className="w-full text-sm">
+                  <caption className="sr-only">Service principals of your groups.</caption>
+                  <thead className="bg-bg-soft/50">
+                    <tr>
+                      <th scope="col" className="th w-[14rem] px-5 py-2.5">
+                        Name
+                      </th>
+                      <th scope="col" className="th px-3 py-2.5">
+                        Group
+                      </th>
+                      <th scope="col" className="th px-3 py-2.5">
+                        Purpose
+                      </th>
+                      <th scope="col" className="th px-3 py-2.5">
+                        Audiences
+                      </th>
+                      <th scope="col" className="th px-3 py-2.5">
+                        State
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map((sp) => (
+                      <tr key={sp.name} className="border-t border-border/70 hover:bg-bg-soft/30">
+                        <td className="td px-5">
+                          <span className="font-mono text-xs">{sp.name}</span>
+                        </td>
+                        <td className="td px-3 text-text-dim">
+                          <span className="whitespace-nowrap">{sp.ownerGroup}</span>
+                        </td>
+                        <td className="td px-3">{sp.purpose}</td>
+                        <td className="td px-3">
+                          {sp.audiences && sp.audiences.length > 0 ? sp.audiences.join(', ') : '—'}
+                        </td>
+                        <td className="td px-3">
+                          {sp.ready ? (
+                            <span className={`badge ${GOOD}`}>Ready</span>
+                          ) : (
+                            <>
+                              <span className={`badge ${WAIT}`}>Not ready</span>
+                              <p className="mt-1 max-w-[22rem] text-xs text-text-mute break-words">
+                                {sp.message ?? 'no status yet'}
+                              </p>
+                            </>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )
+            })()}
+          </>
         )}
       </div>
 

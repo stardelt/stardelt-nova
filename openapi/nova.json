@@ -2550,95 +2550,6 @@
         }
       }
     },
-    "/api/lineage": {
-      "get": {
-        "tags": [
-          "public"
-        ],
-        "operationId": "lineage_graph",
-        "parameters": [
-          {
-            "name": "catalog",
-            "in": "query",
-            "description": "Catalog",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "schema",
-            "in": "query",
-            "description": "Schema",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "table",
-            "in": "query",
-            "description": "Table",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "depth",
-            "in": "query",
-            "description": "Depth 1-5, default 2",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "format": "int32"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Lineage graph",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LineageGraph"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Not visible"
-          }
-        }
-      }
-    },
-    "/api/lineage/runs/{run_id}": {
-      "get": {
-        "tags": [
-          "public"
-        ],
-        "operationId": "lineage_run_detail",
-        "parameters": [
-          {
-            "name": "run_id",
-            "in": "path",
-            "description": "Run ID",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Run detail"
-          },
-          "404": {
-            "description": "Not found"
-          }
-        }
-      }
-    },
     "/api/me": {
       "get": {
         "tags": [
@@ -4865,6 +4776,57 @@
         }
       }
     },
+    "/api/service-principals": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "description": "The service principals the caller may see: every `ServicePrincipal` of their groups, and all of them for an administrator. `purpose` is the resource's `spec.purpose` (default `pipeline`); `audiences` are the resource's audiences; `ready` is `status.ready`; `message` is `null` when ready, otherwise the `Ready` condition's message, or `no status yet`. Credentials are never part of an answer. Answers `Cache-Control: no-store`.",
+        "operationId": "service_principals_list",
+        "responses": {
+          "200": {
+            "description": "The caller's principals, sorted by name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServicePrincipalsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token to sign in with",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The cluster did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No cluster connection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/settings": {
       "get": {
         "tags": [
@@ -6609,87 +6571,6 @@
           }
         }
       },
-      "LineageEdge": {
-        "type": "object",
-        "required": [
-          "from",
-          "to",
-          "jobNamespace",
-          "jobName",
-          "runId",
-          "eventTime"
-        ],
-        "properties": {
-          "eventTime": {
-            "type": "string"
-          },
-          "from": {
-            "type": "string"
-          },
-          "jobName": {
-            "type": "string"
-          },
-          "jobNamespace": {
-            "type": "string"
-          },
-          "runId": {
-            "type": "string"
-          },
-          "to": {
-            "type": "string"
-          }
-        }
-      },
-      "LineageGraph": {
-        "type": "object",
-        "required": [
-          "nodes",
-          "edges"
-        ],
-        "properties": {
-          "edges": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/LineageEdge"
-            }
-          },
-          "nodes": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/LineageNode"
-            }
-          }
-        }
-      },
-      "LineageNode": {
-        "type": "object",
-        "required": [
-          "id",
-          "namespace",
-          "name",
-          "visible"
-        ],
-        "properties": {
-          "id": {
-            "type": "string"
-          },
-          "label": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "name": {
-            "type": "string"
-          },
-          "namespace": {
-            "type": "string"
-          },
-          "visible": {
-            "type": "boolean"
-          }
-        }
-      },
       "Link": {
         "type": "object",
         "description": "A deep link into an app's own UI.",
@@ -8348,6 +8229,59 @@
           "truncated": {
             "type": "boolean",
             "description": "True when more tables match than were returned, or when the catalog has more namespaces than one\nrequest reads (100): the answer is then a prefix, so narrow the words or name the catalog."
+          }
+        }
+      },
+      "ServicePrincipalView": {
+        "type": "object",
+        "description": "One `ServicePrincipal` the caller may see (#479).",
+        "required": [
+          "name",
+          "ownerGroup",
+          "purpose",
+          "audiences",
+          "ready"
+        ],
+        "properties": {
+          "audiences": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "message": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`null` when ready; otherwise the same sentence the Schedule dialog would refuse with."
+          },
+          "name": {
+            "type": "string"
+          },
+          "ownerGroup": {
+            "type": "string"
+          },
+          "purpose": {
+            "type": "string"
+          },
+          "ready": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ServicePrincipalsResponse": {
+        "type": "object",
+        "description": "`GET /api/service-principals`: the principals the caller may see.",
+        "required": [
+          "principals"
+        ],
+        "properties": {
+          "principals": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ServicePrincipalView"
+            }
           }
         }
       },

@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Lineage graph API (D40, WP-34a).
 
 use std::collections::{HashMap, HashSet};

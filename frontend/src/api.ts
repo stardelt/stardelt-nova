@@ -555,6 +555,19 @@ export type PipelinePrincipal = {
   message: string | null
 }
 
+/** One service principal of the caller's groups (`GET /api/service-principals`). */
+export type ServicePrincipal = {
+  name: string
+  ownerGroup: string
+  /** `pipeline`, `maintenance` or `collector`; it decides nothing by itself. */
+  purpose: string
+  /** What the principal's tokens are valid for: `trino`, `lakekeeper`. */
+  audiences: string[]
+  ready: boolean
+  /** `null` when ready; otherwise why not. */
+  message: string | null
+}
+
 /** `POST /api/pipelines` (`Schedule`, stardelt-nova#210, options stardelt-nova#223). */
 export type CreatePipelineRequest = {
   name: string
@@ -968,6 +981,7 @@ export type LineageNodeView = {
   visible: boolean
   label?: string | null
 }
+
 export type LineageEdgeView = {
   from: string
   to: string
@@ -976,8 +990,11 @@ export type LineageEdgeView = {
   runId: string
   eventTime: string
 }
-export type LineageGraph = { nodes: LineageNodeView[]; edges: LineageEdgeView[] }
-export type LineageParams = { catalog: string; schema: string; table: string; depth?: number }
+
+export type LineageGraphView = {
+  nodes: LineageNodeView[]
+  edges: LineageEdgeView[]
+}
 
 function pipelineLogUrl(
   namespace: string,
@@ -1053,13 +1070,10 @@ export const api = {
   jobs:         ()                            => jget<Job[]>('/api/jobs'),
   queryLog:     (p: QueryLogParams)           => jget<QueryLogPage>(queryLogUrl(p)),
   queryLogDetail: (id: string)                => jget<QueryLogDetail>(`/api/query-log/${seg(id)}`),
-  lineage: (p: LineageParams) => {
-    const qs = new URLSearchParams({ catalog: p.catalog, schema: p.schema, table: p.table, depth: String(p.depth ?? 2) })
-    return jget<LineageGraph>(`/api/lineage?${qs.toString()}`)
-  },
   pipelines:    ()                            => jget<{ pipelines: PipelineView[] }>('/api/pipelines'),
   /** The caller's own groups and their principals (`Schedule`, #210). */
   pipelinePrincipals: ()                      => jget<{ groups: PipelinePrincipal[] }>('/api/pipelines/principals'),
+  servicePrincipals: ()                       => jget<{ principals: ServicePrincipal[] }>('/api/service-principals'),
   /** The latest published versions of the notebooks in the caller's groups (#225). */
   notebooks:    ()                            => jget<PublishedNotebook[]>('/api/notebooks'),
   /** One notebook's published versions, newest first, at most 50. */
@@ -1104,6 +1118,15 @@ export const api = {
     jpost<{ namespace: string }>(catalogPath('/api/catalog/namespaces', catalog), { namespace }),
   upload:       (req: UploadRequest)          => jpost<UploadResult>('/api/ingest/upload', req),
   transfer:     (req: TransferRequest)        => jpost<TransferResult>('/api/transfer', req),
+  lineage:      (params: { catalog?: string; schema?: string; table?: string; depth?: number }) => {
+    const qs = new URLSearchParams()
+    if (params.catalog) qs.set('catalog', params.catalog)
+    if (params.schema) qs.set('schema', params.schema)
+    if (params.table) qs.set('table', params.table)
+    if (params.depth != null) qs.set('depth', String(params.depth))
+    const query = qs.toString()
+    return jget<LineageGraphView>(query ? `/api/lineage?${query}` : '/api/lineage')
+  },
 }
 
 /**
