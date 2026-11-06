@@ -2094,7 +2094,7 @@ mod router_tests {
         };
         let resp = crate::lineage_api::graph(
             axum::extract::State(state),
-            axum::Extension(Some(signed_in("alice"))),
+            Some(axum::Extension(signed_in("alice"))),
             axum::extract::Query(q),
         )
         .await;
@@ -2147,7 +2147,7 @@ mod router_tests {
         };
         let resp = crate::lineage_api::graph(
             axum::extract::State(state),
-            axum::Extension(Some(signed_in("alice"))),
+            Some(axum::Extension(signed_in("alice"))),
             axum::extract::Query(q),
         )
         .await;
@@ -2198,7 +2198,7 @@ mod router_tests {
         let b1 = axum::body::to_bytes(
             crate::lineage_api::graph(
                 axum::extract::State(state1),
-                axum::Extension(Some(signed_in("alice"))),
+                Some(axum::Extension(signed_in("alice"))),
                 axum::extract::Query(q1),
             )
             .await
@@ -2224,7 +2224,7 @@ mod router_tests {
         let b2 = axum::body::to_bytes(
             crate::lineage_api::graph(
                 axum::extract::State(state2),
-                axum::Extension(Some(signed_in("alice"))),
+                Some(axum::Extension(signed_in("alice"))),
                 axum::extract::Query(q2),
             )
             .await
@@ -2260,7 +2260,7 @@ mod router_tests {
         let state = lineage_state(pool, &["mobility"], "alice");
         let resp = crate::lineage_api::run_detail(
             axum::extract::State(state),
-            axum::Extension(Some(signed_in("alice"))),
+            Some(axum::Extension(signed_in("alice"))),
             axum::extract::Path(run_id.to_string()),
         )
         .await;

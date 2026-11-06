@@ -107,9 +107,10 @@ fn dataset_id(ns: &str, name: &str) -> String {
 )]
 pub async fn graph(
     State(state): State<Arc<AppState>>,
-    Extension(principal): Extension<Option<Principal>>,
+    principal: Option<Extension<Principal>>,
     Query(q): Query<GraphQuery>,
 ) -> Response {
+    let principal = principal.map(|Extension(p)| p);
     let depth = q.depth.clamp(1i32, 5i32);
 
     // Determine the starting dataset
@@ -341,9 +342,10 @@ fn demo_graph_response(_start_ns: &str, _start_name: &str) -> Response {
 )]
 pub async fn run_detail(
     State(state): State<Arc<AppState>>,
-    Extension(principal): Extension<Option<Principal>>,
+    principal: Option<Extension<Principal>>,
     Path(run_id): Path<String>,
 ) -> Response {
+    let principal = principal.map(|Extension(p)| p);
     if state.demo {
         return Json(serde_json::json!({
             "run_id": run_id,
