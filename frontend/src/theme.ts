@@ -1,5 +1,5 @@
 // The theme library (stardelt-internal/design/themes.md): four palettes, chosen per
-// person. Dark blue is the default; the choice is applied on <html data-theme>.
+// person. Graphite is the default; the choice is applied on <html data-theme>.
 import { useSyncExternalStore } from 'react'
 
 export type Theme = 'dark' | 'light' | 'graphite' | 'silver'
@@ -9,8 +9,8 @@ export type Theme = 'dark' | 'light' | 'graphite' | 'silver'
  * one sentence, and three swatches (background, surface, accent) for its card.
  */
 export const THEMES: { id: Theme; label: string; description: string; swatch: [string, string, string] }[] = [
-  { id: 'dark',     label: 'Dark blue', description: 'The stardelt default.',          swatch: ['rgb(11 14 31)', 'rgb(22 27 53)', 'rgb(105 121 255)'] },
-  { id: 'graphite', label: 'Graphite',  description: 'Dark, neutral anthracite.',      swatch: ['rgb(24 25 27)', 'rgb(40 42 46)', 'rgb(122 138 255)'] },
+  { id: 'dark',     label: 'Dark blue', description: 'Dark with a blue tint.',          swatch: ['rgb(11 14 31)', 'rgb(22 27 53)', 'rgb(105 121 255)'] },
+  { id: 'graphite', label: 'Graphite',  description: 'The stardelt default.',          swatch: ['rgb(24 25 27)', 'rgb(40 42 46)', 'rgb(122 138 255)'] },
   { id: 'light',    label: 'Light',     description: 'Light with a blue tint.',        swatch: ['rgb(246 247 251)', 'rgb(238 240 247)', 'rgb(74 91 240)'] },
   { id: 'silver',   label: 'Silver',    description: 'Light, neutral gray.',           swatch: ['rgb(240 241 242)', 'rgb(230 232 234)', 'rgb(66 82 225)'] },
 ]
@@ -56,7 +56,7 @@ export function hasThemeChoice(): boolean {
 
 export function getTheme(): Theme {
   if (currentTheme) return currentTheme
-  currentTheme = storedTheme() ?? 'dark'
+  currentTheme = storedTheme() ?? 'graphite'
   return currentTheme
 }
 
@@ -75,7 +75,7 @@ export function applyTheme(theme: Theme) {
   window.dispatchEvent(new Event(EVENT))
 }
 
-/** The first paint: the stored theme, or dark without writing a choice that was never made. */
+/** The first paint: the stored theme, or graphite without writing a choice that was never made. */
 export function initTheme() {
   document.documentElement.dataset.theme = getTheme()
 }

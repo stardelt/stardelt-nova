@@ -4016,18 +4016,18 @@ test.describe('preferences', () => {
     }
   })
 
-  test('an unknown stored theme falls back to dark', async ({ browser }) => {
+  test('an unknown stored theme falls back to graphite', async ({ browser }) => {
     // An id from an older or newer version is not a theme: neither the stored value nor
     // the personal setting may put the UI into it (or overwrite it behind the person).
     const { context, page } = await open(browser, { settings: { theme: 'neon' } })
     await context.addInitScript(() => { localStorage.setItem('stardelt-nova:theme', 'neon') })
 
     await page.goto('/')
-    await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark')
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'graphite')
     expect(await page.evaluate(() => localStorage.getItem('stardelt-nova:theme'))).toBe('neon')
 
     await page.goto('/preferences')
-    await expect(page.getByRole('radio', { name: 'Dark blue', exact: true })).toBeChecked()
+    await expect(page.getByRole('radio', { name: 'Graphite', exact: true })).toBeChecked()
     await context.close()
   })
 
@@ -4062,15 +4062,18 @@ test.describe('preferences', () => {
     const group = page.getByRole('group', { name: 'Appearance' })
     const card = (id: string) => page.locator(`label:has(input[value="${id}"])`)
 
-    // Four native radios, exactly one checked: dark blue, the default.
+    // Four native radios, exactly one checked: graphite, the default.
     await expect(group.getByRole('radio')).toHaveCount(4)
     await expect(group.locator('input[type=radio]:checked')).toHaveCount(1)
-    await expect(group.getByRole('radio', { name: 'Dark blue', exact: true })).toBeChecked()
+    await expect(group.getByRole('radio', { name: 'Graphite', exact: true })).toBeChecked()
     await expect(group.getByText('Selected', { exact: true })).toHaveCount(1)
-    await expect(card('dark')).toContainText('Selected')
+    await expect(card('graphite')).toContainText('Selected')
 
     // Arrow keys move the selection: right/down forward, left back, wrapping round.
-    await group.getByRole('radio', { name: 'Dark blue', exact: true }).focus()
+    await group.getByRole('radio', { name: 'Graphite', exact: true }).focus()
+    await page.keyboard.press('ArrowLeft')
+    await expect(group.getByRole('radio', { name: 'Dark blue', exact: true })).toBeChecked()
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark')
     await page.keyboard.press('ArrowRight')
     await expect(group.getByRole('radio', { name: 'Graphite', exact: true })).toBeChecked()
     await expect(page.locator('html')).toHaveAttribute('data-theme', 'graphite')

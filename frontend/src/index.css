@@ -5,7 +5,7 @@
    root, respects .gitignore), which is why the old `content` globs — index.html and
    src — need no replacement. */
 
-/* Brand tokens. Dark is the default (stardelt brand); Graphite, Light and Silver are
+/* Brand tokens. Graphite is the default; Dark blue, Light and Silver are
    opt-in via <html data-theme="…">, chosen in Preferences or from the top bar
    (`frontend/src/theme.ts` holds the four ids and their labels).
 
@@ -41,7 +41,6 @@
 }
 
 @layer base {
-  :root,
   [data-theme='dark'] {
     --c-bg: 11 14 31;
     --c-bg-elev: 17 21 43;
@@ -64,8 +63,10 @@
     color-scheme: dark;
   }
 
-  /* Graphite (stardelt-nova#221): the dark theme with no blue cast — a neutral
-     anthracite. The accent stays the brand's, a little lighter so it reads on gray. */
+  /* Graphite (stardelt-nova#221), the default: the dark theme with no blue cast — a
+     neutral anthracite. The accent stays the brand's, a little lighter so it reads on
+     gray. `:root:not([data-theme])` covers a page without the attribute. */
+  :root:not([data-theme]),
   [data-theme='graphite'] {
     --c-bg: 24 25 27;
     --c-bg-elev: 31 33 36;
@@ -135,6 +136,11 @@
 
   html, body, #root {
     height: 100%;
+  }
+  /* A solid colour on <html> too: the canvas outside <body> (overscroll, rubber-band
+     scrolling in Safari) shows this, never the browser's white. */
+  html {
+    background-color: rgb(var(--c-bg));
   }
   body {
     background:
