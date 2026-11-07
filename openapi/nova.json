@@ -5358,6 +5358,98 @@
         }
       }
     },
+    "/api/streams/{namespace}/{name}": {
+      "patch": {
+        "tags": [
+          "public"
+        ],
+        "summary": "Stop or resume one stream: merge `spec.stopped` and answer the updated view.",
+        "description": "Stop or resume one stream by setting `spec.stopped` (the one verb a stream has, D42 §4.4). `true` stops the job and keeps the checkpoint so `false` resumes from it. A stream the caller may not see, a foreign namespace, and a name that does not exist all answer the same `404`. The answer is the updated stream view. Answers `Cache-Control: no-store`.",
+        "operationId": "streams_patch",
+        "parameters": [
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "The stream's namespace; only Nova's own namespace",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "description": "The stream's name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StreamState"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The stream, with `spec.stopped` applied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StreamView"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token to sign in with",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such stream, or the caller may not see it, or the namespace is not Nova's own",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The cluster did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No cluster connection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/transfer": {
       "post": {
         "tags": [
@@ -8736,6 +8828,19 @@
           },
           "value": {
             "description": "Any JSON value."
+          }
+        }
+      },
+      "StreamState": {
+        "type": "object",
+        "description": "The one verb a stream has (D42 §4.4): stop or resume by setting `spec.stopped`.",
+        "required": [
+          "stopped"
+        ],
+        "properties": {
+          "stopped": {
+            "type": "boolean",
+            "description": "The desired `spec.stopped`."
           }
         }
       },
