@@ -1,5 +1,5 @@
-import { useQuery } from '@tanstack/react-query'
-import { api } from '../api'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { api, errorMessage, type StreamView } from '../api'
 import ErrorBox from '../components/ErrorBox'
 import { formatWhen } from './Pipelines'
 
@@ -24,7 +24,13 @@ function PhaseBadge({ phase }: { phase: string }) {
 }
 
 export default function Streams() {
+  const qc = useQueryClient()
   const streams = useQuery({ queryKey: ['streams'], queryFn: api.streams, refetchInterval: 15_000 })
+  const mutation = useMutation({
+    mutationFn: ({ s, stopped }: { s: StreamView; stopped: boolean }) =>
+      api.setStreamState(s.namespace, s.name, stopped),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['streams'] }),
+  })
 
   return (
     <div className="flex flex-col gap-4">
@@ -46,44 +52,63 @@ export default function Streams() {
       )}
 
       {streams.data && streams.data.streams.length > 0 && (
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-border text-left text-text-dim">
-                <th className="py-2 pr-3 font-medium">Name</th>
-                <th className="py-2 pr-3 font-medium">Phase</th>
-                <th className="py-2 pr-3 font-medium">Source</th>
-                <th className="py-2 pr-3 font-medium">Sink</th>
-                <th className="py-2 pr-3 font-medium">Checkpoint</th>
-                <th className="py-2 font-medium">Last error</th>
-              </tr>
-            </thead>
-            <tbody>
-              {streams.data.streams.map((s) => (
-                <tr key={s.namespace + '/' + s.name} className="border-b border-border/60 align-top">
-                  <td className="py-2 pr-3">
-                    <span className="font-mono">{s.name}</span>
-                    <div className="text-text-dim text-xs">{s.owner_group}</div>
-                  </td>
-                  <td className="py-2 pr-3">
-                    <PhaseBadge phase={s.phase} />
-                  </td>
-                  <td className="py-2 pr-3">
-                    {s.source_connection} · {s.source_topic}
-                  </td>
-                  <td className="py-2 pr-3">
-                    <div>
-                      {s.sink_catalog}.{s.sink_table}
-                    </div>
-                    <div className="text-xs text-text-dim">{s.sink_mode}</div>
-                  </td>
-                  <td className="py-2 pr-3">{formatWhen(s.last_checkpoint_at).text}</td>
-                  <td className="py-2 text-bad text-xs break-words">{s.last_error ?? '—'}</td>
+        <>
+          {mutation.isError && (
+            <p role="alert" className="text-sm text-bad">
+              {errorMessage(mutation.error)}
+            </p>
+          )}
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-border text-left text-text-dim">
+                  <th className="py-2 pr-3 font-medium">Name</th>
+                  <th className="py-2 pr-3 font-medium">Phase</th>
+                  <th className="py-2 pr-3 font-medium">Source</th>
+                  <th className="py-2 pr-3 font-medium">Sink</th>
+                  <th className="py-2 pr-3 font-medium">Checkpoint</th>
+                  <th className="py-2 pr-3 font-medium">Last error</th>
+                  <th className="py-2 font-medium">Job</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody>
+                {streams.data.streams.map((s) => (
+                  <tr key={s.namespace + '/' + s.name} className="border-b border-border/60 align-top">
+                    <td className="py-2 pr-3">
+                      <span className="font-mono">{s.name}</span>
+                      <div className="text-text-dim text-xs">{s.owner_group}</div>
+                    </td>
+                    <td className="py-2 pr-3">
+                      <PhaseBadge phase={s.phase} />
+                    </td>
+                    <td className="py-2 pr-3">
+                      {s.source_connection} · {s.source_topic}
+                    </td>
+                    <td className="py-2 pr-3">
+                      <div>
+                        {s.sink_catalog}.{s.sink_table}
+                      </div>
+                      <div className="text-xs text-text-dim">{s.sink_mode}</div>
+                    </td>
+                    <td className="py-2 pr-3">{formatWhen(s.last_checkpoint_at).text}</td>
+                    <td className="py-2 pr-3 text-bad text-xs break-words">{s.last_error ?? '—'}</td>
+                    <td className="py-2">
+                      <button
+                        type="button"
+                        aria-label={`${s.stopped ? 'Resume' : 'Stop'} ${s.name}`}
+                        disabled={mutation.isPending && mutation.variables?.s.name === s.name}
+                        onClick={() => mutation.mutate({ s, stopped: !s.stopped })}
+                        className="rounded border border-border bg-bg-soft px-2 py-1 text-xs text-text hover:bg-bg disabled:opacity-50"
+                      >
+                        {s.stopped ? 'Resume' : 'Stop'}
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
       )}
     </div>
   )
