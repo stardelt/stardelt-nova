@@ -29,6 +29,7 @@ const groups: NavGroup[] = [
       { to: '/data', label: 'Load & transfer', icon: 'upload' },
       { to: '/connections', label: 'Connections', icon: 'key' },
       { to: '/pipelines', label: 'Pipelines', icon: 'play' },
+      { to: '/streams', label: 'Streams', icon: 'pulse' },
       { to: '/deployments', label: 'Deployments', icon: 'arrow' },
       { to: '/jobs', label: 'Activity', icon: 'clock' },
       { to: '/notebooks', label: 'Notebooks', icon: 'notebook' },
