@@ -373,7 +373,10 @@ function Stat({ label, value, hint, icon, tone }: {
         <span className="label">{label}</span>
         <Icon name={icon} className="w-4 h-4 text-text-mute" />
       </div>
-      <div className={`text-2xl font-semibold mt-2 ${tone === 'ok' ? 'text-success' : ''}`}>{value}</div>
+      <div className={`text-2xl font-semibold mt-2 flex items-center gap-2 lowercase first-letter:uppercase ${tone === 'ok' ? 'text-text' : ''}`}>
+        {tone === 'ok' && <span className="w-2 h-2 rounded-full bg-success shrink-0" aria-hidden="true" />}
+        {value}
+      </div>
       <div className="text-xs text-text-mute mt-0.5 break-words">{hint}</div>
     </div>
   )

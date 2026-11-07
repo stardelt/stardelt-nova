@@ -29,7 +29,7 @@ export default function Streams() {
   return (
     <div className="flex flex-col gap-4">
       <div>
-        <h1 className="text-lg font-semibold">Streams</h1>
+        <h1 className="text-2xl font-bold tracking-tight">Streams</h1>
         <p className="text-sm text-text-dim">
           Jobs that read a topic from the streaming bus and write an Iceberg table. The operator runs them; this page
           reports what it sees.
