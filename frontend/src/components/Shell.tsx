@@ -354,7 +354,7 @@ export default function Shell() {
             className="btn-ghost px-2.5 py-2"
             aria-label="Toggle theme"
           >
-            {darkTheme ? <Icon name="spark" className="w-4 h-4" /> : <Icon name="pulse" className="w-4 h-4" />}
+            {darkTheme ? <Icon name="sun" className="w-4 h-4" /> : <Icon name="moon" className="w-4 h-4" />}
           </button>
         </header>
 
