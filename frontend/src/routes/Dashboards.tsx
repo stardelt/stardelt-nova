@@ -39,16 +39,13 @@ export default function Dashboards() {
     <div className="h-full flex flex-col gap-4">
       <header className="flex items-center justify-between gap-4 flex-wrap">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">Dashboards</h1>
+          <h1 className="text-3xl font-bold tracking-tight">Dashboards</h1>
           <p className="text-text-dim text-sm mt-1">
             Apache Superset, embedded.
             {deployed
-              // The password is generated per cluster (scripts/app-secrets.sh in the
-              // platform repo) and kept in the superset-admin Secret; the old
-              // "admin / admin" hint stopped being true when that landed, and
-              // printing a kubectl command here would hand a data engineer
-              // Kubernetes vocabulary they do not need.
-              ? <> Sign in with the Superset admin account.</>
+              // The embed uses the platform IdP; the superset-admin Secret is the API/administrator
+              // account, not a UI login.
+              ? <> Sign in with your platform account.</>
               : apps.isLoading
                 ? <> Checking whether it is deployed…</>
                 : apps.isError
