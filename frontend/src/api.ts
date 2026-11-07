@@ -875,7 +875,7 @@ async function jget<T>(path: string): Promise<T> {
   return readJson<T>(path, r)
 }
 
-async function jsend<T>(method: 'POST' | 'PUT', path: string, body: unknown): Promise<T> {
+async function jsend<T>(method: 'POST' | 'PUT' | 'PATCH', path: string, body: unknown): Promise<T> {
   const r = await send(path, {
     method,
     headers: { 'content-type': 'application/json' },
@@ -895,6 +895,10 @@ async function jpost<T>(path: string, body: unknown): Promise<T> {
 
 async function jput<T>(path: string, body: unknown): Promise<T> {
   return jsend<T>('PUT', path, body)
+}
+
+async function jpatch<T>(path: string, body: unknown): Promise<T> {
+  return jsend<T>('PATCH', path, body)
 }
 
 /** A delete answers 204 with no body; a failure carries the API's sentence like any other. */
@@ -1089,6 +1093,9 @@ export const api = {
   queryLogDetail: (id: string)                => jget<QueryLogDetail>(`/api/query-log/${seg(id)}`),
   pipelines:    ()                            => jget<{ pipelines: PipelineView[] }>('/api/pipelines'),
   streams:       ()                            => jget<{ streams: StreamView[] }>('/api/streams'),
+  /** Stop or resume one stream; answers the updated view (`spec.stopped`, D42). */
+  setStreamState: (namespace: string, name: string, stopped: boolean) =>
+    jpatch<StreamView>(`/api/streams/${seg(namespace)}/${seg(name)}`, { stopped }),
   /** The caller's own groups and their principals (`Schedule`, #210). */
   pipelinePrincipals: ()                      => jget<{ groups: PipelinePrincipal[] }>('/api/pipelines/principals'),
   servicePrincipals: ()                       => jget<{ principals: ServicePrincipal[] }>('/api/service-principals'),
