@@ -2217,7 +2217,7 @@ fn log_view(page: LogPage) -> LogView {
 // Errors and the ticketing facts
 // ---------------------------------------------------------------------------
 
-fn no_cluster() -> Fail {
+pub(crate) fn no_cluster() -> Fail {
     Fail::new(StatusCode::SERVICE_UNAVAILABLE, "no cluster connection")
 }
 
@@ -2348,7 +2348,7 @@ fn task_lookup_fail(e: AirflowError) -> Fail {
 
 /// The status for a read of a resource: the sentence stays generic (a kube error names the API
 /// server), the detail goes to the log.
-fn resource_fail(e: ResourceError) -> Fail {
+pub(crate) fn resource_fail(e: ResourceError) -> Fail {
     match e {
         ResourceError::Unavailable(message) => {
             tracing::warn!(error = %message, "pipeline resource request failed");
@@ -3961,7 +3961,7 @@ pub(crate) fn router() -> Router<Arc<AppState>> {
         .route_layer(axum::middleware::from_fn(no_store))
 }
 
-fn answer<T: Serialize>(result: Result<T, Fail>) -> Response {
+pub(crate) fn answer<T: Serialize>(result: Result<T, Fail>) -> Response {
     answer_with(StatusCode::OK, result)
 }
 
