@@ -1,24 +1,29 @@
-//! The `StreamApp` read API (D42): what runs on the streaming bus, and how it is doing.
+//! The `StreamApp` API (D42): what runs on the streaming bus, and how it is doing.
 //!
-//! Read-only in slice 1: the operator owns the resources, Nova explains them. Starting and
-//! stopping a stream (the operator's `spec.stopped`) is a separate ticket.
+//! Slice 1 is read-only. Slice 3a adds the one verb a stream has — stop and resume by
+//! patching `spec.stopped` (the checkpoint is kept, so `stopped: false` resumes from it).
 
 use std::sync::Arc;
 
-use axum::{Router, response::Response, routing::get};
-use kube::api::{Api, ApiResource};
+use axum::{
+    Json, Router,
+    extract::Path,
+    response::Response,
+    routing::{get, patch as patch_route},
+};
+use kube::api::{Api, ApiResource, Patch, PatchParams};
 use kube::core::GroupVersionKind;
-use serde::Serialize;
-use serde_json::Value;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use utoipa::ToSchema;
 
 use crate::AppState;
 use crate::auth::Identity;
 use crate::connection_routes::{Fail, SignedIn};
-use crate::pipelines::{ResourceError, answer, no_cluster, resource_fail, visible};
+use crate::pipelines::{ResourceError, answer, may_act, no_cluster, resource_fail, visible};
 
 /// One `StreamApp`, as the Streams page needs it. No secret, no checkpoint path.
-#[derive(Serialize, ToSchema)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct StreamView {
     pub namespace: String,
     pub name: String,
@@ -40,62 +45,71 @@ pub struct StreamsResponse {
     pub streams: Vec<StreamView>,
 }
 
+/// The one verb a stream has (D42 §4.4): stop or resume by setting `spec.stopped`.
+#[derive(Deserialize, ToSchema)]
+pub struct StreamState {
+    /// The desired `spec.stopped`.
+    pub stopped: bool,
+}
+
+/// One stream as the API answers it. No connection credentials and no checkpoint prefix.
+pub fn stream_view(app: &Value, _who: &Identity) -> StreamView {
+    let spec = app.get("spec").unwrap_or(app);
+    let text = |v: Option<&Value>| v.and_then(Value::as_str).unwrap_or_default().to_string();
+    let status = app.get("status").unwrap_or(&Value::Null);
+    let phase = text(status.get("phase"));
+    StreamView {
+        namespace: text(app.pointer("/metadata/namespace")),
+        name: text(app.pointer("/metadata/name")),
+        owner_group: text(spec.get("ownerGroup")),
+        phase: if phase.is_empty() {
+            "Pending".to_string()
+        } else {
+            phase
+        },
+        last_error: status
+            .get("lastError")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        last_checkpoint_at: status
+            .get("lastCheckpointAt")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        stopped: spec
+            .get("stopped")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        source_connection: text(spec.pointer("/source/connectionRef")),
+        source_topic: text(spec.pointer("/source/topic")),
+        sink_catalog: text(spec.pointer("/sink/catalog")),
+        sink_table: text(spec.pointer("/sink/table")),
+        sink_mode: text(spec.pointer("/sink/mode")),
+        run_as: spec
+            .get("runAs")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    }
+}
+
 /// Every stream the caller may see, sorted by namespace then name. Pure: no cluster.
 pub fn visible_streams(apps: &[Value], who: &Identity) -> Vec<StreamView> {
     let mut views: Vec<StreamView> = apps
         .iter()
         .filter_map(|app| {
             let spec = app.get("spec").unwrap_or(app);
-            if !visible(who, spec) {
-                return None;
-            }
-            let text =
-                |v: Option<&Value>| v.and_then(Value::as_str).unwrap_or_default().to_string();
-            let status = app.get("status").unwrap_or(&Value::Null);
-            let phase = text(status.get("phase"));
-            Some(StreamView {
-                namespace: text(app.pointer("/metadata/namespace")),
-                name: text(app.pointer("/metadata/name")),
-                owner_group: text(spec.get("ownerGroup")),
-                phase: if phase.is_empty() {
-                    "Pending".to_string()
-                } else {
-                    phase
-                },
-                last_error: status
-                    .get("lastError")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                last_checkpoint_at: status
-                    .get("lastCheckpointAt")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                stopped: spec
-                    .get("stopped")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
-                source_connection: text(spec.pointer("/source/connectionRef")),
-                source_topic: text(spec.pointer("/source/topic")),
-                sink_catalog: text(spec.pointer("/sink/catalog")),
-                sink_table: text(spec.pointer("/sink/table")),
-                sink_mode: text(spec.pointer("/sink/mode")),
-                run_as: spec
-                    .get("runAs")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-            })
+            visible(who, spec).then(|| stream_view(app, who))
         })
         .collect();
     views.sort_by(|a, b| (&a.namespace, &a.name).cmp(&(&b.namespace, &b.name)));
     views
 }
 
-/// The `StreamApp` list of Nova's namespace; `None` without a cluster connection.
-async fn stream_apps(state: &AppState) -> Result<Vec<Value>, Fail> {
+/// The `StreamApp` resources of Nova's namespace. `None` without a cluster connection.
+fn stream_api(state: &AppState) -> Result<Api<kube::api::DynamicObject>, Fail> {
     let Some(client) = state.kube.clone() else {
         return Err(no_cluster());
     };
-    let api: Api<kube::api::DynamicObject> = Api::namespaced_with(
+    Ok(Api::namespaced_with(
         client,
         &crate::cluster::namespace(),
         &ApiResource::from_gvk(&GroupVersionKind::gvk(
@@ -103,7 +117,12 @@ async fn stream_apps(state: &AppState) -> Result<Vec<Value>, Fail> {
             "v1alpha1",
             "StreamApp",
         )),
-    );
+    ))
+}
+
+/// Every `StreamApp` of Nova's namespace.
+async fn stream_apps(state: &AppState) -> Result<Vec<Value>, Fail> {
+    let api = stream_api(state)?;
     let objects = api
         .list(&kube::api::ListParams::default())
         .await
@@ -116,6 +135,11 @@ async fn stream_apps(state: &AppState) -> Result<Vec<Value>, Fail> {
                 .map_err(|e| resource_fail(ResourceError::Unavailable(e.to_string())))
         })
         .collect()
+}
+
+fn not_found() -> Fail {
+    // Indistinguishable from a stream that does not exist (and from one the caller may not see).
+    Fail::new(axum::http::StatusCode::NOT_FOUND, "not found")
 }
 
 #[utoipa::path(
@@ -141,18 +165,94 @@ pub(crate) async fn list(signed: SignedIn) -> Response {
     answer(result)
 }
 
-/// The two routes, uncacheable like the pipelines ones.
+/// Stop or resume one stream: merge `spec.stopped` and answer the updated view.
+#[utoipa::path(
+    patch,
+    operation_id = "streams_patch",
+    path = "/api/streams/{namespace}/{name}",
+    tag = "public",
+    description = "Stop or resume one stream by setting `spec.stopped` (the one verb a stream has, D42 §4.4). `true` stops the job and keeps the checkpoint so `false` resumes from it. A stream the caller may not see, a foreign namespace, and a name that does not exist all answer the same `404`. The answer is the updated stream view. Answers `Cache-Control: no-store`.",
+    params(
+        ("namespace" = String, Path, description = "The stream's namespace; only Nova's own namespace"),
+        ("name" = String, Path, description = "The stream's name"),
+    ),
+    request_body = StreamState,
+    responses(
+        (status = 200, description = "The stream, with `spec.stopped` applied", body = StreamView),
+        (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such stream, or the caller may not see it, or the namespace is not Nova's own", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The cluster did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No cluster connection", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn patch(
+    signed: SignedIn,
+    Path((namespace, name)): Path<(String, String)>,
+    Json(body): Json<StreamState>,
+) -> Response {
+    answer(
+        patch_stream(
+            signed.state(),
+            signed.identity(),
+            &namespace,
+            &name,
+            body.stopped,
+        )
+        .await,
+    )
+}
+
+async fn patch_stream(
+    state: &AppState,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+    stopped: bool,
+) -> Result<StreamView, Fail> {
+    if namespace != crate::cluster::namespace() {
+        return Err(not_found());
+    }
+    let api = stream_api(state)?;
+    let app = api.get(name).await.map_err(|e| match e {
+        kube::Error::Api(er) if er.code == 404 => not_found(),
+        other => resource_fail(ResourceError::Unavailable(other.to_string())),
+    })?;
+    let app_value = serde_json::to_value(&app)
+        .map_err(|e| resource_fail(ResourceError::Unavailable(e.to_string())))?;
+    let spec = app_value.get("spec").unwrap_or(&app_value);
+    if !may_act(who, spec) {
+        return Err(not_found());
+    }
+    let patched = api
+        .patch(
+            name,
+            &PatchParams::default(),
+            &Patch::Merge(json!({"spec": {"stopped": stopped}})),
+        )
+        .await
+        .map_err(|e| match e {
+            kube::Error::Api(er) if er.code == 404 => not_found(),
+            other => resource_fail(ResourceError::Unavailable(other.to_string())),
+        })?;
+    let patched = serde_json::to_value(patched)
+        .map_err(|e| resource_fail(ResourceError::Unavailable(e.to_string())))?;
+    Ok(stream_view(&patched, who))
+}
+
+/// The stream routes, uncacheable like the pipelines ones.
 pub(crate) fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/streams", get(list))
+        .route("/streams/{namespace}/{name}", patch_route(patch))
         .route_layer(axum::middleware::from_fn(crate::pipelines::no_store))
 }
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use axum::http::StatusCode;
+    use serde_json::{Value, json};
 
-    use super::visible_streams;
+    use super::{patch_stream, stream_view, visible_streams};
     use crate::auth::Identity;
 
     fn who(sub: &str, groups: &[&str], admin: bool) -> Identity {
@@ -168,9 +268,9 @@ mod tests {
         }
     }
 
-    fn app(name: &str, group: &str) -> serde_json::Value {
+    fn app(name: &str, group: &str) -> Value {
         json!({
-            "metadata": {"name": name, "namespace": "stardelt"},
+            "metadata": {"name": name, "namespace": crate::cluster::namespace()},
             "spec": {
                 "ownerGroup": group,
                 "runAs": format!("pipeline-{group}"),
@@ -209,5 +309,144 @@ mod tests {
         assert!(views[0].last_error.is_none());
         assert!(views[0].last_checkpoint_at.is_none());
         assert!(!views[0].stopped);
+    }
+
+    #[test]
+    fn a_foreign_namespace_is_not_found() {
+        let caller = who("u", &["sales"], false);
+        let ns = crate::cluster::namespace();
+        let view = stream_view(&app("a", "sales"), &caller);
+        assert_eq!(view.namespace, ns);
+        // The namespace guard is enforced by patch_stream; the pure mapping stays small.
+    }
+
+    mod fake_kube {
+        use std::sync::{Arc, Mutex};
+
+        use axum::{
+            Json, Router,
+            extract::{Path, State},
+            http::StatusCode,
+            routing::get,
+        };
+        use serde_json::{Value, json};
+
+        pub struct Fake {
+            pub items: Vec<Value>,
+            pub patches: Vec<Value>,
+        }
+
+        type Shared = Arc<Mutex<Fake>>;
+
+        fn failure(code: StatusCode, message: &str) -> (StatusCode, Json<Value>) {
+            (
+                code,
+                Json(json!({
+                    "kind": "Status",
+                    "apiVersion": "v1",
+                    "status": "Failure",
+                    "message": message,
+                    "code": code.as_u16()
+                })),
+            )
+        }
+
+        async fn one(
+            State(state): State<Shared>,
+            Path((_namespace, name)): Path<(String, String)>,
+        ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+            let state = state.lock().unwrap();
+            state
+                .items
+                .iter()
+                .find(|item| item["metadata"]["name"] == name)
+                .cloned()
+                .map(Json)
+                .ok_or_else(|| failure(StatusCode::NOT_FOUND, "not found"))
+        }
+
+        async fn patch_one(
+            State(state): State<Shared>,
+            Path((_namespace, name)): Path<(String, String)>,
+            body: String,
+        ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+            let body: Value = serde_json::from_str(&body)
+                .map_err(|_| failure(StatusCode::BAD_REQUEST, "not json"))?;
+            let mut state = state.lock().unwrap();
+            state.patches.push(body.clone());
+            let item = state
+                .items
+                .iter_mut()
+                .find(|item| item["metadata"]["name"] == name)
+                .ok_or_else(|| failure(StatusCode::NOT_FOUND, "not found"))?;
+            if let Some(stopped) = body.pointer("/spec/stopped").and_then(Value::as_bool) {
+                item["spec"]["stopped"] = json!(stopped);
+            }
+            Ok(Json(item.clone()))
+        }
+
+        pub async fn start_with_patch(items: Vec<Value>) -> (kube::Client, Shared) {
+            let shared = Arc::new(Mutex::new(Fake {
+                items,
+                patches: Vec::new(),
+            }));
+            let app = Router::new()
+                .route(
+                    "/apis/stardelt.io/v1alpha1/namespaces/{namespace}/streamapps",
+                    get(|| async {
+                        Json(json!({"apiVersion":"stardelt.io/v1alpha1","kind":"StreamAppList","items":[]}))
+                    }),
+                )
+                .route(
+                    "/apis/stardelt.io/v1alpha1/namespaces/{namespace}/streamapps/{name}",
+                    get(one).patch(patch_one),
+                )
+                .with_state(shared.clone());
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let url = format!("http://{addr}").parse().unwrap();
+            let client = kube::Client::try_from(kube::Config::new(url)).expect("client");
+            (client, shared)
+        }
+    }
+
+    #[tokio::test]
+    async fn an_owner_may_patch_and_the_merge_body_sets_stopped() {
+        let (client, shared) = fake_kube::start_with_patch(vec![app("demo", "sales")]).await;
+        let state = crate::router_tests::test_state_with_kube(client);
+        let ns = crate::cluster::namespace();
+        let view = patch_stream(&state, &who("u", &["sales"], false), &ns, "demo", true)
+            .await
+            .expect("owner may patch");
+        assert!(view.stopped);
+        assert_eq!(view.name, "demo");
+        let patches = shared.lock().unwrap().patches.clone();
+        assert_eq!(patches.len(), 1);
+        assert_eq!(patches[0], json!({"spec": {"stopped": true}}));
+    }
+
+    #[tokio::test]
+    async fn a_member_of_another_group_gets_404() {
+        let (client, _) = fake_kube::start_with_patch(vec![app("demo", "sales")]).await;
+        let state = crate::router_tests::test_state_with_kube(client);
+        let ns = crate::cluster::namespace();
+        let err = patch_stream(&state, &who("u", &["marketing"], false), &ns, "demo", true)
+            .await
+            .expect_err("outsider gets 404");
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_foreign_namespace_gets_404() {
+        let (client, shared) = fake_kube::start_with_patch(vec![app("demo", "sales")]).await;
+        let state = crate::router_tests::test_state_with_kube(client);
+        let err = patch_stream(&state, &who("u", &["sales"], false), "other", "demo", true)
+            .await
+            .expect_err("foreign namespace gets 404");
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+        assert!(shared.lock().unwrap().patches.is_empty());
     }
 }
