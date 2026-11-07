@@ -1,25 +1,10 @@
 import type { ReactNode } from 'react'
 
 export type IconName =
-  | 'grid'
-  | 'database'
-  | 'terminal'
-  | 'upload'
-  | 'clock'
-  | 'lineage'
-  | 'chart'
-  | 'pulse'
-  | 'search'
-  | 'plus'
-  | 'arrow'
-  | 'download'
-  | 'table'
-  | 'spark'
-  | 'notebook'
-  | 'users'
-  | 'sliders'
-  | 'key'
-  | 'play'
+  | 'grid' | 'database' | 'terminal' | 'upload' | 'clock' | 'lineage' | 'chart' | 'pulse'
+  | 'search' | 'plus' | 'arrow' | 'download' | 'table' | 'spark' | 'notebook' | 'users'
+  | 'sliders' | 'key' | 'play'
+  | 'folder' | 'eye' | 'volume'      // ← the three new names
   | 'sun'
   | 'moon'
   | 'alert'
@@ -138,6 +123,21 @@ const paths: Record<IconName, ReactNode> = {
     </>
   ),
   play: <polygon points="6 3 20 12 6 21 6 3" />,
+  folder: <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />,
+  eye: (
+    <>
+      <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+      <circle cx="12" cy="12" r="3" />
+    </>
+  ),
+  volume: (
+    <>
+      <line x1="22" y1="12" x2="2" y2="12" />
+      <path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" />
+      <line x1="6" y1="16" x2="6.01" y2="16" />
+      <line x1="10" y1="16" x2="10.01" y2="16" />
+    </>
+  ),
   sun: (
     <>
       <circle cx="12" cy="12" r="4" />

@@ -4,6 +4,7 @@ import { useSearchParams } from 'react-router-dom'
 import { ApiError, api, type Catalog } from '../api'
 import ErrorBox from './ErrorBox'
 import LayerBadge from './LayerBadge'
+import ObjectIcon from './ObjectIcon'
 
 export type CatalogTreeSelection = { ns: string; tbl: string }
 
@@ -106,6 +107,7 @@ function CatalogNode({
         <span aria-hidden className="text-text-mute text-xs">
           {open ? '▾' : '▸'}
         </span>
+        <ObjectIcon kind="catalog" />
         <span className="text-sm font-medium">{catalog.name}</span>
         <LayerBadge layer={catalog.layer} />
       </button>
@@ -294,6 +296,7 @@ function SchemaNode({
         <span aria-hidden className="text-text-mute text-xs">
           {open ? '▾' : '▸'}
         </span>
+        <ObjectIcon kind="schema" />
         <span className="text-sm font-medium">{ns}</span>
         {tables.data && <span className="ml-auto text-[11px] text-text-mute">{visible.length}</span>}
       </button>
@@ -323,9 +326,7 @@ function SchemaNode({
                       : 'text-text-dim hover:text-text hover:bg-bg-soft/40 border border-transparent',
                   ].join(' ')}
                 >
-                  <span className="text-text-mute" aria-hidden>
-                    ◇
-                  </span>
+                  <ObjectIcon kind={id.kind === 'view' ? 'view' : 'table'} />
                   <span className="truncate">{id.name}</span>
                 </button>
               </li>
