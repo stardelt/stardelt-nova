@@ -5589,6 +5589,7 @@ test.describe('person menu', () => {
     await page.goto('/')
     await page.waitForTimeout(500)
     const settings = page.locator('nav').getByRole('link', { name: 'Settings' })
+    await settings.scrollIntoViewIfNeeded()
     await expect(settings).toBeVisible()
     const box = await settings.boundingBox()
     expect(box).not.toBeNull()
@@ -5596,6 +5597,22 @@ test.describe('person menu', () => {
     const navBox = await nav.boundingBox()
     expect(navBox).not.toBeNull()
     expect(box!.y + box!.height).toBeLessThanOrEqual(navBox!.y + navBox!.height + 5)
+    await context.close()
+  })
+
+  test('at 1440 x 900 the sidebar footer is on screen and the last admin link can be scrolled to', async ({ browser }) => {
+    const context = await browser.newContext({ viewport: { width: 1440, height: 900 } })
+    const page = await context.newPage()
+    await page.route('**/api/**', (r) => {
+      const path = new URL(r.request().url()).pathname
+      if (path === '/api/me') return json(r, ME_ADMIN)
+      return json(r, [])
+    })
+    await page.goto('/')
+    await expect(page.locator('#primary-nav footer')).toBeInViewport()
+    const settings = page.locator('nav').getByRole('link', { name: 'Settings' })
+    await settings.scrollIntoViewIfNeeded()
+    await expect(settings).toBeInViewport()
     await context.close()
   })
 

@@ -96,7 +96,7 @@ function titleFor(pathname: string): string {
 
 function navClass({ isActive }: { isActive: boolean }) {
   return [
-    'flex items-center gap-2.5 px-3 py-2 rounded-[10px] text-sm transition-colors',
+    'flex items-center gap-2.5 px-3 py-1.5 rounded-[10px] text-sm transition-colors',
     isActive
       ? 'bg-accent/15 text-text border border-accent/30'
       : 'text-text-dim hover:text-text hover:bg-bg-soft border border-transparent',
@@ -258,11 +258,11 @@ export default function Shell() {
           </div>
         </div>
 
-        <nav className="px-3 pb-4 flex-1">
+        <nav className="px-3 pb-4 flex-1 min-h-0 overflow-y-auto">
           {groups
             .filter(group => !group.admin || admin)
             .map(group => (
-            <div key={group.label} className="mb-4">
+            <div key={group.label} className="mb-3">
               <div className="label px-3 mb-1.5">{group.label}</div>
               <div className="space-y-1">
                 {group.items.map(item => (
