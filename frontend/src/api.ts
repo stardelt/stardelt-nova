@@ -691,6 +691,23 @@ export type PipelineView = {
   deployment?: DeploymentView
 }
 
+/** One `StreamApp` (D42): a job that reads a Kafka topic and writes an Iceberg table. */
+export type StreamView = {
+  namespace: string
+  name: string
+  owner_group: string
+  phase: 'Pending' | 'Running' | 'Stopped' | 'Failed' | string
+  last_error: string | null
+  last_checkpoint_at: string | null
+  stopped: boolean
+  source_connection: string
+  source_topic: string
+  sink_catalog: string
+  sink_table: string
+  sink_mode: string
+  run_as: string | null
+}
+
 /** `GET /api/pipelines/{namespace}/{name}`: the view plus the latest 20 runs. */
 export type PipelineDetail = PipelineView & {
   runs: RunView[]
@@ -1071,6 +1088,7 @@ export const api = {
   queryLog:     (p: QueryLogParams)           => jget<QueryLogPage>(queryLogUrl(p)),
   queryLogDetail: (id: string)                => jget<QueryLogDetail>(`/api/query-log/${seg(id)}`),
   pipelines:    ()                            => jget<{ pipelines: PipelineView[] }>('/api/pipelines'),
+  streams:       ()                            => jget<{ streams: StreamView[] }>('/api/streams'),
   /** The caller's own groups and their principals (`Schedule`, #210). */
   pipelinePrincipals: ()                      => jget<{ groups: PipelinePrincipal[] }>('/api/pipelines/principals'),
   servicePrincipals: ()                       => jget<{ principals: ServicePrincipal[] }>('/api/service-principals'),
