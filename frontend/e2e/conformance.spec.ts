@@ -99,7 +99,7 @@ test.describe('project footer', () => {
   // own — the frontend package's version, baked in by `vite.config.ts` — so nothing is
   // asked of the network to show it.
   const DOCS = 'https://stardelt.io'
-  const SOURCE = 'https://github.com/stardelt/stardelt'
+  const SOURCE = 'https://github.com/stardelt'
   const LINKS = [['Documentation', DOCS], ['Source', SOURCE]] as const
 
   test('the footer names the project, its version and the two places to read more', async ({ browser }) => {
