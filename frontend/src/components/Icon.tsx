@@ -22,6 +22,7 @@ export type IconName =
   | 'play'
   | 'sun'
   | 'moon'
+  | 'alert'
 
 const paths: Record<IconName, ReactNode> = {
   grid: (
@@ -144,6 +145,12 @@ const paths: Record<IconName, ReactNode> = {
     </>
   ),
   moon: <path d="M20.5 14.5A8.5 8.5 0 1 1 9.5 3.5a7 7 0 0 0 11 11z" />,
+  alert: (
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 7.5v5.5M12 16.5v.01" />
+    </>
+  ),
 }
 
 export function Icon({ name, className }: { name: IconName; className?: string }) {

@@ -5657,3 +5657,23 @@ test.describe('activity', () => {
     await context.close()
   })
 })
+
+test.describe('error notice', () => {
+  test('a failed load is a bordered notice with an icon and a Retry button', async ({ browser }) => {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 800 } })
+    const page = await context.newPage()
+    await page.route('**/api/**', (r) => {
+      const path = new URL(r.request().url()).pathname
+      if (path === '/api/me') return json(r, { user: 'operator', auth_mode: 'static-dev', demo: false, warehouse: 'warehouse' })
+      if (path === '/api/pipelines') return json(r, { error: 'the secret store is not configured' }, 500)
+      return json(r, [])
+    })
+    await page.goto('/pipelines')
+    const alert = page.getByRole('alert').first()
+    await expect(alert).toContainText('the secret store is not configured')
+    await expect(alert.locator('svg')).toHaveCount(1)
+    await expect(alert.getByRole('button', { name: 'Retry' })).toBeVisible()
+    expect(await alert.evaluate((el) => getComputedStyle(el).borderTopStyle)).toBe('solid')
+    await context.close()
+  })
+})
