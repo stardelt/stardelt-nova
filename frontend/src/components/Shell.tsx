@@ -308,7 +308,7 @@ export default function Shell() {
               Documentation
             </a>
             <a
-              href="https://github.com/stardelt/stardelt"
+              href="https://github.com/stardelt"
               target="_blank"
               rel="noopener noreferrer"
               className="text-[11px] text-text-dim hover:text-text underline underline-offset-2 rounded-[4px] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
