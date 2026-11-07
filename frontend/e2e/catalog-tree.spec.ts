@@ -24,7 +24,7 @@ test('catalog explorer shows a tree of catalogs, schemas and tables', async ({ p
       return json(r, { identifiers: [{ namespace: ['sales'], name: 'orders' }, { namespace: ['sales'], name: 'customers' }] })
     }
     if (path === '/api/catalog/namespaces/ops/tables') {
-      return json(r, { identifiers: [{ namespace: ['ops'], name: 'runs' }] })
+      return json(r, { identifiers: [{ namespace: ['ops'], name: 'runs' }, { namespace: ['ops'], name: 'runs_view', kind: 'view' }] })
     }
     if (path === '/api/catalog/namespaces/raw/tables') {
       return json(r, { identifiers: [] })
@@ -53,6 +53,8 @@ test('catalog explorer shows a tree of catalogs, schemas and tables', async ({ p
   await expect(page.getByRole('button', { name: /warehouse/ })).toBeVisible()
   await expect(page.getByRole('button', { name: /bronze/ })).toBeVisible()
   await expect(page.getByRole('combobox', { name: 'Catalog' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: /warehouse/ }).locator('[data-kind="catalog"]')).toHaveCount(1)
+  await expect(page.getByRole('button', { name: 'sales' }).locator('[data-kind="schema"]')).toHaveCount(1)
 
   // 2. warehouse is already open (its schemas sales and ops are visible) and bronze is not (raw invisible until clicked)
   await expect(page.getByRole('button', { name: 'sales' })).toBeVisible()
@@ -65,6 +67,9 @@ test('catalog explorer shows a tree of catalogs, schemas and tables', async ({ p
   await page.getByRole('button', { name: 'sales' }).click()
   await expect(page.getByRole('button', { name: /orders/ })).toBeVisible()
   await expect(page.getByRole('button', { name: /customers/ })).toBeVisible()
+  await page.getByRole('button', { name: 'ops' }).click()
+  await expect(page.getByRole('button', { name: /runs/ }).locator('[data-kind="table"]')).toHaveCount(1)
+  await expect(page.getByRole('button', { name: /runs_view/ }).locator('[data-kind="view"]')).toHaveCount(1)
 
   // 4. clicking orders shows the detail heading orders and marks the row aria-current
   await page.getByRole('button', { name: /orders/ }).click()
@@ -75,7 +80,5 @@ test('catalog explorer shows a tree of catalogs, schemas and tables', async ({ p
   await page.getByLabel('Filter tables').fill('runs')
   await expect(page.getByRole('button', { name: 'sales' })).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'ops' })).toBeVisible()
-  // ops was not expanded; expand it to see runs (lazy loading means we must expand to load)
-  await page.getByRole('button', { name: 'ops' }).click()
-  await expect(page.getByRole('button', { name: /runs/ })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'runs', exact: true })).toBeVisible()
 })

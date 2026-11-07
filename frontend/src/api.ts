@@ -128,7 +128,7 @@ export type CatalogMetrics = {
 
 export type NamespaceList = { namespaces: string[][] }
 
-export type TableIdentifier = { namespace: string[]; name: string }
+export type TableIdentifier = { namespace: string[]; name: string; kind?: 'table' | 'view' }
 export type TableList = { identifiers: TableIdentifier[] }
 
 export type IcebergField = {
