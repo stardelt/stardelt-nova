@@ -5307,6 +5307,57 @@
         }
       }
     },
+    "/api/streams": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "description": "The calling user's streams: every `StreamApp` of their groups, and all of them for an administrator. `phase` is the operator's `status.phase` (`Pending` when it has not reported yet); `lastError` is the application's own terminal message when the phase is `Failed`; `lastCheckpointAt` is empty until the operator can read the checkpoint and the UI must show `—`. `stopped` is `spec.stopped`. No connection credentials and no checkpoint prefix are part of an answer. Answers `Cache-Control: no-store`.",
+        "operationId": "streams_list",
+        "responses": {
+          "200": {
+            "description": "The caller's streams, sorted by namespace and name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StreamsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token to sign in with",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The cluster did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No cluster connection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/transfer": {
       "post": {
         "tags": [
@@ -8685,6 +8736,86 @@
           },
           "value": {
             "description": "Any JSON value."
+          }
+        }
+      },
+      "StreamView": {
+        "type": "object",
+        "description": "One `StreamApp`, as the Streams page needs it. No secret, no checkpoint path.",
+        "required": [
+          "namespace",
+          "name",
+          "owner_group",
+          "phase",
+          "stopped",
+          "source_connection",
+          "source_topic",
+          "sink_catalog",
+          "sink_table",
+          "sink_mode"
+        ],
+        "properties": {
+          "last_checkpoint_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "owner_group": {
+            "type": "string"
+          },
+          "phase": {
+            "type": "string"
+          },
+          "run_as": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sink_catalog": {
+            "type": "string"
+          },
+          "sink_mode": {
+            "type": "string"
+          },
+          "sink_table": {
+            "type": "string"
+          },
+          "source_connection": {
+            "type": "string"
+          },
+          "source_topic": {
+            "type": "string"
+          },
+          "stopped": {
+            "type": "boolean"
+          }
+        }
+      },
+      "StreamsResponse": {
+        "type": "object",
+        "required": [
+          "streams"
+        ],
+        "properties": {
+          "streams": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StreamView"
+            }
           }
         }
       },

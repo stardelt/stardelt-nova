@@ -41,6 +41,7 @@
 //!   DELETE /api/connections/{scope}/…       — delete one
 //!   GET  /api/pipelines                     — the caller's pipelines, with state and last run
 //!   GET  /api/pipelines/{ns}/{name}         — one pipeline: latest runs, params, options
+//!   GET  /api/streams                      — the caller's StreamApps, with phase and last error
 //!   POST /api/pipelines/check               — what the engine says about a statement (EXPLAIN)
 //!   POST /api/pipelines/preview-schedule    — the next fire times of a cron in its zone
 //!   GET  /api/pipelines/{ns}/{name}/runs/{run_id} — one run with its tasks
@@ -108,6 +109,7 @@ mod query_log_store;
 mod saved_queries;
 mod secret_store;
 mod statements;
+mod streams;
 mod trino;
 mod user_settings;
 mod warehouses;
@@ -692,6 +694,8 @@ fn api_router() -> Router<Arc<AppState>> {
         // Pipelines: only the caller's groups' pipelines, administrators see all. Nova checks
         // the resource before it asks Airflow; a hidden pipeline is 404. Uncacheable.
         .merge(pipelines::router())
+        // Streams (D42): the caller's StreamApps, read-only. Uncacheable like pipelines.
+        .merge(streams::router())
         // Published notebooks: immutable versions, owner-group scoped (stardelt-nova#225).
         .merge(notebooks::router())
         // Statements: submit, poll, read in chunks, cancel by id (stardelt-nova#272).
