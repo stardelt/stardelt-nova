@@ -644,6 +644,8 @@ mod tests {
             superset_url: "http://superset:8088".into(),
             jupyterhub_url: "http://proxy-public:80".into(),
             warehouse_name: "warehouse".into(),
+            stage_name: None,
+            stage_kind: "dev",
             catalog_ids: std::sync::RwLock::new(std::collections::HashMap::new()),
             catalog_access: std::sync::Mutex::new(std::collections::HashMap::new()),
             catalog_metrics: std::sync::Mutex::new(std::collections::HashMap::new()),
