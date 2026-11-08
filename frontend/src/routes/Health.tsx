@@ -3,7 +3,6 @@ import { Link } from 'react-router-dom'
 import { api, errorMessage } from '../api'
 import { ClusterNotice } from '../components/ClusterNotice'
 import ErrorBox from '../components/ErrorBox'
-import { Icon } from '../components/Icon'
 import { isBrowsable, safeHttpUrl, shortImage } from '../format'
 
 export default function Health() {
@@ -59,7 +58,7 @@ export default function Health() {
               <span className="ml-auto text-xs text-text-dim">{a.status === 'not-installed' ? 'not installed' : a.status}</span>
               {isBrowsable(a) && safeHttpUrl(a.external_url)
                 ? <a href={safeHttpUrl(a.external_url)} target="_blank" rel="noreferrer" className="btn-ghost py-1 px-2.5 text-xs">
-                    Open <Icon name="arrow" className="w-3.5 h-3.5" />
+                    Open service ↗
                   </a>
                 : <span className="w-[68px]" />}
             </div>

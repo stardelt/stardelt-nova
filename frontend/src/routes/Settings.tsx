@@ -82,7 +82,7 @@ export default function Settings() {
             <Row label="Distinct images" value={String(images.length)} />
           </dl>
           <div className="flex gap-2 mt-4">
-            <Link to="/health" className="btn-ghost py-1.5 px-3 text-xs">Health →</Link>
+            <Link to="/health" className="btn-ghost py-1.5 px-3 text-xs">Service health →</Link>
             <Link to="/apps" className="btn-ghost py-1.5 px-3 text-xs">Apps →</Link>
           </div>
         </div>

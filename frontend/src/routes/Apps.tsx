@@ -92,7 +92,7 @@ function AppCard({ app }: { app: PlatformApp }) {
           {statusLabel(app.status)}
         </span>
         <Link to={`/apps/${app.id}`} className="btn-ghost ml-auto py-1.5 px-3 text-xs">
-          Details <Icon name="arrow" className="w-3.5 h-3.5" />
+          App details <Icon name="arrow" className="w-3.5 h-3.5" />
         </Link>
         {/* Only link what is actually serving. The ingress exists for every app with a
             UI in the playground, so an uninstalled Superset answers with an ingress 503
@@ -107,7 +107,7 @@ function AppCard({ app }: { app: PlatformApp }) {
             className="btn-ghost py-1.5 px-3 text-xs"
             title={`Open ${externalUrl}`}
           >
-            Open
+            Open app ↗
           </a>
         )}
         {externalUrl && !up && (

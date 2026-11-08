@@ -344,9 +344,9 @@ function ByCatalog({
                     <Link
                       to={`/catalog?catalog=${encodeURIComponent(catalog.name)}`}
                       className="text-xs text-accent hover:underline whitespace-nowrap"
-                      aria-label={`Open catalog ${catalog.name}`}
+                      aria-label={`Browse catalog ${catalog.name}`}
                     >
-                      Open
+                      Browse catalog →
                     </Link>
                     <button
                       type="button"

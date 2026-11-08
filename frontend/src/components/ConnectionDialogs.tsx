@@ -974,7 +974,7 @@ export function BreakGlassDialog({
 
   return (
     <DialogFrame
-      title={answer ? `Credential ${connection.name}` : `Break-glass read of ${connection.name}`}
+      title={answer ? `Credential ${connection.name}` : `Read ${connection.name} as admin (logged)`}
       titleId={titleId}
       initialFocus="[data-autofocus]"
       open={!closed}

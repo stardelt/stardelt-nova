@@ -350,7 +350,7 @@ function BreakGlassBanner({
               className="btn-ghost py-1 px-2 text-xs"
               onClick={onRotate}
             >
-              Rotate now
+              Rotate secret
             </button>
           )}
         </div>
@@ -463,29 +463,29 @@ function Row({ row, admin, onRotate, onDelete, onBreakGlass }: {
             <button
               type="button"
               className="btn-ghost py-1 px-2 text-xs"
-              aria-label={`Rotate ${row.name}`}
+              aria-label={`Rotate secret for ${row.name}`}
               onClick={onRotate}
             >
-              Rotate
+              Rotate secret
             </button>
           )}
           <button
             type="button"
             className="btn-ghost py-1 px-2 text-xs text-bad"
-            aria-label={`Delete ${row.name}`}
+            aria-label={`Delete connection ${row.name}`}
             onClick={onDelete}
           >
-            Delete
+            Delete connection
           </button>
           {admin && row.scope === 'group' && (
             <div className="border-l border-border/70 pl-2">
               <button
                 type="button"
                 className="btn-ghost py-1 px-2 text-xs"
-                aria-label={`Break-glass read ${row.name}`}
+                aria-label={`Read ${row.name} as admin; the read is logged`}
                 onClick={onBreakGlass}
               >
-                Break-glass read
+                Read as admin (logged)
               </button>
             </div>
           )}
