@@ -701,6 +701,10 @@ export type StreamView = {
   reason: string | null
   last_error: string | null
   last_checkpoint_at: string | null
+  /** How many times Spark has submitted the application; null until the operator reports it. */
+  attempts: number | null
+  /** When Spark last submitted the application (RFC 3339); null until the operator reports it. */
+  last_submitted_at: string | null
   stopped: boolean
   source_connection: string
   source_topic: string
