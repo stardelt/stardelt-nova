@@ -29,3 +29,10 @@ test('demo mode: the Query log says why it is empty', async ({ page }) => {
   await page.goto('/queries')
   await expect(page.getByText('Demo mode keeps no query history')).toBeVisible()
 })
+
+test('demo mode: a catalog table shows its documentation, no red error', async ({ page }) => {
+  await page.goto('/catalog?ns=nyc_taxi&tbl=yellow_trips')
+  await page.waitForLoadState('networkidle')
+  await expect(page.getByText('NYC yellow-taxi trips, one row per completed trip.')).toBeVisible()
+  expect(await page.locator('[role=alert]').count(), '/catalog has a role=alert').toBe(0)
+})
