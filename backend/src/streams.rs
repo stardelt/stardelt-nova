@@ -340,7 +340,10 @@ mod tests {
         let view = stream_view(&restarting, &who("u", &["sales"], false));
         assert_eq!(view.phase, "Running");
         assert_eq!(view.reason.as_deref(), Some("Restarting"));
-        assert_eq!(view.last_error.as_deref(), Some("container exited with code 1"));
+        assert_eq!(
+            view.last_error.as_deref(),
+            Some("container exited with code 1")
+        );
     }
 
     #[test]
