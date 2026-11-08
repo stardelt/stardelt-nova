@@ -88,6 +88,28 @@ test('a 404 shows an alert sentence, keeps the row and re-enables the button', a
   await expect(page.getByRole('button', { name: 'Stop demo' })).toBeEnabled()
 })
 
+test('demo mode lists the sample streams with no action and no alert', async ({ page }) => {
+  await page.route('**/api/**', (r) => {
+    const path = new URL(r.request().url()).pathname
+    if (path === '/api/me') return json(r, { ...me, demo: true })
+    if (path === '/api/streams') {
+      return json(r, {
+        streams: [
+          { ...runningStream, name: 'pegelonline-live', phase: 'Running' },
+          { ...runningStream, name: 'orders-cdc', phase: 'Pending' },
+        ],
+      })
+    }
+    return json(r, {})
+  })
+  await page.goto('/streams')
+  const main = page.locator('main')
+  await expect(main.getByText('pegelonline-live')).toBeVisible()
+  await expect(main.getByText('orders-cdc')).toBeVisible()
+  await expect(main.getByRole('button')).toHaveCount(0)
+  await expect(main.getByRole('alert')).toHaveCount(0)
+})
+
 test('a restarting stream shows the Ready reason beside its phase', async ({ page }) => {
   await page.route('**/api/**', (r) => {
     const path = new URL(r.request().url()).pathname
