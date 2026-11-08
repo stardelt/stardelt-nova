@@ -4,7 +4,25 @@ import { defineConfig } from '@playwright/test'
 // with no cluster behind it, so every page also shows how it behaves when its upstreams are
 // unreachable. Needs `npm run build` (the backend serves `dist/`) and a built backend binary.
 // `NOVA_E2E_PORT` lets parallel checkouts run at the same time; it defaults to the CI port.
+// Two servers start: the no-cluster dev server on `NOVA_E2E_PORT` (18080) and the demo server
+// on `NOVA_E2E_DEMO_PORT` (18081, `NOVA_DEMO=1`); the `demo` project runs `e2e/demo.spec.ts`
+// against the second.
 const port = Number(process.env.NOVA_E2E_PORT ?? 18080)
+const demoPort = Number(process.env.NOVA_E2E_DEMO_PORT ?? 18081)
+
+const server = (p: number, demo: boolean) => ({
+  command: process.env.NOVA_E2E_BIN ?? '../target/debug/stardelt-nova-backend',
+  url: `http://127.0.0.1:${p}/api/me`,
+  reuseExistingServer: !process.env.CI,
+  env: {
+    NOVA_BIND_ADDR: `127.0.0.1:${p}`,
+    NOVA_STATIC_DIR: 'dist',
+    NOVA_AUTH_MODE: 'dev',
+    NOVA_DEV_USER: demo ? 'demo' : 'e2e',
+    ...(demo ? { NOVA_DEMO: '1' } : {}),
+  },
+})
+
 export default defineConfig({
   testDir: 'e2e',
   workers: 1,
@@ -12,21 +30,14 @@ export default defineConfig({
   timeout: 120_000,
   reporter: [['list']],
   use: {
-    baseURL: `http://127.0.0.1:${port}`,
     // Locally you may point at an installed browser: PW_CHROMIUM=/usr/bin/chromium
     launchOptions: process.env.PW_CHROMIUM
       ? { executablePath: process.env.PW_CHROMIUM, args: ['--no-sandbox'] }
       : {},
   },
-  webServer: {
-    command: process.env.NOVA_E2E_BIN ?? '../target/debug/stardelt-nova-backend',
-    url: `http://127.0.0.1:${port}/api/me`,
-    reuseExistingServer: !process.env.CI,
-    env: {
-      NOVA_BIND_ADDR: `127.0.0.1:${port}`,
-      NOVA_STATIC_DIR: 'dist',
-      NOVA_AUTH_MODE: 'dev',
-      NOVA_DEV_USER: 'e2e',
-    },
-  },
+  webServer: [server(port, false), server(demoPort, true)],
+  projects: [
+    { name: 'main', testIgnore: /demo\.spec\.ts/, use: { baseURL: `http://127.0.0.1:${port}` } },
+    { name: 'demo', testMatch: /demo\.spec\.ts/, use: { baseURL: `http://127.0.0.1:${demoPort}` } },
+  ],
 })
