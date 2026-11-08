@@ -4309,7 +4309,7 @@ pub(crate) async fn detail(
             return match crate::demo::pipeline_detail(&namespace, &name) {
                 Some(detail) => answer(Ok(detail)),
                 None => answer::<PipelineDetail>(Err(no_such_pipeline())),
-            }
+            };
         }
         ReadCaller::Signed(signed) => *signed,
     };
