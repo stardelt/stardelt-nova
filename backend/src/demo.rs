@@ -267,7 +267,7 @@ impl DemoState {
             .tables
             .iter()
             .filter(|t| t.namespace == namespace)
-            .map(|t| json!({ "namespace": [t.namespace.clone()], "name": t.name }))
+            .map(|t| json!({ "namespace": [t.namespace.clone()], "name": t.name, "kind": "table" }))
             .collect();
         json!({ "identifiers": ids })
     }

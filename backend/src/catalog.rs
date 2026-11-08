@@ -104,11 +104,15 @@ pub struct NamespacesResponse {
     pub namespaces: Vec<Vec<String>>,
 }
 
-/// One Iceberg table identifier.
+/// One Iceberg object identifier: a table or a view.
 #[derive(serde::Serialize, utoipa::ToSchema)]
 pub struct TableIdentifier {
     pub namespace: Vec<String>,
     pub name: String,
+    /// `table` or `view`. Iceberg REST lists them through two endpoints; the explorer needs to
+    /// tell them apart, and only a table has `/tables/{ns}/{tbl}` metadata.
+    #[schema(example = "table")]
+    pub kind: String,
 }
 
 /// Iceberg `ListTables` result.
@@ -474,6 +478,62 @@ async fn proxy(state: &AppState, path: String) -> Response {
                 .into_response()
         }
     }
+}
+
+/// GET one catalog path and parse it. The error is the response Nova would have proxied.
+#[allow(clippy::result_large_err)]
+async fn catalog_json(state: &AppState, path: String) -> Result<serde_json::Value, Response> {
+    let url = format!("{}{}", state.lakekeeper_url, path);
+    let mut request = state.http.get(&url);
+    match lakekeeper_authorization(state).await {
+        Ok(Some(header)) => request = request.header(reqwest::header::AUTHORIZATION, header),
+        Ok(None) => {}
+        Err(e) => {
+            warn!("catalog service token unavailable: {e}");
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+                .into_response());
+        }
+    }
+    match request.send().await {
+        Ok(r) => {
+            let status = r.status();
+            let body = r.bytes().await.unwrap_or_default();
+            if status.is_success() {
+                serde_json::from_slice(&body).map_err(|e| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        Json(serde_json::json!({"error": format!("the catalog answered invalid JSON: {e}")})),
+                    )
+                        .into_response()
+                })
+            } else {
+                Err(upstream_error(
+                    StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+                    &body,
+                ))
+            }
+        }
+        Err(e) => Err((
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response()),
+    }
+}
+
+/// Names in a `ListTablesResponse`-shaped body (`{"identifiers":[{"name":…}]}`).
+fn listed_names(body: &serde_json::Value) -> Vec<String> {
+    body["identifiers"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|i| i["name"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// One error sentence, the envelope every `/api/` failure uses.
@@ -923,7 +983,34 @@ pub async fn list_tables(
     let Some(ns) = path_segment(&ns) else {
         return bad_segment(&ns);
     };
-    proxy(&s, format!("/catalog/v1/{id}/namespaces/{ns}/tables")).await
+    let tables = match catalog_json(&s, format!("/catalog/v1/{id}/namespaces/{ns}/tables")).await {
+        Ok(tables) => tables,
+        Err(response) => return response,
+    };
+    // A catalog that does not serve the views endpoint (or denies it) still lists its tables:
+    // the kind must never be the reason a listing fails.
+    let views = catalog_json(&s, format!("/catalog/v1/{id}/namespaces/{ns}/views"))
+        .await
+        .unwrap_or(serde_json::Value::Null);
+    let mut identifiers: Vec<TableIdentifier> = listed_names(&tables)
+        .into_iter()
+        .map(|name| TableIdentifier {
+            namespace: vec![ns.clone()],
+            name,
+            kind: "table".into(),
+        })
+        .collect();
+    identifiers.extend(
+        listed_names(&views)
+            .into_iter()
+            .map(|name| TableIdentifier {
+                namespace: vec![ns.clone()],
+                name,
+                kind: "view".into(),
+            }),
+    );
+    identifiers.sort_by(|a, b| a.name.cmp(&b.name));
+    Json(TablesResponse { identifiers }).into_response()
 }
 
 #[utoipa::path(
@@ -1343,6 +1430,92 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
         format!("http://{addr}")
+    }
+
+    async fn fake_lakekeeper_tables_and_views(include_views: bool) -> String {
+        let app = Router::new()
+            .route(
+                "/management/v1/warehouse",
+                get(|| async {
+                    Json(json!({
+                        "warehouses": [{"id": "wid-warehouse", "name": "warehouse"}]
+                    }))
+                }),
+            )
+            .route(
+                "/catalog/v1/wid-warehouse/namespaces/sales/tables",
+                get(|| async {
+                    Json(json!({
+                        "identifiers": [{"namespace": ["sales"], "name": "orders"}]
+                    }))
+                }),
+            );
+        let app = if include_views {
+            app.route(
+                "/catalog/v1/wid-warehouse/namespaces/sales/views",
+                get(|| async {
+                    Json(json!({
+                        "identifiers": [{"namespace": ["sales"], "name": "orders_view"}]
+                    }))
+                }),
+            )
+        } else {
+            app
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn the_table_list_marks_views() {
+        let (trino, _) = fake_trino(&[("ada", &["warehouse"])]).await;
+        let lakekeeper = fake_lakekeeper_tables_and_views(true).await;
+        let state = crate::router_tests::catalog_scope_test_state(&trino, &lakekeeper);
+        let ada = person("ada");
+        let response = list_tables(
+            axum::extract::State(state),
+            axum::extract::Path("sales".into()),
+            axum::extract::Query(CatalogParam {
+                catalog: Some("warehouse".into()),
+            }),
+            Some(Extension(ada)),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        let identifiers = body["identifiers"].as_array().expect("identifiers");
+        assert_eq!(identifiers.len(), 2);
+        assert_eq!(identifiers[0]["name"], "orders");
+        assert_eq!(identifiers[0]["kind"], "table");
+        assert_eq!(identifiers[1]["name"], "orders_view");
+        assert_eq!(identifiers[1]["kind"], "view");
+    }
+
+    #[tokio::test]
+    async fn a_catalog_without_views_still_lists_tables() {
+        let (trino, _) = fake_trino(&[("ada", &["warehouse"])]).await;
+        let lakekeeper = fake_lakekeeper_tables_and_views(false).await;
+        let state = crate::router_tests::catalog_scope_test_state(&trino, &lakekeeper);
+        let ada = person("ada");
+        let response = list_tables(
+            axum::extract::State(state),
+            axum::extract::Path("sales".into()),
+            axum::extract::Query(CatalogParam {
+                catalog: Some("warehouse".into()),
+            }),
+            Some(Extension(ada)),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        let identifiers = body["identifiers"].as_array().expect("identifiers");
+        assert_eq!(identifiers.len(), 1);
+        assert_eq!(identifiers[0]["name"], "orders");
+        assert_eq!(identifiers[0]["kind"], "table");
     }
 
     /// A `Catalog` object as the API server hands it over: a name, and optionally the
