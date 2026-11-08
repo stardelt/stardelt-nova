@@ -1303,6 +1303,30 @@ fn resources(state: &AppState) -> Option<Resources> {
     state.kube.clone().map(Resources::cluster)
 }
 
+/// Demo mode has no principal and no store, so `SignedIn` refuses the read before the handler
+/// runs (#500). This lets exactly the routes with demo samples through.
+pub(crate) enum Caller {
+    Demo,
+    /// Boxed because `SignedIn` is large (208 bytes) and clippy's `large_enum_variant` is a gate.
+    Signed(Box<SignedIn>),
+}
+
+impl FromRequestParts<Arc<AppState>> for Caller {
+    type Rejection = Fail;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        if state.demo {
+            return Ok(Caller::Demo);
+        }
+        SignedIn::from_request_parts(parts, state)
+            .await
+            .map(|signed| Caller::Signed(Box::new(signed)))
+    }
+}
+
 #[utoipa::path(
     get,
     operation_id = "connections_list",
@@ -1316,7 +1340,11 @@ fn resources(state: &AppState) -> Option<Resources> {
         (status = 503, description = "The secret store is not configured", body = crate::openapi::ErrorResponse),
     )
 )]
-pub(crate) async fn list(signed: SignedIn) -> Response {
+pub(crate) async fn list(caller: Caller) -> Response {
+    let signed = match caller {
+        Caller::Demo => return Json(crate::demo::connections()).into_response(),
+        Caller::Signed(signed) => *signed,
+    };
     let resources = resources(&signed.state);
     match list_connections(
         signed.store(),
@@ -3416,5 +3444,31 @@ mod tests {
             .expect_err("no policy");
         assert_eq!(err.status(), StatusCode::FORBIDDEN);
         assert!(err.message().contains("finance"));
+    }
+
+    /// Demo mode has neither a principal nor a store, so this goes through `Caller::Demo`; the
+    /// two sample rows are the answer and no value appears (#500).
+    #[tokio::test]
+    async fn demo_mode_lists_connections_without_a_store() {
+        let app = Router::new()
+            .route("/api/connections", get(list))
+            .with_state(crate::router_tests::test_state());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/connections")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.contains("orders-postgres"), "{text}");
+        assert!(text.contains("my-bucket"), "{text}");
+        assert!(!text.contains("hunter2"), "no value may appear: {text}");
     }
 }
