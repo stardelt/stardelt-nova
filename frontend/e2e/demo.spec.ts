@@ -45,3 +45,14 @@ test('demo mode: a catalog table shows its documentation, no red error', async (
   await expect(page.getByText('NYC yellow-taxi trips, one row per completed trip.')).toBeVisible()
   expect(await page.locator('[role=alert]').count(), '/catalog has a role=alert').toBe(0)
 })
+
+test('demo mode: a sample pipeline opens its detail page', async ({ page }) => {
+  await page.goto('/pipelines/stardelt/daily_revenue')
+  await page.waitForLoadState('networkidle')
+  await expect(page.getByRole('heading', { name: 'daily_revenue' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Edit schedule' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Delete pipeline' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: /definition/i })).toHaveCount(0)
+  await page.waitForTimeout(2500)
+  expect(await page.locator('[role=alert]').count(), 'pipeline detail has a role=alert').toBe(0)
+})

@@ -580,6 +580,30 @@ pub fn pipelines() -> crate::pipelines::PipelineListResponse {
     }
 }
 
+/// `GET /api/pipelines/{namespace}/{name}` in demo mode (#500): one of the sample rows with
+/// no runs. The page hides the write actions and the definition card, which have no demo
+/// branch.
+pub fn pipeline_detail(namespace: &str, name: &str) -> Option<crate::pipelines::PipelineDetail> {
+    use crate::pipelines::{PipelineDetail, PipelineOptionsView};
+    let pipeline = pipelines()
+        .pipelines
+        .into_iter()
+        .find(|p| p.namespace == namespace && p.name == name)?;
+    Some(PipelineDetail {
+        pipeline,
+        runs: vec![],
+        params: std::collections::BTreeMap::new(),
+        retries: None,
+        options: PipelineOptionsView {
+            retries: 1,
+            backoff_minutes: 5,
+            timeout_minutes: 120,
+            concurrency: "Forbid".into(),
+        },
+        airflow_url: None,
+    })
+}
+
 /// `GET /api/pipelines/principals` in demo mode: the two groups above, both able to schedule.
 pub fn pipeline_principals() -> crate::pipelines::PrincipalsResponse {
     use crate::pipelines::{PrincipalView, PrincipalsResponse};
@@ -1026,6 +1050,15 @@ mod tests {
         demo.transfer("nyc_taxi.zones", "analytics.zones_copy", "overwrite")
             .unwrap();
         assert!(demo.last_write_ms.is_some_and(|ms| ms > 0));
+    }
+
+    #[test]
+    fn pipeline_detail_is_one_of_the_samples() {
+        let detail = pipeline_detail("stardelt", "daily_revenue").expect("a sample pipeline");
+        assert_eq!(detail.pipeline.name, "daily_revenue");
+        assert!(detail.runs.is_empty(), "the sample has no runs");
+        assert!(pipeline_detail("stardelt", "nope").is_none());
+        assert!(pipeline_detail("other", "daily_revenue").is_none());
     }
 
     #[test]
