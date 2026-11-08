@@ -6,7 +6,7 @@ import ErrorBox from './ErrorBox'
 import LayerBadge from './LayerBadge'
 import ObjectIcon from './ObjectIcon'
 
-export type CatalogTreeSelection = { ns: string; tbl: string }
+export type CatalogTreeSelection = { ns: string; tbl: string; kind?: 'table' | 'view' }
 
 /** A 403 says no: the person's grants do not change by asking again. */
 function forbidden(error: unknown): boolean {
@@ -317,7 +317,7 @@ function SchemaNode({
               <li key={id.name}>
                 <button
                   type="button"
-                  onClick={() => onSelect({ ns, tbl: id.name })}
+                  onClick={() => onSelect({ ns, tbl: id.name, kind: id.kind ?? 'table' })}
                   aria-current={sel ? 'true' : undefined}
                   className={[
                     'w-full text-left px-2 py-1.5 rounded-[8px] text-sm flex items-center gap-2',

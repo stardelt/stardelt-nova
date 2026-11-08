@@ -9,7 +9,7 @@ import TableAbout, { type DocsState } from '../components/TableAbout'
 import { formatTime, sqlTableRef, rowsLabel } from '../format'
 import { isAdmin } from '../roles'
 
-type Sel = { ns: string; tbl: string }
+type Sel = { ns: string; tbl: string; kind?: 'table' | 'view' }
 
 /** A 403 says no: the person's grants do not change by asking again. */
 function forbidden(error: unknown): boolean {
@@ -84,7 +84,7 @@ export default function Catalog() {
 
       <section className="min-w-0 min-h-0 overflow-auto">
         {selected ? (
-          <TableDetail ns={selected.ns} tbl={selected.tbl} catalog={catalog} />
+          <TableDetail ns={selected.ns} tbl={selected.tbl} catalog={catalog} kind={selected.kind} />
         ) : (
           <div className="card p-8 h-full grid place-items-center text-center">
             <div>
@@ -99,17 +99,20 @@ export default function Catalog() {
   )
 }
 
-function TableDetail({ ns, tbl, catalog }: Sel & { catalog?: string }) {
+function TableDetail({ ns, tbl, catalog, kind }: Sel & { catalog?: string; kind?: 'table' | 'view' }) {
   const [tab, setTab] = useState<'preview' | 'columns' | 'details' | 'history'>('preview')
   const qc = useQueryClient()
   const me = useQuery({ queryKey: ['me'], queryFn: api.me })
+  const isView = kind === 'view'
   const meta = useQuery({
     queryKey: ['catalog', 'table', catalog, ns, tbl],
     queryFn: () => api.tableMeta(ns, tbl, catalog),
+    enabled: !isView,
   })
   const docs = useQuery({
     queryKey: ['catalog', 'table-docs', catalog, ns, tbl],
     queryFn: () => api.tableDocs(ns, tbl, catalog),
+    enabled: !isView,
   })
   const preview = useQuery({
     queryKey: ['preview', catalog, ns, tbl],
@@ -142,20 +145,26 @@ function TableDetail({ ns, tbl, catalog }: Sel & { catalog?: string }) {
   const schemaId = m?.['current-schema-id'] ?? m?.schemas[0]?.['schema-id'] ?? 0
   const schema = m?.schemas.find(s => s['schema-id'] === schemaId) ?? m?.schemas[0]
   const partSpec = m?.['partition-specs']?.[0]
+  const tabs = isView
+    ? (['preview'] as const)
+    : (['preview', 'columns', 'details', 'history'] as const)
 
   return (
     <div className="space-y-4">
       <header className="flex items-start justify-between gap-4 flex-wrap">
         <div>
           <div className="text-[11px] uppercase tracking-widest text-text-mute">{ns}</div>
-          <h1 className="text-2xl font-bold tracking-tight font-mono">{tbl}</h1>
+          <h1 className="text-2xl font-bold tracking-tight font-mono flex items-center gap-2">
+            {tbl}
+            {isView && <span className="badge border-accent/40 bg-accent/10 text-accent">View</span>}
+          </h1>
           {m && (
             <div className="text-xs text-text-mute mt-1 font-mono truncate max-w-[620px]">{m.location}</div>
           )}
         </div>
         <div className="flex gap-2">
           <Link to={queryHref(`SELECT * FROM ${sqlTableRef(ns, tbl, catalog)} LIMIT 100`)} className="btn-primary">
-            Query table
+            {isView ? 'Query view' : 'Query table'}
           </Link>
           {lineageHref && (
             <Link to={lineageHref} className="btn-ghost" title="Show this table's lineage">Lineage</Link>
@@ -164,10 +173,10 @@ function TableDetail({ ns, tbl, catalog }: Sel & { catalog?: string }) {
         </div>
       </header>
 
-      <TableAbout ns={ns} tbl={tbl} catalog={catalog} me={me.data} docs={docs} onSaved={onDocsSaved} />
+      {!isView && <TableAbout ns={ns} tbl={tbl} catalog={catalog} me={me.data} docs={docs} onSaved={onDocsSaved} />}
 
       <div className="flex gap-2">
-        {(['preview', 'columns', 'details', 'history'] as const).map(t => (
+        {tabs.map(t => (
           <button
             key={t}
             onClick={() => setTab(t)}

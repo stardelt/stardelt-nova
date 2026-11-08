@@ -9042,12 +9042,18 @@
       },
       "TableIdentifier": {
         "type": "object",
-        "description": "One Iceberg table identifier.",
+        "description": "One Iceberg object identifier: a table or a view.",
         "required": [
           "namespace",
-          "name"
+          "name",
+          "kind"
         ],
         "properties": {
+          "kind": {
+            "type": "string",
+            "description": "`table` or `view`. Iceberg REST lists them through two endpoints; the explorer needs to\ntell them apart, and only a table has `/tables/{ns}/{tbl}` metadata.",
+            "example": "table"
+          },
           "name": {
             "type": "string"
           },
