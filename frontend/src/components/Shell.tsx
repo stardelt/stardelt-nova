@@ -67,6 +67,7 @@ const titles: Record<string, string> = {
   '/apps': 'Platform apps',
   '/admin/catalogs': 'Catalogs',
   '/lineage': 'Lineage',
+  '/streams': 'Streams',
   '/dashboards': 'Dashboards',
   '/notebooks': 'Notebooks',
   '/health': 'Health',
