@@ -1839,38 +1839,41 @@ test.describe('pipelines', () => {
     await context.close()
   })
 
-  test('pipeline actions move to Airflow', async ({ browser }) => {
+  test('run now', async ({ browser }) => {
+    const queued = run({ state: 'queued', startedAt: null, endedAt: null, durationSeconds: null })
     const rows = [
       pipeline({ name: 'team-a' }),
+      pipeline({ name: 'team-b' }),
       pipeline({ name: 'team-paused', paused: true, state: 'paused' }),
     ]
-    const detail = { ...pipeline({ name: 'team-a' }), runs: [], params: {}, retries: null, airflowUrl: 'https://airflow.example/dags/team-a' }
-    const { context, page } = await open(browser, {
+    const { context, page, requests } = await open(browser, {
       rows,
-      read: (route, path, method) => {
-        if (method !== 'GET') return false
-        if (path === `/api/pipelines/${NS}/team-a`) {
-          json(route, detail)
-          return true
+      write: (route, path, method) => {
+        if (method !== 'POST' || !path.endsWith('/runs')) return false
+        if (path.includes('/team-b/')) {
+          json(route, { error: 'the pipeline is paused: resume it first' }, 409)
+        } else {
+          json(route, queued, 201)
         }
-        return false
+        return true
       },
     })
 
-    await expect(page.getByRole('button', { name: /Run now/ })).toHaveCount(0)
-    await expect(page.getByRole('button', { name: /Pause/ })).toHaveCount(0)
-    await expect(page.getByRole('button', { name: /Resume/ })).toHaveCount(0)
-    await expect(page.getByRole('button', { name: /Stop/ })).toHaveCount(0)
+    const pausedRun = page.getByRole('button', { name: 'Run now team-paused' })
+    await expect(pausedRun).toBeDisabled()
+    await expect(pausedRun).toHaveAttribute('title', 'Resume the pipeline first')
 
-    await page.getByRole('link', { name: 'team-a' }).click()
-    await expect(page.getByRole('heading', { name: 'team-a' })).toBeVisible()
-    await expect(page.getByText('Run, pause and stop live in Airflow — use Open in Airflow.')).toBeVisible()
-    await expect(page.getByRole('link', { name: 'Open in Airflow' })).toBeVisible()
-    await expect(page.getByRole('button', { name: /Run now/ })).toHaveCount(0)
-    await expect(page.getByRole('button', { name: /Pause/ })).toHaveCount(0)
-    await expect(page.getByRole('button', { name: /Resume/ })).toHaveCount(0)
-    await expect(page.getByRole('button', { name: /Stop run/ })).toHaveCount(0)
+    await page.getByRole('button', { name: 'Run now team-a' }).click()
+    await expect(page.getByRole('status')).toHaveText('Started a run of team-a.')
 
+    await page.getByRole('button', { name: 'Run now team-b' }).click()
+    await expect(page.getByRole('alert')).toHaveText('the pipeline is paused: resume it first')
+
+    expect(postsTo(requests, '/runs')).toBe(2)
+    expect(requests.filter((request) => request.method === 'POST').map(pathOf).sort()).toEqual([
+      `/api/pipelines/${NS}/team-a/runs`,
+      `/api/pipelines/${NS}/team-b/runs`,
+    ])
     await context.close()
   })
 
@@ -1898,16 +1901,39 @@ test.describe('pipelines', () => {
       },
     })
 
-    await expect(page.getByRole('button', { name: /Pause|Resume/ })).toHaveCount(0)
+    const gets = () =>
+      requests.filter((request) => request.method === 'GET' && pathOf(request) === '/api/pipelines').length
+    const beforePause = gets()
+    await page.getByRole('button', { name: 'Pause team-a' }).click()
+    await expect(page.getByRole('button', { name: 'Resume team-a' })).toBeVisible()
+    await expect.poll(gets, { message: 'the list is read again after pause' }).toBeGreaterThan(beforePause)
+    await expect(page.getByRole('dialog')).toHaveCount(0)
+
+    const beforeResume = gets()
+    await page.getByRole('button', { name: 'Resume team-a' }).click()
+    await expect(page.getByRole('button', { name: 'Pause team-a' })).toBeVisible()
+    await expect.poll(gets, { message: 'the list is read again after resume' }).toBeGreaterThan(beforeResume)
+    expect(postsTo(requests, '/pause')).toBe(1)
+    expect(postsTo(requests, '/resume')).toBe(1)
     await context.close()
   })
 
   test('pause and resume refusals show the API sentence', async ({ browser }) => {
-    const { context, page } = await open(browser, {
-      rows: [pipeline({ name: 'pause-me', paused: false, state: 'idle' })],
-    })
-    await expect(page.getByRole('button', { name: /Pause|Resume/ })).toHaveCount(0)
-    await context.close()
+    const sentence = 'the scheduler has not loaded this pipeline yet'
+    for (const [name, paused] of [['pause-me', false], ['resume-me', true]] as const) {
+      const { context, page } = await open(browser, {
+        rows: [pipeline({ name, paused, state: paused ? 'paused' : 'idle' })],
+        write: (route, _path, method) => {
+          if (method !== 'POST') return false
+          json(route, { error: sentence }, 409)
+          return true
+        },
+      })
+      await page.getByRole('button', { name: paused ? `Resume ${name}` : `Pause ${name}` }).click()
+      await expect(page.getByRole('alert'), name).toHaveText(sentence)
+      await expect(page.getByRole('dialog'), name).toHaveCount(0)
+      await context.close()
+    }
   })
 
   test('P4 stop run names the run, asks once, and Escape cancels', async ({ browser }) => {
@@ -1919,7 +1945,8 @@ test.describe('pipelines', () => {
       ...pipeline({ name: 'team-a', state: 'running', lastRun: running }),
       runs: [running], params: {}, retries: null,
     }
-    const { context, page } = await open(browser, {
+    let stopCalls = 0
+    const { context, page, requests } = await open(browser, {
       start: `/pipelines/${NS}/team-a`,
       read: (route, path, method) => {
         if (method !== 'GET') return false
@@ -1933,10 +1960,40 @@ test.describe('pipelines', () => {
         }
         return false
       },
+      write: (route, path, method) => {
+        if (method !== 'POST' || !path.endsWith('/stop')) return false
+        stopCalls += 1
+        if (stopCalls === 1) json(route, { error: 'the run is not active' }, 409)
+        else json(route, running)
+        return true
+      },
     })
 
-    await expect(page.getByRole('button', { name: `Stop run ${running.runId}` })).toHaveCount(0)
-    await expect(page.getByText('Run, pause and stop live in Airflow — use Open in Airflow.')).toBeVisible()
+    const opener = page.getByRole('button', { name: `Stop run ${running.runId}` })
+    await expect(opener).toBeVisible()
+    await opener.click()
+    const dialog = page.getByRole('dialog', { name: 'Stop this run?' })
+    await expect(dialog).toBeVisible()
+    await expect(dialog).toContainText(running.runId)
+    await expect(dialog.getByRole('button', { name: 'Cancel' })).toBeFocused()
+    expect(postsTo(requests, '/stop')).toBe(0)
+
+    await page.keyboard.press('Escape')
+    await expect(dialog).toHaveCount(0)
+    expect(postsTo(requests, '/stop')).toBe(0)
+    await expect(opener).toBeFocused()
+
+    await opener.click()
+    await expect(dialog).toBeVisible()
+    await dialog.getByRole('button', { name: 'Stop run' }).click()
+    await expect(dialog.getByRole('alert')).toHaveText('the run is not active')
+    await expect(dialog).toBeVisible()
+    expect(postsTo(requests, '/stop')).toBe(1)
+
+    await dialog.getByRole('button', { name: 'Stop run' }).click()
+    await expect(page.getByRole('status')).toHaveText(`Stopped run ${running.runId}.`)
+    await expect(dialog).toHaveCount(0)
+    expect(postsTo(requests, '/stop')).toBe(2)
     await context.close()
   })
 
@@ -2568,7 +2625,8 @@ test.describe('pipelines', () => {
     expect((await auditPage(page)).filter((finding) => finding.rule === 'U5')).toEqual([])
 
     await page.getByRole('button', { name: `Show tasks of run ${running.runId}` }).click()
-    await expect(page.getByRole('button', { name: `Stop run ${running.runId}` })).toHaveCount(0)
+    await page.getByRole('button', { name: `Stop run ${running.runId}` }).click()
+    await expect(page.getByRole('dialog', { name: 'Stop this run?' })).toBeVisible()
     expect((await auditPage(page)).filter((finding) => finding.rule === 'U5')).toEqual([])
 
     await page.keyboard.press('Escape')
