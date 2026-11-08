@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { api, errorMessage, type QueryLogItem } from '../api'
+import { EmptyState } from '../components/EmptyState'
 import { formatBytes, formatCount, formatDurationMs, formatTime, relativeTime, rowsLabel, sourceLabel } from '../format'
 import { isAdmin } from '../roles'
 
@@ -253,8 +254,10 @@ export default function QueryLog() {
             )}
             {log.data && items.length === 0 && (
               <tr>
-                <td className="px-4 py-6 text-text-mute" colSpan={colCount}>
-                  No queries match. Run one in the <Link className="underline" to="/query">SQL editor</Link>, or widen the time range.
+                <td colSpan={colCount}>
+                  <EmptyState icon="search" title="No queries match">
+                    Run one in the <Link className="underline" to="/query">SQL editor</Link>, or widen the time range.
+                  </EmptyState>
                 </td>
               </tr>
             )}

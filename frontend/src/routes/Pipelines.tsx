@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { ApiError, api, type PipelineView } from '../api'
+import { EmptyState } from '../components/EmptyState'
 import ErrorBox from '../components/ErrorBox'
 import { Icon } from '../components/Icon'
 import ScheduleDialog from '../components/ScheduleDialog'
@@ -168,11 +169,9 @@ export default function Pipelines() {
           </div>
         )}
         {list.data && pipelines.length === 0 && (
-          <p className="px-5 py-5 text-sm text-text-mute">
-            No pipelines yet.{' '}
-            <Link to="/query" className="underline">Open the SQL editor</Link>, write a statement
-            and press Schedule.
-          </p>
+          <EmptyState icon="lineage" title="No pipelines yet">
+            <Link to="/query" className="underline">Open the SQL editor</Link>, write a statement and press Schedule.
+          </EmptyState>
         )}
         {list.data && pipelines.length > 0 && (
           <table className="w-full text-sm">

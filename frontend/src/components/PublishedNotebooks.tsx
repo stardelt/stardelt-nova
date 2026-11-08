@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { ApiError, api, errorMessage, type PipelinePrincipal, type PipelineView, type PublishedNotebook } from '../api'
 import { formatBytes, formatTime, shortVersion } from '../format'
+import { EmptyState } from './EmptyState'
 import ErrorBox from './ErrorBox'
 import ScheduleDialog from './ScheduleDialog'
 
@@ -82,7 +83,11 @@ export default function PublishedNotebooks() {
           <ErrorBox error={list.error} onRetry={storeMissing ? undefined : () => void list.refetch()} />
         </div>
       )}
-      {list.data && rows.length === 0 && <p className="px-5 pb-4 text-sm text-text-mute">{EMPTY}</p>}
+      {list.data && rows.length === 0 && (
+        <EmptyState icon="notebook" title="No published notebooks yet">
+          {EMPTY}
+        </EmptyState>
+      )}
       {shown.length > 0 && (
         <div className="relative max-h-[22rem] overflow-auto border-t border-border/70">
           <table className="w-full text-sm">

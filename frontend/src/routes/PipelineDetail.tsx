@@ -3,6 +3,7 @@ import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-quer
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { ApiError, api, type LogLine, type PipelineDetail as PipelineDetailView, type RunView } from '../api'
 import ErrorBox from '../components/ErrorBox'
+import { EmptyState } from '../components/EmptyState'
 import ScheduleDialog, { DeletePipelineDialog } from '../components/ScheduleDialog'
 import DefinitionEditor from '../components/DefinitionEditor'
 import { shortRevision, shortVersion } from '../format'
@@ -311,7 +312,7 @@ export default function PipelineDetail() {
           <tbody>
             {pipeline.runs.length === 0 && (
               <tr>
-                <td colSpan={8} className="px-5 py-4 text-text-mute">No runs yet.</td>
+                <td colSpan={8}><EmptyState icon="clock" title="No runs yet">{null}</EmptyState></td>
               </tr>
             )}
             {pipeline.runs.map((run, index) => {

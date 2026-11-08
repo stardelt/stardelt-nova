@@ -37,7 +37,7 @@ test('empty /api/streams shows the empty state and no button', async ({ page }) 
     return json(r, {})
   })
   await page.goto('/streams')
-  await expect(page.locator('main').getByText('No streams yet.')).toBeVisible()
+  await expect(page.locator('main').getByText('No streams yet')).toBeVisible()
   await expect(page.locator('main').getByRole('button')).toHaveCount(0)
 })
 
