@@ -5364,7 +5364,7 @@
           "public"
         ],
         "summary": "Stop or resume one stream: merge `spec.stopped` and answer the updated view.",
-        "description": "Stop or resume one stream by setting `spec.stopped` (the one verb a stream has, D42 §4.4). `true` stops the job and keeps the checkpoint so `false` resumes from it. A stream the caller may not see, a foreign namespace, and a name that does not exist all answer the same `404`. The answer is the updated stream view. Answers `Cache-Control: no-store`.",
+        "description": "Stop or resume one stream by setting `spec.stopped` (the one verb a stream has). `true` stops the job and keeps the checkpoint so `false` resumes from it. A stream the caller may not see, a foreign namespace, and a name that does not exist all answer the same `404`. The answer is the updated stream view. Answers `Cache-Control: no-store`.",
         "operationId": "streams_patch",
         "parameters": [
           {
@@ -8853,7 +8853,7 @@
       },
       "StreamState": {
         "type": "object",
-        "description": "The one verb a stream has (D42 §4.4): stop or resume by setting `spec.stopped`.",
+        "description": "The one verb a stream has: stop or resume by setting `spec.stopped`.",
         "required": [
           "stopped"
         ],
