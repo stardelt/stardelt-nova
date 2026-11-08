@@ -166,6 +166,17 @@ export default function Query() {
           </div>
         )}
 
+        {!result && !error && !running && (
+          <div className="card flex-1 min-h-0 grid place-items-center p-6 text-center">
+            <div>
+              <p className="text-text-dim text-sm">Run a query to see results here.</p>
+              <p className="text-xs text-text-mute mt-1">
+                ⌘/Ctrl+Enter runs the statement above. The row count, the timing and a CSV download appear in this panel.
+              </p>
+            </div>
+          </div>
+        )}
+
         {result && (
           <div className="card flex-1 min-h-0 overflow-hidden flex flex-col">
             <div className="px-4 py-2 text-xs text-text-mute border-b border-border flex items-center gap-3">
@@ -217,7 +228,7 @@ export default function Query() {
             className="text-xs text-text-mute hover:text-text"
           >clear</button>
         </div>
-        {history.length === 0 && <div className="text-text-mute text-sm">no queries yet</div>}
+        {history.length === 0 && <div className="text-text-mute text-sm">No queries yet — run one above.</div>}
         <ul className="space-y-2">
           {history.map((h, i) => (
             <li key={i}>
