@@ -307,6 +307,58 @@ impl DemoState {
             .find(|t| t.namespace == namespace && t.name == table)
     }
 
+    /// The demo table's documentation, for `GET /api/catalog/tables/{ns}/{tbl}/documentation`
+    /// (stardelt-nova#500). Demo mode is read-only: `canEdit` and `canRollback` are false.
+    pub fn documentation(
+        &self,
+        namespace: &str,
+        table: &str,
+    ) -> Option<crate::catalog_docs::TableDocumentation> {
+        let t = self.table(namespace, table)?;
+        let (description, tags, owner, domain): (&str, Vec<&str>, &str, Option<&str>) =
+            match (namespace, table) {
+                ("nyc_taxi", "yellow_trips") => (
+                    "NYC yellow-taxi trips, one row per completed trip.",
+                    vec!["bronze", "taxi"],
+                    "mobility-analytics",
+                    Some("mobility"),
+                ),
+                ("analytics", "trips_by_borough") => (
+                    "Trips by pickup borough, rebuilt from nyc_taxi.yellow_trips.",
+                    vec!["gold", "taxi"],
+                    "mobility-analytics",
+                    Some("mobility"),
+                ),
+                ("analytics", "daily_revenue") => (
+                    "Daily revenue and average fare, rebuilt from nyc_taxi.yellow_trips.",
+                    vec!["gold", "finance"],
+                    "retail-analytics",
+                    Some("finance"),
+                ),
+                _ => ("", vec![], "", None),
+            };
+        Some(crate::catalog_docs::TableDocumentation {
+            description: (!description.is_empty()).then(|| description.to_string()),
+            tags: tags.into_iter().map(str::to_string).collect(),
+            owner: (!owner.is_empty()).then(|| owner.to_string()),
+            domain: domain.map(str::to_string),
+            columns: t
+                .columns
+                .iter()
+                .map(|c| crate::catalog_docs::ColumnDocumentation {
+                    name: c.name.clone(),
+                    r#type: c.r#type.clone(),
+                    description: None,
+                })
+                .collect(),
+            can_edit: false,
+            edit_rule: "Demo mode keeps a read-only catalog.".to_string(),
+            can_rollback: false,
+            rollback_rule: "Demo mode keeps no snapshots, so there is nothing to roll back."
+                .to_string(),
+        })
+    }
+
     fn table_mut(&mut self, namespace: &str, table: &str) -> Option<&mut DemoTable> {
         self.tables
             .iter_mut()

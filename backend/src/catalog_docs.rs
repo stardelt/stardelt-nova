@@ -1013,7 +1013,7 @@ async fn catalog_or_error(
     operation_id = "table_documentation_get",
     path = "/api/catalog/tables/{ns}/{tbl}/documentation",
     tag = "public",
-    description = "A table's documentation: the Iceberg `comment` as `description`, the `stardelt.tags`/`stardelt.owner`/`stardelt.domain` custom properties, and the description and type of every column of the **current** schema. `?catalog=` picks the catalog. `canEdit`/`editRule` apply Nova's interim rule: until the catalog enforces permissions, Nova decides who may edit, and anyone who reaches Lakekeeper or Trino directly can still change these properties. Demo mode answers 503.",
+    description = "A table's documentation: the Iceberg `comment` as `description`, the `stardelt.tags`/`stardelt.owner`/`stardelt.domain` custom properties, and the description and type of every column of the **current** schema. `?catalog=` picks the catalog. `canEdit`/`editRule` apply Nova's interim rule: until the catalog enforces permissions, Nova decides who may edit, and anyone who reaches Lakekeeper or Trino directly can still change these properties. Demo mode answers the seeded table's documentation read-only (`canEdit` and `canRollback` are false).",
     params(
         ("ns" = String, Path, description = "Namespace (schema) name"),
         ("tbl" = String, Path, description = "Table name"),
@@ -1025,7 +1025,6 @@ async fn catalog_or_error(
         (status = 403, description = "The caller may not browse that catalog", body = crate::openapi::ErrorResponse),
         (status = 404, description = "No such catalog or no such table", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The catalog is not reachable or did not answer", body = crate::openapi::ErrorResponse),
-        (status = 503, description = "Demo mode", body = crate::openapi::ErrorResponse),
     )
 )]
 pub async fn read(
@@ -1035,7 +1034,15 @@ pub async fn read(
     caller: Option<axum::Extension<Principal>>,
 ) -> Response {
     if s.demo {
-        return demo_unavailable();
+        let demo = s.demo_state.read().expect("demo state");
+        return match demo.documentation(&ns, &tbl) {
+            Some(doc) => Json(doc).into_response(),
+            None => (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": format!("no such table {ns}.{tbl}") })),
+            )
+                .into_response(),
+        };
     }
     let caller = caller.as_ref().map(|c| &c.0);
     let who = caller_identity(&s, caller);
@@ -2103,5 +2110,28 @@ mod tests {
             "the audit line never carries the text: {line}"
         );
         assert!(line.contains("sales.orders"), "the table is named: {line}");
+    }
+
+    #[test]
+    fn demo_documentation_is_read_only_and_covers_the_seeded_tables() {
+        let state = test_state();
+        *state.demo_state.write().expect("demo state") = crate::demo::DemoState::seed();
+        let demo = state.demo_state.read().expect("demo state");
+
+        let doc = demo
+            .documentation("nyc_taxi", "yellow_trips")
+            .expect("the seeded table has documentation");
+        assert_eq!(
+            doc.description.as_deref(),
+            Some("NYC yellow-taxi trips, one row per completed trip.")
+        );
+        assert_eq!(doc.tags, ["bronze", "taxi"]);
+        assert_eq!(doc.owner.as_deref(), Some("mobility-analytics"));
+        assert_eq!(doc.domain.as_deref(), Some("mobility"));
+        assert!(!doc.can_edit);
+        assert!(!doc.can_rollback);
+        assert_eq!(doc.columns.len(), 10);
+        assert!(doc.columns.iter().all(|c| c.description.is_none()));
+        assert!(demo.documentation("nyc_taxi", "nope").is_none());
     }
 }
