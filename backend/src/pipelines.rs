@@ -4301,9 +4301,18 @@ pub(crate) async fn spec(
     )
 )]
 pub(crate) async fn detail(
-    signed: SignedIn,
+    caller: ReadCaller,
     Path((namespace, name)): Path<(String, String)>,
 ) -> Response {
+    let signed = match caller {
+        ReadCaller::Demo => {
+            return match crate::demo::pipeline_detail(&namespace, &name) {
+                Some(detail) => answer(Ok(detail)),
+                None => answer::<PipelineDetail>(Err(no_such_pipeline())),
+            };
+        }
+        ReadCaller::Signed(signed) => *signed,
+    };
     answer(
         pipeline_detail(
             resources(signed.state()).as_ref(),
@@ -10675,6 +10684,7 @@ mod tests {
             ("/api/pipelines", "ingest_orders"),
             ("/api/pipelines/principals", "analytics"),
             ("/api/service-principals", "pipeline-analytics"),
+            ("/api/pipelines/stardelt/daily_revenue", "daily_revenue"),
         ] {
             let response = app
                 .clone()
@@ -10696,5 +10706,16 @@ mod tests {
                 String::from_utf8_lossy(&body)
             );
         }
+        // A name the samples do not carry answers the same 404 a real instance gives.
+        let missing = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/pipelines/stardelt/nope")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
     }
 }

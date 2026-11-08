@@ -29,6 +29,9 @@ export default function PipelineDetail() {
   const { namespace = '', name = '' } = useParams()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
+  const me = useQuery({ queryKey: ['me'], queryFn: api.me })
+  // Demo mode has no cluster, so every write and the definition route answer 503 (#500).
+  const demo = me.data?.demo === true
   const [openRun, setOpenRun] = useState<string | null>(null)
   const [editing, setEditing] = useState(false)
   const [deleting, setDeleting] = useState(false)
@@ -115,18 +118,20 @@ export default function PipelineDetail() {
           </div>
           <p className="text-text-dim text-sm mt-1">The runs, tasks and logs of this pipeline.</p>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <button type="button" className="btn-ghost py-1.5 text-xs" onClick={() => setEditing(true)}>
-            Edit schedule
-          </button>
-          <button
-            type="button"
-            className="btn-ghost py-1.5 text-xs text-bad"
-            onClick={() => setDeleting(true)}
-          >
-            Delete pipeline
-          </button>
-        </div>
+        {!demo && (
+          <div className="flex flex-wrap items-center gap-2">
+            <button type="button" className="btn-ghost py-1.5 text-xs" onClick={() => setEditing(true)}>
+              Edit schedule
+            </button>
+            <button
+              type="button"
+              className="btn-ghost py-1.5 text-xs text-bad"
+              onClick={() => setDeleting(true)}
+            >
+              Delete pipeline
+            </button>
+          </div>
+        )}
       </header>
 
       <PipelineFeedback notice={notice} error={null} />
@@ -213,6 +218,7 @@ export default function PipelineDetail() {
         )}
       </section>
 
+      {!demo && (
       <section className="card p-5">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="min-w-0">
@@ -286,6 +292,7 @@ export default function PipelineDetail() {
           </div>
         )}
       </section>
+      )}
 
       <div className="[container-type:inline-size]">
       <section className="card relative overflow-x-auto">
