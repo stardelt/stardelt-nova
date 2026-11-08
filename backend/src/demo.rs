@@ -777,6 +777,42 @@ pub fn connections() -> crate::connection_routes::ConnectionsResponse {
     }
 }
 
+/// `GET /api/streams` in demo mode (#500): two rows, exactly the shape the real API answers
+/// with. Read-only; demo mode has no cluster, so the patch route stays 503 and the page hides
+/// the action.
+pub fn streams() -> crate::streams::StreamsResponse {
+    use crate::streams::{StreamView, StreamsResponse};
+    let row = |name: &str, phase: &str, topic: &str, table: &str| StreamView {
+        namespace: "stardelt".into(),
+        name: name.into(),
+        owner_group: "mobility".into(),
+        phase: phase.into(),
+        reason: None,
+        last_error: None,
+        last_checkpoint_at: Some("2026-11-08T09:30:00Z".into()),
+        attempts: None,
+        last_submitted_at: None,
+        stopped: false,
+        source_connection: "mobility-events".into(),
+        source_topic: topic.into(),
+        sink_catalog: "warehouse".into(),
+        sink_table: table.into(),
+        sink_mode: "append".into(),
+        run_as: Some("pipeline-mobility".into()),
+    };
+    StreamsResponse {
+        streams: vec![
+            row(
+                "pegelonline-live",
+                "Running",
+                "pegelonline.measurements",
+                "mobility.pegelonline",
+            ),
+            row("orders-cdc", "Pending", "orders.changes", "mobility.orders"),
+        ],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -31,6 +31,9 @@ function PhaseBadge({ phase, reason }: { phase: string; reason: string | null })
 
 export default function Streams() {
   const qc = useQueryClient()
+  const me = useQuery({ queryKey: ['me'], queryFn: api.me })
+  // Demo mode has no cluster, so the patch route stays 503 (#500): do not offer the action.
+  const demo = me.data?.demo === true
   const streams = useQuery({ queryKey: ['streams'], queryFn: api.streams, refetchInterval: 15_000 })
   const mutation = useMutation({
     mutationFn: ({ s, stopped }: { s: StreamView; stopped: boolean }) =>
@@ -73,7 +76,7 @@ export default function Streams() {
                   <th className="py-2 pr-3 font-medium">Sink</th>
                   <th className="py-2 pr-3 font-medium">Checkpoint</th>
                   <th className="py-2 pr-3 font-medium">Last error</th>
-                  <th className="py-2 font-medium">Job</th>
+                  {!demo && <th className="py-2 font-medium">Job</th>}
                 </tr>
               </thead>
               <tbody>
@@ -109,17 +112,19 @@ export default function Streams() {
                     </td>
                     <td className="py-2 pr-3">{formatWhen(s.last_checkpoint_at).text}</td>
                     <td className="py-2 pr-3 text-bad text-xs break-words">{s.last_error ?? '—'}</td>
-                    <td className="py-2">
-                      <button
-                        type="button"
-                        aria-label={`${s.stopped ? 'Resume' : 'Stop'} ${s.name}`}
-                        disabled={mutation.isPending && mutation.variables?.s.name === s.name}
-                        onClick={() => mutation.mutate({ s, stopped: !s.stopped })}
-                        className="rounded border border-border bg-bg-soft px-2 py-1 text-xs text-text hover:bg-bg disabled:opacity-50"
-                      >
-                        {s.stopped ? 'Resume' : 'Stop'}
-                      </button>
-                    </td>
+                    {!demo && (
+                      <td className="py-2">
+                        <button
+                          type="button"
+                          aria-label={`${s.stopped ? 'Resume' : 'Stop'} ${s.name}`}
+                          disabled={mutation.isPending && mutation.variables?.s.name === s.name}
+                          onClick={() => mutation.mutate({ s, stopped: !s.stopped })}
+                          className="rounded border border-border bg-bg-soft px-2 py-1 text-xs text-text hover:bg-bg disabled:opacity-50"
+                        >
+                          {s.stopped ? 'Resume' : 'Stop'}
+                        </button>
+                      </td>
+                    )}
                   </tr>
                 ))}
               </tbody>

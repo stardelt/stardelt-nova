@@ -8,7 +8,7 @@ use std::sync::Arc;
 use axum::{
     Json, Router,
     extract::Path,
-    response::Response,
+    response::{IntoResponse, Response},
     routing::{get, patch as patch_route},
 };
 use kube::api::{Api, ApiResource, Patch, PatchParams};
@@ -19,7 +19,7 @@ use utoipa::ToSchema;
 
 use crate::AppState;
 use crate::auth::Identity;
-use crate::connection_routes::{Fail, SignedIn};
+use crate::connection_routes::{Caller, Fail, SignedIn};
 use crate::pipelines::{ResourceError, answer, may_act, no_cluster, resource_fail, visible};
 
 /// One `StreamApp`, as the Streams page needs it. No secret, no checkpoint path.
@@ -180,7 +180,11 @@ fn not_found() -> Fail {
         (status = 503, description = "No cluster connection", body = crate::openapi::ErrorResponse),
     )
 )]
-pub(crate) async fn list(signed: SignedIn) -> Response {
+pub(crate) async fn list(caller: Caller) -> Response {
+    let signed = match caller {
+        Caller::Demo => return Json(crate::demo::streams()).into_response(),
+        Caller::Signed(signed) => *signed,
+    };
     let result = match stream_apps(signed.state()).await {
         Ok(apps) => Ok(StreamsResponse {
             streams: visible_streams(&apps, signed.identity()),
@@ -277,7 +281,7 @@ mod tests {
     use axum::http::StatusCode;
     use serde_json::{Value, json};
 
-    use super::{patch_stream, stream_view, visible_streams};
+    use super::{patch_stream, router, stream_view, visible_streams};
     use crate::auth::Identity;
 
     fn who(sub: &str, groups: &[&str], admin: bool) -> Identity {
@@ -511,5 +515,32 @@ mod tests {
             .expect_err("foreign namespace gets 404");
         assert_eq!(err.status(), StatusCode::NOT_FOUND);
         assert!(shared.lock().unwrap().patches.is_empty());
+    }
+
+    /// Demo mode has neither a principal nor a cluster, so `GET /api/streams` answers the two
+    /// sample rows instead of the 503 the extractor used to give (#500).
+    #[tokio::test]
+    async fn demo_mode_lists_streams_without_a_store() {
+        use tower::ServiceExt;
+
+        let app = axum::Router::new()
+            .nest("/api", router())
+            .with_state(crate::router_tests::test_state());
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/streams")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.contains("pegelonline-live"), "{text}");
+        assert!(text.contains("orders-cdc"), "{text}");
     }
 }
