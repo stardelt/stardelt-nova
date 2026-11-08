@@ -220,6 +220,13 @@ pub fn router(
             "/internal/lineage",
             post(ingest_lineage).layer(DefaultBodyLimit::max(MAX_LINEAGE_BODY_BYTES)),
         )
+        // The path the official OpenLineage clients post to (`urljoin(OPENLINEAGE_URL,
+        // "api/v1/lineage")`): Airflow's provider, the Spark listener and dbt. Same handler,
+        // same bearer token, same body limit.
+        .route(
+            "/api/v1/lineage",
+            post(ingest_lineage).layer(DefaultBodyLimit::max(MAX_LINEAGE_BODY_BYTES)),
+        )
         .with_state(state)
 }
 
@@ -504,6 +511,30 @@ mod tests {
         assert_eq!(ev.run_id, "00000000-0000-0000-0000-000000000001");
         assert_eq!(ev.inputs.len(), 1);
         assert_eq!(ev.outputs.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn lineage_receiver_answers_the_openlineage_standard_path() {
+        let (tx, _rx) = mpsc::channel(4);
+        let (ltx, mut lrx) = mpsc::channel(4);
+        let app = router("s3cret", tx, ltx);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/lineage")
+            .header("authorization", "Bearer s3cret")
+            .body(Body::from(valid_lineage_event()))
+            .unwrap();
+        let (status, _, _) = call(app.clone(), req).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(lrx.try_recv().is_ok());
+        // and the token still guards it
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/lineage")
+            .body(Body::from(valid_lineage_event()))
+            .unwrap();
+        let (status, _, _) = call(app, req).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 
     fn finished_hive_event() -> String {
