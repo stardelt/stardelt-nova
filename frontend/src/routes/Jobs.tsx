@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { api } from '../api'
 import { formatTime } from '../format'
 import ErrorBox from '../components/ErrorBox'
+import { EmptyState } from '../components/EmptyState'
 import { Icon } from '../components/Icon'
 
 export default function Jobs() {
@@ -40,7 +41,7 @@ export default function Jobs() {
               <tr><td className="px-4 py-5" colSpan={6}><ErrorBox error={jobs.error} onRetry={() => jobs.refetch()} /></td></tr>
             )}
             {jobs.data && jobs.data.length === 0 && (
-              <tr><td className="px-4 py-5 text-text-mute" colSpan={6}>No activity yet.</td></tr>
+              <tr><td colSpan={6}><EmptyState icon="play" title="No activity yet">{null}</EmptyState></td></tr>
             )}
             {(jobs.data ?? []).map(j => (
               <tr key={j.id} className="border-t border-border/70 hover:bg-bg-soft/30">

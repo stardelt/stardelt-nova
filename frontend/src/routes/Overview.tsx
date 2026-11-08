@@ -4,6 +4,7 @@ import { Link } from 'react-router-dom'
 import { ApiError, api, errorMessage, type CatalogStat } from '../api'
 import { formatBytes, formatCount, formatTime, relativeTime, rowsLabel, statusLabel } from '../format'
 import ErrorBox from '../components/ErrorBox'
+import { EmptyState } from '../components/EmptyState'
 import { Icon } from '../components/Icon'
 import LayerBadge from '../components/LayerBadge'
 import { isAdmin } from '../roles'
@@ -151,7 +152,7 @@ export default function Overview() {
           {jobs.isLoading && <div className="text-text-mute text-sm">loading…</div>}
           {jobs.isError && !jobs.data && <ErrorBox error={jobs.error} onRetry={() => jobs.refetch()} />}
           {jobs.data && recent.length === 0 && (
-            <div className="text-text-mute text-sm">No activity yet. Run a query or load a file.</div>
+            <EmptyState icon="pulse" title="Nothing has happened yet">Run a query or load a file.</EmptyState>
           )}
           <div className="space-y-1">
             {recent.map(j => (

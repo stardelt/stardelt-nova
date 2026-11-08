@@ -2481,7 +2481,7 @@ test.describe('pipelines', () => {
 
   test('states: loading, empty, a retryable error and 503 without Retry', async ({ browser }) => {
     const empty = await open(browser)
-    await expect(empty.page.getByText('No pipelines yet. Open the SQL editor, write a statement and press Schedule.')).toBeVisible()
+    await expect(empty.page.getByText('No pipelines yet')).toBeVisible()
     await expect(empty.page.getByRole('link', { name: 'Open the SQL editor' })).toHaveAttribute('href', '/query')
     await empty.context.close()
 
@@ -2493,7 +2493,7 @@ test.describe('pipelines', () => {
       },
     })
     await expect(loading.page.getByText('Loading pipelines…')).toBeVisible()
-    await expect(loading.page.getByText('No pipelines yet. Open the SQL editor, write a statement and press Schedule.')).toBeVisible()
+    await expect(loading.page.getByText('No pipelines yet')).toBeVisible()
     await loading.context.close()
 
     const broken = await open(browser, {
@@ -5645,7 +5645,7 @@ test.describe('activity', () => {
 
     await page.goto('/jobs')
     await expect(page.getByRole('heading', { name: 'Activity', exact: true })).toBeVisible()
-    await expect(page.getByText('No activity yet.')).toBeVisible()
+    await expect(page.getByText('No activity yet')).toBeVisible()
     await expect(page).toHaveTitle('Activity · stardelt Nova')
     const nav = await page.evaluate(() => [...document.querySelectorAll('nav a')].map((a) => a.textContent?.trim()))
     expect(nav).toContain('Activity')

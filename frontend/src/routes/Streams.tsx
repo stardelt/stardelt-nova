@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, errorMessage, type StreamView } from '../api'
+import { EmptyState } from '../components/EmptyState'
 import ErrorBox from '../components/ErrorBox'
 import { formatWhen } from './Pipelines'
 
@@ -50,10 +51,9 @@ export default function Streams() {
       {streams.isError && <ErrorBox error={streams.error} onRetry={() => streams.refetch()} />}
 
       {streams.data && streams.data.streams.length === 0 && (
-        <p className="text-sm text-text-dim">
-          No streams yet. A stream is created as a <span className="font-mono">StreamApp</span> resource; ask an
-          administrator to add one.
-        </p>
+        <EmptyState icon="spark" title="No streams yet">
+          A stream is created as a <span className="font-mono">StreamApp</span> resource; ask an administrator to add one.
+        </EmptyState>
       )}
 
       {streams.data && streams.data.streams.length > 0 && (
