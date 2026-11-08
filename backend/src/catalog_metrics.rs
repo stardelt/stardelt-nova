@@ -51,8 +51,14 @@ use crate::{
 /// local catalog; more would turn the Overview into a scan of the warehouse.
 pub const MAX_TABLES_PER_CATALOG: usize = 200;
 
-/// How many table metadata reads one scan keeps in flight.
-pub const CONCURRENCY: usize = 8;
+/// How many table metadata reads one scan keeps in flight. Four, not eight: Lakekeeper's
+/// OpenFGA `BatchCheck` takes ~1.5 s under a burst, and eight concurrent loads cross its
+/// authorization-client timeout (#658).
+pub const CONCURRENCY: usize = 4;
+
+/// How long one table load waits before its single retry on 503/429: long enough for
+/// the burst that caused it to drain, short enough to stay inside one refresher round.
+pub const RETRY_DELAY: Duration = Duration::from_millis(750);
 
 /// How many catalogs one refresher round scans at once. Two, not four: the round runs for
 /// minutes in the background and must never look like load on the catalog.
@@ -231,25 +237,34 @@ async fn get_json<T: serde::de::DeserializeOwned>(
     authorization: &Option<String>,
     url: &str,
 ) -> Result<T, WarehouseError> {
-    let mut request = state.http.get(url);
-    if let Some(header) = authorization {
-        request = request.header(reqwest::header::AUTHORIZATION, header);
+    for attempt in 0..2 {
+        let mut request = state.http.get(url);
+        if let Some(header) = authorization {
+            request = request.header(reqwest::header::AUTHORIZATION, header);
+        }
+        let response = request.send().await.map_err(|e| {
+            warn!("lakekeeper unreachable while reading catalog metrics: {e}");
+            WarehouseError::Unreachable
+        })?;
+        let status = response.status();
+        if (status == StatusCode::SERVICE_UNAVAILABLE || status == StatusCode::TOO_MANY_REQUESTS)
+            && attempt == 0
+        {
+            tokio::time::sleep(RETRY_DELAY).await;
+            continue;
+        }
+        if !status.is_success() {
+            // A table deleted between the listing and the load is the ordinary race; a
+            // warehouse whose id no longer exists is the same answer. Neither is a body.
+            warn!(url = %url, %status, "lakekeeper answered catalog metrics with a non-2xx status");
+            return Err(WarehouseError::Malformed);
+        }
+        return response.json().await.map_err(|e| {
+            warn!(url = %url, "lakekeeper catalog metrics answer malformed: {e}");
+            WarehouseError::Malformed
+        });
     }
-    let response = request.send().await.map_err(|e| {
-        warn!("lakekeeper unreachable while reading catalog metrics: {e}");
-        WarehouseError::Unreachable
-    })?;
-    let status = response.status();
-    if !status.is_success() {
-        // A table deleted between the listing and the load is the ordinary race; a
-        // warehouse whose id no longer exists is the same answer. Neither is a body.
-        warn!(url = %url, %status, "lakekeeper answered catalog metrics with a non-2xx status");
-        return Err(WarehouseError::Malformed);
-    }
-    response.json().await.map_err(|e| {
-        warn!(url = %url, "lakekeeper catalog metrics answer malformed: {e}");
-        WarehouseError::Malformed
-    })
+    unreachable!("the retry loop returns on both attempts")
 }
 
 /// The Iceberg REST namespace path of one (possibly multi-level) namespace: the levels
@@ -1100,6 +1115,8 @@ mod tests {
         loads: HashMap<(String, String, String), Value>,
         /// Warehouse ids whose namespace list answers 500.
         broken: Vec<String>,
+        /// `(warehouse id, namespace, table)` → how many upcoming loads still answer 503.
+        failing_loads: HashMap<(String, String, String), usize>,
         namespace_requests: usize,
         load_requests: usize,
         /// When set, a namespace list waits here: the single-flight and "no scan on the
@@ -1164,6 +1181,15 @@ mod tests {
 
         fn break_namespaces(&self, id: &str) {
             self.0.lock().unwrap().broken.push(id.into());
+        }
+
+        /// The next load of this table answers 503; the one after it succeeds.
+        fn fail_load_once(&self, id: &str, ns: &str, table: &str) {
+            self.0
+                .lock()
+                .unwrap()
+                .failing_loads
+                .insert((id.into(), ns.into(), table.into()), 1);
         }
 
         /// Hold every namespace list until the test releases it; answers the door so the
@@ -1280,6 +1306,14 @@ mod tests {
     ) -> Response {
         let mut lakekeeper = fake.0.lock().unwrap();
         lakekeeper.load_requests += 1;
+        if let Some(left) = lakekeeper
+            .failing_loads
+            .get_mut(&(wh.clone(), ns.clone(), tbl.clone()))
+            && *left > 0
+        {
+            *left -= 1;
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
         match lakekeeper.loads.get(&(wh, ns, tbl)) {
             Some(body) => Json(body.clone()).into_response(),
             None => Json(load_body(metadata_with(
@@ -1320,6 +1354,21 @@ mod tests {
         );
         assert_eq!(stats.last_commit_ms, Some(1_700_000_000_000));
         assert_eq!(stats.name, "warehouse");
+    }
+
+    #[tokio::test]
+    async fn a_table_load_retries_once_on_503() {
+        let fake = FakeLakekeeper::new();
+        fake.warehouse("warehouse", "wid-warehouse");
+        fake.namespaces("wid-warehouse", &["s1"]);
+        fake.tables("wid-warehouse", "s1", &["t1".to_string()]);
+        fake.fail_load_once("wid-warehouse", "s1", "t1");
+        let url = fake.serve().await;
+        let state = crate::router_tests::catalog_scope_test_state("http://127.0.0.1:1", &url);
+
+        let stats = scan_catalog(&state, "warehouse").await.expect("the scan");
+        assert_eq!(stats.records, 10, "the retried load's snapshot is counted");
+        assert_eq!(fake.load_requests(), 2, "one 503, then one success");
     }
 
     // -----------------------------------------------------------------------
