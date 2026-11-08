@@ -33,6 +33,11 @@ pub struct StreamView {
     pub reason: Option<String>,
     pub last_error: Option<String>,
     pub last_checkpoint_at: Option<String>,
+    /// How many times Spark has submitted the application (`status.attempts`); absent until
+    /// the operator reports it (operator#336).
+    pub attempts: Option<i64>,
+    /// When Spark last submitted the application, RFC 3339 (`status.lastSubmittedAt`).
+    pub last_submitted_at: Option<String>,
     pub stopped: bool,
     pub source_connection: String,
     pub source_topic: String,
@@ -88,6 +93,11 @@ pub fn stream_view(app: &Value, _who: &Identity) -> StreamView {
             .map(str::to_string),
         last_checkpoint_at: status
             .get("lastCheckpointAt")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        attempts: status.get("attempts").and_then(Value::as_i64),
+        last_submitted_at: status
+            .get("lastSubmittedAt")
             .and_then(Value::as_str)
             .map(str::to_string),
         stopped: spec
@@ -162,7 +172,7 @@ fn not_found() -> Fail {
     operation_id = "streams_list",
     path = "/api/streams",
     tag = "public",
-    description = "The calling user's streams: every `StreamApp` of their groups, and all of them for an administrator. `phase` is the operator's `status.phase` (`Pending` when it has not reported yet); `lastError` is the application's own terminal message when the phase is `Failed`; `lastCheckpointAt` is empty until the operator can read the checkpoint and the UI must show `—`. `stopped` is `spec.stopped`. No connection credentials and no checkpoint prefix are part of an answer. Answers `Cache-Control: no-store`.",
+    description = "The calling user's streams: every `StreamApp` of their groups, and all of them for an administrator. `phase` is the operator's `status.phase` (`Pending` when it has not reported yet); `lastError` is the application's own terminal message when the phase is `Failed`; `lastCheckpointAt` is empty until the operator can read the checkpoint and the UI must show `—`. `stopped` is `spec.stopped`. `attempts` is how many times Spark has submitted the application and `lastSubmittedAt` when it last did; both are absent until the operator reports them. No connection credentials and no checkpoint prefix are part of an answer. Answers `Cache-Control: no-store`.",
     responses(
         (status = 200, description = "The caller's streams, sorted by namespace and name", body = StreamsResponse),
         (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
@@ -325,6 +335,8 @@ mod tests {
         assert!(views[0].last_checkpoint_at.is_none());
         assert!(!views[0].stopped);
         assert!(views[0].reason.is_none());
+        assert!(views[0].attempts.is_none());
+        assert!(views[0].last_submitted_at.is_none());
     }
 
     #[test]
@@ -343,6 +355,22 @@ mod tests {
         assert_eq!(
             view.last_error.as_deref(),
             Some("container exited with code 1")
+        );
+    }
+
+    #[test]
+    fn a_restarted_stream_carries_its_attempt_count() {
+        let mut looped = app("loops", "sales");
+        looped["status"] = json!({
+            "phase": "Running",
+            "attempts": 25,
+            "lastSubmittedAt": "2026-11-08T04:57:34Z"
+        });
+        let view = stream_view(&looped, &who("u", &["sales"], false));
+        assert_eq!(view.attempts, Some(25));
+        assert_eq!(
+            view.last_submitted_at.as_deref(),
+            Some("2026-11-08T04:57:34Z")
         );
     }
 

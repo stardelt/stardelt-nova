@@ -5312,7 +5312,7 @@
         "tags": [
           "public"
         ],
-        "description": "The calling user's streams: every `StreamApp` of their groups, and all of them for an administrator. `phase` is the operator's `status.phase` (`Pending` when it has not reported yet); `lastError` is the application's own terminal message when the phase is `Failed`; `lastCheckpointAt` is empty until the operator can read the checkpoint and the UI must show `—`. `stopped` is `spec.stopped`. No connection credentials and no checkpoint prefix are part of an answer. Answers `Cache-Control: no-store`.",
+        "description": "The calling user's streams: every `StreamApp` of their groups, and all of them for an administrator. `phase` is the operator's `status.phase` (`Pending` when it has not reported yet); `lastError` is the application's own terminal message when the phase is `Failed`; `lastCheckpointAt` is empty until the operator can read the checkpoint and the UI must show `—`. `stopped` is `spec.stopped`. `attempts` is how many times Spark has submitted the application and `lastSubmittedAt` when it last did; both are absent until the operator reports them. No connection credentials and no checkpoint prefix are part of an answer. Answers `Cache-Control: no-store`.",
         "operationId": "streams_list",
         "responses": {
           "200": {
@@ -8860,6 +8860,14 @@
           "sink_mode"
         ],
         "properties": {
+          "attempts": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "How many times Spark has submitted the application (`status.attempts`); absent until\nthe operator reports it (operator#336)."
+          },
           "last_checkpoint_at": {
             "type": [
               "string",
@@ -8871,6 +8879,13 @@
               "string",
               "null"
             ]
+          },
+          "last_submitted_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When Spark last submitted the application, RFC 3339 (`status.lastSubmittedAt`)."
           },
           "name": {
             "type": "string"
