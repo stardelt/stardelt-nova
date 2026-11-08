@@ -172,7 +172,7 @@ fn not_found() -> Fail {
     operation_id = "streams_list",
     path = "/api/streams",
     tag = "public",
-    description = "The calling user's streams: every `StreamApp` of their groups, and all of them for an administrator. `phase` is the operator's `status.phase` (`Pending` when it has not reported yet); `lastError` is the application's own terminal message when the phase is `Failed`; `lastCheckpointAt` is empty until the operator can read the checkpoint and the UI must show `—`. `stopped` is `spec.stopped`. `attempts` is how many times Spark has submitted the application and `lastSubmittedAt` when it last did; both are absent until the operator reports them. No connection credentials and no checkpoint prefix are part of an answer. Answers `Cache-Control: no-store`.",
+    description = "The calling user's streams: every `StreamApp` of their groups, and all of them for an administrator. `phase` is the operator's `status.phase` (`Pending` when it has not reported yet); `lastError` is the application's own terminal message when the phase is `Failed`; `lastCheckpointAt` is the time of the newest checkpoint commit, absent until the operator reports it. `stopped` is `spec.stopped`. `attempts` is how many times Spark has submitted the application and `lastSubmittedAt` when it last did; both are absent until the operator reports them. No connection credentials and no checkpoint prefix are part of an answer. Answers `Cache-Control: no-store`.",
     responses(
         (status = 200, description = "The caller's streams, sorted by namespace and name", body = StreamsResponse),
         (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
