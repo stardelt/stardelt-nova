@@ -6,6 +6,7 @@ import { Icon, type IconName } from './Icon'
 import { applyTheme, counterpart, themeLabel, useTheme } from '../theme'
 import { isAdmin } from '../roles'
 import ErrorBoundary from './ErrorBoundary'
+import StageBadge from './StageBadge'
 import UserMenu from './UserMenu'
 
 type NavItem = { to: string; label: string; icon: IconName; end?: boolean }
@@ -194,8 +195,10 @@ export default function Shell() {
   useEffect(() => { setNavOpen(false) }, [location.pathname])
 
   useEffect(() => {
-    document.title = title === 'Nova' ? 'stardelt Nova' : `${title} · stardelt Nova`
-  }, [title])
+    const base = title === 'Nova' ? 'stardelt Nova' : `${title} · stardelt Nova`
+    const stripped = base.replace(/^\[[^\]]+\] /, '')
+    document.title = me.data?.stage_name ? `[${me.data.stage_name}] ${stripped}` : stripped
+  }, [title, me.data?.stage_name])
 
   // One button, four themes: it switches to the paired theme (dark blue ↔ light,
   // graphite ↔ silver), never to an arbitrary third one.
@@ -212,6 +215,9 @@ export default function Shell() {
 
   return (
     <div className="h-full grid grid-cols-1 md:grid-cols-[250px_minmax(0,1fr)]">
+      {me.data?.stage_kind === 'prod' && me.data?.stage_name && (
+        <div aria-hidden="true" className="fixed inset-x-0 top-0 h-[3px] bg-amber-500 z-50 pointer-events-none" />
+      )}
       <a
         href="#main"
         className="sr-only focus:not-sr-only focus:fixed focus:left-3 focus:top-3 focus:z-50 btn-primary"
@@ -347,6 +353,7 @@ export default function Shell() {
               className="input pl-9 w-40 lg:w-64 py-1.5"
             />
           </form>
+          <StageBadge me={me.data} />
           <AppSwitcher />
           <UserMenu me={me.data} />
           <button

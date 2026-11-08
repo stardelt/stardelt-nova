@@ -2663,6 +2663,18 @@ mod tests {
         assert!(auth.sessions.find(&sid).is_none());
     }
 
+    #[tokio::test]
+    async fn me_in_dev_mode_reports_the_stage() {
+        let app = Router::new().route("/api/me", get(crate::me)).with_state(
+            crate::router_tests::test_state_with_stage(Some("prod-eu".into()), "prod"),
+        );
+        let (status, body) = call(&app, "/api/me", &[]).await;
+        assert_eq!(status, StatusCode::OK);
+        let body: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(body["stage_kind"], "prod");
+        assert_eq!(body["stage_name"], "prod-eu");
+    }
+
     /// An IdP that sends no ID token on a refresh still refreshes the identity: the
     /// access token carries the same claims and is verified the same way.
     #[tokio::test]
@@ -3158,6 +3170,8 @@ mod tests {
                 "admin_console_url",
                 "auth_mode",
                 "demo",
+                "stage_kind",
+                "stage_name",
                 "user",
                 "warehouse"
             ],

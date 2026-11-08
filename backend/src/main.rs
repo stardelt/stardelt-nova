@@ -144,6 +144,8 @@ pub struct AppState {
     pub superset_url: String,
     pub jupyterhub_url: String,
     pub warehouse_name: String,
+    pub stage_name: Option<String>,
+    pub stage_kind: &'static str,
     /// Lakekeeper warehouse ids by catalog name, filled from the warehouse list on the
     /// first miss (`catalog::warehouse_id_for`). One catalog is one warehouse
     /// (`design/multitenant-catalogs.md` §2); this replaces the single id Nova used to
@@ -243,6 +245,8 @@ struct Me {
     warehouse: String,
     /// `None` in `dev` mode: there is no IdP, so no console.
     admin_console_url: Option<String>,
+    stage_name: Option<String>,
+    stage_kind: &'static str,
 }
 
 /// `/api/me` in `oidc` mode: claims, never tokens. Nova still talks to Trino and
@@ -274,6 +278,8 @@ struct OidcMe<'a> {
     /// person signs in again; `None` for an Authorization-header call, which has no
     /// session. Never the access token's own `exp`.
     session_expires_at: Option<u64>,
+    stage_name: Option<&'a str>,
+    stage_kind: &'static str,
 }
 
 #[utoipa::path(
@@ -299,6 +305,8 @@ pub(crate) async fn me(
             demo: s.demo,
             warehouse: s.warehouse_name.clone(),
             admin_console_url: None,
+            stage_name: s.stage_name.clone(),
+            stage_kind: s.stage_kind,
         })
         .into_response(),
         Some(Extension(p)) => {
@@ -324,6 +332,8 @@ pub(crate) async fn me(
                 admin_group: facts.admin_group.as_deref(),
                 admin_by: facts.admin_by,
                 session_expires_at: facts.session_expires_at,
+                stage_name: s.stage_name.as_deref(),
+                stage_kind: s.stage_kind,
             })
             .into_response()
         }
@@ -868,6 +878,15 @@ async fn main() -> anyhow::Result<()> {
         jupyterhub_url: std::env::var("NOVA_JUPYTERHUB_URL")
             .unwrap_or_else(|_| "http://proxy-public:80".into()),
         warehouse_name: std::env::var("NOVA_WAREHOUSE_NAME").unwrap_or_else(|_| "warehouse".into()),
+        stage_name: std::env::var("NOVA_STAGE_NAME")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty() && s.len() <= 24),
+        stage_kind: match std::env::var("NOVA_STAGE_KIND").as_deref() {
+            Ok("prod") => "prod",
+            Ok("test") => "test",
+            _ => "dev",
+        },
         catalog_ids: RwLock::new(HashMap::new()),
         catalog_access: Mutex::new(HashMap::new()),
         catalog_metrics: Mutex::new(HashMap::new()),
@@ -1076,6 +1095,21 @@ mod router_tests {
     pub(crate) fn test_state_with_trino(trino_url: &str) -> Arc<AppState> {
         build_test_state(None, trino_url, "http://127.0.0.1:1", false, None, None)
     }
+    pub(crate) fn test_state_with_stage(
+        stage_name: Option<String>,
+        stage_kind: &'static str,
+    ) -> Arc<AppState> {
+        build_test_state_full(
+            None,
+            "http://127.0.0.1:1",
+            "http://127.0.0.1:1",
+            false,
+            None,
+            None,
+            stage_name,
+            stage_kind,
+        )
+    }
     fn build_test_state(
         db: Option<sqlx::PgPool>,
         trino_url: &str,
@@ -1083,6 +1117,28 @@ mod router_tests {
         demo_mode: bool,
         catalog_token: Option<catalog_token::CatalogToken>,
         kube: Option<kube::Client>,
+    ) -> Arc<AppState> {
+        build_test_state_full(
+            db,
+            trino_url,
+            lakekeeper_url,
+            demo_mode,
+            catalog_token,
+            kube,
+            None,
+            "dev",
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn build_test_state_full(
+        db: Option<sqlx::PgPool>,
+        trino_url: &str,
+        lakekeeper_url: &str,
+        demo_mode: bool,
+        catalog_token: Option<catalog_token::CatalogToken>,
+        kube: Option<kube::Client>,
+        stage_name: Option<String>,
+        stage_kind: &'static str,
     ) -> Arc<AppState> {
         Arc::new(AppState {
             dev_user: "test".into(),
@@ -1092,6 +1148,8 @@ mod router_tests {
             superset_url: "http://127.0.0.1:1".into(),
             jupyterhub_url: "http://127.0.0.1:1".into(),
             warehouse_name: "warehouse".into(),
+            stage_name,
+            stage_kind,
             catalog_ids: RwLock::new(HashMap::new()),
             catalog_access: Mutex::new(HashMap::new()),
             catalog_metrics: Mutex::new(HashMap::new()),
