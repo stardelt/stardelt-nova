@@ -52,7 +52,7 @@ pub struct StreamsResponse {
     pub streams: Vec<StreamView>,
 }
 
-/// The one verb a stream has (D42 §4.4): stop or resume by setting `spec.stopped`.
+/// The one verb a stream has: stop or resume by setting `spec.stopped`.
 #[derive(Deserialize, ToSchema)]
 pub struct StreamState {
     /// The desired `spec.stopped`.
@@ -200,7 +200,7 @@ pub(crate) async fn list(caller: Caller) -> Response {
     operation_id = "streams_patch",
     path = "/api/streams/{namespace}/{name}",
     tag = "public",
-    description = "Stop or resume one stream by setting `spec.stopped` (the one verb a stream has, D42 §4.4). `true` stops the job and keeps the checkpoint so `false` resumes from it. A stream the caller may not see, a foreign namespace, and a name that does not exist all answer the same `404`. The answer is the updated stream view. Answers `Cache-Control: no-store`.",
+    description = "Stop or resume one stream by setting `spec.stopped` (the one verb a stream has). `true` stops the job and keeps the checkpoint so `false` resumes from it. A stream the caller may not see, a foreign namespace, and a name that does not exist all answer the same `404`. The answer is the updated stream view. Answers `Cache-Control: no-store`.",
     params(
         ("namespace" = String, Path, description = "The stream's namespace; only Nova's own namespace"),
         ("name" = String, Path, description = "The stream's name"),

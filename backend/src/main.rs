@@ -705,7 +705,7 @@ fn api_router() -> Router<Arc<AppState>> {
         // Pipelines: only the caller's groups' pipelines, administrators see all. Nova checks
         // the resource before it asks Airflow; a hidden pipeline is 404. Uncacheable.
         .merge(pipelines::router())
-        // Streams (D42): the caller's StreamApps, read-only. Uncacheable like pipelines.
+        // Streams: the caller's StreamApps, read-only. Uncacheable like pipelines.
         .merge(streams::router())
         // Published notebooks: immutable versions, owner-group scoped (stardelt-nova#225).
         .merge(notebooks::router())
