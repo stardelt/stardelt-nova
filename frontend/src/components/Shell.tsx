@@ -194,6 +194,24 @@ export default function Shell() {
   const [navOpen, setNavOpen] = useState(false)
   useEffect(() => { setNavOpen(false) }, [location.pathname])
 
+  // The navigation collapses to a 64 px icon rail, remembered per person like the theme.
+  // The browser copy is the first paint; the server value wins when the state store has one.
+  const NAV_KEY = 'stardelt-nova:nav'
+  const [collapsed, setCollapsed] = useState(() => {
+    try { return localStorage.getItem(NAV_KEY) === 'collapsed' } catch { return false }
+  })
+  useEffect(() => {
+    void api.settings().then(s => {
+      if (s.nav === 'collapsed' || s.nav === 'expanded') setCollapsed(s.nav === 'collapsed')
+    }).catch(() => {})
+  }, [])
+  function toggleNav() {
+    const next = !collapsed
+    setCollapsed(next)
+    try { localStorage.setItem(NAV_KEY, next ? 'collapsed' : 'expanded') } catch { /* no store */ }
+    void api.putSetting('nav', next ? 'collapsed' : 'expanded').catch(() => {})
+  }
+
   useEffect(() => {
     const base = title === 'Nova' ? 'stardelt Nova' : `${title} · stardelt Nova`
     const stripped = base.replace(/^\[[^\]]+\] /, '')
@@ -214,7 +232,10 @@ export default function Shell() {
   }
 
   return (
-    <div className="h-full grid grid-cols-1 md:grid-cols-[250px_minmax(0,1fr)]">
+    <div className={[
+      'h-full grid grid-cols-1',
+      collapsed ? 'md:grid-cols-[64px_minmax(0,1fr)]' : 'md:grid-cols-[250px_minmax(0,1fr)]',
+    ].join(' ')}>
       {me.data?.stage_kind === 'prod' && me.data?.stage_name && (
         <div aria-hidden="true" className="fixed inset-x-0 top-0 h-[3px] bg-amber-500 z-50 pointer-events-none" />
       )}
@@ -243,24 +264,56 @@ export default function Shell() {
           'fixed inset-y-0 left-0 z-40 w-[250px] transition-transform',
           'md:static md:z-auto md:translate-x-0 md:bg-bg-elev/50 md:backdrop-blur',
           navOpen ? 'translate-x-0' : '-translate-x-full',
+          collapsed ? 'md:w-16' : 'md:w-[250px]',
         ].join(' ')}
       >
-        <div className="p-5 flex items-center gap-2.5">
+        <div className={[
+          'p-5 flex items-center gap-2.5',
+          // 64 px cannot hold the 28 px brand and a 28 px toggle side by side, so the
+          // header stacks them in the rail; the expanded header keeps its row.
+          collapsed && 'md:flex-col md:justify-center md:gap-1 md:px-2 md:py-3',
+        ].filter(Boolean).join(' ')}>
           {/* The brand asset, not a stand-in: `logo-wordmark.svg` is the same file the
               favicon and the docs use, so the product and its documentation cannot drift. */}
-          <img src="/logo-wordmark.svg" alt="stardelt" className="h-7 w-auto" />
-          <div className="text-[11px] text-text-mute leading-tight">Nova</div>
+          {collapsed
+            ? <img src="/logo.svg" alt="stardelt" className="h-7 w-7" />
+            : <><img src="/logo-wordmark.svg" alt="stardelt" className="h-7 w-auto" />
+                <div className="text-[11px] text-text-mute leading-tight">Nova</div></>}
+          <button
+            type="button"
+            onClick={toggleNav}
+            aria-label={collapsed ? 'Expand navigation' : 'Collapse navigation'}
+            aria-expanded={!collapsed}
+            aria-controls="primary-nav"
+            title={collapsed ? `Expand navigation · stardelt v${__APP_VERSION__}` : 'Collapse navigation'}
+            className={['btn-ghost p-1.5 hidden md:inline-flex', collapsed ? '' : 'ml-auto'].join(' ')}
+          >
+            <Icon name={collapsed ? 'panel-left-open' : 'panel-left-close'} className="w-4 h-4" />
+          </button>
         </div>
 
         <div className="px-3 pb-3">
-          <div className="card px-3 py-2 flex items-center gap-2">
-            <Icon name="database" className="w-4 h-4 text-accent" />
-            <div className="min-w-0">
+          <div className={['card flex items-center gap-2', collapsed ? 'md:justify-center px-2 py-2' : 'px-3 py-2'].join(' ')}>
+            {collapsed ? (
+              // The rail shows the icon alone; the `demo` badge shrinks to a dot on it.
+              <span className="relative inline-flex shrink-0">
+                <Icon name="database" className="w-4 h-4 text-accent" />
+                {me.data?.demo && (
+                  <span
+                    title="demo warehouse"
+                    className="hidden md:block absolute -top-1 -right-1 h-1.5 w-1.5 rounded-full bg-warn"
+                  />
+                )}
+              </span>
+            ) : (
+              <Icon name="database" className="w-4 h-4 text-accent" />
+            )}
+            <div className={collapsed ? 'min-w-0 md:hidden' : 'min-w-0'}>
               <div className="text-[10px] uppercase tracking-widest text-text-mute">Warehouse</div>
               <div className="text-sm truncate">{me.data?.warehouse ?? 'warehouse'}</div>
             </div>
             {me.data?.demo && (
-              <span className="badge ml-auto border-amber-400/40 bg-amber-400/10 text-warn">demo</span>
+              <span className={['badge border-amber-400/40 bg-amber-400/10 text-warn', collapsed ? 'ml-auto md:hidden' : 'ml-auto'].join(' ')}>demo</span>
             )}
           </div>
         </div>
@@ -268,14 +321,17 @@ export default function Shell() {
         <nav className="px-3 pb-4 flex-1 min-h-0 overflow-y-auto">
           {groups
             .filter(group => !group.admin || admin)
-            .map(group => (
-            <div key={group.label} className="mb-3">
-              <div className="label px-3 mb-1.5">{group.label}</div>
+            .map((group, index) => (
+            <div key={group.label} className={[
+              'mb-3',
+              collapsed && index > 0 ? 'md:border-t md:border-border md:pt-2' : '',
+            ].filter(Boolean).join(' ')}>
+              <div className={['label px-3 mb-1.5', collapsed && 'md:sr-only'].filter(Boolean).join(' ')}>{group.label}</div>
               <div className="space-y-1">
                 {group.items.map(item => (
-                  <NavLink key={item.to} to={item.to} end={item.end} className={navClass}>
-                    <Icon name={item.icon} className="w-4 h-4" />
-                    {item.label}
+                  <NavLink key={item.to} to={item.to} end={item.end} className={navClass} title={collapsed ? item.label : undefined}>
+                    <Icon name={item.icon} className="w-4 h-4 shrink-0" />
+                    <span className={collapsed ? 'md:sr-only' : ''}>{item.label}</span>
                   </NavLink>
                 ))}
                 {/* User management is the IdP's job, not a Nova screen: Keycloak owns
@@ -290,8 +346,8 @@ export default function Shell() {
                     title="Manage users in the platform identity provider"
                     className={navClass({ isActive: false })}
                   >
-                    <Icon name="users" className="w-4 h-4" />
-                    Users
+                    <Icon name="users" className="w-4 h-4 shrink-0" />
+                    <span className={collapsed ? 'md:sr-only' : ''}>Users</span>
                   </a>
                 )}
               </div>
@@ -303,7 +359,7 @@ export default function Shell() {
 
         {/* The project names itself: the version that is running, and where to read more
             or report a problem. A person should not have to leave Nova to find them. */}
-        <footer className="px-3 pb-3 pt-2 border-t border-border">
+        <footer className={['px-3 pb-3 pt-2 border-t border-border', collapsed && 'md:hidden'].filter(Boolean).join(' ')}>
           <div className="px-2 text-[11px] text-text-mute">stardelt v{__APP_VERSION__}</div>
           <div className="px-2 mt-1 flex flex-wrap gap-x-3 gap-y-1">
             <a

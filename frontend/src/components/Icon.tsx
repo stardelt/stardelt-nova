@@ -8,6 +8,8 @@ export type IconName =
   | 'sun'
   | 'moon'
   | 'alert'
+  | 'panel-left-close'
+  | 'panel-left-open'
 
 const paths: Record<IconName, ReactNode> = {
   grid: (
@@ -123,6 +125,20 @@ const paths: Record<IconName, ReactNode> = {
     </>
   ),
   play: <polygon points="6 3 20 12 6 21 6 3" />,
+  'panel-left-close': (
+    <>
+      <rect x="3" y="3" width="18" height="18" rx="2" />
+      <line x1="9" y1="3" x2="9" y2="21" />
+      <path d="m16 15-3-3 3-3" />
+    </>
+  ),
+  'panel-left-open': (
+    <>
+      <rect x="3" y="3" width="18" height="18" rx="2" />
+      <line x1="9" y1="3" x2="9" y2="21" />
+      <path d="m14 9 3 3-3 3" />
+    </>
+  ),
   folder: <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />,
   eye: (
     <>
