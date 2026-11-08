@@ -34,6 +34,15 @@ test('demo mode: the Connections page offers no write action that would answer 5
   expect(await page.locator('[role=alert]').count(), 'connections has a role=alert').toBe(0)
 })
 
+test('demo mode: the Pipelines page offers no Schedule action that would answer 503', async ({ page }) => {
+  await page.goto('/pipelines')
+  await page.waitForLoadState('networkidle')
+  await expect(page.getByRole('button', { name: 'Schedule a notebook' })).toHaveCount(0)
+  await expect(page.getByText('Demo mode shows two sample pipelines.')).toBeVisible()
+  await page.waitForTimeout(2500)
+  expect(await page.locator('[role=alert]').count(), '/pipelines has a role=alert').toBe(0)
+})
+
 test('demo mode: the Query log says why it is empty', async ({ page }) => {
   await page.goto('/queries')
   await expect(page.getByText('Demo mode keeps no query history')).toBeVisible()

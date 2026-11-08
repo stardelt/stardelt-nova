@@ -123,6 +123,9 @@ export default function Pipelines() {
     queryFn: api.servicePrincipals,
     refetchInterval: 60_000,
   })
+  const me = useQuery({ queryKey: ['me'], queryFn: api.me })
+  // Demo mode has no scheduler, so every write route answers 503 (#500): offer none.
+  const demo = me.data?.demo === true
   // A delete on the detail page comes back here with its notice in the route state; show it
   // once, then replace the entry so Back does not bring the sentence along.
   useEffect(() => {
@@ -144,11 +147,18 @@ export default function Pipelines() {
         <div className="min-w-0">
           <h1 className="text-2xl font-bold tracking-tight">Pipelines</h1>
           <p className="text-text-dim text-sm mt-1">Scheduled work you and your groups own.</p>
+          {demo && (
+            <p className="text-text-dim text-sm mt-1">
+              Demo mode shows two sample pipelines. Scheduling a notebook needs a scheduler connection.
+            </p>
+          )}
         </div>
-        <button type="button" className="btn-primary" onClick={() => setScheduling(true)}>
-          <Icon name="clock" className="w-4 h-4" />
-          Schedule a notebook
-        </button>
+        {!demo && (
+          <button type="button" className="btn-primary" onClick={() => setScheduling(true)}>
+            <Icon name="clock" className="w-4 h-4" />
+            Schedule a notebook
+          </button>
+        )}
       </header>
 
       <PipelineFeedback notice={routedNotice} error={null} />
