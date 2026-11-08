@@ -17,6 +17,7 @@ const runningStream = {
   name: 'demo',
   owner_group: 'admins',
   phase: 'Running',
+  reason: null,
   last_error: null,
   last_checkpoint_at: null,
   stopped: false,
@@ -85,4 +86,19 @@ test('a 404 shows an alert sentence, keeps the row and re-enables the button', a
   await expect(page.getByRole('alert')).toContainText('Not found.')
   await expect(page.getByText('demo', { exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Stop demo' })).toBeEnabled()
+})
+
+test('a restarting stream shows the Ready reason beside its phase', async ({ page }) => {
+  await page.route('**/api/**', (r) => {
+    const path = new URL(r.request().url()).pathname
+    if (path === '/api/me') return json(r, me)
+    if (path === '/api/streams') {
+      return json(r, { streams: [{ ...runningStream, reason: 'Restarting' }] })
+    }
+    return json(r, {})
+  })
+  await page.goto('/streams')
+  const main = page.locator('main')
+  await expect(main.getByText('Running', { exact: true })).toBeVisible()
+  await expect(main.getByText('Restarting', { exact: true })).toBeVisible()
 })

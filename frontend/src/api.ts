@@ -697,6 +697,8 @@ export type StreamView = {
   name: string
   owner_group: string
   phase: 'Pending' | 'Running' | 'Stopped' | 'Failed' | string
+  /** The operator's `Ready` reason; `Restarting` while a crashed job is being retried. */
+  reason: string | null
   last_error: string | null
   last_checkpoint_at: string | null
   stopped: boolean

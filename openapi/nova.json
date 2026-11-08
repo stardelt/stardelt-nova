@@ -8884,6 +8884,13 @@
           "phase": {
             "type": "string"
           },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The `Ready` condition's reason, when the operator set one (operator#322: `Restarting`)."
+          },
           "run_as": {
             "type": [
               "string",

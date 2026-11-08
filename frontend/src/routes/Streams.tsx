@@ -18,9 +18,14 @@ const PHASES: Record<string, PhaseLook> = {
   Pending: { word: 'Pending', cls: BUSY },
 }
 
-function PhaseBadge({ phase }: { phase: string }) {
+function PhaseBadge({ phase, reason }: { phase: string; reason: string | null }) {
   const look = PHASES[phase] ?? { word: phase || 'Unknown', cls: NEUTRAL }
-  return <span className={`badge ${look.cls}`}>{look.word}</span>
+  return (
+    <span className="inline-flex items-center gap-1">
+      <span className={`badge ${look.cls}`}>{look.word}</span>
+      {reason && reason !== phase && <span className={`badge ${BUSY}`}>{reason}</span>}
+    </span>
+  )
 }
 
 export default function Streams() {
@@ -79,7 +84,7 @@ export default function Streams() {
                       <div className="text-text-dim text-xs">{s.owner_group}</div>
                     </td>
                     <td className="py-2 pr-3">
-                      <PhaseBadge phase={s.phase} />
+                      <PhaseBadge phase={s.phase} reason={s.reason} />
                     </td>
                     <td className="py-2 pr-3">
                       {s.source_connection} · {s.source_topic}

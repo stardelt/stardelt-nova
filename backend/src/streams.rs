@@ -29,6 +29,8 @@ pub struct StreamView {
     pub name: String,
     pub owner_group: String,
     pub phase: String,
+    /// The `Ready` condition's reason, when the operator set one (operator#322: `Restarting`).
+    pub reason: Option<String>,
     pub last_error: Option<String>,
     pub last_checkpoint_at: Option<String>,
     pub stopped: bool,
@@ -52,6 +54,18 @@ pub struct StreamState {
     pub stopped: bool,
 }
 
+/// The reason on the operator's `Ready` condition (`StreamAppStatus.conditions`).
+fn ready_reason(status: &Value) -> Option<String> {
+    status
+        .get("conditions")?
+        .as_array()?
+        .iter()
+        .find(|c| c.get("type").and_then(Value::as_str) == Some("Ready"))
+        .and_then(|c| c.get("reason"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
 /// One stream as the API answers it. No connection credentials and no checkpoint prefix.
 pub fn stream_view(app: &Value, _who: &Identity) -> StreamView {
     let spec = app.get("spec").unwrap_or(app);
@@ -67,6 +81,7 @@ pub fn stream_view(app: &Value, _who: &Identity) -> StreamView {
         } else {
             phase
         },
+        reason: ready_reason(status),
         last_error: status
             .get("lastError")
             .and_then(Value::as_str)
@@ -309,6 +324,26 @@ mod tests {
         assert!(views[0].last_error.is_none());
         assert!(views[0].last_checkpoint_at.is_none());
         assert!(!views[0].stopped);
+        assert!(views[0].reason.is_none());
+    }
+
+    #[test]
+    fn a_restarting_stream_carries_the_ready_reason() {
+        let mut restarting = app("loops", "sales");
+        restarting["status"] = json!({
+            "phase": "Running",
+            "lastError": "container exited with code 1",
+            "conditions": [
+                {"type": "Ready", "status": "True", "reason": "Restarting"}
+            ]
+        });
+        let view = stream_view(&restarting, &who("u", &["sales"], false));
+        assert_eq!(view.phase, "Running");
+        assert_eq!(view.reason.as_deref(), Some("Restarting"));
+        assert_eq!(
+            view.last_error.as_deref(),
+            Some("container exited with code 1")
+        );
     }
 
     #[test]
