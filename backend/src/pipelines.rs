@@ -41,6 +41,8 @@
 //!   deleted — a `kubectl` or GitOps pipeline answers 409 instead of being rewritten. The
 //!   statement is **never** audited, only its length and the cron text. A create needs no
 //!   Airflow (the resource is the source of truth); the read routes keep answering 503 without it.
+//!   In demo mode (`NOVA_DEMO=1`) the three read routes answer sample data from `demo.rs`; the
+//!   write routes and the detail routes still answer 503.
 //!
 //! - **Options and parameters** (#223): a schedule carries `${params.<name>}` values (at most 16,
 //!   lower-case names, values up to 256 characters) and the advanced options the loader reads
@@ -3972,6 +3974,30 @@ fn answer_with<T: Serialize>(status: StatusCode, result: Result<T, Fail>) -> Res
     }
 }
 
+/// Demo mode has no principal and no store, so `SignedIn` refuses every read before the
+/// handler runs (#500). This lets exactly the read routes that have demo samples through.
+pub(crate) enum ReadCaller {
+    Demo,
+    /// Boxed: `SignedIn` is 208 bytes and `clippy::large_enum_variant` is a gate.
+    Signed(Box<SignedIn>),
+}
+
+impl FromRequestParts<Arc<AppState>> for ReadCaller {
+    type Rejection = Fail;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        if state.demo {
+            return Ok(ReadCaller::Demo);
+        }
+        SignedIn::from_request_parts(parts, state)
+            .await
+            .map(|signed| ReadCaller::Signed(Box::new(signed)))
+    }
+}
+
 #[utoipa::path(
     get,
     operation_id = "pipelines_list",
@@ -3985,7 +4011,11 @@ fn answer_with<T: Serialize>(status: StatusCode, result: Result<T, Fail>) -> Res
         (status = 503, description = "No cluster connection, or the scheduler is not configured", body = crate::openapi::ErrorResponse),
     )
 )]
-pub(crate) async fn list(signed: SignedIn) -> Response {
+pub(crate) async fn list(caller: ReadCaller) -> Response {
+    let signed = match caller {
+        ReadCaller::Demo => return answer(Ok(crate::demo::pipelines())),
+        ReadCaller::Signed(signed) => signed,
+    };
     answer(
         list_pipelines(
             resources(signed.state()).as_ref(),
@@ -4009,7 +4039,11 @@ pub(crate) async fn list(signed: SignedIn) -> Response {
         (status = 503, description = "No cluster connection", body = crate::openapi::ErrorResponse),
     )
 )]
-pub(crate) async fn principals(signed: SignedIn) -> Response {
+pub(crate) async fn principals(caller: ReadCaller) -> Response {
+    let signed = match caller {
+        ReadCaller::Demo => return answer(Ok(crate::demo::pipeline_principals())),
+        ReadCaller::Signed(signed) => signed,
+    };
     answer(principal_views(resources(signed.state()).as_ref(), signed.identity()).await)
 }
 
@@ -4026,7 +4060,11 @@ pub(crate) async fn principals(signed: SignedIn) -> Response {
         (status = 503, description = "No cluster connection", body = crate::openapi::ErrorResponse),
     )
 )]
-pub(crate) async fn service_principals(signed: SignedIn) -> Response {
+pub(crate) async fn service_principals(caller: ReadCaller) -> Response {
+    let signed = match caller {
+        ReadCaller::Demo => return answer(Ok(crate::demo::service_principals())),
+        ReadCaller::Signed(signed) => signed,
+    };
     answer(service_principal_views(resources(signed.state()).as_ref(), signed.identity()).await)
 }
 
@@ -10624,5 +10662,39 @@ mod tests {
                 .contains(CANARY),
             "the value is in the resource, where papermill reads it"
         );
+    }
+
+    #[tokio::test]
+    async fn demo_mode_answers_the_three_pipeline_reads() {
+        use tower::ServiceExt;
+        let app = Router::new()
+            .nest("/api", router())
+            .with_state(crate::router_tests::test_state());
+        for (uri, want) in [
+            ("/api/pipelines", "daily_revenue"),
+            ("/api/pipelines", "ingest_orders"),
+            ("/api/pipelines/principals", "analytics"),
+            ("/api/service-principals", "pipeline-analytics"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(uri)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            assert!(
+                String::from_utf8_lossy(&body).contains(want),
+                "{uri} answered without {want}: {}",
+                String::from_utf8_lossy(&body)
+            );
+        }
     }
 }

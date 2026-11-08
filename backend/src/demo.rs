@@ -463,6 +463,111 @@ impl DemoState {
     }
 }
 
+/// The Pipelines page in demo mode (#500): two resources the API could have returned.
+pub fn pipelines() -> crate::pipelines::PipelineListResponse {
+    use crate::pipelines::{PipelineListResponse, PipelineView, RunView};
+    let run =
+        |id: &str, state: &str, started: &str, ended: Option<&str>, secs: Option<f64>| RunView {
+            run_id: id.into(),
+            state: state.into(),
+            run_type: "scheduled".into(),
+            logical_date: Some(started.into()),
+            started_at: Some(started.into()),
+            ended_at: ended.map(str::to_string),
+            duration_seconds: secs,
+            triggered_by: Some("scheduler".into()),
+            note: None,
+        };
+    PipelineListResponse {
+        pipelines: vec![
+            PipelineView {
+                name: "daily_revenue".into(),
+                namespace: "stardelt".into(),
+                owner_group: Some("analytics".into()),
+                schedule: Some("0 6 * * * (UTC)".into()),
+                paused: false,
+                loaded: true,
+                next_run: Some("2026-11-09T06:00:00Z".into()),
+                state: "succeeded".into(),
+                last_run: Some(run(
+                    "scheduled__2026-11-08T06:00:00+00:00",
+                    "success",
+                    "2026-11-08T06:00:00Z",
+                    Some("2026-11-08T06:02:11Z"),
+                    Some(131.0),
+                )),
+                tasks: vec![],
+                run_as: Some("pipeline-analytics".into()),
+                concurrency: "Allow".into(),
+                created_at: Some("2026-10-21T09:15:00Z".into()),
+                deployment: None,
+            },
+            PipelineView {
+                name: "ingest_orders".into(),
+                namespace: "stardelt".into(),
+                owner_group: Some("mobility".into()),
+                schedule: Some("*/15 * * * * (UTC)".into()),
+                paused: false,
+                loaded: true,
+                next_run: None,
+                state: "running".into(),
+                last_run: Some(run(
+                    "scheduled__2026-11-08T09:00:00+00:00",
+                    "running",
+                    "2026-11-08T09:00:00Z",
+                    None,
+                    None,
+                )),
+                tasks: vec![],
+                run_as: Some("pipeline-mobility".into()),
+                concurrency: "Allow".into(),
+                created_at: Some("2026-10-29T14:20:00Z".into()),
+                deployment: None,
+            },
+        ],
+    }
+}
+
+/// `GET /api/pipelines/principals` in demo mode: the two groups above, both able to schedule.
+pub fn pipeline_principals() -> crate::pipelines::PrincipalsResponse {
+    use crate::pipelines::{PrincipalView, PrincipalsResponse};
+    PrincipalsResponse {
+        groups: vec![
+            PrincipalView {
+                group: "analytics".into(),
+                principal: Some("pipeline-analytics".into()),
+                ready: true,
+                message: None,
+            },
+            PrincipalView {
+                group: "mobility".into(),
+                principal: Some("pipeline-mobility".into()),
+                ready: true,
+                message: None,
+            },
+        ],
+    }
+}
+
+/// `GET /api/service-principals` in demo mode: the two principals, ready.
+pub fn service_principals() -> crate::pipelines::ServicePrincipalsResponse {
+    use crate::pipelines::{ServicePrincipalView, ServicePrincipalsResponse};
+    let principal = |name: &str, group: &str| ServicePrincipalView {
+        name: name.into(),
+        owner_group: group.into(),
+        purpose: "pipeline".into(),
+        audiences: vec!["lakekeeper".into()],
+        ready: true,
+        message: None,
+    };
+    ServicePrincipalsResponse {
+        principals: vec![
+            principal("pipeline-analytics", "analytics"),
+            principal("pipeline-mobility", "mobility"),
+        ],
+    }
+}
+
 fn extract_ref(q: &str) -> Option<(String, String)> {
     let idx = q.find(" from ")?;
     let rest = &q[idx + 6..];
