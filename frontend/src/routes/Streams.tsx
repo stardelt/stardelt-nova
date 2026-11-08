@@ -85,6 +85,18 @@ export default function Streams() {
                     </td>
                     <td className="py-2 pr-3">
                       <PhaseBadge phase={s.phase} reason={s.reason} />
+                      {typeof s.attempts === 'number' && s.attempts > 1 && (
+                        <span
+                          className={`badge ${BUSY} ml-1`}
+                          title={
+                            s.last_submitted_at
+                              ? `last submitted ${formatWhen(s.last_submitted_at).text}`
+                              : undefined
+                          }
+                        >
+                          {s.attempts}× restarted
+                        </span>
+                      )}
                     </td>
                     <td className="py-2 pr-3">
                       {s.source_connection} · {s.source_topic}
