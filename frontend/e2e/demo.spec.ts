@@ -25,6 +25,15 @@ test('demo mode: the Pipelines page lists the two samples', async ({ page }) => 
   await expect(page.getByText('ingest_orders')).toBeVisible()
 })
 
+test('demo mode: the Connections page offers no write action that would answer 503', async ({ page }) => {
+  await page.goto('/connections')
+  await page.waitForLoadState('networkidle')
+  await expect(page.getByRole('button', { name: 'New connection' })).toHaveCount(0)
+  expect(await page.getByText('Read-only in demo').count()).toBeGreaterThan(0)
+  await page.waitForTimeout(2500)
+  expect(await page.locator('[role=alert]').count(), 'connections has a role=alert').toBe(0)
+})
+
 test('demo mode: the Query log says why it is empty', async ({ page }) => {
   await page.goto('/queries')
   await expect(page.getByText('Demo mode keeps no query history')).toBeVisible()
