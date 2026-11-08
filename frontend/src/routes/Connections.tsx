@@ -55,6 +55,8 @@ export default function Connections() {
   const queryClient = useQueryClient()
   const me = useQuery({ queryKey: ['me'], queryFn: api.me })
   const admin = isAdmin(me.data)
+  // Demo mode has no secret store, so every write route answers 503 (#500): offer none.
+  const demo = me.data?.demo === true
   const list = useQuery({ queryKey: ['connections'], queryFn: api.connections })
   const [dialog, setDialog] = useState<OpenDialog | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
@@ -99,11 +101,18 @@ export default function Connections() {
           <p className="text-text-dim text-sm mt-1">
             Credentials for systems outside the platform. The values are write-only: nobody can read them back here.
           </p>
+          {demo && (
+            <p className="text-text-dim text-sm mt-1">
+              Demo mode shows sample connections. Creating, rotating or deleting one needs a secret store.
+            </p>
+          )}
         </div>
-        <button type="button" className="btn-primary" onClick={() => setDialog({ kind: 'new' })}>
-          <Icon name="plus" className="w-4 h-4" />
-          New connection
-        </button>
+        {!demo && (
+          <button type="button" className="btn-primary" onClick={() => setDialog({ kind: 'new' })}>
+            <Icon name="plus" className="w-4 h-4" />
+            New connection
+          </button>
+        )}
       </header>
 
       {notice && <p role="status" className="text-sm text-ok break-words">{notice}</p>}
@@ -125,6 +134,7 @@ export default function Connections() {
             caption="Personal connections"
             rows={personal}
             admin={admin}
+            demo={demo}
             onRotate={(connection) => setDialog({ kind: 'rotate', connection })}
             onDelete={(connection) => setDialog({ kind: 'delete', connection })}
             onBreakGlass={openBreakGlass}
@@ -150,6 +160,7 @@ export default function Connections() {
               caption={`Connections of the group ${group}`}
               rows={groupRows}
               admin={admin}
+              demo={demo}
               onRotate={(connection) => setDialog({ kind: 'rotate', connection })}
               onDelete={(connection) => setDialog({ kind: 'delete', connection })}
               onBreakGlass={openBreakGlass}
@@ -167,6 +178,7 @@ export default function Connections() {
               caption="Managed connections"
               rows={managed}
               admin={admin}
+              demo={demo}
               onRotate={(connection) => setDialog({ kind: 'rotate', connection })}
               onDelete={(connection) => setDialog({ kind: 'delete', connection })}
               onBreakGlass={openBreakGlass}
@@ -261,6 +273,7 @@ function ConnectionTable({
   caption,
   rows,
   admin,
+  demo,
   onRotate,
   onDelete,
   onBreakGlass,
@@ -268,6 +281,7 @@ function ConnectionTable({
   caption: string
   rows: Connection[]
   admin: boolean
+  demo: boolean
   onRotate: (connection: Connection) => void
   onDelete: (connection: Connection) => void
   onBreakGlass: (connection: Connection) => void
@@ -310,6 +324,7 @@ function ConnectionTable({
               key={row.name}
               row={row}
               admin={admin}
+              demo={demo}
               onRotate={() => onRotate(row)}
               onDelete={() => onDelete(row)}
               onBreakGlass={() => onBreakGlass(row)}
@@ -415,9 +430,10 @@ function UseDisclosure({ row }: { row: Connection }) {
   )
 }
 
-function Row({ row, admin, onRotate, onDelete, onBreakGlass }: {
+function Row({ row, admin, demo, onRotate, onDelete, onBreakGlass }: {
   row: Connection
   admin: boolean
+  demo: boolean
   onRotate: () => void
   onDelete: () => void
   onBreakGlass: () => void
@@ -458,38 +474,42 @@ function Row({ row, admin, onRotate, onDelete, onBreakGlass }: {
       </td>
       <td className="td px-3"><Status row={row} /></td>
       <td className="td px-3">
-        <div className="flex flex-wrap items-center justify-end gap-2">
-          {rotatable && (
-            <button
-              type="button"
-              className="btn-ghost py-1 px-2 text-xs"
-              aria-label={`Rotate secret for ${row.name}`}
-              onClick={onRotate}
-            >
-              Rotate secret
-            </button>
-          )}
-          <button
-            type="button"
-            className="btn-ghost py-1 px-2 text-xs text-bad"
-            aria-label={`Delete connection ${row.name}`}
-            onClick={onDelete}
-          >
-            Delete connection
-          </button>
-          {admin && row.scope === 'group' && (
-            <div className="border-l border-border/70 pl-2">
+        {demo ? (
+          <span className="text-xs text-text-mute">Read-only in demo</span>
+        ) : (
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            {rotatable && (
               <button
                 type="button"
                 className="btn-ghost py-1 px-2 text-xs"
-                aria-label={`Read ${row.name} as admin; the read is logged`}
-                onClick={onBreakGlass}
+                aria-label={`Rotate secret for ${row.name}`}
+                onClick={onRotate}
               >
-                Read as admin (logged)
+                Rotate secret
               </button>
-            </div>
-          )}
-        </div>
+            )}
+            <button
+              type="button"
+              className="btn-ghost py-1 px-2 text-xs text-bad"
+              aria-label={`Delete connection ${row.name}`}
+              onClick={onDelete}
+            >
+              Delete connection
+            </button>
+            {admin && row.scope === 'group' && (
+              <div className="border-l border-border/70 pl-2">
+                <button
+                  type="button"
+                  className="btn-ghost py-1 px-2 text-xs"
+                  aria-label={`Read ${row.name} as admin; the read is logged`}
+                  onClick={onBreakGlass}
+                >
+                  Read as admin (logged)
+                </button>
+              </div>
+            )}
+          </div>
+        )}
       </td>
     </tr>
   )
