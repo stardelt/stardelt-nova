@@ -11,6 +11,8 @@ export type Me = {
   auth_mode: 'static-dev' | 'oidc' | string
   demo: boolean
   warehouse: string
+  stage_name?: string | null
+  stage_kind?: 'dev' | 'test' | 'prod'
   // The fields below are present in oidc mode only — claims, never tokens.
   sub?: string
   email?: string | null
