@@ -1330,6 +1330,11 @@ pub(crate) async fn list(
     State(state): State<Arc<AppState>>,
     principal: Option<Extension<Principal>>,
 ) -> Response {
+    // Demo mode has no object store (#500): "no notebooks published yet" is the truthful
+    // answer, not a 503 the page paints red.
+    if state.demo {
+        return Json(Vec::<NotebookSummary>::new()).into_response();
+    }
     let Some(store) = state.notebooks.as_ref() else {
         return no_storage().into_response();
     };
@@ -2833,6 +2838,14 @@ mod tests {
             (status, answer),
             (StatusCode::SERVICE_UNAVAILABLE, expected)
         );
+    }
+
+    #[tokio::test]
+    async fn demo_mode_lists_no_notebooks_without_a_store() {
+        let state = crate::router_tests::test_state();
+        let app = app(state, Some(principal("alice", &["analytics"], false)));
+        let (status, answer) = call(&app, "GET", "/notebooks", None, &[]).await;
+        assert_eq!((status, answer), (StatusCode::OK, json!([])));
     }
 
     #[tokio::test]
