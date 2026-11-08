@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test'
 
 // Demo mode (#500): the pages with samples must render without a red error.
 // The server this project points at runs with NOVA_DEMO=1 (playwright.config.ts).
-const PAGES = ['/pipelines', '/connections', '/queries']
+const PAGES = ['/pipelines', '/connections', '/queries', '/streams', '/notebooks']
 
 for (const route of PAGES) {
   test(`demo mode: ${route} shows no red error`, async ({ page }) => {
@@ -37,6 +37,17 @@ test('demo mode: the Connections page offers no write action that would answer 5
 test('demo mode: the Query log says why it is empty', async ({ page }) => {
   await page.goto('/queries')
   await expect(page.getByText('Demo mode keeps no query history')).toBeVisible()
+})
+
+test('demo mode: the Streams page lists the two samples', async ({ page }) => {
+  await page.goto('/streams')
+  await expect(page.getByText('pegelonline-live')).toBeVisible()
+  await expect(page.getByText('orders-cdc')).toBeVisible()
+})
+
+test('demo mode: the Notebooks page says nothing is published yet', async ({ page }) => {
+  await page.goto('/notebooks')
+  await expect(page.getByText(/no published notebooks/i)).toBeVisible()
 })
 
 test('demo mode: a catalog table shows its documentation, no red error', async ({ page }) => {
