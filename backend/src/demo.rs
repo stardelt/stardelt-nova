@@ -734,6 +734,49 @@ fn coerce(raw: &str) -> Value {
     }
 }
 
+/// `GET /api/connections` in demo mode (#500): two rows, no values, exactly the shape the
+/// real API answers with.
+pub fn connections() -> crate::connection_routes::ConnectionsResponse {
+    use crate::connections::{ConnectionView, Scope};
+    let row = |name: &str, kind: &str, scope: Scope, group: Option<&str>, secret_keys: &[&str]| {
+        ConnectionView {
+            name: name.into(),
+            scope,
+            kind: kind.into(),
+            owner_group: group.map(str::to_string),
+            usable_by: vec![],
+            config: std::collections::BTreeMap::from([
+                ("host".to_string(), "demo.invalid".to_string()),
+                ("port".to_string(), "5432".to_string()),
+            ]),
+            secret_keys: secret_keys.iter().map(|k| k.to_string()).collect(),
+            last_rotated: Some("2026-10-30T08:00:00Z".into()),
+            version: 1,
+            sync: None,
+            break_glass: None,
+            member: true,
+        }
+    };
+    crate::connection_routes::ConnectionsResponse {
+        connections: vec![
+            row(
+                "orders-postgres",
+                "postgres",
+                Scope::Group,
+                Some("mobility"),
+                &["username", "password"],
+            ),
+            row(
+                "my-bucket",
+                "s3",
+                Scope::Personal,
+                None,
+                &["accessKey", "secretKey"],
+            ),
+        ],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
