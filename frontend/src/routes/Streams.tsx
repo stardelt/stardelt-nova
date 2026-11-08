@@ -19,6 +19,16 @@ const PHASES: Record<string, PhaseLook> = {
   Pending: { word: 'Pending', cls: BUSY },
 }
 
+/** The operator's own window: `Restarting` lasts ten minutes after a submission. */
+const RESTART_WINDOW_MS = 10 * 60 * 1000
+
+/** True when the last submission is inside the operator's restart window. */
+function restartedRecently(iso: string | null): boolean {
+  if (!iso) return false
+  const then = Date.parse(iso)
+  return !Number.isNaN(then) && Date.now() - then < RESTART_WINDOW_MS
+}
+
 function PhaseBadge({ phase, reason }: { phase: string; reason: string | null }) {
   const look = PHASES[phase] ?? { word: phase || 'Unknown', cls: NEUTRAL }
   return (
@@ -90,14 +100,14 @@ export default function Streams() {
                       <PhaseBadge phase={s.phase} reason={s.reason} />
                       {typeof s.attempts === 'number' && s.attempts > 1 && (
                         <span
-                          className={`badge ${BUSY} ml-1`}
+                          className={`badge ${restartedRecently(s.last_submitted_at) ? BUSY : NEUTRAL} ml-1`}
                           title={
                             s.last_submitted_at
                               ? `last submitted ${formatWhen(s.last_submitted_at).text}`
-                              : undefined
+                              : `${s.attempts} submissions since the stream was created`
                           }
                         >
-                          {s.attempts}× restarted
+                          {s.attempts}× {restartedRecently(s.last_submitted_at) ? 'restarted' : 'submissions'}
                         </span>
                       )}
                     </td>
