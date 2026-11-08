@@ -225,7 +225,7 @@ export default function QueryLog() {
           <caption className="sr-only">Queries, newest first. Expand a row for its details.</caption>
           <thead className="bg-bg-soft/50">
             <tr>
-              <th className="th px-2 py-2.5 w-8"><span className="sr-only">Details</span></th>
+              <th className="th px-2 py-2.5 w-8"><span className="sr-only">Show query details</span></th>
               <th className="th px-3 py-2.5">Status</th>
               <th className="th px-3 py-2.5">Query</th>
               <th className="th px-3 py-2.5">Warehouse</th>

@@ -100,7 +100,7 @@ export default function AppDetail() {
           )}
           {externalUrl ? (
             <a href={externalUrl} target="_blank" rel="noreferrer" className="btn-ghost py-1.5">
-              Open <Icon name="arrow" className="w-3.5 h-3.5" />
+              Open app ↗
             </a>
           ) : (
             <span className="text-xs text-text-mute">no external link</span>

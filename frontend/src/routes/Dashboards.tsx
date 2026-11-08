@@ -106,7 +106,7 @@ export default function Dashboards() {
             <div className="text-text-mute text-sm mt-1">
               It needs a bigger node; enable it with the <span className="font-mono">full</span> profile.
             </div>
-            {deployed && base && <a href={base} className="btn-ghost mt-4">Open {base}</a>}
+            {deployed && base && <a href={base} className="btn-ghost mt-4">Open in Superset ↗</a>}
           </div>
         </div>
       )}

@@ -489,12 +489,12 @@ test.describe('connections', () => {
       },
     })
 
-    await page.getByRole('button', { name: 'Rotate team-db' }).click()
+    await page.getByRole('button', { name: 'Rotate secret for team-db' }).click()
     await page.getByLabel('password').fill(CANARY)
     await page.getByRole('button', { name: 'Rotate connection' }).click()
     await expect(page.getByRole('status')).toHaveText('Rotated team-db.')
 
-    await page.getByRole('button', { name: 'Rotate platform-s3' }).click()
+    await page.getByRole('button', { name: 'Rotate secret for platform-s3' }).click()
     await expect(page.getByText('A managed connection cannot be read back, so enter every field.')).toBeVisible()
     const managedButton = page.getByRole('button', { name: 'Rotate connection' })
     await expect(managedButton).toBeDisabled()
@@ -525,7 +525,7 @@ test.describe('connections', () => {
         return true
       },
     })
-    const del = page.getByRole('button', { name: 'Delete warehouse-db' })
+    const del = page.getByRole('button', { name: 'Delete connection warehouse-db' })
     await del.click()
     const dialog = page.getByRole('dialog')
     await expect(dialog).toBeVisible()
@@ -593,17 +593,17 @@ test.describe('connections', () => {
     await expect(finance).toContainText(
       'You see this because you are an administrator. You cannot create or rotate here; you can delete it in an incident or read it with a break-glass read, which tells the group.',
     )
-    await expect(finance.getByRole('button', { name: 'Delete finance-db' })).toBeVisible()
-    await expect(finance.getByRole('button', { name: 'Break-glass read finance-db' })).toBeVisible()
-    expect(await finance.getByRole('button', { name: 'Rotate finance-db' }).count()).toBe(0)
+    await expect(finance.getByRole('button', { name: 'Delete connection finance-db' })).toBeVisible()
+    await expect(finance.getByRole('button', { name: 'Read finance-db as admin; the read is logged' })).toBeVisible()
+    expect(await finance.getByRole('button', { name: 'Rotate secret for finance-db' }).count()).toBe(0)
     // The person cannot use the credential either, so the notebook snippet is absent too.
     expect(await finance.getByText('Use in a notebook').count()).toBe(0)
 
     const analytics = groupSection(page, 'analytics')
     await expect(analytics.getByText('Not your group')).toHaveCount(0)
-    await expect(analytics.getByRole('button', { name: 'Rotate analytics-db' })).toBeVisible()
-    await expect(analytics.getByRole('button', { name: 'Delete analytics-db' })).toBeVisible()
-    await expect(analytics.getByRole('button', { name: 'Break-glass read analytics-db' })).toBeVisible()
+    await expect(analytics.getByRole('button', { name: 'Rotate secret for analytics-db' })).toBeVisible()
+    await expect(analytics.getByRole('button', { name: 'Delete connection analytics-db' })).toBeVisible()
+    await expect(analytics.getByRole('button', { name: 'Read analytics-db as admin; the read is logged' })).toBeVisible()
     await expect(analytics.getByText('Use in a notebook')).toBeVisible()
 
     // The page, its badge and its extra buttons keep an accessible name (rule U5).
@@ -623,7 +623,7 @@ test.describe('connections', () => {
     await expect(banner).toContainText('Read by')
     await expect(banner).toContainText('incident 4711: the pipeline is blocked.')
     await expect(banner).toContainText('Consider rotating the credential.')
-    expect(await banner.getByRole('button', { name: 'Rotate now' }).count()).toBe(0)
+    expect(await banner.getByRole('button', { name: 'Rotate secret' }).count()).toBe(0)
     // The group's own members still get the action (the same banner is only informational for us).
     await context.close()
   })
@@ -638,7 +638,7 @@ test.describe('connections', () => {
         return true
       },
     })
-    await page.getByRole('button', { name: 'Delete finance-db' }).click()
+    await page.getByRole('button', { name: 'Delete connection finance-db' }).click()
     const dialog = page.getByRole('dialog')
     await expect(dialog).toContainText('Delete finance-db?')
     await expect(dialog).toContainText('You are deleting a connection of a group you are not in.')
@@ -661,8 +661,8 @@ test.describe('connections', () => {
         return true
       },
     })
-    await page.getByRole('button', { name: 'Break-glass read finance-db' }).click()
-    const dialog = page.getByRole('dialog', { name: 'Break-glass read of finance-db' })
+    await page.getByRole('button', { name: 'Read finance-db as admin; the read is logged' }).click()
+    const dialog = page.getByRole('dialog', { name: 'Read finance-db as admin (logged)' })
     await dialog.getByLabel('Reason').fill('incident 4711: the pipeline is blocked')
     await dialog.getByRole('button', { name: 'Read the credential' }).click()
     const answer = page.getByRole('dialog', { name: 'Credential finance-db' })
@@ -691,7 +691,7 @@ test.describe('connections', () => {
       rows: [ANALYTICS_ROW],
     })
     await expect(page.getByText('Not your group')).toHaveCount(0)
-    await expect(page.getByRole('button', { name: 'Rotate analytics-db' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Rotate secret for analytics-db' })).toBeVisible()
     await context.close()
   })
 
@@ -888,7 +888,7 @@ test.describe('break-glass', () => {
 
   /** Open the dialog, give a reason and read; the dialog is on step 2. */
   async function reveal(page: Page) {
-    await page.getByRole('button', { name: 'Break-glass read team-db' }).click()
+    await page.getByRole('button', { name: 'Read team-db as admin; the read is logged' }).click()
     // The page keeps a closed break-glass dialog mounted; only one is open at a time.
     const dialog = page.locator('dialog[open]')
     await dialog.getByLabel('Reason').fill(REASON)
@@ -924,8 +924,8 @@ test.describe('break-glass', () => {
 
   test('P3 break-glass asks for a reason first', async ({ browser }) => {
     const { context, page, requests } = await open(browser)
-    await page.getByRole('button', { name: 'Break-glass read team-db' }).click()
-    const dialog = page.getByRole('dialog', { name: 'Break-glass read of team-db' })
+    await page.getByRole('button', { name: 'Read team-db as admin; the read is logged' }).click()
+    const dialog = page.getByRole('dialog', { name: 'Read team-db as admin (logged)' })
     await expect(dialog).toBeVisible()
     const read = page.getByRole('button', { name: 'Read the credential' })
     const reason = page.getByLabel('Reason')
@@ -1044,13 +1044,13 @@ test.describe('break-glass', () => {
   test('only administrators on group rows see the action', async ({ browser }) => {
     const rows = [GROUP_ROW, PERSONAL_ROW, MANAGED_ROW]
     const nonAdmin = await open(browser, { me: { ...ADMIN, is_admin: false }, rows })
-    expect(await nonAdmin.page.getByRole('button', { name: /^Break-glass read / }).count()).toBe(0)
+    expect(await nonAdmin.page.getByRole('button', { name: /^Read .* as admin; the read is logged$/ }).count()).toBe(0)
     await nonAdmin.context.close()
 
     const admin = await open(browser, { rows })
-    await expect(admin.page.getByRole('button', { name: 'Break-glass read team-db' })).toHaveCount(1)
-    expect(await admin.page.getByRole('button', { name: 'Break-glass read my-db' }).count()).toBe(0)
-    expect(await admin.page.getByRole('button', { name: 'Break-glass read platform-s3' }).count()).toBe(0)
+    await expect(admin.page.getByRole('button', { name: 'Read team-db as admin; the read is logged' })).toHaveCount(1)
+    expect(await admin.page.getByRole('button', { name: 'Read my-db as admin; the read is logged' }).count()).toBe(0)
+    expect(await admin.page.getByRole('button', { name: 'Read platform-s3 as admin; the read is logged' }).count()).toBe(0)
     await admin.context.close()
   })
 
@@ -1074,7 +1074,7 @@ test.describe('break-glass', () => {
       .map((element) => element.getAttribute('title')))).toContain(reason)
     expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(1)
 
-    await banner.getByRole('button', { name: 'Rotate now' }).click()
+    await banner.getByRole('button', { name: 'Rotate secret' }).click()
     await expect(page.getByRole('dialog')).toContainText('Rotate team-db')
     await context.close()
   })
@@ -1087,13 +1087,13 @@ test.describe('break-glass', () => {
       const { context, page } = await open(browser, {
         read: (route) => json(route, { error: body }, status),
       })
-      await page.getByRole('button', { name: 'Break-glass read team-db' }).click()
+      await page.getByRole('button', { name: 'Read team-db as admin; the read is logged' }).click()
       await page.getByLabel('Reason').fill(REASON)
       await page.getByRole('button', { name: 'Read the credential' }).click()
 
       await expect(page.getByRole('alert'), `${status}`).toContainText(sentence)
       await expect(page.getByLabel('Reason'), `${status}`).toHaveValue(REASON)
-      await expect(page.getByRole('dialog', { name: 'Break-glass read of team-db' })).toBeVisible()
+      await expect(page.getByRole('dialog', { name: 'Read team-db as admin (logged)' })).toBeVisible()
       await context.close()
     }
   })
@@ -1102,7 +1102,7 @@ test.describe('break-glass', () => {
     const { context, page } = await open(browser)
     // The page must stay inside a 360 px phone: the dialog is `min(44rem, 100vw - 2rem)`.
     await page.setViewportSize({ width: 360, height: 740 })
-    await page.getByRole('button', { name: 'Break-glass read team-db' }).click()
+    await page.getByRole('button', { name: 'Read team-db as admin; the read is logged' }).click()
     expect((await auditPage(page)).filter((finding) => finding.rule === 'U5')).toEqual([])
 
     await page.getByLabel('Reason').fill(REASON)
@@ -4289,7 +4289,7 @@ test.describe('admin catalogs', () => {
     await expect(finance.getByText('CatalogReady: Ready')).toBeVisible()
     await expect(finance.getByText('GrantsReady: Ready')).toBeVisible()
     await expect(finance.getByText('Drift: Clean')).toBeVisible()
-    await expect(finance.getByRole('link', { name: 'Open catalog finance' }))
+    await expect(finance.getByRole('link', { name: 'Browse catalog finance' }))
       .toHaveAttribute('href', '/catalog?catalog=finance')
 
     const product = table.locator('tbody tr').filter({ hasText: 'product' })

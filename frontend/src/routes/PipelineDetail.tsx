@@ -108,7 +108,7 @@ export default function PipelineDetail() {
                 target="_blank"
                 rel="noreferrer"
               >
-                Open in Airflow
+                Open in Airflow ↗
               </a>
             )}
           </div>

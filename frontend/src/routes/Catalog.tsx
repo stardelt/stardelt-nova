@@ -167,7 +167,7 @@ function TableDetail({ ns, tbl, catalog, kind }: Sel & { catalog?: string; kind?
             {isView ? 'Query view' : 'Query table'}
           </Link>
           {lineageHref && (
-            <Link to={lineageHref} className="btn-ghost" title="Show this table's lineage">Lineage</Link>
+            <Link to={lineageHref} className="btn-ghost" title="Show this table's lineage">Show lineage</Link>
           )}
           <Link to="/data" className="btn-ghost">Load data</Link>
         </div>
