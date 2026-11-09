@@ -55,3 +55,10 @@ unreachable). Dark blue and Light keep their look; Graphite is a neutral anthrac
 Silver a neutral light gray. `overview-360-graphite.png` is the phone width.
 `themes-contact-sheet.png` arranges the sixteen at 640×400 in one image for review —
 rows are the pages, columns the themes, in the order dark, light, graphite, silver.
+
+`command-palette-*.png` — the ⌘K page palette (stardelt-nova#587, slice a of #509) at
+1440×900 and 390×900, dark, from the built UI with a non-admin `/api/me` stub and the
+Overview's metrics, catalogs and jobs stubbed so the page behind it renders. The panel is
+open with an empty query, so every group is visible and the admin group is absent: the
+palette applies the same admin filter as the sidebar. At 390 px the panel is 358 px wide
+and the page does not scroll sideways.
