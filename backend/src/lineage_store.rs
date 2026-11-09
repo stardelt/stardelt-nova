@@ -30,6 +30,28 @@ pub async fn insert_event(pool: &PgPool, ev: &LineageEvent) -> sqlx::Result<()> 
     .execute(pool)
     .await?;
 
+    // A query that wrote nothing did not produce a dataset: it is a reader of its inputs,
+    // counted per day and job instead of drawn as an edge.
+    if ev.outputs.is_empty() {
+        for input in &ev.inputs {
+            sqlx::query(
+                "INSERT INTO lineage_reads (dataset_namespace, dataset_name, day, job_namespace, job_name, queries, last_read) \
+                 VALUES ($1, $2, $3::timestamptz::date, $4, $5, 1, $3::timestamptz) \
+                 ON CONFLICT (dataset_namespace, dataset_name, day, job_namespace, job_name) DO UPDATE SET \
+                   queries = lineage_reads.queries + 1, \
+                   last_read = GREATEST(lineage_reads.last_read, EXCLUDED.last_read)",
+            )
+            .bind(&input.namespace)
+            .bind(&input.name)
+            .bind(&ev.event_time)
+            .bind(&ev.job_namespace)
+            .bind(&ev.job_name)
+            .execute(pool)
+            .await?;
+        }
+        return Ok(());
+    }
+
     // Upsert edges from inputs/outputs
     // For each input
     for input in &ev.inputs {
@@ -72,6 +94,12 @@ pub async fn insert_event(pool: &PgPool, ev: &LineageEvent) -> sqlx::Result<()> 
 }
 
 pub async fn purge_events(pool: &PgPool, days: i64) -> sqlx::Result<u64> {
+    sqlx::query(
+        "DELETE FROM lineage_reads WHERE day < (now() - make_interval(days => $1::int))::date",
+    )
+    .bind(days as i32)
+    .execute(pool)
+    .await?;
     let result = sqlx::query(
         "DELETE FROM lineage_events WHERE event_time < now() - make_interval(days => $1::int)",
     )
@@ -268,6 +296,51 @@ mod tests {
             "edge time updated to later event: {}",
             et.0
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn a_query_without_outputs_counts_as_a_reader_instead_of_an_edge() {
+        let pool = migrated_pool().await;
+        let run_id = "00000000-0000-0000-0000-000000000095";
+        sqlx::query("DELETE FROM lineage_reads WHERE job_name = 'reads-job'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let mut ev = sample_event(run_id, "2026-01-01T00:00:00Z", "COMPLETE");
+        ev.outputs.clear();
+        ev.job_name = "reads-job".to_string();
+        insert_event(&pool, &ev).await.unwrap();
+
+        let edges: (i64,) = sqlx::query_as(
+            "SELECT count(*) FROM lineage_edges WHERE job_namespace = 'default' AND job_name = 'reads-job'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(edges.0, 0, "a read-only query draws no edge");
+
+        let reads: (i64,) = sqlx::query_as(
+            "SELECT count(*) FROM lineage_reads WHERE dataset_namespace = 'mobility.gold' \
+             AND dataset_name = 'trips' AND job_name = 'reads-job'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(reads.0, 1, "one reader row per input");
+
+        insert_event(&pool, &ev).await.unwrap();
+        let (queries, day): (i32, String) = sqlx::query_as(
+            "SELECT queries, to_char(day, 'YYYY-MM-DD') FROM lineage_reads \
+             WHERE dataset_namespace = 'mobility.gold' AND dataset_name = 'trips' \
+             AND job_name = 'reads-job'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(queries, 2, "the same table read twice counts twice");
+        assert_eq!(day, "2026-01-01", "reads are counted per event day");
     }
 
     #[tokio::test]
