@@ -148,6 +148,20 @@ pub fn connection_event(
     }
 }
 
+/// One new team space: who created it, the team and its group. No description, no grant
+/// and no principal name: the action is what is recorded.
+pub fn team_created(who: &crate::auth::Identity, team: &str, group: &str) {
+    tracing::info!(
+        target: "audit",
+        action = "team-created",
+        team = %team,
+        group = %group,
+        actor = %who.display_name,
+        sub = %who.sub,
+        "team space created"
+    );
+}
+
 /// One pipeline log read: who read which task's log. **No field can hold log content**, and the
 /// run and task come from the checked pipeline, never from an unchecked browser value.
 pub fn pipeline_log_event(

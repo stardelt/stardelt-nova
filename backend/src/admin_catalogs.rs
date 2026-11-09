@@ -34,7 +34,9 @@ use axum::{
     http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
-use kube::api::{Api, ApiResource, DynamicObject, GroupVersionKind, Patch, PatchParams};
+use kube::api::{
+    Api, ApiResource, DynamicObject, GroupVersionKind, Patch, PatchParams, PostParams,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use utoipa::ToSchema;
@@ -113,8 +115,16 @@ const VERBS: [&str; 5] = ["browse", "select", "write", "create", "manage"];
 const ACCESS_CHANGE_LIMIT: usize = 30;
 const ACCESS_CHANGE_WINDOW: Duration = Duration::from_secs(60 * 60);
 
+/// At most this many team spaces per administrator in [`TEAM_CREATE_WINDOW`].
+const TEAM_CREATE_LIMIT: usize = 10;
+const TEAM_CREATE_WINDOW: Duration = Duration::from_secs(60 * 60);
+
 /// The in-memory per-administrator rate limit (`AppState::catalog_access_changes`).
 pub type AccessChangesLimiter = Mutex<HashMap<String, VecDeque<Instant>>>;
+
+/// The in-memory per-administrator rate limit of `POST /api/admin/teams`
+/// (`AppState::team_creates`): ten new team spaces an hour, each one three catalogs.
+pub type TeamCreatesLimiter = Mutex<HashMap<String, VecDeque<Instant>>>;
 
 /// One `PUT /api/admin/catalogs/{name}/access` body.
 ///
@@ -132,6 +142,34 @@ pub struct CatalogAccessUpdate {
     pub managed_access: bool,
     /// The whole `spec.grants` array, each `{group, verb}` once.
     pub grants: Vec<CatalogGrant>,
+}
+
+/// One `POST /api/admin/teams` body: a new team space.
+///
+/// The group comes from the company's sign-in provider; stardelt never creates groups,
+/// so `group` must already exist there.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct NewTeam {
+    /// The team's short name: 2 to 21 lower-case letters and digits, starting with a letter.
+    pub team: String,
+    /// The group the three catalogs belong to.
+    pub group: String,
+    /// `spec.description` of the production catalog; the other two carry a fixed sentence.
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// What a created team space answers: its three catalogs and its pipeline principal.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct NewTeamResponse {
+    /// `<team>`, `<team>lab` and `<team>ref`, in that order.
+    pub catalogs: Vec<String>,
+    /// `pipeline-<group>`.
+    pub principal: String,
+    /// False when the principal already existed for another team of the same group.
+    pub principal_created: bool,
 }
 
 #[utoipa::path(
@@ -276,6 +314,309 @@ pub(crate) async fn update_access(
         .into_response()
 }
 
+#[utoipa::path(
+    post,
+    operation_id = "admin_teams_create",
+    path = "/api/admin/teams",
+    tag = "internal",
+    description = "Create a new team space in one call: the `Catalog` resources `<team>` (production), `<team>lab` (the team's sandbox) and `<team>ref` (shared reference data), each owned by `group` with the four verbs `browse`, `select`, `write` and `create` for `group` and for `stardelt-admins`, plus the `ServicePrincipal` `pipeline-<group>` when it does not exist yet (it may already serve another team of the same group). The group must already exist in the company's sign-in provider — stardelt never creates groups. Administrator-only; a non-administrator answers 403 `this view is for platform administrators`. A team name outside 2 to 21 lower-case letters and digits starting with a letter, a group name outside the group rule, or a description over 500 characters is a 400; any of the three catalogs already existing is a 409 `the catalog <name> already exists` with nothing created, and a platform without any `Catalog` is a 409 `no lakehouse to put the catalogs in`; more than ten team spaces per administrator in an hour is a 429. When the API server refuses one of the creates the answer is a 502 naming what failed and what was created so far; nothing is rolled back, so a half-created space stays visible and can be finished by hand. Without a cluster connection the answer is 503 `the cluster is not reachable from Nova`. Answers 201 with the three catalog names and the principal, `Cache-Control: no-store`.",
+    request_body = NewTeam,
+    responses(
+        (status = 201, description = "The three catalogs and the pipeline principal", body = NewTeamResponse),
+        (status = 400, description = "The team name, the group name or the description is invalid", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller is not a platform administrator", body = crate::openapi::ErrorResponse),
+        (status = 409, description = "One of the three catalogs already exists, or there is no lakehouse", body = crate::openapi::ErrorResponse),
+        (status = 429, description = "More than ten team spaces this hour", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The cluster did not answer, or Nova may not create the resources", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "Nova has no cluster client", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn create_team(
+    State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<Principal>>,
+    ApiJson(body): ApiJson<NewTeam>,
+) -> Response {
+    if let Err(fail) = validate_team(&body) {
+        return fail.into_response();
+    }
+    // The same actor rule as `update_access`: `require_admin` ran in `oidc` mode, and in
+    // `dev` mode the one operator is the actor with a stable limiter key.
+    let who = actor(principal, &state);
+
+    let Some(client) = state.kube.clone() else {
+        return Fail::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the cluster is not reachable from Nova",
+        )
+        .into_response();
+    };
+
+    let catalogs = catalogs_api(client.clone());
+    let existing = match catalogs.list(&kube::api::ListParams::default()).await {
+        Ok(list) => list.items,
+        Err(e) => {
+            tracing::warn!(error = %e, "admin team catalog list failed");
+            return cluster_unavailable().into_response();
+        }
+    };
+
+    // All three names are checked against one list, before anything is created: either
+    // the whole team space is new or nothing happens.
+    let team = body.team.clone();
+    let lab = format!("{team}lab");
+    let reference = format!("{team}ref");
+    for wanted in [&team, &lab, &reference] {
+        if existing
+            .iter()
+            .any(|object| object.metadata.name.as_deref() == Some(wanted.as_str()))
+        {
+            return Fail::new(
+                StatusCode::CONFLICT,
+                format!("the catalog {wanted} already exists"),
+            )
+            .into_response();
+        }
+    }
+    let lakehouse = existing
+        .first()
+        .and_then(|object| object.data.get("spec"))
+        .and_then(|spec| spec.get("lakehouseRef"))
+        .and_then(|reference| reference.get("name"))
+        .and_then(Value::as_str);
+    let Some(lakehouse) = lakehouse else {
+        return Fail::new(StatusCode::CONFLICT, "no lakehouse to put the catalogs in")
+            .into_response();
+    };
+
+    // The slot is taken only for an attempt that reached a change (the body is valid, the
+    // names are free): a typo or a conflict never spends one of the ten.
+    if !take_slot(
+        &state.team_creates,
+        &who.sub,
+        TEAM_CREATE_LIMIT,
+        TEAM_CREATE_WINDOW,
+    ) {
+        return Fail::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many new team spaces this hour; wait",
+        )
+        .into_response();
+    }
+
+    let title = capitalized(&team);
+    let wanted = [
+        (team.clone(), title.clone(), body.description.clone()),
+        (
+            lab,
+            format!("{title} lab"),
+            Some(format!("Work in progress for {team}.")),
+        ),
+        (
+            reference,
+            format!("{title} reference"),
+            Some(format!("Shared reference data for {team}.")),
+        ),
+    ];
+
+    let mut created: Vec<String> = Vec::with_capacity(wanted.len());
+    for (name, display_name, description) in &wanted {
+        let spec = catalog_spec(lakehouse, &body.group, display_name, description.as_deref());
+        if let Err(e) = create_object(&catalogs, &catalog_resource(name, spec)).await {
+            // The API server's words stay in the log; the answer says what failed and what
+            // exists now, because nothing is rolled back.
+            tracing::warn!(error = %e, catalog = %name, "admin team catalog create failed");
+            return Fail::new(
+                StatusCode::BAD_GATEWAY,
+                format!(
+                    "creating the catalog {name} failed; created so far: {}",
+                    so_far(&created)
+                ),
+            )
+            .into_response();
+        }
+        created.push(name.clone());
+    }
+
+    // The principal is shared by every team of the group, so it is created only when the
+    // namespace has none by that name yet.
+    let principal_name = format!("pipeline-{}", body.group);
+    let principals = principals_api(client);
+    let existing_principals = match principals.list(&kube::api::ListParams::default()).await {
+        Ok(list) => list.items,
+        Err(e) => {
+            tracing::warn!(error = %e, "admin team principal list failed");
+            return Fail::new(
+                StatusCode::BAD_GATEWAY,
+                format!(
+                    "reading the principals failed; created so far: {}",
+                    so_far(&created)
+                ),
+            )
+            .into_response();
+        }
+    };
+    let already_there = existing_principals
+        .iter()
+        .any(|object| object.metadata.name.as_deref() == Some(principal_name.as_str()));
+    let mut principal_created = false;
+    if !already_there {
+        let resource = principal_resource(&principal_name, &body.group);
+        if let Err(e) = create_object(&principals, &resource).await {
+            tracing::warn!(error = %e, principal = %principal_name, "admin team principal create failed");
+            return Fail::new(
+                StatusCode::BAD_GATEWAY,
+                format!(
+                    "creating the principal {principal_name} failed; created so far: {}",
+                    so_far(&created)
+                ),
+            )
+            .into_response();
+        }
+        principal_created = true;
+    }
+
+    crate::audit::team_created(&who, &body.team, &body.group);
+
+    let answer = NewTeamResponse {
+        catalogs: created,
+        principal: principal_name,
+        principal_created,
+    };
+    (
+        StatusCode::CREATED,
+        [(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))],
+        Json(answer),
+    )
+        .into_response()
+}
+
+/// The team-space body rules, in the order the form shows them.
+fn validate_team(body: &NewTeam) -> Result<(), Fail> {
+    if !valid_team_name(&body.team) {
+        return Err(bad_request(
+            "a team name is 2 to 21 lower-case letters and digits, starting with a letter",
+        ));
+    }
+    if !valid_group(&body.group) {
+        return Err(bad_request(GROUP_SENTENCE));
+    }
+    if body
+        .description
+        .as_deref()
+        .is_some_and(|description| description.chars().count() > 500)
+    {
+        return Err(bad_request("the description is at most 500 characters"));
+    }
+    Ok(())
+}
+
+/// A team name: `^[a-z][a-z0-9]{1,20}$`.
+fn valid_team_name(team: &str) -> bool {
+    let bytes = team.as_bytes();
+    (2..=21).contains(&bytes.len())
+        && bytes[0].is_ascii_lowercase()
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+}
+
+/// The team name with its first letter capitalised: `mobility` is `Mobility`.
+fn capitalized(team: &str) -> String {
+    let mut chars = team.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+/// `spec` of one of the three catalogs: the owner group, the lakehouse, the display name,
+/// the description when there is one, and the four verbs for the group and for the
+/// administrators. No `spec.storage`: the catalog takes the lakehouse's defaults.
+fn catalog_spec(
+    lakehouse: &str,
+    group: &str,
+    display_name: &str,
+    description: Option<&str>,
+) -> Value {
+    let mut grants = Vec::with_capacity(8);
+    for holder in [group, "stardelt-admins"] {
+        for verb in ["browse", "select", "write", "create"] {
+            grants.push(json!({ "group": holder, "verb": verb }));
+        }
+    }
+    let mut spec = serde_json::Map::new();
+    spec.insert("owner".into(), json!(group));
+    spec.insert("lakehouseRef".into(), json!({ "name": lakehouse }));
+    spec.insert("displayName".into(), json!(display_name));
+    if let Some(description) = description {
+        spec.insert("description".into(), json!(description));
+    }
+    spec.insert("grants".into(), Value::Array(grants));
+    Value::Object(spec)
+}
+
+/// One `Catalog` resource of Nova's namespace, ready for a create.
+fn catalog_resource(name: &str, spec: Value) -> DynamicObject {
+    DynamicObject::new(name, &catalog_api_resource()).data(json!({ "spec": spec }))
+}
+
+/// The `Catalog` API resource, so a create can name its kind without a second `Api`.
+fn catalog_api_resource() -> ApiResource {
+    ApiResource::from_gvk(&GroupVersionKind::gvk("stardelt.io", "v1alpha1", "Catalog"))
+}
+
+/// The `ServicePrincipal` resources of Nova's namespace (`pipelines.rs` reads the same
+/// kind). Here only the team space creates one.
+fn principals_api(client: kube::Client) -> Api<DynamicObject> {
+    Api::namespaced_with(
+        client,
+        &crate::cluster::namespace(),
+        &ApiResource::from_gvk(&GroupVersionKind::gvk(
+            "stardelt.io",
+            "v1alpha1",
+            "ServicePrincipal",
+        )),
+    )
+}
+
+/// One `pipeline-<group>` principal: the owner group and the `pipeline` purpose. The
+/// audiences keep the CRD's default (both engines).
+fn principal_resource(name: &str, group: &str) -> DynamicObject {
+    DynamicObject::new(
+        name,
+        &ApiResource::from_gvk(&GroupVersionKind::gvk(
+            "stardelt.io",
+            "v1alpha1",
+            "ServicePrincipal",
+        )),
+    )
+    .data(json!({
+        "spec": { "ownerGroup": group, "purpose": "pipeline" }
+    }))
+}
+
+/// A real create: a name that already exists is an error, never an overwrite. The namespace
+/// is Nova's own, so a team space never lands anywhere else.
+async fn create_object(
+    api: &Api<DynamicObject>,
+    object: &DynamicObject,
+) -> Result<(), kube::Error> {
+    let mut object = object.clone();
+    object.metadata.namespace = Some(crate::cluster::namespace());
+    api.create(&PostParams::default(), &object)
+        .await
+        .map(|_| ())
+}
+
+/// The names created so far, for the 502 that says where the half-created space stops.
+fn so_far(created: &[String]) -> String {
+    if created.is_empty() {
+        "none".to_string()
+    } else {
+        created.join(", ")
+    }
+}
+
 /// The administrator the audit line names and the rate limit counts. In `oidc` mode the
 /// principal is always there (`require_admin` ran); in `dev` mode the one operator is the
 /// actor, with `sub` the configured dev user so the limiter has a stable key.
@@ -372,16 +713,27 @@ fn cluster_unavailable() -> Fail {
 /// True when this administrator may make another change now. Old slots fall out of the
 /// window; a refused attempt never reaches this.
 fn take_access_change_slot(limiter: &AccessChangesLimiter, sub: &str) -> bool {
+    take_slot(limiter, sub, ACCESS_CHANGE_LIMIT, ACCESS_CHANGE_WINDOW)
+}
+
+/// One slot of a per-administrator window, shared by both limits here: the catalog
+/// changes (thirty an hour) and the team spaces (ten an hour).
+fn take_slot(
+    limiter: &Mutex<HashMap<String, VecDeque<Instant>>>,
+    sub: &str,
+    limit: usize,
+    window: Duration,
+) -> bool {
     let mut changes = limiter.lock().expect("catalog change limiter poisoned");
     let now = Instant::now();
     let slots = changes.entry(sub.to_string()).or_default();
     while slots
         .front()
-        .is_some_and(|taken| now.duration_since(*taken) >= ACCESS_CHANGE_WINDOW)
+        .is_some_and(|taken| now.duration_since(*taken) >= window)
     {
         slots.pop_front();
     }
-    if slots.len() >= ACCESS_CHANGE_LIMIT {
+    if slots.len() >= limit {
         return false;
     }
     slots.push_back(now);
@@ -969,6 +1321,7 @@ mod tests {
 
         pub struct Fake {
             pub items: Vec<Value>,
+            pub principals: Vec<Value>,
             pub status: StatusCode,
             pub patch_status: StatusCode,
             pub patches: Vec<Value>,
@@ -1056,8 +1409,78 @@ mod tests {
             Ok(Json(item.clone()))
         }
 
+        async fn create_catalog(
+            State(state): State<Shared>,
+            Path(namespace): Path<String>,
+            body: String,
+        ) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
+            create_in(state, namespace, &body, true)
+        }
+
+        async fn create_principal(
+            State(state): State<Shared>,
+            Path(namespace): Path<String>,
+            body: String,
+        ) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
+            create_in(state, namespace, &body, false)
+        }
+
+        /// A real create of the fake API: a name that exists is a `409`, and the stored
+        /// object carries the namespace and a `resourceVersion`.
+        fn create_in(
+            state: Shared,
+            namespace: String,
+            body: &str,
+            catalog: bool,
+        ) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
+            let mut object: Value = serde_json::from_str(body)
+                .map_err(|_| failure(StatusCode::BAD_REQUEST, "the object is not JSON"))?;
+            let name = object["metadata"]["name"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            if name.is_empty() {
+                return Err(failure(StatusCode::BAD_REQUEST, "the object has no name"));
+            }
+            let mut state = state.lock().unwrap();
+            let list = if catalog {
+                &mut state.items
+            } else {
+                &mut state.principals
+            };
+            if list.iter().any(|item| item["metadata"]["name"] == name) {
+                return Err(failure(
+                    StatusCode::CONFLICT,
+                    &format!("{name} already exists"),
+                ));
+            }
+            object["metadata"]["namespace"] = json!(namespace);
+            object["metadata"]["resourceVersion"] = json!("500");
+            list.push(object.clone());
+            Ok((StatusCode::CREATED, Json(object)))
+        }
+
+        async fn list_principals(State(state): State<Shared>) -> Json<Value> {
+            let state = state.lock().unwrap();
+            Json(json!({
+                "apiVersion": "stardelt.io/v1alpha1",
+                "kind": "ServicePrincipalList",
+                "metadata": { "resourceVersion": "1" },
+                "items": state.principals
+            }))
+        }
+
         pub async fn start(items: Vec<Value>, status: StatusCode) -> kube::Client {
             start_with_patch(items, status, StatusCode::OK).await.0
+        }
+
+        /// A fake with no cluster error: the `Catalog` list and the creates both answer, and
+        /// `principals` is what the namespace already holds (`ServicePrincipal`).
+        pub async fn start_with_principals(
+            items: Vec<Value>,
+            principals: Vec<Value>,
+        ) -> (kube::Client, Shared) {
+            start_all(items, principals, StatusCode::OK, StatusCode::OK).await
         }
 
         pub async fn start_with_patch(
@@ -1065,8 +1488,18 @@ mod tests {
             status: StatusCode,
             patch_status: StatusCode,
         ) -> (kube::Client, Shared) {
+            start_all(items, Vec::new(), status, patch_status).await
+        }
+
+        async fn start_all(
+            items: Vec<Value>,
+            principals: Vec<Value>,
+            status: StatusCode,
+            patch_status: StatusCode,
+        ) -> (kube::Client, Shared) {
             let shared = Arc::new(Mutex::new(Fake {
                 items,
+                principals,
                 status,
                 patch_status,
                 patches: Vec::new(),
@@ -1074,11 +1507,15 @@ mod tests {
             let app = Router::new()
                 .route(
                     "/apis/stardelt.io/v1alpha1/namespaces/{namespace}/catalogs",
-                    get(list),
+                    get(list).post(create_catalog),
                 )
                 .route(
                     "/apis/stardelt.io/v1alpha1/namespaces/{namespace}/catalogs/{name}",
                     get(one).patch(patch_one),
+                )
+                .route(
+                    "/apis/stardelt.io/v1alpha1/namespaces/{namespace}/serviceprincipals",
+                    get(list_principals).post(create_principal),
                 )
                 .with_state(shared.clone());
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1566,5 +2003,320 @@ mod tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// The `POST /api/admin/teams` request body.
+    fn new_team(team: &str, group: &str) -> NewTeam {
+        NewTeam {
+            team: team.into(),
+            group: group.into(),
+            description: Some("Energy trading: consumption, prices and forecasts.".into()),
+        }
+    }
+
+    fn principal_object(name: &str, group: &str) -> Value {
+        json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "ServicePrincipal",
+            "metadata": { "name": name, "namespace": "stardelt", "resourceVersion": "77" },
+            "spec": { "ownerGroup": group, "purpose": "pipeline" }
+        })
+    }
+
+    /// One `Catalog` of the fake, by name.
+    fn stored_catalog(fake: &fake_kube::Fake, name: &str) -> Value {
+        fake.items
+            .iter()
+            .find(|item| item["metadata"]["name"] == name)
+            .cloned()
+            .unwrap_or_else(|| panic!("no catalog {name} was created"))
+    }
+
+    #[tokio::test]
+    async fn create_team_creates_three_catalogs_and_one_principal() {
+        let (client, fake) = fake_kube::start_with_principals(
+            vec![catalog_object("warehouse", Some("Ready"))],
+            Vec::new(),
+        )
+        .await;
+        let state = crate::router_tests::test_state_with_kube(client);
+        let response = create_team(
+            State(state),
+            None,
+            ApiJson(new_team("energy", "energy-analytics")),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL),
+            Some(&HeaderValue::from_static("no-store"))
+        );
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let answer: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            answer,
+            json!({
+                "catalogs": ["energy", "energylab", "energyref"],
+                "principal": "pipeline-energy-analytics",
+                "principalCreated": true
+            })
+        );
+
+        let fake = fake.lock().unwrap();
+        let names: Vec<&str> = fake
+            .items
+            .iter()
+            .filter_map(|item| item["metadata"]["name"].as_str())
+            .collect();
+        assert_eq!(names.len(), 4, "the warehouse plus the three: {names:?}");
+
+        let production = stored_catalog(&fake, "energy");
+        assert_eq!(production["spec"]["owner"], "energy-analytics");
+        assert_eq!(production["spec"]["lakehouseRef"]["name"], "default");
+        assert_eq!(production["spec"]["displayName"], "Energy");
+        assert_eq!(
+            production["spec"]["description"],
+            "Energy trading: consumption, prices and forecasts."
+        );
+        assert!(
+            production["spec"].get("storage").is_none(),
+            "no spec.storage: the lakehouse's defaults"
+        );
+        let grants = production["spec"]["grants"].as_array().unwrap();
+        assert_eq!(grants.len(), 8);
+        assert_eq!(
+            grants[0],
+            json!({ "group": "energy-analytics", "verb": "browse" })
+        );
+        assert_eq!(
+            grants[3],
+            json!({ "group": "energy-analytics", "verb": "create" })
+        );
+        assert_eq!(
+            grants[4],
+            json!({ "group": "stardelt-admins", "verb": "browse" })
+        );
+        assert_eq!(
+            grants[7],
+            json!({ "group": "stardelt-admins", "verb": "create" })
+        );
+
+        let lab = stored_catalog(&fake, "energylab");
+        assert_eq!(lab["spec"]["displayName"], "Energy lab");
+        assert_eq!(lab["spec"]["description"], "Work in progress for energy.");
+        assert_eq!(lab["spec"]["owner"], "energy-analytics");
+
+        let reference = stored_catalog(&fake, "energyref");
+        assert_eq!(reference["spec"]["displayName"], "Energy reference");
+        assert_eq!(
+            reference["spec"]["description"],
+            "Shared reference data for energy."
+        );
+
+        assert_eq!(fake.principals.len(), 1);
+        assert_eq!(
+            fake.principals[0]["metadata"]["name"],
+            "pipeline-energy-analytics"
+        );
+        assert_eq!(fake.principals[0]["spec"]["ownerGroup"], "energy-analytics");
+        assert_eq!(fake.principals[0]["spec"]["purpose"], "pipeline");
+    }
+
+    #[tokio::test]
+    async fn create_team_keeps_an_existing_principal() {
+        let (client, fake) = fake_kube::start_with_principals(
+            vec![catalog_object("warehouse", Some("Ready"))],
+            vec![principal_object(
+                "pipeline-energy-analytics",
+                "energy-analytics",
+            )],
+        )
+        .await;
+        let state = crate::router_tests::test_state_with_kube(client);
+        let response = create_team(
+            State(state),
+            None,
+            ApiJson(new_team("energy", "energy-analytics")),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let answer: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(answer["principalCreated"], false);
+
+        // The principal that was already there is untouched, and no second one was created.
+        let fake = fake.lock().unwrap();
+        assert_eq!(fake.principals.len(), 1);
+        assert_eq!(fake.principals[0]["metadata"]["resourceVersion"], "77");
+        assert_eq!(fake.items.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn create_team_refuses_a_taken_catalog_and_an_empty_platform() {
+        // `energylab` exists: the whole team space is refused, nothing is created.
+        let (client, fake) = fake_kube::start_with_principals(
+            vec![
+                catalog_object("warehouse", Some("Ready")),
+                catalog_object("energylab", Some("Ready")),
+            ],
+            Vec::new(),
+        )
+        .await;
+        let state = crate::router_tests::test_state_with_kube(client);
+        let response = create_team(
+            State(state),
+            None,
+            ApiJson(new_team("energy", "energy-analytics")),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert!(
+            String::from_utf8_lossy(&body).contains("the catalog energylab already exists"),
+            "{}",
+            String::from_utf8_lossy(&body)
+        );
+        {
+            let fake = fake.lock().unwrap();
+            assert_eq!(fake.items.len(), 2, "nothing was created");
+            assert!(fake.principals.is_empty(), "no principal either");
+        }
+
+        // No `Catalog` at all: there is no lakehouse to put the three in.
+        let (client, fake) = fake_kube::start_with_principals(Vec::new(), Vec::new()).await;
+        let state = crate::router_tests::test_state_with_kube(client);
+        let response = create_team(
+            State(state),
+            None,
+            ApiJson(new_team("energy", "energy-analytics")),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert!(
+            String::from_utf8_lossy(&body).contains("no lakehouse to put the catalogs in"),
+            "{}",
+            String::from_utf8_lossy(&body)
+        );
+        let fake = fake.lock().unwrap();
+        assert!(fake.items.is_empty());
+        assert!(fake.principals.is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_team_rejects_a_bad_team_name() {
+        for team in ["Energy", "e", "1energy", "energy-1", "energy space"] {
+            let fail = validate_team(&new_team(team, "energy-analytics")).expect_err("refused");
+            assert_eq!(
+                (fail.status(), fail.message()),
+                (
+                    StatusCode::BAD_REQUEST,
+                    "a team name is 2 to 21 lower-case letters and digits, starting with a letter"
+                ),
+                "{team}"
+            );
+        }
+        assert!(validate_team(&new_team("energy", "energy-analytics")).is_ok());
+
+        // Long, and answered before any cluster call (this state has no cluster client).
+        let too_long = "a".repeat(22);
+        let state = crate::router_tests::test_state();
+        let response = create_team(
+            State(state),
+            None,
+            ApiJson(new_team(&too_long, "energy-analytics")),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        // The group rule and the description length are answered too.
+        let fail = validate_team(&NewTeam {
+            team: "energy".into(),
+            group: "bad group".into(),
+            description: None,
+        })
+        .expect_err("refused");
+        assert_eq!(
+            (fail.status(), fail.message()),
+            (StatusCode::BAD_REQUEST, GROUP_SENTENCE)
+        );
+        let fail = validate_team(&NewTeam {
+            team: "energy".into(),
+            group: "energy-analytics".into(),
+            description: Some("x".repeat(501)),
+        })
+        .expect_err("refused");
+        assert_eq!(
+            (fail.status(), fail.message()),
+            (
+                StatusCode::BAD_REQUEST,
+                "the description is at most 500 characters"
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn create_team_is_admin_only() {
+        use crate::auth::{Principal, require_admin};
+
+        fn identity(admin: bool) -> crate::auth::Identity {
+            crate::auth::Identity {
+                sub: "s".into(),
+                display_name: "u".into(),
+                email: None,
+                name: None,
+                groups: vec![],
+                roles: vec![],
+                groups_overage: false,
+                is_admin: admin,
+            }
+        }
+
+        async fn status_for(identity: Option<crate::auth::Identity>) -> (StatusCode, String) {
+            // The same order `main` builds: require_admin inner, the principal outer.
+            let app = crate::admin_router()
+                .route_layer(axum::middleware::from_fn(require_admin))
+                .layer(axum::middleware::from_fn(
+                    move |mut req: Request<Body>, next: axum::middleware::Next| {
+                        let identity = identity.clone();
+                        async move {
+                            if let Some(identity) = identity {
+                                req.extensions_mut().insert(Principal {
+                                    identity,
+                                    via: "session",
+                                    access_token: None,
+                                });
+                            }
+                            next.run(req).await
+                        }
+                    },
+                ))
+                .with_state(crate::router_tests::test_state());
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/admin/teams")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            json!({ "team": "energy", "group": "energy-analytics" }).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            (status, String::from_utf8_lossy(&body).into_owned())
+        }
+
+        let (status, refused) = status_for(Some(identity(false))).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(refused.contains("this view is for platform administrators"));
+
+        // No principal is refused too (the dev router has no check, oidc always has one).
+        let (status, _) = status_for(None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
     }
 }

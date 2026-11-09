@@ -1436,6 +1436,7 @@ mod tests {
             run_starts: std::sync::Mutex::new(std::collections::HashMap::new()),
             pipeline_creates: Mutex::new(std::collections::HashMap::new()),
             catalog_access_changes: Mutex::new(std::collections::HashMap::new()),
+            team_creates: Mutex::new(std::collections::HashMap::new()),
             airflow: None,
             table_locks: Mutex::new(std::collections::HashMap::new()),
             people_touched: Mutex::new(std::collections::HashMap::new()),
