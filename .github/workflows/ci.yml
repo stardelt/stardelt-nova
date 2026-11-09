@@ -85,6 +85,9 @@ jobs:
       - name: TypeScript type-check
         run: npx tsc -b --noEmit
 
+      - name: Vocabulary
+        run: npm run lint:vocab
+
       - name: Build
         run: npm run build
 
