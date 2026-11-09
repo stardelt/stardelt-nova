@@ -113,6 +113,11 @@ async function open(browser: Browser, {
         concurrency: 'Forbid', createdAt: null,
       }, 201)
     }
+    // The workspace card (#653): this spec is about published notebooks, so it says
+    // `unavailable` and the card keeps only the way in.
+    if (path === '/api/workspace') {
+      return json(route, { state: 'unavailable', startedAt: null, lastActivity: null, idleStopAt: null })
+    }
     if (path === '/api/notebooks') {
       return listStatus === 200
         ? json(route, notebooks)
@@ -248,7 +253,7 @@ test.describe('published notebooks', () => {
     await expect(section.getByRole('alert')).toHaveText('The notebook store is not configured.')
     await expect(section.getByRole('button', { name: 'Retry' })).toHaveCount(0)
     await expect(page.getByRole('link', { name: 'My server' })).toBeVisible()
-    await expect(page.getByRole('link', { name: 'Open JupyterHub ↗' })).toBeVisible()
+    await expect(page.getByRole('link', { name: 'Open JupyterLab ↗' })).toBeVisible()
     await context.close()
   })
 

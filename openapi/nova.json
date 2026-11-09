@@ -6447,6 +6447,172 @@
           }
         }
       }
+    },
+    "/api/workspace": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`GET /api/workspace`: the caller's own server state.",
+        "description": "The state of the caller's own JupyterHub server: `stopped` (no server), `starting` (the hub is spawning it), `running` (`ready`) or `stopping` (the hub is stopping it), with `startedAt`, `lastActivity` and `idleStopAt` (`lastActivity` plus the platform's idle limit: when the hub culls an idle server). Orders no server and never reads another person's: the hub user is the caller's own sign-in name. A person the hub has never seen answers `stopped`. Answers `200 {\"state\":\"unavailable\"}` when Nova has no hub credentials or the hub does not answer, so the page still renders. Answers `Cache-Control: no-store`.",
+        "operationId": "workspace_get",
+        "responses": {
+          "200": {
+            "description": "The caller's workspace, or `unavailable`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceView"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token to sign in with",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/workspace/start": {
+      "post": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`POST /api/workspace/start`: ask the hub to spawn the caller's server.",
+        "description": "Spawn the caller's own JupyterHub server: `POST /hub/api/users/{name}/server` with Nova's service token. Answers `202 {\"state\":\"starting\"}` when the hub accepted the spawn, `200 {\"state\":\"running\"}` when a server was already running, and `409` when the hub has never seen this person (they must open JupyterHub once to create their workspace). `503` when Nova has no hub credentials, `502` when the hub does not answer or refuses another way.",
+        "operationId": "workspace_start",
+        "responses": {
+          "200": {
+            "description": "A server was already running",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceView"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "The hub is spawning the server",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceView"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token to sign in with",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The hub has no such user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The hub did not answer or refused",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No hub credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/workspace/stop": {
+      "post": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`POST /api/workspace/stop`: ask the hub to stop the caller's server.",
+        "description": "Stop the caller's own JupyterHub server: `DELETE /hub/api/users/{name}/server` with Nova's service token. Answers `202 {\"state\":\"stopping\"}`; a person the hub has never seen answers `200 {\"state\":\"stopped\"}` (there is nothing to stop). `503` when Nova has no hub credentials, `502` when the hub does not answer or refuses.",
+        "operationId": "workspace_stop",
+        "responses": {
+          "200": {
+            "description": "There was no server to stop",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceView"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "The hub is stopping the server",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceView"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token to sign in with",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The hub did not answer or refused",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No hub credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -10804,6 +10970,40 @@
           "ready": {
             "type": "integer",
             "format": "int32"
+          }
+        }
+      },
+      "WorkspaceView": {
+        "type": "object",
+        "description": "One workspace as the card shows it. `state` is one of `stopped`, `starting`, `running`,\n`stopping` and `unavailable`; the three times are RFC 3339 in UTC, or `null` while the hub\nreports none.",
+        "required": [
+          "state"
+        ],
+        "properties": {
+          "idleStopAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`last_activity` plus `NOVA_WORKSPACE_IDLE_SECONDS`: when the hub culls an idle server."
+          },
+          "lastActivity": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The hub's `last_activity` for the server."
+          },
+          "startedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When the server was started (`server.started`)."
+          },
+          "state": {
+            "type": "string",
+            "description": "`stopped`, `starting`, `running`, `stopping` or `unavailable`."
           }
         }
       }
