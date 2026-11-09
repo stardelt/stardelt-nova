@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
-import { ApiError, api, errorMessage, formatCell, type Catalog as CatalogRow, type IcebergField, type QueryResult, type TableDocumentation, type TableMetadata } from '../api'
+import { ApiError, api, errorMessage, formatCell, type IcebergField, type QueryResult, type TableDocumentation, type TableMetadata } from '../api'
 import { useCatalogs } from '../components/CatalogSelect'
+import CatalogOverview from '../components/CatalogOverview'
 import CatalogTree from '../components/CatalogTree'
 import ErrorBox from '../components/ErrorBox'
 import TableAbout, { type DocsState } from '../components/TableAbout'
@@ -15,49 +16,6 @@ type Sel = { ns: string; tbl: string; kind?: 'table' | 'view' }
 function forbidden(error: unknown): boolean {
   if (error instanceof ApiError) return error.status === 403
   return !!error && typeof error === 'object' && 'status' in error && (error as { status?: unknown }).status === 403
-}
-
-/** The verbs a group reads with, and the ones it writes with (`VERBS` in `AdminCatalogs.tsx`
- * is the full set). */
-const READ_VERBS = ['browse', 'select']
-const WRITE_VERBS = ['write', 'create', 'manage']
-
-/**
- * Who owns the current catalog and which groups may read or write it (stardelt-nova#577),
- * one line under the catalog list. Access is granted by groups in the company's sign-in
- * provider, so this answers "whose data is this, who else can read it, whom do I ask".
- *
- * The owner, the description and the grants are the catalog's `Catalog` resource (the API
- * sends them with the catalog list). Nothing is guessed: with no owner and no grant the
- * line is not rendered at all, and a person who may not write is told whom to ask only
- * when there is an owner to ask.
- */
-function CatalogAccess({ catalog }: { catalog: CatalogRow | undefined }) {
-  if (!catalog) return null
-  const grants = catalog.grants ?? []
-  const groupsWith = (verbs: string[]) =>
-    [...new Set(grants.filter((grant) => verbs.includes(grant.verb)).map((grant) => grant.group))]
-  const read = groupsWith(READ_VERBS)
-  const write = groupsWith(WRITE_VERBS)
-  const owner = catalog.owner || undefined
-  const description = catalog.description || undefined
-  const parts = [
-    description,
-    owner ? <>Owned by <strong>{owner}</strong></> : null,
-    read.length > 0 ? <>Read: {read.join(', ')}</> : null,
-    write.length > 0 ? <>Write: {write.join(', ')}</> : null,
-    !catalog.canWrite && owner
-      ? `To write here, ask ${owner} or an administrator to add your group.`
-      : null,
-  ].filter(Boolean) as ReactNode[]
-  if (parts.length === 0) return null
-  return (
-    <p className="text-xs text-text-dim">
-      {parts.map((part, index) => (
-        <span key={index}>{index === 0 ? null : ' · '}{part}</span>
-      ))}
-    </p>
-  )
 }
 
 export default function Catalog() {
@@ -94,15 +52,14 @@ export default function Catalog() {
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-[300px_minmax(0,1fr)] gap-5 h-full min-h-0">
-      {/* A page has one h1: with a table open, that table's name is the heading below. */}
-      {!selected && <h1 className="sr-only">Catalog</h1>}
+      {/* A page has one h1: the table's name or the catalog overview's name is the heading below. */}
+      {!selected && !currentCatalog && <h1 className="sr-only">Catalog</h1>}
       <aside className="card p-3 flex flex-col min-h-0">
         <div className="px-1 pb-2">
-          <CatalogAccess catalog={currentCatalog} />
           <input
             value={filter}
             onChange={e => setFilter(e.target.value)}
-            placeholder="Filter tables…"
+            placeholder="Search tables…"
             aria-label="Filter tables"
             className="input py-1.5"
           />
@@ -134,6 +91,8 @@ export default function Catalog() {
       <section className="min-w-0 min-h-0 overflow-auto">
         {selected ? (
           <TableDetail ns={selected.ns} tbl={selected.tbl} catalog={catalog} kind={selected.kind} />
+        ) : currentCatalog ? (
+          <CatalogOverview catalog={currentCatalog} />
         ) : (
           <div className="card p-8 h-full grid place-items-center text-center">
             <div>

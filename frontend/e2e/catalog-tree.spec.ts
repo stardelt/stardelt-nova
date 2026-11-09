@@ -48,26 +48,29 @@ test('catalog explorer shows a tree of catalogs, schemas and tables', async ({ p
   })
 
   await page.goto('/catalog')
+  // The left pane is navigation only (stardelt-nova#584); the right pane names the same
+  // schemas, so every tree lookup is scoped to the catalog list.
+  const tree = page.getByRole('list', { name: 'Catalogs' })
 
   // 1. both catalog names are visible as rows and no <select> with the label `Catalog` exists
   await expect(page.getByRole('button', { name: /warehouse/ })).toBeVisible()
   await expect(page.getByRole('button', { name: /bronze/ })).toBeVisible()
   await expect(page.getByRole('combobox', { name: 'Catalog' })).toHaveCount(0)
   await expect(page.getByRole('button', { name: /warehouse/ }).locator('[data-kind="catalog"]')).toHaveCount(1)
-  await expect(page.getByRole('button', { name: 'sales' }).locator('[data-kind="schema"]')).toHaveCount(1)
+  await expect(tree.getByRole('button', { name: 'sales' }).locator('[data-kind="schema"]')).toHaveCount(1)
 
   // 2. warehouse is already open (its schemas sales and ops are visible) and bronze is not (raw invisible until clicked)
-  await expect(page.getByRole('button', { name: 'sales' })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'ops' })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'raw' })).toHaveCount(0)
+  await expect(tree.getByRole('button', { name: 'sales' })).toBeVisible()
+  await expect(tree.getByRole('button', { name: 'ops' })).toBeVisible()
+  await expect(tree.getByRole('button', { name: 'raw' })).toHaveCount(0)
 
   // 3. clicking bronze shows raw; clicking sales shows orders and customers
   await page.getByRole('button', { name: /bronze/ }).click()
-  await expect(page.getByRole('button', { name: 'raw' })).toBeVisible()
-  await page.getByRole('button', { name: 'sales' }).click()
+  await expect(tree.getByRole('button', { name: 'raw' })).toBeVisible()
+  await tree.getByRole('button', { name: 'sales' }).click()
   await expect(page.getByRole('button', { name: /orders/ })).toBeVisible()
   await expect(page.getByRole('button', { name: /customers/ })).toBeVisible()
-  await page.getByRole('button', { name: 'ops' }).click()
+  await tree.getByRole('button', { name: 'ops' }).click()
   await expect(page.getByRole('button', { name: /runs/ }).locator('[data-kind="table"]')).toHaveCount(1)
   await expect(page.getByRole('button', { name: /runs_view/ }).locator('[data-kind="view"]')).toHaveCount(1)
 
@@ -78,9 +81,9 @@ test('catalog explorer shows a tree of catalogs, schemas and tables', async ({ p
 
   // 5. typing runs in the Filter box hides sales (no match) and keeps ops with runs
   await page.getByLabel('Filter tables').fill('runs')
-  await expect(page.getByRole('button', { name: 'sales' })).toHaveCount(0)
-  await expect(page.getByRole('button', { name: 'ops' })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'runs', exact: true })).toBeVisible()
+  await expect(tree.getByRole('button', { name: 'sales' })).toHaveCount(0)
+  await expect(tree.getByRole('button', { name: 'ops' })).toBeVisible()
+  await expect(tree.getByRole('button', { name: 'runs', exact: true })).toBeVisible()
 
   await page.getByRole('button', { name: /runs_view/ }).click()
   await expect(page.getByRole('heading', { name: 'runs_view' })).toBeVisible()

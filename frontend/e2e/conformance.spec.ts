@@ -1552,14 +1552,18 @@ test.describe('catalog explorer', () => {
     const tree = page.getByRole('list', { name: 'Catalogs' })
     await expect(tree).toBeVisible()
     await expect(tree.getByRole('button', { name: /bronze|silver|gold|warehouse|shared/ })).toHaveCount(5)
-    // the default catalog is expanded, the others are not
-    await expect(page.getByRole('button', { name: /warehouse/ })).toHaveAttribute('aria-expanded', 'true')
-    await expect(page.getByRole('button', { name: /gold/ })).toHaveAttribute('aria-expanded', 'false')
+    // the default catalog is expanded, the others are not — and it is the highlighted one
+    // now that the right pane describes a catalog (stardelt-nova#584).
+    await expect(tree.getByRole('button', { name: /warehouse/ })).toHaveAttribute('aria-expanded', 'true')
+    await expect(tree.getByRole('button', { name: /warehouse/ })).toHaveAttribute('aria-current', 'true')
+    await expect(tree.getByRole('button', { name: /gold/ })).toHaveAttribute('aria-expanded', 'false')
+    await expect(tree.getByRole('button', { name: /gold/ })).not.toHaveAttribute('aria-current', 'true')
+    await expect(page.getByRole('heading', { level: 1, name: /warehouse/ })).toBeVisible()
 
     // A deep link opens the named catalog and shows its schemas.
     await page.goto('/catalog?catalog=gold')
-    await expect(page.getByRole('button', { name: /gold/ })).toHaveAttribute('aria-expanded', 'true')
-    await expect(page.getByRole('button', { name: /nyc_taxi/ })).toBeVisible()
+    await expect(tree.getByRole('button', { name: /gold/ })).toHaveAttribute('aria-expanded', 'true')
+    await expect(tree.getByRole('button', { name: /nyc_taxi/ })).toBeVisible()
     judge('/catalog', await auditPage(page))
     await context.close()
   })
@@ -1567,7 +1571,8 @@ test.describe('catalog explorer', () => {
   test('the second catalog is what every request then names', async ({ browser }) => {
     const { context, page, seen } = await open(browser, { body: TWO })
     await page.goto('/catalog')
-    await expect(page.getByRole('button', { name: /nyc_taxi/ })).toBeVisible()
+    const tree = page.getByRole('list', { name: 'Catalogs' })
+    await expect(tree.getByRole('button', { name: /nyc_taxi/ })).toBeVisible()
 
     await page.getByRole('button', { name: /finance/ }).click()
     // The choice is in the URL, so a reload or a pasted link opens the same catalog …
@@ -1575,10 +1580,12 @@ test.describe('catalog explorer', () => {
     // … and the table list is asked for in that catalog, not the default one.
     await expect.poll(() => seen.at(-1) ?? '', { message: 'the next namespaces request names the catalog' })
       .toContain('catalog=finance')
-    await expect(page.getByRole('button', { name: /seed/ })).toBeVisible()
+    await expect(tree.getByRole('button', { name: /seed/ })).toBeVisible()
+    // The right pane moved with the choice.
+    await expect(page.getByRole('heading', { level: 1, name: /finance/ })).toBeVisible()
 
     // A generated statement names the chosen catalog, never the historical default.
-    await page.getByRole('button', { name: /seed/ }).click()
+    await tree.getByRole('button', { name: /seed/ }).click()
     await page.getByRole('button', { name: /nation/ }).click()
     const link = page.getByRole('link', { name: 'Query table' })
     const sql = await link.evaluate((a) => new URL((a as HTMLAnchorElement).href).searchParams.get('sql'))
@@ -1604,8 +1611,9 @@ test.describe('catalog explorer', () => {
     await context.close()
   })
 
-  test('the access line names the owner and who may read and write', async ({ browser }) => {
-    // stardelt-nova#577: one line under the catalog list, from the catalog's resource.
+  test('the catalog page names the owner and who may read and write', async ({ browser }) => {
+    // stardelt-nova#584: the facts of stardelt-nova#577 moved from a line under the catalog
+    // list to the page the right pane shows, next to the object they describe.
     const { context, page } = await open(browser, {
       body: {
         catalogs: [
@@ -1626,16 +1634,24 @@ test.describe('catalog explorer', () => {
       },
     })
     await page.goto('/catalog?catalog=finance')
-    const line = page.locator('aside p.text-xs').filter({ hasText: 'Owned by finance-team' })
-    await expect(line).toHaveCount(1)
-    await expect(line).toContainText('the finance lakehouse')
-    await expect(line).toContainText('Read: analysts')
-    await expect(line).toContainText('Write: engineers')
-    await expect(line).toContainText('To write here, ask finance-team or an administrator to add your group.')
+    const main = page.locator('main')
+    const facts = main.locator('dl')
+    await expect(facts).toContainText('finance-team')
+    await expect(facts).toContainText('analysts')
+    await expect(facts).toContainText('engineers')
+    await expect(facts).toContainText('Read only')
+    await expect(main).toContainText('the finance lakehouse')
+    await expect(main).toContainText('To write here, ask finance-team or an administrator to add your group.')
+    // The left pane is navigation only: nothing of the catalog's facts sits above the search box.
+    const left = page.locator('aside.card')
+    await expect(left).not.toContainText('finance lakehouse')
+    await expect(left).not.toContainText('finance-team')
 
-    // The default catalog has no owner and no grant: the page shows no access line for it.
+    // The default catalog has no owner and no grant: dashes, and a writer may write.
     await page.goto('/catalog')
-    await expect(page.locator('aside p.text-xs')).toHaveCount(0)
+    await expect(page.getByRole('heading', { level: 1, name: /warehouse/ })).toBeVisible()
+    await expect(facts).toContainText('Read and write')
+    await expect(main).toContainText('No description yet.')
     await context.close()
   })
 
