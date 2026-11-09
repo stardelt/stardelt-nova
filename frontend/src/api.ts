@@ -112,6 +112,12 @@ export type Catalog = {
 
 export type CatalogList = { catalogs: Catalog[]; default: string }
 
+/** One table the catalog search found (`GET /api/catalog/search`). */
+export type SearchMatch = { catalog: string; namespace: string; table: string }
+
+/** `GET /api/catalog/search`: tables whose `namespace.table` contains every word of `q`. */
+export type SearchResult = { query: string; matches: SearchMatch[]; truncated: boolean }
+
 /**
  * One catalog's numbers (`GET /api/catalog/metrics`, stardelt-nova#249, #263), read from
  * the catalog's Iceberg metadata rather than counted by a query. `lastCommitMs` is the
@@ -1101,6 +1107,9 @@ export const api = {
   warehouses:   ()                            => jget<SqlWarehouse[]>('/api/warehouses'),
   /** The catalogs the caller may browse and the one a request without `?catalog=` uses. */
   catalogs:     ()                            => jget<CatalogList>('/api/catalog/catalogs'),
+  /** Tables whose name contains every word of `q`, in the default catalog. */
+  searchTables: (q: string, limit = 8) =>
+    jget<SearchResult>(`/api/catalog/search?q=${encodeURIComponent(q)}&limit=${limit}`),
   /** Schemas, tables, rows, bytes and the newest commit per catalog, plus the totals (#249). */
   catalogMetrics: ()                          => jget<CatalogMetrics>('/api/catalog/metrics'),
   /** Read every catalog again now (administrators; 429 when a minute has not passed). */
