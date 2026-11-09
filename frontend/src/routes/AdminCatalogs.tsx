@@ -37,6 +37,14 @@ type Grant = { group: string; verb: Verb }
 const GROUP_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 const GROUP_SENTENCE =
   'a group name is letters, digits, dots, dashes and underscores (up to 64)'
+
+/** `POST /api/admin/teams`'s team rule: 2 to 21 lower-case letters and digits (#596). */
+const TEAM_RE = /^[a-z][a-z0-9]{1,20}$/
+const TEAM_SENTENCE =
+  'a team name is 2 to 21 lower-case letters and digits, starting with a letter'
+const DESCRIPTION_SENTENCE = 'the description is at most 500 characters'
+const MAX_DESCRIPTION = 500
+
 const OWNER_SENTENCE = 'the owner is one group name'
 const TOO_MANY_GRANTS = 'at most 50 grants'
 const MAX_GRANTS = 50
@@ -75,6 +83,12 @@ export default function AdminCatalogs() {
   const [view, setView] = useState<View>('by-catalog')
   const [filter, setFilter] = useState('')
   const [editing, setEditing] = useState<AdminCatalog | null>(null)
+  const [creatingTeam, setCreatingTeam] = useState(false)
+  const [notice, setNotice] = useState<string | null>(null)
+  // The names a just-created team space made, until the list has a row for each: the rows
+  // join the same pending poll as an edited catalog, so the sync's GrantsReady appears
+  // without a reload.
+  const [awaitingCreate, setAwaitingCreate] = useState<string[]>([])
   const [pending, setPending] = useState<Record<string, Pending>>({})
   const [outcomes, setOutcomes] = useState<Record<string, Outcome>>({})
 
@@ -146,6 +160,29 @@ export default function AdminCatalogs() {
     }
   }, [catalogs.data, pending, pendingCount])
 
+  // A new team space's rows arrive with the refetch the create triggered; each one joins
+  // the same pending poll as an edited catalog, so the sync's GrantsReady shows on the row.
+  useEffect(() => {
+    const answer = catalogs.data
+    if (!answer || awaitingCreate.length === 0) return
+    const now = Date.now()
+    const ready = awaitingCreate.flatMap((name) => {
+      const row = answer.find((catalog) => catalog.name === name)
+      return row && typeof row.generation === 'number'
+        ? [{ name, generation: row.generation }]
+        : []
+    })
+    if (ready.length === 0) return
+    setPending((current) => {
+      const next = { ...current }
+      for (const { name, generation } of ready) {
+        if (!next[name]) next[name] = { generation, startedAt: now }
+      }
+      return next
+    })
+    setAwaitingCreate((current) => current.filter((name) => !ready.some((row) => row.name === name)))
+  }, [catalogs.data, awaitingCreate])
+
   /** A successful save: show the returned row at once, then wait for the sync to catch up. */
   function saved(row: AdminCatalog) {
     queryClient.setQueryData<AdminCatalog[]>(['admin-catalogs'], (current) =>
@@ -161,15 +198,33 @@ export default function AdminCatalogs() {
     }
   }
 
+  /** A successful create: say what was made, then refresh both lists and watch the sync. */
+  function created(names: string[]) {
+    setCreatingTeam(false)
+    setNotice(`Created ${andList(names)}.`)
+    setAwaitingCreate(names)
+    void queryClient.invalidateQueries({ queryKey: ['admin-catalogs'] })
+    void queryClient.invalidateQueries({ queryKey: ['catalog', 'catalogs'] })
+  }
+
   return (
     <div className="max-w-6xl space-y-5">
-      <header>
-        <h1 className="text-2xl font-bold tracking-tight">Catalogs</h1>
-        <p className="text-text-mute text-sm mt-1">
-          Platform administrators can do everything in every catalog; they are not listed.
-          Permissions are catalog-wide today.
-        </p>
+      <header className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">Catalogs</h1>
+          <p className="text-text-mute text-sm mt-1">
+            Platform administrators can do everything in every catalog; they are not listed.
+            Permissions are catalog-wide today.
+          </p>
+        </div>
+        <button type="button" className="btn-primary" onClick={() => setCreatingTeam(true)}>
+          New team space
+        </button>
       </header>
+
+      {notice && (
+        <p className="text-sm text-ok" role="status">{notice}</p>
+      )}
 
       {catalogs.isLoading && <div className="text-text-mute text-sm">loading…</div>}
       {catalogs.isError && (
@@ -217,8 +272,22 @@ export default function AdminCatalogs() {
           onSaved={saved}
         />
       )}
+
+      {creatingTeam && (
+        <NewTeamDialog
+          knownGroups={knownGroups}
+          onClose={() => setCreatingTeam(false)}
+          onCreated={created}
+        />
+      )}
     </div>
   )
+}
+
+/** `a`, `a and b`, `a, b and c` — the notice names the three catalogs the API made. */
+function andList(names: string[]): string {
+  if (names.length <= 1) return names.join('')
+  return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
 }
 
 /** A new object without the named keys; used by every pending/outcome transition. */
@@ -723,8 +792,206 @@ function EditCatalogDialog({
   )
 }
 
-function groupedGrants(catalog: AdminCatalog): Map<string, string[]> {
-  const groups = new Map<string, string[]>()
+/**
+ * The New team space dialog (stardelt-nova#597): the one-step create behind
+ * `POST /api/admin/teams` (#596). A native `<dialog>` like the Edit dialog; the preview is
+ * derived from the two names, so what it says is exactly what the request makes —
+ * `<team>`, `<team>lab` and `<team>ref`, the principal `pipeline-<group>`, and one owner
+ * and read/write line. The name rules are the API's, so a name the API would refuse is
+ * already refused here.
+ */
+function NewTeamDialog({
+  knownGroups,
+  onClose,
+  onCreated,
+}: {
+  knownGroups: string[]
+  onClose: () => void
+  onCreated: (names: string[]) => void
+}) {
+  const titleId = useId()
+  const listId = useId()
+  const teamId = useId()
+  const groupId = useId()
+  const descriptionId = useId()
+  const dialog = useRef<HTMLDialogElement>(null)
+  const teamInput = useRef<HTMLInputElement>(null)
+  const opener = useRef<HTMLElement | null>(null)
+
+  const [team, setTeam] = useState('')
+  const [group, setGroup] = useState('')
+  const [description, setDescription] = useState('')
+  const [creating, setCreating] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    const element = dialog.current
+    if (!element) return
+    opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    if (!element.open) element.showModal()
+    teamInput.current?.focus()
+    return () => {
+      if (element.open) element.close()
+      opener.current?.focus()
+    }
+  }, [])
+
+  const teamValue = team.trim()
+  const groupValue = group.trim()
+  const descriptionValue = description.trim()
+  const teamProblem = teamValue && !TEAM_RE.test(teamValue) ? TEAM_SENTENCE : null
+  const groupProblem = groupValue && !validGroup(groupValue) ? GROUP_SENTENCE : null
+  const descriptionProblem =
+    descriptionValue.length > MAX_DESCRIPTION ? DESCRIPTION_SENTENCE : null
+  const canCreate =
+    teamValue !== '' &&
+    groupValue !== '' &&
+    !teamProblem &&
+    !groupProblem &&
+    !descriptionProblem
+
+  const catalogs: { name: string; layer: string }[] = [
+    { name: teamValue || '<team>', layer: 'production' },
+    { name: teamValue ? `${teamValue}lab` : '<team>lab', layer: 'sandbox' },
+    { name: teamValue ? `${teamValue}ref` : '<team>ref', layer: 'reference data' },
+  ]
+  const principal = `pipeline-${groupValue || '<group>'}`
+
+  async function create() {
+    setCreating(true)
+    setError(null)
+    try {
+      const answer = await api.createTeam({
+        team: teamValue,
+        group: groupValue,
+        ...(descriptionValue ? { description: descriptionValue } : {}),
+      })
+      onCreated(answer.catalogs)
+    } catch (e) {
+      setCreating(false)
+      setError(errorMessage(e))
+    }
+  }
+
+  function submit(event: FormEvent) {
+    event.preventDefault()
+    if (creating || !canCreate) return
+    void create()
+  }
+
+  return (
+    <dialog
+      ref={dialog}
+      aria-labelledby={titleId}
+      onCancel={(event) => {
+        event.preventDefault()
+        onClose()
+      }}
+      className="m-auto w-[min(44rem,calc(100vw_-_2rem))] max-w-none rounded-[14px] border border-border bg-bg-elev p-0 text-text shadow-2xl backdrop:bg-black/60"
+    >
+      <form onSubmit={submit} className="flex max-h-[85vh] flex-col">
+        <div className="px-5 pt-5">
+          <h2 id={titleId} className="text-lg font-semibold break-words">New team space</h2>
+          <p className="mt-1 text-xs text-text-mute">
+            One call creates the team&rsquo;s three catalogs and its pipeline principal.
+            The group must already exist in the company&rsquo;s sign-in provider.
+          </p>
+        </div>
+
+        <div className="min-h-0 space-y-4 overflow-y-auto px-5 py-4">
+          <div>
+            <label htmlFor={teamId} className="label block mb-1.5">Team name</label>
+            <input
+              id={teamId}
+              ref={teamInput}
+              className="input w-full"
+              value={team}
+              autoComplete="off"
+              spellCheck={false}
+              aria-invalid={teamProblem ? true : undefined}
+              aria-describedby={teamProblem ? `${teamId}-hint` : undefined}
+              onChange={(event) => setTeam(event.target.value)}
+            />
+            <p id={`${teamId}-hint`} className={teamProblem ? 'mt-1 text-xs text-bad' : 'mt-1 text-xs text-text-mute'}>
+              {teamProblem ?? 'lower-case letters and digits, e.g. energy'}
+            </p>
+          </div>
+
+          <div>
+            <label htmlFor={groupId} className="label block mb-1.5">Group</label>
+            <input
+              id={groupId}
+              className="input w-full"
+              value={group}
+              list={listId}
+              autoComplete="off"
+              spellCheck={false}
+              aria-invalid={groupProblem ? true : undefined}
+              aria-describedby={groupProblem ? `${groupId}-hint` : undefined}
+              onChange={(event) => setGroup(event.target.value)}
+            />
+            <p id={`${groupId}-hint`} className={groupProblem ? 'mt-1 text-xs text-bad' : 'mt-1 text-xs text-text-mute'}>
+              {groupProblem ?? 'from your sign-in provider; stardelt does not create groups'}
+            </p>
+            <datalist id={listId}>
+              {knownGroups.map((known) => <option key={known} value={known} />)}
+            </datalist>
+          </div>
+
+          <div>
+            <label htmlFor={descriptionId} className="label block mb-1.5">
+              Description <span className="text-text-mute">(optional)</span>
+            </label>
+            <textarea
+              id={descriptionId}
+              className="input w-full min-h-20"
+              value={description}
+              onChange={(event) => setDescription(event.target.value)}
+            />
+            {descriptionProblem && (
+              <p className="mt-1 text-xs text-bad">{descriptionProblem}</p>
+            )}
+          </div>
+
+          <div
+            className="rounded-[10px] border border-border/70 bg-bg-soft/40 p-3"
+            aria-label="What this creates"
+          >
+            <p className="text-xs font-medium text-text-dim">Creates</p>
+            <ul className="mt-1.5 space-y-1 font-mono text-xs">
+              {catalogs.map((row) => (
+                <li key={row.layer} className="flex flex-wrap items-baseline gap-x-3">
+                  <span aria-hidden="true">▣</span>
+                  <span className="min-w-28 break-all">{row.name}</span>
+                  <span className="font-sans text-text-mute">{row.layer}</span>
+                </li>
+              ))}
+              <li className="flex flex-wrap items-baseline gap-x-3">
+                <span aria-hidden="true">⚙</span>
+                <span className="break-all">{principal}</span>
+                <span className="font-sans text-text-mute">(kept if it already exists)</span>
+              </li>
+            </ul>
+            <p className="mt-2 font-mono text-xs text-text-dim break-words">
+              Owner and read/write: {groupValue || '<group>'}, stardelt-admins
+            </p>
+          </div>
+
+          {error && <p className="text-sm text-bad" role="alert">{error}</p>}
+        </div>
+
+        <div className="flex flex-wrap items-center justify-end gap-2 border-t border-border px-5 py-3">
+          <button type="button" className="btn-ghost" onClick={onClose}>Cancel</button>
+          <button type="submit" className="btn-primary" disabled={creating || !canCreate}>
+            {creating ? 'Creating…' : 'Create'}
+          </button>
+        </div>
+      </form>
+    </dialog>
+  )
+}
+
+function groupedGrants(catalog: AdminCatalog): Map<string, string[]> {  const groups = new Map<string, string[]>()
   for (const grant of catalog.grants) {
     const verbs = groups.get(grant.group) ?? []
     if (!verbs.includes(grant.verb)) verbs.push(grant.verb)
