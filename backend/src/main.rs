@@ -47,6 +47,8 @@
 //!   GET  /api/compute                      — the Spark clusters the caller may use
 //!   POST /api/compute/{name}/start         — start one: `spec.state: Running`
 //!   POST /api/compute/{name}/stop          — stop one: `spec.state: Stopped`
+//!   PUT  /api/admin/compute/{name}  — create or replace a SparkCluster (admin)
+//!   DELETE /api/admin/compute/{name}  — delete one, never the shared one (admin)
 //!   POST /api/pipelines/check               — what the engine says about a statement (EXPLAIN)
 //!   POST /api/pipelines/preview-schedule    — the next fire times of a cron in its zone
 //!   GET  /api/pipelines/{ns}/{name}/runs/{run_id} — one run with its tasks
@@ -749,6 +751,12 @@ fn admin_router() -> Router<Arc<AppState>> {
         // A new team space in one call: `<team>`, `<team>lab`, `<team>ref` and the
         // group's pipeline principal (#596). Same administrator gate.
         .route("/admin/teams", post(admin_catalogs::create_team))
+        // The administrator's cluster form (internal#161 slice 5c): create-or-replace and
+        // delete. Start/Stop stay on the public `/compute` routes.
+        .route(
+            "/admin/compute/{name}",
+            put(compute::upsert).delete(compute::remove),
+        )
         // Read every catalog's numbers again now, rather than wait for the five-minute
         // round (#263). The same administrator gate as `/api/apps` above; a non-admin
         // answers its 403 sentence.
