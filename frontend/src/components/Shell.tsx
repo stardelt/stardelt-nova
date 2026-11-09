@@ -20,6 +20,7 @@ const titles: Record<string, string> = {
   '/queries': 'Query log',
   '/jobs': 'Activity',
   '/pipelines': 'Pipelines',
+  '/runs': 'Runs',
   '/deployments': 'Deployments',
   '/apps': 'Platform apps',
   '/admin/catalogs': 'Catalogs',
