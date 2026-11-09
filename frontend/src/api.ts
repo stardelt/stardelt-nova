@@ -44,6 +44,16 @@ export type Me = {
   admin_console_url?: string | null
 }
 
+/** A named SQL snippet owned by the caller (GET /api/saved-queries). */
+export type SavedQuery = {
+  id: number
+  title: string
+  sql: string
+  warehouse: string
+  created_at: number
+  updated_at: number
+}
+
 export type Warehouse = { name: string; id: string }
 
 /**
@@ -1074,6 +1084,10 @@ export const api = {
   settings:     ()                            => jget<Record<string, unknown>>('/api/settings'),
   putSetting:   (key: string, value: unknown) => jput<SettingAnswer>(`/api/settings/${seg(key)}`, value),
   deleteSetting: (key: string)                => jdel(`/api/settings/${seg(key)}`),
+  savedQueries: ()                            => jget<SavedQuery[]>('/api/saved-queries'),
+  saveQuery:   (req: { title: string; sql: string; warehouse: string }) =>
+    jpost<SavedQuery>('/api/saved-queries', req),
+  deleteSavedQuery: (id: number)              => jdel(`/api/saved-queries/${id}`),
   connections:  ()                            => jget<{ connections: Connection[] }>('/api/connections'),
   createConnection: (req: NewConnectionRequest) => jpost<Connection>('/api/connections', req),
   rotateConnection: (path: string, secret: Record<string, string>) => jput<Connection>(path, { secret }),

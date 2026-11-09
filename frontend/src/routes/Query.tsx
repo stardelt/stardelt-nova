@@ -1,8 +1,12 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
-import { api, allTables, downloadCsv, errorMessage, formatCell, type QueryResult, type TableRef } from '../api'
+import {
+  api, allTables, downloadCsv, errorMessage, formatCell,
+  type QueryResult, type SavedQuery, type TableRef,
+} from '../api'
 import CatalogSelect, { useCatalogs } from '../components/CatalogSelect'
+import ErrorBox from '../components/ErrorBox'
 import { Icon } from '../components/Icon'
 import ScheduleDialog from '../components/ScheduleDialog'
 import WarehouseNote from '../components/WarehouseNote'
@@ -42,6 +46,181 @@ function saveHistory(h: string[]) {
   }
 }
 
+/**
+ * Save the statement above under a name (`POST /api/saved-queries`).
+ *
+ * A native `<dialog>` opened with `showModal()`, like StopRunDialog: the browser traps
+ * focus, makes the page behind it inert and closes it on Escape. Focus starts in the title
+ * input and returns to the button that opened it. Save stays disabled while the title is
+ * blank or the editor is empty.
+ */
+function SaveQueryDialog({
+  sql,
+  onClose,
+  onSaved,
+}: {
+  sql: string
+  onClose: () => void
+  onSaved: (title: string) => void
+}) {
+  const ref = useRef<HTMLDialogElement>(null)
+  const opener = useRef<HTMLElement | null>(null)
+  const input = useRef<HTMLInputElement>(null)
+  const id = useId()
+  const titleId = `${id}-title`
+  const [title, setTitle] = useState('')
+  const qc = useQueryClient()
+  const save = useMutation({
+    mutationFn: (req: { title: string; sql: string; warehouse: string }) => api.saveQuery(req),
+    onSuccess: (row) => {
+      void qc.invalidateQueries({ queryKey: ['saved-queries'] })
+      onSaved(row.title)
+    },
+  })
+  const blocked = title.trim() === '' || sql.trim() === ''
+
+  useEffect(() => {
+    const dialog = ref.current
+    if (!dialog) return
+    opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    if (!dialog.open) dialog.showModal()
+    input.current?.focus()
+    return () => {
+      if (dialog.open) dialog.close()
+      opener.current?.focus()
+    }
+  }, [])
+
+  return (
+    <dialog
+      ref={ref}
+      aria-labelledby={titleId}
+      onCancel={(event) => {
+        event.preventDefault()
+        onClose()
+      }}
+      className="m-auto w-[min(32rem,calc(100vw_-_2rem))] max-w-none rounded-[14px] border border-border bg-bg-elev p-0 text-text shadow-2xl backdrop:bg-black/60"
+    >
+      <div className="flex max-h-[85vh] flex-col">
+        <div className="px-5 pt-5">
+          <h2 id={titleId} className="text-lg font-semibold">Save this query</h2>
+        </div>
+        <form
+          className="min-h-0 space-y-3 overflow-y-auto px-5 py-4 text-sm"
+          onSubmit={(e) => {
+            e.preventDefault()
+            if (!blocked && !save.isPending) save.mutate({ title: title.trim(), sql, warehouse: '' })
+          }}
+        >
+          <label className="grid gap-1.5">
+            <span className="label">Title</span>
+            <input
+              ref={input}
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              maxLength={200}
+              aria-label="Query title"
+              className="w-full rounded-[10px] border border-border bg-bg-soft/60 px-3 py-2 text-sm text-text outline-hidden focus:border-accent/60"
+            />
+          </label>
+          <p className="text-xs text-text-mute">The name the query is listed under. It can be up to 200 characters.</p>
+          {save.error != null && (
+            <div role="alert" className="rounded-[10px] border border-red-500/40 bg-red-500/10 p-3 text-sm text-bad break-words">
+              {errorMessage(save.error)}
+            </div>
+          )}
+          <div className="flex flex-wrap items-center justify-end gap-2 border-t border-border pt-3">
+            <button type="submit" className="btn-primary py-1.5" disabled={blocked || save.isPending}>
+              {save.isPending ? 'Saving…' : 'Save'}
+            </button>
+            <button type="button" className="btn-ghost" onClick={onClose}>
+              Cancel
+            </button>
+          </div>
+        </form>
+      </div>
+    </dialog>
+  )
+}
+
+/**
+ * Delete one saved query (`DELETE /api/saved-queries/{id}`). The confirmation names the
+ * title, so a person can see which one goes; Cancel is focused first and Escape closes.
+ */
+function DeleteQueryDialog({
+  row,
+  onClose,
+  onDeleted,
+}: {
+  row: SavedQuery
+  onClose: () => void
+  onDeleted: (title: string) => void
+}) {
+  const ref = useRef<HTMLDialogElement>(null)
+  const opener = useRef<HTMLElement | null>(null)
+  const id = useId()
+  const titleId = `${id}-title`
+  const qc = useQueryClient()
+  const remove = useMutation({
+    mutationFn: () => api.deleteSavedQuery(row.id),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['saved-queries'] })
+      onDeleted(row.title)
+    },
+  })
+
+  useEffect(() => {
+    const dialog = ref.current
+    if (!dialog) return
+    opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    if (!dialog.open) dialog.showModal()
+    dialog.querySelector<HTMLElement>('[data-autofocus]')?.focus()
+    return () => {
+      if (dialog.open) dialog.close()
+      opener.current?.focus()
+    }
+  }, [])
+
+  return (
+    <dialog
+      ref={ref}
+      aria-labelledby={titleId}
+      onCancel={(event) => {
+        event.preventDefault()
+        onClose()
+      }}
+      className="m-auto w-[min(32rem,calc(100vw_-_2rem))] max-w-none rounded-[14px] border border-border bg-bg-elev p-0 text-text shadow-2xl backdrop:bg-black/60"
+    >
+      <div className="flex max-h-[85vh] flex-col">
+        <div className="px-5 pt-5">
+          <h2 id={titleId} className="text-lg font-semibold">Delete “{row.title}”?</h2>
+        </div>
+        <div className="min-h-0 overflow-y-auto px-5 py-4 space-y-3 text-sm">
+          <p className="text-text-dim">The saved query is removed from your list. The statement itself is not run or changed.</p>
+          {remove.error != null && (
+            <div role="alert" className="rounded-[10px] border border-red-500/40 bg-red-500/10 p-3 text-sm text-bad break-words">
+              {errorMessage(remove.error)}
+            </div>
+          )}
+        </div>
+        <div className="flex flex-wrap items-center justify-end gap-2 border-t border-border px-5 py-3">
+          <button
+            type="button"
+            className="btn-danger"
+            disabled={remove.isPending}
+            onClick={() => remove.mutate()}
+          >
+            {remove.isPending ? 'Deleting…' : 'Delete'}
+          </button>
+          <button type="button" className="btn-ghost" onClick={onClose} data-autofocus>
+            Cancel
+          </button>
+        </div>
+      </div>
+    </dialog>
+  )
+}
+
 export default function Query() {
   const [params] = useSearchParams()
   // The catalog the person works in. It names the catalogs the sample is generated from,
@@ -63,6 +242,11 @@ export default function Query() {
   const [history, setHistory] = useState<string[]>(loadHistory)
   const [scheduling, setScheduling] = useState(false)
   const [scheduled, setScheduled] = useState<{ name: string; namespace: string } | null>(null)
+  const saved = useQuery({ queryKey: ['saved-queries'], queryFn: () => api.savedQueries() })
+  const [saving, setSaving] = useState(false)
+  const [deleting, setDeleting] = useState<SavedQuery | null>(null)
+  // The last successful save or delete, in the person's words (role="status").
+  const [notice, setNotice] = useState<string | null>(null)
   const taRef = useRef<HTMLTextAreaElement>(null)
   const empty = sql.trim() === ''
 
@@ -160,6 +344,10 @@ export default function Query() {
           </p>
         )}
 
+        {notice && (
+          <p role="status" className="text-sm text-ok break-words">{notice}</p>
+        )}
+
         {error && (
           <div className="rounded-[14px] border border-red-500/40 bg-red-500/10 p-4 text-sm text-bad font-mono whitespace-pre-wrap break-words">
             {error}
@@ -221,28 +409,90 @@ export default function Query() {
       </div>
 
       <aside className="card p-4 overflow-auto">
-        <div className="flex items-center justify-between mb-3">
-          <h3 className="label">History</h3>
-          <button
-            onClick={() => { setHistory([]); saveHistory([]) }}
-            className="text-xs text-text-mute hover:text-text"
-          >clear</button>
-        </div>
-        {history.length === 0 && <div className="text-text-mute text-sm">No queries yet — run one above.</div>}
-        <ul className="space-y-2">
-          {history.map((h, i) => (
-            <li key={i}>
-              <button
-                onClick={() => { setTyped(h); taRef.current?.focus() }}
-                className="w-full text-left text-xs font-mono text-text-dim hover:text-text break-all"
-                title={h}
-              >
-                {h.length > 60 ? h.slice(0, 60) + '…' : h}
-              </button>
-            </li>
-          ))}
-        </ul>
+        <section>
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="label">History</h3>
+            <button
+              onClick={() => { setHistory([]); saveHistory([]) }}
+              className="text-xs text-text-mute hover:text-text"
+            >clear</button>
+          </div>
+          {history.length === 0 && <div className="text-text-mute text-sm">No queries yet — run one above.</div>}
+          <ul className="space-y-2">
+            {history.map((h, i) => (
+              <li key={i}>
+                <button
+                  onClick={() => { setTyped(h); taRef.current?.focus() }}
+                  className="w-full text-left text-xs font-mono text-text-dim hover:text-text break-all"
+                  title={h}
+                >
+                  {h.length > 60 ? h.slice(0, 60) + '…' : h}
+                </button>
+              </li>
+            ))}
+          </ul>
+        </section>
+
+        <section className="mt-5 border-t border-border pt-4">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="label">Saved queries</h3>
+            <button
+              type="button"
+              onClick={() => setSaving(true)}
+              disabled={saved.isError}
+              title={saved.isError ? 'The saved queries could not be loaded' : undefined}
+              className="text-xs text-text-mute hover:text-text disabled:opacity-50"
+            >Save query</button>
+          </div>
+          {saved.isPending && <div className="text-text-mute text-sm">saved queries…</div>}
+          {saved.isError && <ErrorBox error={saved.error} onRetry={() => void saved.refetch()} />}
+          {saved.data?.length === 0 && (
+            <div className="text-text-mute text-sm">No saved queries yet — run a query and choose Save query.</div>
+          )}
+          <ul className="space-y-2">
+            {saved.data?.map((row) => (
+              <li key={row.id} className="flex items-start justify-between gap-2">
+                <button
+                  type="button"
+                  onClick={() => { setTyped(row.sql); taRef.current?.focus() }}
+                  className="min-w-0 flex-1 text-left text-xs text-text-dim hover:text-text break-words"
+                  title={row.sql}
+                >
+                  {row.title}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDeleting(row)}
+                  aria-label={`Delete “${row.title}”`}
+                  className="shrink-0 text-xs text-text-mute hover:text-bad"
+                >Delete</button>
+              </li>
+            ))}
+          </ul>
+        </section>
       </aside>
+
+      {saving && (
+        <SaveQueryDialog
+          sql={sql}
+          onClose={() => setSaving(false)}
+          onSaved={(title) => {
+            setSaving(false)
+            setNotice(`Saved “${title}”.`)
+          }}
+        />
+      )}
+
+      {deleting && (
+        <DeleteQueryDialog
+          row={deleting}
+          onClose={() => setDeleting(null)}
+          onDeleted={(title) => {
+            setDeleting(null)
+            setNotice(`Deleted “${title}”.`)
+          }}
+        />
+      )}
 
       {scheduling && (
         <ScheduleDialog
