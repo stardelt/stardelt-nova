@@ -1586,7 +1586,7 @@ test.describe('catalog explorer', () => {
 
     // A generated statement names the chosen catalog, never the historical default.
     await tree.getByRole('button', { name: /seed/ }).click()
-    await page.getByRole('button', { name: /nation/ }).click()
+    await tree.getByRole('button', { name: /nation/ }).click()
     const link = page.getByRole('link', { name: 'Query table' })
     const sql = await link.evaluate((a) => new URL((a as HTMLAnchorElement).href).searchParams.get('sql'))
     expect(sql).toBe('SELECT * FROM finance.seed.nation LIMIT 100')

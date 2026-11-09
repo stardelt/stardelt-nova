@@ -68,16 +68,16 @@ test('catalog explorer shows a tree of catalogs, schemas and tables', async ({ p
   await page.getByRole('button', { name: /bronze/ }).click()
   await expect(tree.getByRole('button', { name: 'raw' })).toBeVisible()
   await tree.getByRole('button', { name: 'sales' }).click()
-  await expect(page.getByRole('button', { name: /orders/ })).toBeVisible()
-  await expect(page.getByRole('button', { name: /customers/ })).toBeVisible()
+  await expect(tree.getByRole('button', { name: /orders/ })).toBeVisible()
+  await expect(tree.getByRole('button', { name: /customers/ })).toBeVisible()
   await tree.getByRole('button', { name: 'ops' }).click()
-  await expect(page.getByRole('button', { name: /runs/ }).locator('[data-kind="table"]')).toHaveCount(1)
-  await expect(page.getByRole('button', { name: /runs_view/ }).locator('[data-kind="view"]')).toHaveCount(1)
+  await expect(tree.getByRole('button', { name: /runs/ }).locator('[data-kind="table"]')).toHaveCount(1)
+  await expect(tree.getByRole('button', { name: /runs_view/ }).locator('[data-kind="view"]')).toHaveCount(1)
 
   // 4. clicking orders shows the detail heading orders and marks the row aria-current
-  await page.getByRole('button', { name: /orders/ }).click()
+  await tree.getByRole('button', { name: /orders/ }).click()
   await expect(page.getByRole('heading', { name: 'orders' })).toBeVisible()
-  await expect(page.getByRole('button', { name: /orders/ })).toHaveAttribute('aria-current', 'true')
+  await expect(tree.getByRole('button', { name: /orders/ })).toHaveAttribute('aria-current', 'true')
 
   // 5. typing runs in the Filter box hides sales (no match) and keeps ops with runs
   await page.getByLabel('Filter tables').fill('runs')
@@ -85,7 +85,7 @@ test('catalog explorer shows a tree of catalogs, schemas and tables', async ({ p
   await expect(tree.getByRole('button', { name: 'ops' })).toBeVisible()
   await expect(tree.getByRole('button', { name: 'runs', exact: true })).toBeVisible()
 
-  await page.getByRole('button', { name: /runs_view/ }).click()
+  await tree.getByRole('button', { name: /runs_view/ }).click()
   await expect(page.getByRole('heading', { name: 'runs_view' })).toBeVisible()
   // A view keeps the preview and no table-only tabs.
   await expect(page.getByRole('button', { name: 'columns' })).toHaveCount(0)
