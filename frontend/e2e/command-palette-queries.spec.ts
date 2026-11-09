@@ -33,6 +33,9 @@ async function stubApi(page: import('@playwright/test').Page) {
     if (path === '/api/catalog/catalogs') return json(route, CATALOGS)
     if (path === '/api/catalog/namespaces') return json(route, { namespaces: [] })
     if (path === '/api/apps/links') return json(route, [])
+    // The SQL editor's WarehouseNote reads this as an array (`sql-panes.spec.ts:34`); the
+    // catch-all `{}` made the route throw in CI and the page render as an error (#614).
+    if (path === '/api/warehouses') return json(route, [])
     if (path === '/api/saved-queries') return json(route, SAVED)
     return json(route, {})
   })

@@ -582,6 +582,19 @@ export type NotebookParameters = {
   objectVersion: string
 }
 
+/** One pipeline that runs a published notebook (`GET /api/notebooks/{group}/{name}/usage`). */
+export type NotebookScheduleRow = {
+  namespace: string
+  name: string
+  ownerGroup: string
+  /** The pinned object version the schedule runs. */
+  objectVersion: string
+  cron: string | null
+  timezone: string | null
+  runAs: string | null
+}
+export type NotebookUsageResponse = { schedules: NotebookScheduleRow[] }
+
 /** A cron and its IANA zone, as `POST`/`PUT /api/pipelines` carries them. */
 export type ScheduleSpec = { cron: string; timezone: string }
 
@@ -1205,6 +1218,9 @@ export const api = {
     const qs = version ? `?${new URLSearchParams({ version }).toString()}` : ''
     return jget<NotebookParameters>(`/api/notebooks/${seg(group)}/${seg(name)}/parameters${qs}`)
   },
+  /** The pipelines that run one published notebook — its schedules and pinned versions (#517). */
+  notebookUsage: (group: string, name: string) =>
+    jget<NotebookUsageResponse>(`/api/notebooks/${seg(group)}/${seg(name)}/usage`),
   /** Fill the placeholders and ask the engine to plan the statement: nothing runs (#223). */
   checkStatement: (req: CheckStatementRequest) => jpost<CheckStatementView>('/api/pipelines/check', req),
   /** The next fire times of a cron in its zone, at most ten (#223). */

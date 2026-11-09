@@ -3135,6 +3135,87 @@
         }
       }
     },
+    "/api/notebooks/{group}/{name}/usage": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "description": "The pipelines that run one published notebook — the schedules and on-demand pipelines of that group, sorted by name. Each row is the one-task `Pipeline` a Schedule created (#516): its pinned `objectVersion`, its cron and timezone when it has a schedule, and its `runAs`. Owner-group scoped: a caller who is not a member of `group` answers 403, and an administrator gets no wider view. Answers `Cache-Control: no-store`.",
+        "operationId": "notebooks_usage",
+        "parameters": [
+          {
+            "name": "group",
+            "in": "path",
+            "description": "The notebook's owner group",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "description": "The notebook's `.ipynb` file name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The visible schedules, sorted by name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotebookUsageResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token to sign in with",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not a member of the group",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The cluster did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No cluster connection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/notebooks/{group}/{name}/versions": {
       "get": {
         "tags": [
@@ -7493,6 +7574,52 @@
           }
         }
       },
+      "NotebookScheduleRow": {
+        "type": "object",
+        "description": "One pipeline that runs a published notebook (`GET /api/notebooks/{group}/{name}/usage`,\nstardelt-nova#517): a Schedule is a one-task `Pipeline` (#516), so this is its resource.",
+        "required": [
+          "namespace",
+          "name",
+          "ownerGroup",
+          "objectVersion"
+        ],
+        "properties": {
+          "cron": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`spec.schedule.cron`; `None` for a pipeline that runs on demand."
+          },
+          "name": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "objectVersion": {
+            "type": "string",
+            "description": "The pinned `config.objectVersion`; a schedule runs exactly these bytes."
+          },
+          "ownerGroup": {
+            "type": "string"
+          },
+          "runAs": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`spec.runAs`."
+          },
+          "timezone": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`spec.schedule.timezone`; `None` for a pipeline that runs on demand."
+          }
+        }
+      },
       "NotebookSummary": {
         "type": "object",
         "required": [
@@ -7526,6 +7653,22 @@
           "uploadedBy": {
             "type": "string",
             "description": "The `x-amz-meta-uploaded-by` the publisher wrote (their display name)."
+          }
+        }
+      },
+      "NotebookUsageResponse": {
+        "type": "object",
+        "description": "`GET /api/notebooks/{group}/{name}/usage`.",
+        "required": [
+          "schedules"
+        ],
+        "properties": {
+          "schedules": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NotebookScheduleRow"
+            },
+            "description": "The visible pipelines that run this notebook, sorted by name."
           }
         }
       },

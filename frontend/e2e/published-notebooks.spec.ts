@@ -46,6 +46,12 @@ const SMOKE_PARAMS = {
   parameters: [{ name: 'days', default: '1' }, { name: 'region', default: 'eu' }],
   objectVersion: V3,
 }
+const SMOKE_USAGE = {
+  schedules: [
+    { namespace: 'stardelt', name: 'smoke-daily', ownerGroup: 'analytics',
+      objectVersion: V3, cron: '0 3 * * *', timezone: 'UTC', runAs: 'pipeline-analytics' },
+  ],
+}
 const OPS_VERSIONS = [
   { objectVersion: V2, size: 512, uploadedAt: '2026-10-19T09:30:00Z', uploadedBy: 'carol', sha256: 'eeeeeeeeeeeeffff' },
 ]
@@ -112,6 +118,8 @@ async function open(browser: Browser, {
         ? json(route, notebooks)
         : json(route, { error: 'The notebook store is not configured.' }, listStatus)
     }
+    const usage = path.match(/^\/api\/notebooks\/([^/]+)\/([^/]+)\/usage$/)
+    if (usage) return json(route, decodeURIComponent(usage[1]) === 'analytics' ? SMOKE_USAGE : { schedules: [] })
     const notebookRoute = /^\/api\/notebooks\/([^/]+)\/([^/]+)\/(versions|parameters)$/.exec(path)
     if (notebookRoute) {
       const known = NOTEBOOK_ROUTES[`${notebookRoute[1]}/${decodeURIComponent(notebookRoute[2])}`]
@@ -206,6 +214,23 @@ test.describe('published notebooks', () => {
     await page.goto('/notebooks/analytics/smoke.ipynb')
     await expect(page.getByRole('heading', { level: 1, name: 'smoke.ipynb' })).toBeVisible()
     await expect(page.getByRole('heading', { name: `Parameters of ${V3.slice(0, 8)}` })).toBeVisible()
+    await context.close()
+  })
+
+  test('the notebook page says where the notebook is used', async ({ browser }) => {
+    const { context, page } = await open(browser)
+    await page.goto('/notebooks/analytics/smoke.ipynb')
+    const card = page.locator('section', {
+      has: page.getByRole('heading', { name: 'Where it is used' }),
+    })
+    const row = card.getByRole('row', { name: /smoke-daily/ })
+    await expect(row).toContainText('0 3 * * *')
+    await expect(row).toContainText('pipeline-analytics')
+    await expect(row.getByRole('link', { name: 'smoke-daily' }))
+      .toHaveAttribute('href', '/pipelines/stardelt/smoke-daily')
+
+    await page.goto('/notebooks/ops/ops.ipynb')
+    await expect(card.getByText('No schedule runs this notebook yet.')).toBeVisible()
     await context.close()
   })
 
