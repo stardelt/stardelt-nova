@@ -387,7 +387,7 @@ export default function Query() {
             )}
             {result.rows.length > SHOWN_ROWS && (
               <div className="px-4 py-2 text-xs border-b border-border text-text-mute">
-                The table shows the first {formatCount(SHOWN_ROWS)} of {formatCount(result.rows.length)} rows; the CSV holds all of them.
+                The table shows the first {formatCount(SHOWN_ROWS)} of {formatCount(result.rows.length)} rows{result.truncated ? '; the CSV holds the rows returned.' : '; the CSV holds all of them.'}
               </div>
             )}
             <div className="overflow-auto flex-1">

@@ -30,3 +30,26 @@ test('a result of 1,000 rows or fewer is drawn whole and has no such note', asyn
   await expect(page.locator('tbody tr')).toHaveCount(1000)
   await expect(page.getByText(/The table shows the first/)).toHaveCount(0)
 })
+
+test('a truncated result does not claim the CSV holds every row', async ({ page }) => {
+  const rows = Array.from({ length: 3000 }, (_, i) => [i])
+  await page.route('**/api/query', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        columns: [{ name: 'x', type: 'integer' }],
+        rows,
+        row_count: rows.length,
+        truncated: true,
+        query_id: 'q3',
+      }),
+    }),
+  )
+  await page.goto('/query')
+  await page.getByRole('button', { name: /^Run/ }).click()
+  await expect(page.locator('tbody tr')).toHaveCount(1000)
+  await expect(page.getByText('Showing the first 3,000 rows. Add a LIMIT or aggregate to see the rest.')).toBeVisible()
+  await expect(page.getByText('The table shows the first 1,000 of 3,000 rows; the CSV holds the rows returned.')).toBeVisible()
+  await expect(page.getByText(/the CSV holds all of them/)).toHaveCount(0)
+})
