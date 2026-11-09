@@ -18,7 +18,8 @@ type Row = { key: string; group: string; label: string; hint: string; icon: Icon
  * gives focus trapping, an inert page behind it and Escape for free; the query starts
  * empty on every open.
  *
- * Queries and actions arrive in later slices.
+ * Saved queries come from `GET /api/saved-queries`, matched on their title or their SQL, and
+ * open the SQL editor with that SQL. Actions arrive in a later slice.
  */
 export default function CommandPalette({
   open,
@@ -95,7 +96,31 @@ export default function CommandPalette({
     [tables.data],
   )
 
-  const rows = useMemo(() => [...pages, ...tableRows], [pages, tableRows])
+  const saved = useQuery({
+    queryKey: ['saved-queries'],
+    queryFn: () => api.savedQueries(),
+    enabled: open,
+    staleTime: 30_000,
+    retry: false,
+  })
+
+  const savedRows = useMemo<Row[]>(() => {
+    const q = query.trim().toLowerCase()
+    if (!q) return []
+    return (saved.data ?? [])
+      .filter(s => s.title.toLowerCase().includes(q) || s.sql.toLowerCase().includes(q))
+      .slice(0, 8)
+      .map(s => ({
+        key: `saved:${s.id}`,
+        group: 'Saved queries',
+        label: s.title,
+        hint: 'Query',
+        icon: 'terminal' as const,
+        to: `/query?sql=${encodeURIComponent(s.sql)}`,
+      }))
+  }, [query, saved.data])
+
+  const rows = useMemo(() => [...pages, ...savedRows, ...tableRows], [pages, savedRows, tableRows])
 
   if (!open) return null
 
@@ -135,13 +160,13 @@ export default function CommandPalette({
         <div className="border-b border-border p-3">
           <input
             role="combobox"
-            aria-label="Search pages and tables"
+            aria-label="Search pages, queries and tables"
             aria-expanded="true"
             aria-controls={`${id}-list`}
             aria-activedescendant={activeId}
             autoFocus
             value={query}
-            placeholder="Search pages and tables…"
+            placeholder="Search pages, queries and tables…"
             className="input w-full"
             onChange={(e) => {
               setQuery(e.target.value)

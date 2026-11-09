@@ -27,6 +27,7 @@ async function stubApi(page: import('@playwright/test').Page) {
     if (path.startsWith('/api/settings/')) return json(route, { key: path.split('/').pop(), value: null })
     if (path === '/api/catalog/catalogs') return json(route, CATALOGS)
     if (path === '/api/apps/links') return json(route, [])
+    if (path === '/api/saved-queries') return json(route, [])
     return json(route, {})
   })
 }
@@ -40,7 +41,7 @@ test('Ctrl+K opens the palette, filters pages and navigates', async ({ page }) =
   await page.keyboard.press('Control+k')
   const dialog = page.getByRole('dialog')
   await expect(dialog).toBeVisible()
-  const input = page.getByRole('combobox', { name: 'Search pages and tables' })
+  const input = page.getByRole('combobox', { name: 'Search pages, queries and tables' })
   await expect(input).toBeFocused()
   await input.fill('streams')
   await expect(dialog.getByRole('option')).toHaveCount(1)
