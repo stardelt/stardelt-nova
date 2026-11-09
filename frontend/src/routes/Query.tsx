@@ -123,8 +123,11 @@ export default function Query() {
             placeholder="SELECT ..."
           />
           <div className="flex flex-wrap items-center gap-2 mt-2">
-            <div className="text-xs text-text-mute">⌘/Ctrl+Enter to run</div>
-            <button onClick={() => setTyped(null)} className="btn-ghost ml-auto py-1.5">Sample</button>
+            <button onClick={run} disabled={running} className="btn-primary py-1.5">
+              <Icon name="terminal" className="w-4 h-4" />
+              {running ? 'Running…' : 'Run'}
+            </button>
+            <button onClick={() => setTyped(null)} className="btn-ghost py-1.5">Sample</button>
             <button
               type="button"
               onClick={() => setScheduling(true)}
@@ -136,10 +139,7 @@ export default function Query() {
               <Icon name="clock" className="w-4 h-4" />
               Schedule
             </button>
-            <button onClick={run} disabled={running} className="btn-primary py-1.5">
-              <Icon name="terminal" className="w-4 h-4" />
-              {running ? 'Running…' : 'Run'}
-            </button>
+            <div className="text-xs text-text-mute ml-auto">⌘/Ctrl+Enter to run</div>
             {/* The class the engine will schedule this statement into (#236): the same
                 line the Profile page shows. Nothing while the answer is on its way or the
                 platform has no warehouse to name. */}
