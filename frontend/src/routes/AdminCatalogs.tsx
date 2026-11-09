@@ -421,11 +421,19 @@ function ByCatalog({
                       type="button"
                       className="text-xs text-accent hover:underline whitespace-nowrap disabled:text-text-mute disabled:no-underline"
                       onClick={() => onEdit(catalog)}
-                      disabled={!catalog.resourceVersion}
+                      disabled={!catalog.resourceVersion || Boolean(catalog.managedBy)}
+                      title={
+                        catalog.managedBy
+                          ? `Managed by ${catalog.managedBy}. Change the grants in Git.`
+                          : undefined
+                      }
                       aria-label={`Edit permissions for ${catalog.name}`}
                     >
                       Edit
                     </button>
+                    {catalog.managedBy && (
+                      <span className="text-[11px] text-text-mute">{catalog.managedBy}</span>
+                    )}
                   </div>
                 </td>
               </tr>

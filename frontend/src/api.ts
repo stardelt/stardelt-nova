@@ -414,6 +414,11 @@ export type AdminCatalog = {
   generation: number | null
   observedGeneration: number | null
   resourceVersion: string | null
+  /**
+   * The GitOps tool that owns this resource (`Argo CD`, `Flux`), or null. A Nova edit would
+   * be reverted by it, so the page sends the person to Git instead (stardelt-nova#604).
+   */
+  managedBy?: string | null
   /** `spec.grants`, in the order the resource declares them: one verb per entry. */
   grants: AdminCatalogGrant[]
   conditions: AdminCatalogCondition[]

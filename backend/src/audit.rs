@@ -527,6 +527,20 @@ pub fn catalog_access_changed(
     });
 }
 
+/// One catalog change refused because a GitOps tool owns the `Catalog`: who, which catalog
+/// and the tool. A refusal is an action too; no field can hold a grant, a body or a credential.
+pub fn catalog_access_refused(who: &crate::auth::Identity, catalog: &str, tool: &str) {
+    tracing::info!(
+        target: "audit",
+        action = "catalog-access-refused",
+        catalog = %catalog,
+        tool = %tool,
+        actor = %who.display_name,
+        sub = %who.sub,
+        "catalog access refused: managed by a GitOps tool"
+    );
+}
+
 /// `group:verb` pairs, comma-separated, in the caller's order (sorted by the caller).
 fn pairs_text(pairs: &[(String, String)]) -> String {
     pairs
