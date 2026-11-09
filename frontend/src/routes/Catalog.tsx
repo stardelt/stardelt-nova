@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
-import { ApiError, api, errorMessage, formatCell, type IcebergField, type QueryResult, type TableDocumentation, type TableMetadata } from '../api'
+import { ApiError, api, errorMessage, formatCell, type IcebergField, type LineageNodeView, type QueryResult, type TableDocumentation, type TableMetadata } from '../api'
 import { useCatalogs } from '../components/CatalogSelect'
 import CatalogBreadcrumb from '../components/CatalogBreadcrumb'
 import CatalogOverview from '../components/CatalogOverview'
 import CatalogTree from '../components/CatalogTree'
 import ErrorBox from '../components/ErrorBox'
+import { Icon } from '../components/Icon'
 import SchemaOverview from '../components/SchemaOverview'
 import TableAbout, { type DocsState } from '../components/TableAbout'
 import TableHealth from '../components/TableHealth'
@@ -121,7 +122,7 @@ export default function Catalog() {
 }
 
 function TableDetail({ ns, tbl, catalog, kind }: Sel & { catalog?: string; kind?: 'table' | 'view' }) {
-  const [tab, setTab] = useState<'preview' | 'profile' | 'columns' | 'details' | 'history'>('preview')
+  const [tab, setTab] = useState<'preview' | 'profile' | 'columns' | 'details' | 'history' | 'lineage'>('preview')
   const qc = useQueryClient()
   const me = useQuery({ queryKey: ['me'], queryFn: api.me })
   const isView = kind === 'view'
@@ -168,7 +169,7 @@ function TableDetail({ ns, tbl, catalog, kind }: Sel & { catalog?: string; kind?
   const partSpec = m?.['partition-specs']?.[0]
   const tabs = isView
     ? (['preview'] as const)
-    : (['preview', 'profile', 'columns', 'details', 'history'] as const)
+    : (['preview', 'profile', 'columns', 'details', 'history', 'lineage'] as const)
 
   return (
     <div className="space-y-4">
@@ -235,6 +236,8 @@ function TableDetail({ ns, tbl, catalog, kind }: Sel & { catalog?: string; kind?
       {tab === 'details' && meta.data && <Details meta={meta.data} partition={partSpec} />}
 
       {tab === 'history' && <HistoryTab ns={ns} tbl={tbl} catalog={catalog} />}
+
+      {tab === 'lineage' && <LineageTab ns={ns} tbl={tbl} catalog={catalogName} />}
     </div>
   )
 }
@@ -706,6 +709,86 @@ function HistoryTab({ ns, tbl, catalog }: Sel & { catalog?: string }) {
       )}
     </div>
   )
+}
+
+/**
+ * One hop up and one hop down from this table (stardelt-nova#511): the datasets that feed it and
+ * the ones it feeds, from `/api/lineage` at depth 1. Nodes the person may not read are listed with
+ * a note and are not links, so the card never turns into a 403. The full graph stays one click
+ * away.
+ */
+function LineageTab({ ns, tbl, catalog }: { ns: string; tbl: string; catalog: string }) {
+  const graph = useQuery({
+    queryKey: ['lineage', 'one-hop', catalog, ns, tbl],
+    queryFn: () => api.lineage({ catalog: catalog || undefined, schema: ns, table: tbl, depth: 1 }),
+    enabled: Boolean(catalog),
+    retry: false,
+    staleTime: 60_000,
+  })
+  if (!catalog) return <div className="card p-6 text-text-mute text-sm">No catalog is open, so there is no lineage to read.</div>
+  if (graph.isLoading) return <div className="card p-6 text-text-mute text-sm">loading lineage…</div>
+  if (graph.isError) return <div className="card p-6"><ErrorBox error={graph.error} onRetry={() => graph.refetch()} /></div>
+
+  const nodes = graph.data?.nodes ?? []
+  const edges = graph.data?.edges ?? []
+  // The id the backend uses for this table; a demo graph may omit the catalog prefix.
+  const byId = new Map(nodes.map(n => [n.id, n]))
+  const current = byId.has(`${catalog}.${ns}|${tbl}`) ? `${catalog}.${ns}|${tbl}` : `${ns}|${tbl}`
+  const pick = (ids: string[]) => {
+    const seen = new Set<string>()
+    const out: LineageNodeView[] = []
+    for (const id of ids) {
+      const n = byId.get(id)
+      if (n && !seen.has(n.id)) { seen.add(n.id); out.push(n) }
+    }
+    return out
+  }
+  const upstream = pick(edges.filter(e => e.to === current).map(e => e.from))
+  const downstream = pick(edges.filter(e => e.from === current).map(e => e.to))
+
+  const row = (n: LineageNodeView) => (
+    <li key={n.id} className="flex items-center gap-2 py-1.5">
+      <Icon name="table" className="w-4 h-4 text-text-mute shrink-0" />
+      {n.visible ? (
+        <Link to={lineageHref(n)} className="text-sm text-accent hover:underline font-mono truncate">{n.namespace}.{n.name}</Link>
+      ) : (
+        <span className="text-sm text-text-mute font-mono truncate" title="You may not read this table">
+          {n.namespace}.{n.name} · not visible to you
+        </span>
+      )}
+    </li>
+  )
+
+  const fullGraph = new URLSearchParams({ schema: ns, table: tbl, catalog })
+  return (
+    <div className="space-y-4">
+      <div className="grid md:grid-cols-2 gap-4">
+        <div className="card p-5">
+          <div className="label mb-2">Upstream — what feeds this table</div>
+          {upstream.length === 0
+            ? <p className="text-sm text-text-mute">No upstream table is recorded.</p>
+            : <ul>{upstream.map(row)}</ul>}
+        </div>
+        <div className="card p-5">
+          <div className="label mb-2">Downstream — what reads this table</div>
+          {downstream.length === 0
+            ? <p className="text-sm text-text-mute">No downstream table is recorded.</p>
+            : <ul>{downstream.map(row)}</ul>}
+        </div>
+      </div>
+      <Link to={`/lineage?${fullGraph.toString()}`} className="btn-ghost">Open the full lineage graph</Link>
+    </div>
+  )
+}
+
+/** A lineage node's table page: the namespace is `<catalog>.<schema>` (or just a schema in demo data). */
+function lineageHref(n: { namespace: string; name: string }): string {
+  const dot = n.namespace.indexOf('.')
+  const catalog = dot > 0 ? n.namespace.slice(0, dot) : ''
+  const schema = dot > 0 ? n.namespace.slice(dot + 1) : n.namespace
+  const q = new URLSearchParams({ schema, table: n.name })
+  if (catalog) q.set('catalog', catalog)
+  return `/lineage?${q.toString()}`
 }
 
 function Details({ meta, partition }: {
