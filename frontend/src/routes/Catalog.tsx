@@ -9,6 +9,7 @@ import CatalogTree from '../components/CatalogTree'
 import ErrorBox from '../components/ErrorBox'
 import SchemaOverview from '../components/SchemaOverview'
 import TableAbout, { type DocsState } from '../components/TableAbout'
+import TableHealth from '../components/TableHealth'
 import { formatTime, sqlTableRef, rowsLabel } from '../format'
 import { isAdmin } from '../roles'
 
@@ -194,6 +195,7 @@ function TableDetail({ ns, tbl, catalog, kind }: Sel & { catalog?: string; kind?
       </header>
 
       {!isView && <TableAbout ns={ns} tbl={tbl} catalog={catalog} me={me.data} docs={docs} onSaved={onDocsSaved} />}
+      {!isView && <TableHealth ns={ns} tbl={tbl} catalog={catalog} />}
 
       <div className="flex gap-2">
         {tabs.map(t => (
