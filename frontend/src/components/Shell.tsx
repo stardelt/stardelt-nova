@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../api'
+import { bindUser } from '../catalogCache'
 import { Icon } from './Icon'
 import { applyTheme, counterpart, themeLabel, useTheme } from '../theme'
 import { isAdmin } from '../roles'
@@ -142,6 +143,8 @@ function AppSwitcher() {
 
 export default function Shell() {
   const me = useQuery({ queryKey: ['me'], queryFn: api.me })
+  // The catalog tree's browser cache belongs to this person (stardelt-nova#644).
+  useEffect(() => { if (me.data) bindUser(me.data.sub) }, [me.data])
   const location = useLocation()
   const navigate = useNavigate()
   const [q, setQ] = useState('')

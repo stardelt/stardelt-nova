@@ -1,15 +1,24 @@
 import { useQuery } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
-import { api, type Catalog } from '../api'
+import { api, type Catalog, type CatalogList } from '../api'
+import { recall, remember } from '../catalogCache'
 import { LAYERS, knownLayer, layerLabel } from './LayerBadge'
 
 /**
  * The catalogs the person may browse (stardelt-nova#234). One query key, so a page that
  * also reads the list — the Catalog page has to tell "denied" from "one catalog" — shares
  * the answer instead of asking twice.
+ *
+ * The last answer is in the browser (stardelt-nova#644): the list shows at once and the
+ * query refreshes it in the background.
  */
 export function useCatalogs() {
-  return useQuery({ queryKey: ['catalog', 'catalogs'], queryFn: api.catalogs })
+  return useQuery({
+    queryKey: ['catalog', 'catalogs'],
+    queryFn: async () => remember('catalogs', await api.catalogs()),
+    placeholderData: () => recall<CatalogList>('catalogs'),
+    staleTime: 300_000,
+  })
 }
 
 /** One `<optgroup>` of the switcher; `key` is stable and `label` is what a person reads. */
