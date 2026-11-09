@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Link, useLocation, useNavigate } from 'react-router-dom'
-import { ApiError, api, errorMessage, type PipelineView } from '../api'
+import { Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom'
+import { ApiError, api, errorMessage, type DeploymentView, type PipelineView } from '../api'
 import { EmptyState } from '../components/EmptyState'
 import ErrorBox from '../components/ErrorBox'
 import { Icon } from '../components/Icon'
@@ -19,6 +19,34 @@ import { formatDurationMs, formatTime, relativeTime } from '../format'
  */
 
 type PipelineAction = 'run' | 'pause' | 'resume'
+
+/** The choices of `?source=`: where a pipeline comes from (stardelt-nova#618). */
+type SourceFilter = 'all' | 'git' | 'nova' | 'modified'
+
+const SOURCE_OPTIONS: { value: SourceFilter; label: string }[] = [
+  { value: 'all', label: 'All sources' },
+  { value: 'git', label: 'From Git' },
+  { value: 'nova', label: 'Made in Nova' },
+  { value: 'modified', label: 'Changed by hand' },
+]
+
+/**
+ * Which source a pipeline belongs to. "Changed by hand" is its own choice rather than a
+ * subset of "From Git": the filter answers "which of these did someone edit after the
+ * deploy", and a drifted pipeline is a different thing to look at than an untouched one.
+ */
+export function sourceOf(pipeline: PipelineView): Exclude<SourceFilter, 'all'> {
+  if (!pipeline.deployment) return 'nova'
+  return pipeline.deployment.modified ? 'modified' : 'git'
+}
+
+/** The `title` of the Source cell: who deployed it and when, the parts the stamp has. */
+export function deployedTitle(deployment: DeploymentView): string | undefined {
+  const parts: string[] = []
+  if (deployment.deployedBy) parts.push(`Deployed by ${deployment.deployedBy}`)
+  if (deployment.deployedAt) parts.push(`at ${deployment.deployedAt}`)
+  return parts.length > 0 ? parts.join(' ') : undefined
+}
 
 type StateLook = { word: string; icon: string; cls: string }
 
@@ -219,6 +247,18 @@ export default function Pipelines() {
   const me = useQuery({ queryKey: ['me'], queryFn: api.me })
   // Demo mode has no scheduler, so every write route answers 503 (#500): offer none.
   const demo = me.data?.demo === true
+  // The source filter lives in the address, so a reload keeps the choice (stardelt-nova#618).
+  const [params, setParams] = useSearchParams()
+  const rawSource = params.get('source')
+  const source: SourceFilter = SOURCE_OPTIONS.some((option) => option.value === rawSource)
+    ? (rawSource as SourceFilter)
+    : 'all'
+  function chooseSource(next: SourceFilter) {
+    const nextParams = new URLSearchParams(params)
+    if (next === 'all') nextParams.delete('source')
+    else nextParams.set('source', next)
+    setParams(nextParams, { replace: true })
+  }
 
   // A delete on the detail page comes back here with its notice in the route state; show it
   // once, then replace the entry so Back does not bring the sentence along.
@@ -230,6 +270,7 @@ export default function Pipelines() {
   }, [location.pathname, location.state, navigate])
 
   const pipelines = list.data?.pipelines ?? []
+  const shown = source === 'all' ? pipelines : pipelines.filter((p) => sourceOf(p) === source)
   const failed = list.isError && !list.data
   // Without a cluster or a scheduler every pipeline route answers 503: the sentence is a
   // fact about the installation, not a failure a Retry could fix.
@@ -257,6 +298,21 @@ export default function Pipelines() {
 
       <PipelineFeedback notice={routedNotice ?? actions.notice} error={actions.error} />
 
+      <div>
+        <select
+          aria-label="Source"
+          className="input py-1 w-auto text-xs"
+          value={source}
+          onChange={(e) => chooseSource(e.target.value as SourceFilter)}
+        >
+          {SOURCE_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      </div>
+
       <div className="card relative overflow-x-auto">
         {list.isLoading && <p className="px-5 py-5 text-sm text-text-mute">Loading pipelines…</p>}
         {failed && (
@@ -277,13 +333,17 @@ export default function Pipelines() {
             <Link to="/query" className="underline">Open the SQL editor</Link>, write a statement and press Schedule.
           </EmptyState>
         )}
-        {list.data && pipelines.length > 0 && (
+        {list.data && pipelines.length > 0 && shown.length === 0 && (
+          <p className="px-5 py-5 text-sm text-text-mute">No pipeline matches this source.</p>
+        )}
+        {list.data && shown.length > 0 && (
           <table className="w-full text-sm">
             <caption className="sr-only">Pipelines you and your groups own.</caption>
             <thead className="bg-bg-soft/50">
               <tr>
                 <th scope="col" className="th w-[14rem] px-5 py-2.5">Name</th>
                 <th scope="col" className="th px-3 py-2.5">Owner</th>
+                <th scope="col" className="th px-3 py-2.5">Source</th>
                 <th scope="col" className="th px-3 py-2.5">Schedule</th>
                 <th scope="col" className="th px-3 py-2.5">State</th>
                 <th scope="col" className="th px-3 py-2.5">Last run</th>
@@ -294,7 +354,7 @@ export default function Pipelines() {
               </tr>
             </thead>
             <tbody>
-              {pipelines.map((pipeline) => (
+              {shown.map((pipeline) => (
                 <Row
                   key={`${pipeline.namespace}/${pipeline.name}`}
                   pipeline={pipeline}
@@ -408,6 +468,31 @@ export default function Pipelines() {
   )
 }
 
+/**
+ * Where the pipeline comes from: `Git · bundle/target @ commit` when `stardelt bundle deploy`
+ * published it, with an amber badge once someone changed it by hand, and `Nova` for a pipeline
+ * made in the interface (stardelt-nova#618).
+ */
+export function SourceCell({ deployment }: { deployment?: DeploymentView }) {
+  if (!deployment) return <span className="text-text-dim">Nova</span>
+  return (
+    <div className="min-w-0">
+      <span className="font-mono text-xs break-words" title={deployedTitle(deployment)}>
+        Git · {deployment.bundle}/{deployment.target}
+        {deployment.revision && <span className="font-mono"> @ {deployment.revision.slice(0, 7)}</span>}
+      </span>
+      {deployment.modified && (
+        <span
+          className="text-[11px] text-warn border border-warn/40 rounded px-1.5 ml-1 whitespace-nowrap"
+          title="Changed after its last deploy; the next deploy will overwrite it."
+        >
+          changed by hand
+        </span>
+      )}
+    </div>
+  )
+}
+
 function Row({
   pipeline,
   pending,
@@ -434,6 +519,9 @@ function Row({
       </td>
       <td className="td px-3 text-text-dim">
         <span className="whitespace-nowrap">{pipeline.ownerGroup ?? '—'}</span>
+      </td>
+      <td className="td px-3">
+        <SourceCell deployment={pipeline.deployment} />
       </td>
       <td className="td px-3">
         <span className="font-mono text-xs break-words">{pipeline.schedule ?? 'On demand'}</span>

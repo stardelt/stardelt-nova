@@ -22,13 +22,12 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     label: 'Build',
     items: [
-      { to: '/data', label: 'Load & transfer', icon: 'upload' },
-      { to: '/connections', label: 'Connections', icon: 'key' },
+      { to: '/notebooks', label: 'Notebooks', icon: 'notebook' },
       { to: '/pipelines', label: 'Pipelines', icon: 'play' },
       { to: '/streams', label: 'Streams', icon: 'pulse' },
-      { to: '/deployments', label: 'Deployments', icon: 'arrow' },
+      { to: '/connections', label: 'Connections', icon: 'key' },
+      { to: '/data', label: 'Load & transfer', icon: 'upload' },
       { to: '/jobs', label: 'Activity', icon: 'clock' },
-      { to: '/notebooks', label: 'Notebooks', icon: 'notebook' },
     ],
   },
   {
@@ -46,6 +45,9 @@ export const NAV_GROUPS: NavGroup[] = [
       { to: '/apps', label: 'Apps', icon: 'grid' },
       { to: '/health', label: 'Health', icon: 'pulse' },
       { to: '/settings', label: 'Platform settings', icon: 'sliders' },
+      // What `stardelt bundle deploy` published, by bundle and stage: an administrator's
+      // overview, not the list of a data engineer (stardelt-nova#516, nova#618).
+      { to: '/deployments', label: 'Deployments', icon: 'arrow' },
     ],
   },
 ]

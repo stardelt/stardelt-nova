@@ -196,6 +196,40 @@ test.describe('roles', () => {
       await expect(page.getByText(/for platform administrators/i)).toBeVisible()
     }
   })
+
+  test('Deployments sits under Admin: an admin finds it there, and the Build group reads in task order', async ({ browser }) => {
+    const page = await (await browser.newContext({ viewport: { width: 1280, height: 800 } })).newPage()
+    await page.route('**/api/**', (r) => {
+      const path = new URL(r.request().url()).pathname
+      if (path === '/api/me') return json(r, { user: 'bob', auth_mode: 'oidc', demo: false, warehouse: 'warehouse', is_admin: true, groups: ['admins'] })
+      if (path === '/api/pipelines') return json(r, { pipelines: [] })
+      return json(r, [])
+    })
+    await page.goto('/')
+    const group = (label: string) => page.locator('#primary-nav nav > div', { has: page.getByText(label, { exact: true }) })
+    // Build: the order a data engineer works in, and no Deployments in it any more (#618).
+    expect(await group('Build').getByRole('link').allTextContents()).toEqual(
+      ['Notebooks', 'Pipelines', 'Streams', 'Connections', 'Load & transfer', 'Activity'])
+    await expect(group('Admin').getByRole('link', { name: 'Deployments' })).toBeVisible()
+    await page.context().close()
+  })
+
+  test('a member has no Deployments entry, and the address still opens the page', async ({ browser }) => {
+    const page = await (await browser.newContext({ viewport: { width: 1280, height: 800 } })).newPage()
+    await page.route('**/api/**', (r) => {
+      const path = new URL(r.request().url()).pathname
+      if (path === '/api/me') return json(r, { user: 'alice', auth_mode: 'oidc', demo: false, warehouse: 'warehouse', is_admin: false, groups: ['analysts'] })
+      if (path === '/api/pipelines') return json(r, { pipelines: [] })
+      return json(r, [])
+    })
+    await page.goto('/')
+    const links = await page.evaluate(() => [...document.querySelectorAll('#primary-nav nav a')].map((a) => a.textContent?.trim()))
+    expect(links).not.toContain('Deployments')
+    // The page itself is not admin-only: a link to it keeps working.
+    await page.goto('/deployments')
+    await expect(page.getByRole('heading', { name: 'Deployments', exact: true })).toBeVisible()
+    await page.context().close()
+  })
 })
 
 test.describe('menus', () => {
@@ -2633,6 +2667,53 @@ test.describe('pipelines', () => {
     await expect(missing.page.getByText('An administrator has to set up the scheduler connection for this installation.')).toBeVisible()
     await expect(missing.page.getByRole('button', { name: 'Retry' })).toHaveCount(0)
     await missing.context.close()
+  })
+
+  test('source: the list says where a pipeline comes from, and the filter narrows the rows', async ({ browser }) => {
+    const commit = '0123abcdef0123abcdef0123abcdef0123abcdef'
+    const rows = [
+      pipeline({ name: 'from-git', deployment: { bundle: 'shop-etl', target: 'prod', revision: commit, deployedBy: 'ada', deployedAt: '2026-11-01T08:00:00Z' } }),
+      pipeline({ name: 'changed-by-hand', deployment: { bundle: 'shop-etl', target: 'prod', revision: commit, modified: true } }),
+      pipeline({ name: 'made-in-nova' }),
+    ]
+    const { context, page } = await open(browser, { rows })
+    const rowOf = (name: string) => page.getByRole('row', { name: new RegExp(name) })
+    await expect(page.getByRole('columnheader', { name: 'Source' })).toBeVisible()
+    await expect(rowOf('from-git')).toContainText('Git · shop-etl/prod @ 0123abc')
+    await expect(rowOf('from-git').getByText('changed by hand')).toHaveCount(0)
+    await expect(rowOf('changed-by-hand')).toContainText('Git · shop-etl/prod @ 0123abc')
+    await expect(rowOf('changed-by-hand').getByText('changed by hand')).toBeVisible()
+    await expect(rowOf('made-in-nova')).toContainText('Nova')
+    // Who deployed and when is the cell's title, not a second line of the table.
+    await expect(page.locator('td span[title="Deployed by ada at 2026-11-01T08:00:00Z"]')).toHaveCount(1)
+
+    const filter = page.getByLabel('Source', { exact: true })
+    const historyBefore = await page.evaluate(() => history.length)
+    await filter.selectOption('nova')
+    await expect(page).toHaveURL(/[?&]source=nova\b/)
+    await expect(rowOf('made-in-nova')).toBeVisible()
+    await expect(rowOf('from-git')).toHaveCount(0)
+    await expect(rowOf('changed-by-hand')).toHaveCount(0)
+    // `replace`: the choice does not add a history entry, so Back leaves the page.
+    expect(await page.evaluate(() => history.length)).toBe(historyBefore)
+    // The address carries the choice, so a reload keeps it.
+    await page.reload()
+    await expect(page.getByLabel('Source', { exact: true })).toHaveValue('nova')
+    await expect(rowOf('from-git')).toHaveCount(0)
+
+    await filter.selectOption('modified')
+    await expect(rowOf('changed-by-hand')).toBeVisible()
+    await expect(rowOf('from-git')).toHaveCount(0)
+    await filter.selectOption('git')
+    await expect(rowOf('from-git')).toBeVisible()
+    await expect(rowOf('changed-by-hand')).toHaveCount(0)
+
+    // An address nobody wrote by hand falls back to every pipeline.
+    await page.goto('/pipelines?source=bogus')
+    await expect(page.getByLabel('Source', { exact: true })).toHaveValue('all')
+    await expect(rowOf('from-git')).toBeVisible()
+    await expect(rowOf('made-in-nova')).toBeVisible()
+    await context.close()
   })
 
   test('U5 the list, a run, the stop dialog and the log have accessible names', async ({ browser }) => {
