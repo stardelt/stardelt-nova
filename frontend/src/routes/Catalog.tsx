@@ -3,9 +3,11 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
 import { ApiError, api, errorMessage, formatCell, type IcebergField, type QueryResult, type TableDocumentation, type TableMetadata } from '../api'
 import { useCatalogs } from '../components/CatalogSelect'
+import CatalogBreadcrumb from '../components/CatalogBreadcrumb'
 import CatalogOverview from '../components/CatalogOverview'
 import CatalogTree from '../components/CatalogTree'
 import ErrorBox from '../components/ErrorBox'
+import SchemaOverview from '../components/SchemaOverview'
 import TableAbout, { type DocsState } from '../components/TableAbout'
 import { formatTime, sqlTableRef, rowsLabel } from '../format'
 import { isAdmin } from '../roles'
@@ -23,6 +25,10 @@ export default function Catalog() {
   // The catalog the person chose. Absent means the API's default, which is what every
   // request did before there were several catalogs.
   const catalog = params.get('catalog') ?? undefined
+  // The schema page: `?catalog=C&ns=S` with no table (stardelt-nova#585). A table opened
+  // from the tree lives in this page's state, so its URL still has no `tbl`.
+  const nsParam = params.get('ns')
+  const schema = nsParam && !params.get('tbl') ? nsParam : null
   const [selected, setSelected] = useState<Sel | null>(null)
   const [filter, setFilter] = useState(params.get('q') ?? '')
 
@@ -46,14 +52,17 @@ export default function Catalog() {
   const noCatalogs = catalogs.data != null && (catalogs.data.catalogs?.length ?? 0) === 0
   // The catalog the Access line describes: `?catalog=`, else the API's default — the same
   // choice `TableDetail` and `CatalogSelect` make.
-  const currentCatalog = catalogs.data?.catalogs?.find(
-    (row) => row.name === (catalog ?? catalogs.data?.default),
-  )
+  const catalogName = catalog ?? catalogs.data?.default
+  const currentCatalog = catalogs.data?.catalogs?.find((row) => row.name === catalogName)
+  // The breadcrumb reads where the person is: a table opened from the tree is page state
+  // (stardelt-nova#584), not a URL param, so the selection is part of it.
+  const crumbNs = selected?.ns ?? schema
+  const crumbTbl = selected?.tbl ?? null
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-[300px_minmax(0,1fr)] gap-5 h-full min-h-0">
-      {/* A page has one h1: the table's name or the catalog overview's name is the heading below. */}
-      {!selected && !currentCatalog && <h1 className="sr-only">Catalog</h1>}
+      {/* A page has one h1: the table's, the schema's or the catalog's name is the heading below. */}
+      {!selected && !schema && !currentCatalog && <h1 className="sr-only">Catalog</h1>}
       <aside className="card p-3 flex flex-col min-h-0">
         <div className="px-1 pb-2">
           <input
@@ -88,9 +97,12 @@ export default function Catalog() {
         </div>
       </aside>
 
-      <section className="min-w-0 min-h-0 overflow-auto">
+      <section className="min-w-0 min-h-0 overflow-auto space-y-4">
+        <CatalogBreadcrumb catalog={catalogName} ns={crumbNs} tbl={crumbTbl} />
         {selected ? (
           <TableDetail ns={selected.ns} tbl={selected.tbl} catalog={catalog} kind={selected.kind} />
+        ) : schema ? (
+          <SchemaOverview catalog={catalogName ?? ''} ns={schema} />
         ) : currentCatalog ? (
           <CatalogOverview catalog={currentCatalog} />
         ) : (

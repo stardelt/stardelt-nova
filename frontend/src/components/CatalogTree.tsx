@@ -24,7 +24,7 @@ export default function CatalogTree({
   defaultCatalog: string
   filter: string
   selected: CatalogTreeSelection | null
-  onSelect: (sel: CatalogTreeSelection) => void
+  onSelect: (sel: CatalogTreeSelection | null) => void
 }) {
   const [params, setParams] = useSearchParams()
   const urlCatalog = params.get('catalog')
@@ -64,7 +64,7 @@ function CatalogNode({
   deepLinkCatalog: string
   filter: string
   selected: CatalogTreeSelection | null
-  onSelect: (sel: CatalogTreeSelection) => void
+  onSelect: (sel: CatalogTreeSelection | null) => void
   params: URLSearchParams
   setParams: (next: URLSearchParams | ((prev: URLSearchParams) => URLSearchParams), opts?: { replace?: boolean }) => void
 }) {
@@ -143,6 +143,7 @@ function CatalogNode({
             selected={selected}
             onSelect={onSelect}
             params={params}
+            setParams={setParams}
           />
         </ul>
       )}
@@ -158,14 +159,16 @@ function CatalogSchemas({
   selected,
   onSelect,
   params,
+  setParams,
 }: {
   catalogName: string
   namespaces: string[][]
   deepLinkCatalog: string
   filter: string
   selected: CatalogTreeSelection | null
-  onSelect: (sel: CatalogTreeSelection) => void
+  onSelect: (sel: CatalogTreeSelection | null) => void
   params: URLSearchParams
+  setParams: (next: URLSearchParams | ((prev: URLSearchParams) => URLSearchParams), opts?: { replace?: boolean }) => void
 }) {
   const filterTrimmed = filter.trim()
   // Track which schemas have visible matches (for "No matching tables" at catalog level)
@@ -190,6 +193,7 @@ function CatalogSchemas({
             selected={selected}
             onSelect={onSelect}
             params={params}
+            setParams={setParams}
           />
         )
       })}
@@ -264,19 +268,41 @@ function SchemaNode({
   selected,
   onSelect,
   params,
+  setParams,
 }: {
   ns: string
   catalogName: string
   deepLinkCatalog: string
   filter: string
   selected: CatalogTreeSelection | null
-  onSelect: (sel: CatalogTreeSelection) => void
+  onSelect: (sel: CatalogTreeSelection | null) => void
   params: URLSearchParams
+  setParams: (next: URLSearchParams | ((prev: URLSearchParams) => URLSearchParams), opts?: { replace?: boolean }) => void
 }) {
   const urlNs = params.get('ns')
   const urlTbl = params.get('tbl')
-  const initialOpen = catalogName === deepLinkCatalog && urlNs === ns && !!urlTbl
+  // The schema the right pane describes (stardelt-nova#585): this catalog's schema with no
+  // table open. As with the catalog row, the tree marks the one object the pane shows.
+  const current = catalogName === deepLinkCatalog && urlNs === ns && !urlTbl && selected === null
+  const initialOpen = catalogName === deepLinkCatalog && urlNs === ns
   const [open, setOpen] = useState(initialOpen)
+
+  const onSchemaClick = () => {
+    if (current) {
+      // Already the schema page: toggle local collapse/expand, the catalog row's pattern.
+      setOpen((o) => !o)
+      return
+    }
+    // Select this schema in the URL and open it. A table opened from the tree lives in the
+    // page's state, not the URL, so it is cleared here rather than by a params change.
+    setOpen(true)
+    onSelect(null)
+    const next = new URLSearchParams(params)
+    next.set('catalog', catalogName)
+    next.set('ns', ns)
+    next.delete('tbl')
+    setParams(next)
+  }
 
   const tables = useQuery({
     queryKey: ['catalog', 'tables', catalogName, ns],
@@ -300,8 +326,14 @@ function SchemaNode({
       <button
         type="button"
         aria-expanded={open}
-        onClick={() => setOpen((o) => !o)}
-        className="w-full flex items-center gap-2 text-left px-2 py-1.5 rounded-[8px] hover:bg-bg-soft/40"
+        aria-current={current ? 'true' : undefined}
+        onClick={onSchemaClick}
+        className={[
+          'w-full flex items-center gap-2 text-left px-2 py-1.5 rounded-[8px]',
+          current
+            ? 'bg-accent/15 text-text border border-accent/30'
+            : 'hover:bg-bg-soft/40 border border-transparent',
+        ].join(' ')}
       >
         <span aria-hidden className="text-text-mute text-xs">
           {open ? '▾' : '▸'}
