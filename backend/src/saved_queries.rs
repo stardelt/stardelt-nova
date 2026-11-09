@@ -31,11 +31,13 @@ const MAX_SQL_CHARS: usize = 100_000;
 #[derive(Serialize, FromRow, Debug, PartialEq, utoipa::ToSchema)]
 pub struct SavedQuery {
     pub id: i64,
+    pub owner_sub: String,
     pub title: String,
     pub sql: String,
     pub warehouse: String,
     pub created_at: i64,
     pub updated_at: i64,
+    pub shared_with: Vec<String>,
 }
 
 /// `POST /api/saved-queries` body.
@@ -46,6 +48,36 @@ pub struct NewSavedQuery {
     /// The warehouse the query was written for; free text, may be empty.
     #[serde(default)]
     pub warehouse: String,
+}
+
+/// `POST /api/saved-queries/{id}/share` body.
+#[derive(Deserialize, Debug, utoipa::ToSchema)]
+pub struct NewShare {
+    pub group: String,
+}
+
+/// The group rule the Catalog CRD uses (`CatalogDomainSpec::validate`): 1 to 64
+/// characters, letters, digits, dot, underscore or dash, starting and ending with a
+/// letter or a digit.
+fn validate_group(raw: &str) -> Result<String, String> {
+    let group = raw.trim().to_string();
+    let bytes = group.as_bytes();
+    let alnum = |b: &u8| b.is_ascii_alphanumeric();
+    let ok = !bytes.is_empty()
+        && bytes.len() <= 64
+        && alnum(&bytes[0])
+        && alnum(&bytes[bytes.len() - 1])
+        && bytes
+            .iter()
+            .all(|b| alnum(b) || matches!(b, b'.' | b'_' | b'-'));
+    if !ok {
+        return Err(
+            "group must be 1 to 64 characters, letters, digits, dot, underscore or dash, \
+             starting and ending with a letter or digit"
+                .into(),
+        );
+    }
+    Ok(group)
 }
 
 /// Who owns what the caller saves: the token's `sub` in `oidc` mode, the static dev
@@ -104,9 +136,12 @@ pub(crate) fn store_failed(e: sqlx::Error) -> Response {
 }
 
 /// The columns `SavedQuery` reads; times as epoch milliseconds.
-const COLUMNS: &str = "id, title, sql, warehouse, \
-    (extract(epoch FROM created_at) * 1000)::bigint AS created_at, \
-    (extract(epoch FROM updated_at) * 1000)::bigint AS updated_at";
+const ROW_COLUMNS: &str = "s.id, s.owner_sub, s.title, s.sql, s.warehouse, \
+    (extract(epoch FROM s.created_at) * 1000)::bigint AS created_at, \
+    (extract(epoch FROM s.updated_at) * 1000)::bigint AS updated_at";
+
+const SHARED_COLUMN: &str = "COALESCE(array_agg(q.group_name ORDER BY q.group_name) \
+     FILTER (WHERE q.group_name IS NOT NULL), '{}'::text[]) AS shared_with";
 
 /// `GET /api/saved-queries` — the caller's own, newest first.
 #[utoipa::path(
@@ -128,12 +163,22 @@ pub async fn list(
         return unavailable();
     };
     let owner = owner_sub(caller.as_ref().map(|c| &c.0), &s.dev_user);
+    let groups: Vec<String> = caller
+        .as_ref()
+        .map(|c| c.0.identity.groups.clone())
+        .unwrap_or_default();
     let sql = format!(
-        "SELECT {COLUMNS} FROM saved_query WHERE owner_sub = $1 \
-         ORDER BY saved_query.updated_at DESC, id DESC"
+        "SELECT {ROW_COLUMNS}, {SHARED_COLUMN} \
+         FROM saved_query s LEFT JOIN query_share q ON q.saved_query_id = s.id \
+         WHERE s.owner_sub = $1 \
+            OR EXISTS (SELECT 1 FROM query_share m \
+                       WHERE m.saved_query_id = s.id AND m.group_name = ANY($2)) \
+         GROUP BY s.id \
+         ORDER BY s.updated_at DESC, s.id DESC"
     );
     match sqlx::query_as::<_, SavedQuery>(sqlx::AssertSqlSafe(sql))
         .bind(owner)
+        .bind(groups)
         .fetch_all(pool)
         .await
     {
@@ -170,10 +215,12 @@ pub async fn create(
         Err(message) => return error(StatusCode::BAD_REQUEST, &message),
     };
     let owner = owner_sub(caller.as_ref().map(|c| &c.0), &s.dev_user);
-    let sql = format!(
-        "INSERT INTO saved_query (owner_sub, title, sql, warehouse) \
-         VALUES ($1, $2, $3, $4) RETURNING {COLUMNS}"
-    );
+    let sql = "INSERT INTO saved_query (owner_sub, title, sql, warehouse) \
+               VALUES ($1, $2, $3, $4) \
+               RETURNING id, owner_sub, title, sql, warehouse, \
+               (extract(epoch FROM created_at) * 1000)::bigint AS created_at, \
+               (extract(epoch FROM updated_at) * 1000)::bigint AS updated_at, \
+               '{}'::text[] AS shared_with";
     match sqlx::query_as::<_, SavedQuery>(sqlx::AssertSqlSafe(sql))
         .bind(owner)
         .bind(new.title)
@@ -222,6 +269,108 @@ pub async fn remove(
         .execute(pool)
         .await
     {
+        Ok(done) if done.rows_affected() == 1 => StatusCode::NO_CONTENT.into_response(),
+        Ok(_) => not_found(),
+        Err(e) => store_failed(e),
+    }
+}
+
+/// `POST /api/saved-queries/{id}/share` — `204`, whether the share is new, a repeat or
+/// the id is not the caller's.
+///
+/// It must not confirm that somebody else's query exists, so a foreign id is the same
+/// answer as a repeat share, and nothing is written.
+#[utoipa::path(
+    post,
+    operation_id = "saved_queries_share",
+    path = "/api/saved-queries/{id}/share",
+    tag = "public",
+    description = "Share one of the caller's saved queries with a group. Members of the group see it in the list.",
+    params(("id" = i64, Path, description = "The saved query's id")),
+    request_body = NewShare,
+    responses(
+        (status = 204, description = "Shared, already shared, or not the caller's"),
+        (status = 400, description = "The group name is not valid", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "The id is not a number", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub async fn share(
+    State(s): State<Arc<AppState>>,
+    caller: Option<Extension<Principal>>,
+    Path(id): Path<String>,
+    ApiJson(body): ApiJson<NewShare>,
+) -> Response {
+    let Ok(id) = id.parse::<i64>() else {
+        return not_found();
+    };
+    let Some(pool) = s.db.as_ref() else {
+        return unavailable();
+    };
+    let group = match validate_group(&body.group) {
+        Ok(group) => group,
+        Err(message) => return error(StatusCode::BAD_REQUEST, &message),
+    };
+    let owner = owner_sub(caller.as_ref().map(|c| &c.0), &s.dev_user);
+    // The owner check and the insert are one statement: a row that is not the
+    // caller's inserts nothing, and a repeat share is a no-op.
+    let done = sqlx::query(
+        "INSERT INTO query_share (saved_query_id, group_name) \
+         SELECT id, $2 FROM saved_query WHERE id = $1 AND owner_sub = $3 \
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(id)
+    .bind(group)
+    .bind(&owner)
+    .execute(pool)
+    .await;
+    match done {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => store_failed(e),
+    }
+}
+
+/// `DELETE /api/saved-queries/{id}/share/{group}` — `204` when a share was removed;
+/// `404` when there was none, or the query is not the caller's.
+#[utoipa::path(
+    delete,
+    operation_id = "saved_queries_unshare",
+    path = "/api/saved-queries/{id}/share/{group}",
+    tag = "public",
+    description = "Stop sharing one of the caller's saved queries with a group.",
+    params(
+        ("id" = i64, Path, description = "The saved query's id"),
+        ("group" = String, Path, description = "The group name"),
+    ),
+    responses(
+        (status = 204, description = "The share is gone"),
+        (status = 404, description = "No such share, or the query is not the caller's", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub async fn unshare(
+    State(s): State<Arc<AppState>>,
+    caller: Option<Extension<Principal>>,
+    Path((id, group)): Path<(String, String)>,
+) -> Response {
+    let Ok(id) = id.parse::<i64>() else {
+        return not_found();
+    };
+    let Some(pool) = s.db.as_ref() else {
+        return unavailable();
+    };
+    let owner = owner_sub(caller.as_ref().map(|c| &c.0), &s.dev_user);
+    let done = sqlx::query(
+        "DELETE FROM query_share q USING saved_query s \
+         WHERE q.saved_query_id = $1 AND q.group_name = $2 \
+           AND q.saved_query_id = s.id AND s.owner_sub = $3",
+    )
+    .bind(id)
+    .bind(&group)
+    .bind(&owner)
+    .execute(pool)
+    .await;
+    match done {
         Ok(done) if done.rows_affected() == 1 => StatusCode::NO_CONTENT.into_response(),
         Ok(_) => not_found(),
         Err(e) => store_failed(e),

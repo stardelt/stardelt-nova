@@ -5541,6 +5541,129 @@
         }
       }
     },
+    "/api/saved-queries/{id}/share": {
+      "post": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`POST /api/saved-queries/{id}/share` — `204`, whether the share is new, a repeat or\nthe id is not the caller's.",
+        "description": "Share one of the caller's saved queries with a group. Members of the group see it in the list.",
+        "operationId": "saved_queries_share",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The saved query's id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewShare"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Shared, already shared, or not the caller's"
+          },
+          "400": {
+            "description": "The group name is not valid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The id is not a number",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The state store is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/saved-queries/{id}/share/{group}": {
+      "delete": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`DELETE /api/saved-queries/{id}/share/{group}` — `204` when a share was removed;\n`404` when there was none, or the query is not the caller's.",
+        "description": "Stop sharing one of the caller's saved queries with a group.",
+        "operationId": "saved_queries_unshare",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The saved query's id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "group",
+            "in": "path",
+            "description": "The group name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The share is gone"
+          },
+          "404": {
+            "description": "No such share, or the query is not the caller's",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The state store is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/service-principals": {
       "get": {
         "tags": [
@@ -8123,6 +8246,18 @@
           }
         }
       },
+      "NewShare": {
+        "type": "object",
+        "description": "`POST /api/saved-queries/{id}/share` body.",
+        "required": [
+          "group"
+        ],
+        "properties": {
+          "group": {
+            "type": "string"
+          }
+        }
+      },
       "NewTeam": {
         "type": "object",
         "description": "One `POST /api/admin/teams` body: a new team space.\n\nThe group comes from the company's sign-in provider; stardelt never creates groups,\nso `group` must already exist there.",
@@ -9595,11 +9730,13 @@
         "description": "A row as the API returns it. Times are epoch milliseconds, like `Job.started_at`.",
         "required": [
           "id",
+          "owner_sub",
           "title",
           "sql",
           "warehouse",
           "created_at",
-          "updated_at"
+          "updated_at",
+          "shared_with"
         ],
         "properties": {
           "created_at": {
@@ -9609,6 +9746,15 @@
           "id": {
             "type": "integer",
             "format": "int64"
+          },
+          "owner_sub": {
+            "type": "string"
+          },
+          "shared_with": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           },
           "sql": {
             "type": "string"
