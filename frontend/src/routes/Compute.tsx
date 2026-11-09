@@ -1,7 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useState } from 'react'
 import { api, errorMessage, type ComputeCluster } from '../api'
+import ComputeDialog from '../components/ComputeDialog'
 import { EmptyState } from '../components/EmptyState'
 import ErrorBox from '../components/ErrorBox'
+import { isAdmin } from '../roles'
 import { formatWhen } from './Pipelines'
 
 const NEUTRAL = 'border-border bg-bg-soft text-text-dim'
@@ -27,7 +30,10 @@ function audience(owner: ComputeCluster['owner']): string {
 
 export default function Compute() {
   const qc = useQueryClient()
+  const me = useQuery({ queryKey: ['me'], queryFn: api.me })
+  const admin = isAdmin(me.data)
   const clusters = useQuery({ queryKey: ['compute'], queryFn: api.compute, refetchInterval: 15_000 })
+  const [editing, setEditing] = useState<null | { cluster: ComputeCluster | null }>(null)
   const start = useMutation({
     mutationFn: (name: string) => api.startCompute(name),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['compute'] }),
@@ -40,11 +46,18 @@ export default function Compute() {
 
   return (
     <div className="flex flex-col gap-4">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight">Compute</h1>
-        <p className="text-sm text-text-dim">
-          Spark clusters a team starts when it needs them; the shared cluster is always on.
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">Compute</h1>
+          <p className="text-sm text-text-dim">
+            Spark clusters a team starts when it needs them; the shared cluster is always on.
+          </p>
+        </div>
+        {admin && me.data?.demo !== true && (
+          <button type="button" className="btn-primary" onClick={() => setEditing({ cluster: null })}>
+            New cluster
+          </button>
+        )}
       </div>
 
       {clusters.isError && <ErrorBox error={clusters.error} onRetry={() => clusters.refetch()} />}
@@ -106,14 +119,49 @@ export default function Compute() {
                             Stop
                           </button>
                         )}
+                        {admin && (
+                          <button
+                            type="button"
+                            className="btn-ghost px-2.5 py-1 text-xs"
+                            onClick={() => setEditing({ cluster: c })}
+                          >
+                            Edit
+                          </button>
+                        )}
                       </div>
                     </>
+                  )}
+                  {c.shared && admin && (
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        className="btn-ghost px-2.5 py-1 text-xs"
+                        onClick={() => setEditing({ cluster: c })}
+                      >
+                        Edit
+                      </button>
+                    </div>
                   )}
                 </article>
               )
             })}
           </div>
         </>
+      )}
+
+      {editing && (
+        <ComputeDialog
+          cluster={editing.cluster}
+          onClose={() => setEditing(null)}
+          onSaved={() => {
+            void qc.invalidateQueries({ queryKey: ['compute'] })
+            setEditing(null)
+          }}
+          onDeleted={() => {
+            void qc.invalidateQueries({ queryKey: ['compute'] })
+            setEditing(null)
+          }}
+        />
       )}
     </div>
   )

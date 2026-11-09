@@ -806,6 +806,12 @@ export type ComputeCluster = {
   displayName: string | null
   owner: { group: string | null; user: string | null }
   size: 'small' | 'medium' | 'large' | string
+  driver?: { cores?: number | null; memory?: string | null } | null
+  executor?: { cores?: number | null; memory?: string | null } | null
+  maxExecutors?: number | null
+  image?: string | null
+  env?: { name: string; value: string }[]
+  sparkConf?: Record<string, string>
   runtime: string
   phase: 'Starting' | 'Running' | 'Stopping' | 'Stopped' | 'Failed' | string
   endpoint: string | null
@@ -814,6 +820,21 @@ export type ComputeCluster = {
   idleStopMinutes: number
   canUse: boolean
   shared: boolean
+}
+
+/** The body of PUT /api/admin/compute/{name}: everything an administrator may set. */
+export type ComputeSpecBody = {
+  displayName?: string
+  owner: { group: string | null; user: string | null }
+  size: 'small' | 'medium' | 'large'
+  driver?: { cores: number; memory: string } | null
+  executor?: { cores: number; memory: string } | null
+  maxExecutors?: number | null
+  runtime: string
+  image?: string | null
+  env: { name: string; value: string }[]
+  sparkConf: Record<string, string>
+  idleStopMinutes: number
 }
 
 /** `GET /api/pipelines/{namespace}/{name}`: the view plus the latest 20 runs. */
@@ -1215,6 +1236,8 @@ export const api = {
   compute:        ()                            => jget<{ clusters: ComputeCluster[] }>('/api/compute'),
   startCompute:   (name: string)                => jpost<ComputeCluster>(`/api/compute/${seg(name)}/start`, {}),
   stopCompute:    (name: string)                => jpost<ComputeCluster>(`/api/compute/${seg(name)}/stop`, {}),
+  saveCompute:    (name: string, body: ComputeSpecBody) => jput<ComputeCluster>(`/api/admin/compute/${seg(name)}`, body),
+  deleteCompute:  (name: string)                => jdel(`/api/admin/compute/${seg(name)}`),
   /** The caller's own groups and their principals (`Schedule`, #210). */
   pipelinePrincipals: ()                      => jget<{ groups: PipelinePrincipal[] }>('/api/pipelines/principals'),
   /** Every run of the caller's pipelines, newest first; the server applies the filters. */
