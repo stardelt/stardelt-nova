@@ -714,6 +714,18 @@ export type RunView = {
   note: string | null
 }
 
+/** One run in the cross-pipeline list (`GET /api/runs`). `RunView`'s fields are flat in the row. */
+export type RunsListRow = {
+  namespace: string
+  name: string
+  /** The owning group; null means administrators only. */
+  ownerGroup: string | null
+  /** `sql`, `notebook`, or `pipeline` for a multi-step pipeline. */
+  kind: 'sql' | 'notebook' | 'pipeline'
+} & RunView
+/** `GET /api/runs` — the runs of the caller's pipelines, newest first. */
+export type RunsListResponse = { runs: RunsListRow[] }
+
 /** One pipeline in the list: the resource plus what the scheduler says about it. */
 /**
  * Where `stardelt bundle deploy` published a pipeline from (stardelt-nova#397): the bundle, the
@@ -1172,6 +1184,16 @@ export const api = {
     jpatch<StreamView>(`/api/streams/${seg(namespace)}/${seg(name)}`, { stopped }),
   /** The caller's own groups and their principals (`Schedule`, #210). */
   pipelinePrincipals: ()                      => jget<{ groups: PipelinePrincipal[] }>('/api/pipelines/principals'),
+  /** Every run of the caller's pipelines, newest first; the server applies the filters. */
+  runs: (opts: { limit?: number; state?: string; kind?: string; group?: string } = {}) => {
+    const qs = new URLSearchParams()
+    if (opts.limit !== undefined) qs.set('limit', String(opts.limit))
+    if (opts.state) qs.set('state', opts.state)
+    if (opts.kind) qs.set('kind', opts.kind)
+    if (opts.group) qs.set('group', opts.group)
+    const query = qs.toString()
+    return jget<RunsListResponse>(`/api/runs${query ? `?${query}` : ''}`)
+  },
   servicePrincipals: ()                       => jget<{ principals: ServicePrincipal[] }>('/api/service-principals'),
   /** The latest published versions of the notebooks in the caller's groups (#225). */
   notebooks:    ()                            => jget<PublishedNotebook[]>('/api/notebooks'),

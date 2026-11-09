@@ -3,7 +3,7 @@ import type { ReactNode } from 'react'
 export type IconName =
   | 'grid' | 'database' | 'terminal' | 'upload' | 'clock' | 'lineage' | 'chart' | 'pulse'
   | 'search' | 'plus' | 'arrow' | 'download' | 'table' | 'spark' | 'notebook' | 'users'
-  | 'sliders' | 'key' | 'play'
+  | 'sliders' | 'key' | 'play' | 'list'
   | 'folder' | 'eye' | 'volume'      // ← the three new names
   | 'sun'
   | 'moon'
@@ -45,6 +45,12 @@ const paths: Record<IconName, ReactNode> = {
     <>
       <circle cx="12" cy="12" r="8.5" />
       <path d="M12 7.5V12l3 2" />
+    </>
+  ),
+  list: (
+    <>
+      <path d="M8 6h13M8 12h13M8 18h13" />
+      <path d="M3 6h.01M3 12h.01M3 18h.01" />
     </>
   ),
   lineage: (

@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test'
 
 // Demo mode (#500): the pages with samples must render without a red error.
 // The server this project points at runs with NOVA_DEMO=1 (playwright.config.ts).
-const PAGES = ['/pipelines', '/connections', '/queries', '/streams', '/notebooks']
+const PAGES = ['/pipelines', '/runs', '/connections', '/queries', '/streams', '/notebooks']
 
 for (const route of PAGES) {
   test(`demo mode: ${route} shows no red error`, async ({ page }) => {
@@ -21,6 +21,12 @@ for (const route of PAGES) {
 
 test('demo mode: the Pipelines page lists the two samples', async ({ page }) => {
   await page.goto('/pipelines')
+  await expect(page.getByText('daily_revenue')).toBeVisible()
+  await expect(page.getByText('ingest_orders')).toBeVisible()
+})
+
+test('demo mode: the Runs page lists the sample runs', async ({ page }) => {
+  await page.goto('/runs')
   await expect(page.getByText('daily_revenue')).toBeVisible()
   await expect(page.getByText('ingest_orders')).toBeVisible()
 })

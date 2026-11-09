@@ -24,6 +24,7 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { to: '/notebooks', label: 'Notebooks', icon: 'notebook' },
       { to: '/pipelines', label: 'Pipelines', icon: 'play' },
+      { to: '/runs', label: 'Runs', icon: 'list' },
       { to: '/streams', label: 'Streams', icon: 'pulse' },
       { to: '/connections', label: 'Connections', icon: 'key' },
       { to: '/data', label: 'Load & transfer', icon: 'upload' },
