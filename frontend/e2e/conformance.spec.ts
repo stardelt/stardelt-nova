@@ -1604,6 +1604,41 @@ test.describe('catalog explorer', () => {
     await context.close()
   })
 
+  test('the access line names the owner and who may read and write', async ({ browser }) => {
+    // stardelt-nova#577: one line under the catalog list, from the catalog's resource.
+    const { context, page } = await open(browser, {
+      body: {
+        catalogs: [
+          {
+            name: 'finance',
+            id: 'wid-finance',
+            owner: 'finance-team',
+            description: 'the finance lakehouse',
+            canWrite: false,
+            grants: [
+              { group: 'analysts', verb: 'select' },
+              { group: 'engineers', verb: 'write' },
+            ],
+          },
+          { name: 'warehouse', id: 'wid-warehouse', canWrite: true },
+        ],
+        default: 'warehouse',
+      },
+    })
+    await page.goto('/catalog?catalog=finance')
+    const line = page.locator('aside p.text-xs').filter({ hasText: 'Owned by finance-team' })
+    await expect(line).toHaveCount(1)
+    await expect(line).toContainText('the finance lakehouse')
+    await expect(line).toContainText('Read: analysts')
+    await expect(line).toContainText('Write: engineers')
+    await expect(line).toContainText('To write here, ask finance-team or an administrator to add your group.')
+
+    // The default catalog has no owner and no grant: the page shows no access line for it.
+    await page.goto('/catalog')
+    await expect(page.locator('aside p.text-xs')).toHaveCount(0)
+    await context.close()
+  })
+
   test('no catalog is open says so and offers no Retry', async ({ browser }) => {
     const sentence = /no catalog is open to you yet; ask an administrator for access/
     // The list route itself may answer 403. The page shows that one sentence once, and no

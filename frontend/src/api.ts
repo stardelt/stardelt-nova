@@ -83,8 +83,22 @@ export type SqlWarehouse = {
  * `bronze`, `silver` or `gold`, from the `stardelt.io/layer` label on the `Catalog`
  * resource or the catalog's own name. The API omits it for every other catalog, and
  * sends the list already ordered bronze, silver, gold, then alphabetically.
+ *
+ * `owner`, `description` and `grants` come from the catalog's `Catalog` resource
+ * (stardelt-nova#577): the owning group, the resource's description, and one
+ * `(group, verb)` pair per declared grant, in the order the resource declares them.
+ * Each is `null`/empty when the resource or the field is absent — a member sees no
+ * guessed owner.
  */
-export type Catalog = { name: string; id: string; layer?: string | null; canWrite?: boolean }
+export type Catalog = {
+  name: string
+  id: string
+  layer?: string | null
+  canWrite?: boolean
+  owner?: string | null
+  description?: string | null
+  grants?: { group: string; verb: string }[]
+}
 
 export type CatalogList = { catalogs: Catalog[]; default: string }
 

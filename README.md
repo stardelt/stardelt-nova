@@ -120,15 +120,26 @@ The platform runs several catalogs (one Lakekeeper warehouse each, rendered into
 one catalog per warehouse). **A person sees only the catalogs they may browse**, and Nova
 does not decide that itself: it asks the engine.
 
-`GET /api/catalog/catalogs` answers the caller's catalogs, each with its warehouse id and
-— when it is one — its medallion layer, plus the default:
+`GET /api/catalog/catalogs` answers the caller's catalogs, each with its warehouse id,
+— when it is one — its medallion layer, and who owns it and may use it, plus the default:
 
 ```json
 {"catalogs": [{"name": "bronze", "id": "3d0a…", "layer": "bronze"},
-              {"name": "finance", "id": "5e6c…"},
+              {"name": "finance", "id": "5e6c…",
+               "owner": "finance-team", "description": "the finance lakehouse",
+               "grants": [{"group": "analysts", "verb": "select"},
+                          {"group": "engineers", "verb": "write"}]},
               {"name": "warehouse", "id": "a1b2…"}],
  "default": "warehouse"}
 ```
+
+`owner` is `spec.owner` of the catalog's `Catalog` resource and `description` its
+`spec.description` (`null` for a catalog without one); `grants` is `spec.grants` in the
+order it declares them — one group and one verb (`browse`, `select`, `write`, `create`,
+`manage`) each, empty when there is none. The Catalog page shows them as one line — whose
+data it is, which groups read and write it, and whom to ask for access — so a member never
+has to open the administrator page. Access itself is granted by the company's sign-in
+provider groups, not in Nova.
 
 The order is **bronze, silver, gold first** (in that order), then every other catalog
 alphabetically. The layer is the `stardelt.io/layer` label on the catalog's `Catalog`
@@ -136,7 +147,9 @@ resource, and when the label is absent the catalog's own name if it is one of th
 labels are not sensitive, and a value that is not `bronze`, `silver` or `gold` is ignored.
 The label list is read once and cached for 60 s, so a changed label shows up within a
 minute; without a cluster connection only the name convention applies. `layer` is absent,
-not `null`, for every other catalog.
+not `null`, for every other catalog. Owner and grants are read from the `Catalog` list on
+every request (not cached, so a grant change shows at once); a list that fails leaves
+them `null`/empty and never fails the catalog list.
 
 Every `/api/catalog/*` route takes an optional `?catalog=<name>`; omitted, the default is
 used — the configured `NOVA_WAREHOUSE_NAME` when the caller may browse it, otherwise the

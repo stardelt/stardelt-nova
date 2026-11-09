@@ -334,7 +334,7 @@
         "tags": [
           "public"
         ],
-        "description": "The catalogs the caller may browse, each with its Lakekeeper warehouse id and its medallion layer when it has one, plus the catalog a request without `?catalog=` uses. The order is bronze, silver, gold first (in that order), then the rest alphabetically; `layer` is `stardelt.io/layer` from the catalog's `Catalog` resource, else the catalog's own name when that is `bronze`, `silver` or `gold`, and absent otherwise. The list is what the engine's `SHOW CATALOGS` shows the caller (through the caller's own token), minus the engine's own catalogs (`system`, `information_schema`, `memory`, `tpch`, `tpcds`, `jmx`); it is cached for 30 s (the layer for 60 s). Every other `/api/catalog/*` route takes the same `?catalog=`; a catalog the caller may not browse answers 403 there and is never proxied. Empty when no catalog is open to the caller. `demo` in demo mode.",
+        "description": "The catalogs the caller may browse, each with its Lakekeeper warehouse id and its medallion layer when it has one, plus the catalog a request without `?catalog=` uses. Its `owner` is `spec.owner` of the catalog's `Catalog` resource and `description` is `spec.description` (null without a resource); `grants` is `spec.grants` in declared order — one group and one verb (`browse`, `select`, `write`, `create`, `manage`) each — and empty when the catalog declares none, so a member can see whose data it is and which groups may read or write it. The order is bronze, silver, gold first (in that order), then the rest alphabetically; `layer` is `stardelt.io/layer` from the catalog's `Catalog` resource, else the catalog's own name when that is `bronze`, `silver` or `gold`, and absent otherwise. The list is what the engine's `SHOW CATALOGS` shows the caller (through the caller's own token), minus the engine's own catalogs (`system`, `information_schema`, `memory`, `tpch`, `tpcds`, `jmx`); it is cached for 30 s (the layer for 60 s; the owner and grants are read on every request). Every other `/api/catalog/*` route takes the same `?catalog=`; a catalog the caller may not browse answers 403 there and is never proxied. Empty when no catalog is open to the caller. `demo` in demo mode.",
         "operationId": "catalogs_list",
         "responses": {
           "200": {
@@ -6041,12 +6041,27 @@
         "required": [
           "name",
           "id",
-          "canWrite"
+          "canWrite",
+          "grants"
         ],
         "properties": {
           "canWrite": {
             "type": "boolean",
             "description": "Whether the caller may write to this catalog (has write/create/manage grant)."
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`spec.description` of the catalog's `Catalog` resource, or `null`."
+          },
+          "grants": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CatalogGrant"
+            },
+            "description": "`spec.grants` of the catalog's `Catalog` resource, in the order it declares them:\none group and one verb each, empty when there is no resource or no grant."
           },
           "id": {
             "type": "string",
@@ -6062,6 +6077,13 @@
           "name": {
             "type": "string",
             "description": "Catalog name, as the engine and the catalog spell it (`warehouse`, `finance`, …)."
+          },
+          "owner": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`spec.owner` of the catalog's `Catalog` resource: the group that owns it, or `null`\nwhen there is no resource or it names no owner (stardelt-nova#577)."
           }
         }
       },

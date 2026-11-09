@@ -153,6 +153,14 @@ pub struct CatalogInfo {
     /// Whether the caller may write to this catalog (has write/create/manage grant).
     #[serde(rename = "canWrite")]
     pub can_write: bool,
+    /// `spec.owner` of the catalog's `Catalog` resource: the group that owns it, or `null`
+    /// when there is no resource or it names no owner (stardelt-nova#577).
+    pub owner: Option<String>,
+    /// `spec.description` of the catalog's `Catalog` resource, or `null`.
+    pub description: Option<String>,
+    /// `spec.grants` of the catalog's `Catalog` resource, in the order it declares them:
+    /// one group and one verb each, empty when there is no resource or no grant.
+    pub grants: Vec<crate::admin_catalogs::CatalogGrant>,
 }
 
 /// `GET /api/catalog/catalogs`: the catalogs the caller may browse, the medallion layers
@@ -768,7 +776,7 @@ pub async fn first_writable_catalog(
     operation_id = "catalogs_list",
     path = "/api/catalog/catalogs",
     tag = "public",
-    description = "The catalogs the caller may browse, each with its Lakekeeper warehouse id and its medallion layer when it has one, plus the catalog a request without `?catalog=` uses. The order is bronze, silver, gold first (in that order), then the rest alphabetically; `layer` is `stardelt.io/layer` from the catalog's `Catalog` resource, else the catalog's own name when that is `bronze`, `silver` or `gold`, and absent otherwise. The list is what the engine's `SHOW CATALOGS` shows the caller (through the caller's own token), minus the engine's own catalogs (`system`, `information_schema`, `memory`, `tpch`, `tpcds`, `jmx`); it is cached for 30 s (the layer for 60 s). Every other `/api/catalog/*` route takes the same `?catalog=`; a catalog the caller may not browse answers 403 there and is never proxied. Empty when no catalog is open to the caller. `demo` in demo mode.",
+    description = "The catalogs the caller may browse, each with its Lakekeeper warehouse id and its medallion layer when it has one, plus the catalog a request without `?catalog=` uses. Its `owner` is `spec.owner` of the catalog's `Catalog` resource and `description` is `spec.description` (null without a resource); `grants` is `spec.grants` in declared order — one group and one verb (`browse`, `select`, `write`, `create`, `manage`) each — and empty when the catalog declares none, so a member can see whose data it is and which groups may read or write it. The order is bronze, silver, gold first (in that order), then the rest alphabetically; `layer` is `stardelt.io/layer` from the catalog's `Catalog` resource, else the catalog's own name when that is `bronze`, `silver` or `gold`, and absent otherwise. The list is what the engine's `SHOW CATALOGS` shows the caller (through the caller's own token), minus the engine's own catalogs (`system`, `information_schema`, `memory`, `tpch`, `tpcds`, `jmx`); it is cached for 30 s (the layer for 60 s; the owner and grants are read on every request). Every other `/api/catalog/*` route takes the same `?catalog=`; a catalog the caller may not browse answers 403 there and is never proxied. Empty when no catalog is open to the caller. `demo` in demo mode.",
     responses(
         (status = 200, description = "The browsable catalogs and the default one", body = CatalogsResponse),
         (status = 502, description = "The query engine or the catalog is not reachable", body = crate::openapi::ErrorResponse),
@@ -787,6 +795,28 @@ pub async fn list_catalogs(
         }
     };
     let layers = catalog_layers(&s).await;
+    // Who owns a catalog and which groups may use it (stardelt-nova#577): one list of
+    // `Catalog` resources per request, read with Nova's own service account like the
+    // layers. Not cached, because a grant added in the company's sign-in provider is
+    // what a person has just been told about. A list that fails leaves the map empty:
+    // the owner line is a nicety, the catalog list is not.
+    let mut access: HashMap<String, admin_catalogs::AdminCatalog> = HashMap::new();
+    if let Some(client) = s.kube.clone() {
+        match admin_catalogs::catalogs_api(client)
+            .list(&kube::api::ListParams::default())
+            .await
+        {
+            Ok(list) => {
+                for object in list.items {
+                    let row = admin_catalogs::row_from_object(
+                        &serde_json::to_value(&object).unwrap_or_default(),
+                    );
+                    access.insert(row.name.clone(), row);
+                }
+            }
+            Err(e) => warn!(error = %e, "catalog access list failed"),
+        }
+    }
     let mut catalogs = Vec::with_capacity(allowed.len());
     for name in allowed {
         let id = if s.demo {
@@ -805,11 +835,18 @@ pub async fn list_catalogs(
         };
         let layer = layer_in(&layers, &name);
         let can_write = catalog_can_write(&s, caller, &name).await;
+        let entry = access.get(&name);
+        let owner = entry.and_then(|row| row.owner.clone());
+        let description = entry.and_then(|row| row.description.clone());
+        let grants = entry.map(|row| row.grants.clone()).unwrap_or_default();
         catalogs.push(CatalogInfo {
             name,
             id,
             layer,
             can_write,
+            owner,
+            description,
+            grants,
         });
     }
     // The engine answers alphabetically; the medallion layers come first here.
@@ -1924,10 +1961,92 @@ mod tests {
         assert_eq!(
             body,
             json!({
-                "catalogs": [{"name": "warehouse", "id": "wid-warehouse", "canWrite": true}],
+                "catalogs": [{
+                    "name": "warehouse",
+                    "id": "wid-warehouse",
+                    "canWrite": true,
+                    "owner": null,
+                    "description": null,
+                    "grants": []
+                }],
                 "default": "warehouse"
             })
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Who owns a catalog and which groups may use it (stardelt-nova#577)
+    // -----------------------------------------------------------------------
+
+    /// A `Catalog` object carrying an owner, a description and grants, as the API
+    /// server hands it over.
+    fn catalog_with_access(name: &str, owner: &str, grants: &[(&str, &str)]) -> Value {
+        json!({
+            "apiVersion": "stardelt.io/v1alpha1",
+            "kind": "Catalog",
+            "metadata": { "name": name },
+            "spec": {
+                "owner": owner,
+                "description": "the finance lakehouse",
+                "grants": grants
+                    .iter()
+                    .map(|(group, verb)| json!({"group": group, "verb": verb}))
+                    .collect::<Vec<_>>(),
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn catalogs_carry_owner_description_and_grants() {
+        let (trino, _) = fake_trino(&[("ada", &["finance"])]).await;
+        let lakekeeper = fake_lakekeeper().await;
+        let (kube, _) = fake_catalog_api::start(vec![catalog_with_access(
+            "finance",
+            "finance-team",
+            &[("analysts", "select"), ("engineers", "write")],
+        )])
+        .await;
+        let state = state_with_catalogs(&trino, &lakekeeper, kube);
+
+        let response = list_catalogs(State(state), Some(Extension(person("ada")))).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(
+            body["catalogs"],
+            json!([{
+                "name": "finance",
+                "id": "wid-finance",
+                "canWrite": false,
+                "owner": "finance-team",
+                "description": "the finance lakehouse",
+                "grants": [
+                    {"group": "analysts", "verb": "select"},
+                    {"group": "engineers", "verb": "write"}
+                ]
+            }])
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_access_list_still_lists_catalogs() {
+        let (trino, _) = fake_trino(&[("ada", &["finance"])]).await;
+        let lakekeeper = fake_lakekeeper().await;
+        // A cluster client whose API server does not answer: the list fails.
+        let client =
+            kube::Client::try_from(kube::Config::new("http://127.0.0.1:1".parse().unwrap()))
+                .expect("a client for an unreachable API server");
+        let state = state_with_catalogs(&trino, &lakekeeper, client);
+
+        let response = list_catalogs(State(state), Some(Extension(person("ada")))).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "a failed access list must not fail the catalog list"
+        );
+        let body = json_body(response).await;
+        assert_eq!(body["catalogs"][0]["name"], "finance");
+        assert_eq!(body["catalogs"][0]["owner"], Value::Null);
+        assert_eq!(body["catalogs"][0]["grants"], json!([]));
     }
 
     // -----------------------------------------------------------------------
@@ -2073,7 +2192,15 @@ mod tests {
         assert_eq!(
             json_body(response).await,
             json!({
-                "catalogs": [{"name": "gold", "id": "demo", "layer": "gold", "canWrite": true}],
+                "catalogs": [{
+                    "name": "gold",
+                    "id": "demo",
+                    "layer": "gold",
+                    "canWrite": true,
+                    "owner": null,
+                    "description": null,
+                    "grants": []
+                }],
                 "default": "gold"
             })
         );
