@@ -6,7 +6,7 @@ import { formatTime, relativeTime, setTimeDisplay, sqlTableRef } from '../src/fo
 // Rules U1–U13 are written down in stardelt-internal/design/ui-conformance.md.
 
 const ROUTES = ['/', '/catalog', '/query', '/data', '/connections', '/jobs', '/pipelines', '/runs', '/deployments', '/queries',
-  '/apps', '/admin/catalogs', '/lineage', '/dashboards', '/notebooks', '/health', '/settings', '/preferences', '/profile',
+  '/apps', '/admin/catalogs', '/compute', '/lineage', '/dashboards', '/notebooks', '/health', '/settings', '/preferences', '/profile',
   '/no-such-page']
 const VARIANTS = [
   { name: 'desktop-dark', viewport: { width: 1280, height: 800 }, theme: 'dark', keyboard: true },
@@ -209,7 +209,7 @@ test.describe('roles', () => {
     const group = (label: string) => page.locator('#primary-nav nav > div', { has: page.getByText(label, { exact: true }) })
     // Build: the order a data engineer works in, and no Deployments in it any more (#618).
     expect(await group('Build').getByRole('link').allTextContents()).toEqual(
-      ['Notebooks', 'Pipelines', 'Runs', 'Streams', 'Connections', 'Load & transfer', 'Activity'])
+      ['Notebooks', 'Pipelines', 'Runs', 'Streams', 'Compute', 'Connections', 'Load & transfer', 'Activity'])
     await expect(group('Admin').getByRole('link', { name: 'Deployments' })).toBeVisible()
     await page.context().close()
   })

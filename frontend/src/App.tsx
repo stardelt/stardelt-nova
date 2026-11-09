@@ -11,6 +11,7 @@ import Pipelines from './routes/Pipelines'
 import Runs from './routes/Runs'
 import PipelineDetail from './routes/PipelineDetail'
 import Streams from './routes/Streams'
+import Compute from './routes/Compute'
 import Deployments from './routes/Deployments'
 import QueryLog from './routes/QueryLog'
 import Apps from './routes/Apps'
@@ -40,6 +41,7 @@ export default function App() {
         <Route path="/pipelines/:namespace/:name" element={<PipelineDetail />} />
         <Route path="/runs" element={<Runs />} />
         <Route path="/streams" element={<Streams />} />
+        <Route path="/compute" element={<Compute />} />
         <Route path="/deployments" element={<Deployments />} />
         <Route path="/queries"    element={<QueryLog   />} />
         <Route path="/apps"       element={<RequireAdmin><Apps      /></RequireAdmin>} />

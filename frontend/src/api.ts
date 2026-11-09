@@ -800,6 +800,22 @@ export type StreamView = {
   run_as: string | null
 }
 
+/** One `SparkCluster`: Spark compute for a team, one person, or everyone (`shared`). */
+export type ComputeCluster = {
+  name: string
+  displayName: string | null
+  owner: { group: string | null; user: string | null }
+  size: 'small' | 'medium' | 'large' | string
+  runtime: string
+  phase: 'Starting' | 'Running' | 'Stopping' | 'Stopped' | 'Failed' | string
+  endpoint: string | null
+  startedAt: string | null
+  lastActivityAt: string | null
+  idleStopMinutes: number
+  canUse: boolean
+  shared: boolean
+}
+
 /** `GET /api/pipelines/{namespace}/{name}`: the view plus the latest 20 runs. */
 export type PipelineDetail = PipelineView & {
   runs: RunView[]
@@ -1195,6 +1211,10 @@ export const api = {
   /** Stop or resume one stream; answers the updated view (`spec.stopped`, D42). */
   setStreamState: (namespace: string, name: string, stopped: boolean) =>
     jpatch<StreamView>(`/api/streams/${seg(namespace)}/${seg(name)}`, { stopped }),
+  /** The Spark clusters this caller may use (internal#161). */
+  compute:        ()                            => jget<{ clusters: ComputeCluster[] }>('/api/compute'),
+  startCompute:   (name: string)                => jpost<ComputeCluster>(`/api/compute/${seg(name)}/start`, {}),
+  stopCompute:    (name: string)                => jpost<ComputeCluster>(`/api/compute/${seg(name)}/stop`, {}),
   /** The caller's own groups and their principals (`Schedule`, #210). */
   pipelinePrincipals: ()                      => jget<{ groups: PipelinePrincipal[] }>('/api/pipelines/principals'),
   /** Every run of the caller's pipelines, newest first; the server applies the filters. */
