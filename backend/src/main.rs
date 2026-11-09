@@ -651,6 +651,11 @@ fn api_router() -> Router<Arc<AppState>> {
             get(saved_queries::list).post(saved_queries::create),
         )
         .route("/saved-queries/{id}", delete(saved_queries::remove))
+        .route("/saved-queries/{id}/share", post(saved_queries::share))
+        .route(
+            "/saved-queries/{id}/share/{group}",
+            delete(saved_queries::unshare),
+        )
         // The query log: the caller's own queries, everybody's for administrators (state store).
         .route("/query-log", get(query_log_api::list))
         .route("/query-log/{id}", get(query_log_api::detail))
@@ -1477,6 +1482,123 @@ mod router_tests {
             api = api.layer(Extension(signed_in(sub)));
         }
         app(test_state_with_db(Some(pool)), api, dir.path())
+    }
+
+    /// A signed-in caller in a set of groups, as `require_auth` would have put it.
+    fn signed_in_with_groups(sub: &str, groups: &[&str]) -> auth::Principal {
+        let mut principal = signed_in(sub);
+        principal.identity.groups = groups.iter().map(|g| (*g).to_string()).collect();
+        principal
+    }
+
+    /// The API on a real database, with `who` signed in and carrying `groups`.
+    fn saved_query_app_in_groups(
+        pool: sqlx::PgPool,
+        who: &str,
+        groups: &[&str],
+        dir: &StaticDir,
+    ) -> Router {
+        let api = api_router().layer(Extension(signed_in_with_groups(who, groups)));
+        app(test_state_with_db(Some(pool)), api, dir.path())
+    }
+
+    /// Alice saves a query and shares it with `analytics`. Its members see it with
+    /// `owner_sub` and `shared_with`; nobody but Alice can unshare or delete it.
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn saved_queries_shared_with_a_group_reach_its_members() {
+        let pool = db::test_support::migrated_pool().await;
+        let dir = StaticDir::new("saved-share");
+        let alice = saved_query_app(pool.clone(), Some("alice-sub"), &dir);
+        let bob = saved_query_app_in_groups(pool.clone(), "bob-sub", &["analytics"], &dir);
+        let carol = saved_query_app_in_groups(pool.clone(), "carol-sub", &["sales"], &dir);
+        let dev = saved_query_app(pool, None, &dir);
+
+        let post = r#"{"title":"Daily trips","sql":"select 1","warehouse":""}"#;
+        let (status, row) = call(&alice, "POST", "/api/saved-queries", Some(post)).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = row["id"].as_i64().unwrap();
+        assert_eq!(row["owner_sub"], "alice-sub");
+        assert_eq!(row["shared_with"], serde_json::json!([]));
+
+        // Share; a repeat and a foreign id are still 204 and change nothing.
+        let share = r#"{"group":"analytics"}"#;
+        let uri = format!("/api/saved-queries/{id}/share");
+        assert_eq!(
+            call(&alice, "POST", &uri, Some(share)).await.0,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            call(&alice, "POST", &uri, Some(share)).await.0,
+            StatusCode::NO_CONTENT
+        );
+        let foreign = format!("/api/saved-queries/{}/share", id + 1000);
+        assert_eq!(
+            call(&alice, "POST", &foreign, Some(share)).await.0,
+            StatusCode::NO_CONTENT
+        );
+
+        // Bob sees it; Carol and the dev user do not.
+        let (status, list) = call(&bob, "GET", "/api/saved-queries", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(list.as_array().unwrap().len(), 1);
+        assert_eq!(list[0]["id"], id);
+        assert_eq!(list[0]["owner_sub"], "alice-sub");
+        assert_eq!(list[0]["shared_with"], serde_json::json!(["analytics"]));
+        assert_eq!(
+            call(&carol, "GET", "/api/saved-queries", None).await.1,
+            serde_json::json!([])
+        );
+        assert_eq!(
+            call(&dev, "GET", "/api/saved-queries", None).await.1,
+            serde_json::json!([])
+        );
+
+        // A member cannot delete or unshare the row; both answer the same 404 as a
+        // missing id.
+        let delete = format!("/api/saved-queries/{id}");
+        assert_eq!(
+            call(&bob, "DELETE", &delete, None).await.0,
+            StatusCode::NOT_FOUND
+        );
+        let unshare = format!("/api/saved-queries/{id}/share/analytics");
+        assert_eq!(
+            call(&bob, "DELETE", &unshare, None).await.0,
+            StatusCode::NOT_FOUND
+        );
+
+        // A malformed group is a 400 with a sentence, not a store error.
+        let (status, body) = call(&alice, "POST", &uri, Some(r#"{"group":"bad group!"}"#)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body["error"].as_str().unwrap().contains("group must be"));
+
+        // Alice can unshare (once); Bob's list is empty again.
+        assert_eq!(
+            call(&alice, "DELETE", &unshare, None).await.0,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            call(&alice, "DELETE", &unshare, None).await.0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            call(&bob, "GET", "/api/saved-queries", None).await.1,
+            serde_json::json!([])
+        );
+
+        // Deleting the query removes its shares with it.
+        assert_eq!(
+            call(&alice, "POST", &uri, Some(share)).await.0,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            call(&alice, "DELETE", &delete, None).await.0,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            call(&bob, "GET", "/api/saved-queries", None).await.1,
+            serde_json::json!([])
+        );
     }
 
     #[tokio::test]
