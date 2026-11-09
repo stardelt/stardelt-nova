@@ -447,6 +447,30 @@ export type CatalogAccessUpdate = {
 }
 
 /**
+ * The body of `POST /api/admin/teams` (stardelt-nova#596): one new team space. The group
+ * must already exist in the company's sign-in provider — stardelt never creates groups;
+ * `description` becomes `spec.description` of the production catalog only.
+ */
+export type NewTeamRequest = {
+  /** 2 to 21 lower-case letters and digits, starting with a letter. */
+  team: string
+  /** The group the three catalogs belong to. */
+  group: string
+  /** `spec.description` of the production catalog, at most 500 characters. */
+  description?: string
+}
+
+/**
+ * What a created team space answers: `<team>`, `<team>lab` and `<team>ref` in that order,
+ * and the pipeline principal `pipeline-<group>` (kept when it already existed).
+ */
+export type NewTeamResponse = {
+  catalogs: string[]
+  principal: string
+  principalCreated: boolean
+}
+
+/**
  * One row of `GET /api/connections` (stardelt-nova#171). A connection is a credential
  * for a system outside the platform; the page lists metadata only. `secretKeys` holds the
  * *names* of the secret fields — a value is never sent, by the store or by Nova, so the
@@ -1183,6 +1207,8 @@ export const api = {
   /** Change one catalog's owner, managed access and grants (#253); the resource stays the source. */
   putCatalogAccess: (name: string, body: CatalogAccessUpdate) =>
     jput<AdminCatalog>(`/api/admin/catalogs/${seg(name)}/access`, body),
+  /** Create a new team space: three catalogs and the group's pipeline principal (#596). */
+  createTeam: (body: NewTeamRequest) => jpost<NewTeamResponse>('/api/admin/teams', body),
   workloads:    ()                            => jget<WorkloadSnapshot>('/api/workloads'),
   createNamespace: (namespace: string, catalog?: string) =>
     jpost<{ namespace: string }>(catalogPath('/api/catalog/namespaces', catalog), { namespace }),

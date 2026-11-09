@@ -69,3 +69,9 @@ dark, from the built demo UI. The Tables pane holds the search box and the catal
 with `warehouse` open on `nyc_taxi`, the History pane the history and the saved queries.
 Collapsed, each pane is a 40 px rail with a rotated label; at 390 px the rails are compact
 bars above and below the editor and the page does not scroll sideways.
+
+`admin-team-*.png` — the New team space dialog (stardelt-nova#597) at 1280×800, dark,
+from the built UI against the dev cluster: the form with the group datalist and the live
+preview of the three catalogs, the `pipeline-<group>` principal and the owner line, and
+the Catalogs list after one create, with `qaenergy`, `qaenergylab` and `qaenergyref` each
+`Ready` with `GrantsReady: Ready`.
