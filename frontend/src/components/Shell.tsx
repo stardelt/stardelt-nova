@@ -227,7 +227,7 @@ export default function Shell() {
           onClick={() => setNavOpen(false)}
         />
       )}
-      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} admin={admin} />
+      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} admin={admin} onSwitchTheme={toggleTheme} />
       <aside
         id="primary-nav"
         className={[

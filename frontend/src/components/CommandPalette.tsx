@@ -5,8 +5,8 @@ import { Icon, type IconName } from './Icon'
 import { api } from '../api'
 import { NAV_GROUPS } from '../nav'
 
-/** One row of the palette: a page, or a table the catalog search found. */
-type Row = { key: string; group: string; label: string; hint: string; icon: IconName; to: string }
+/** One row of the palette: a page, a table the catalog search found, or an action. */
+type Row = { key: string; group: string; label: string; hint: string; icon: IconName; to: string; run?: () => void }
 
 /**
  * ⌘K / Ctrl+K: a keyboard-first way to reach a page or a table.
@@ -19,16 +19,19 @@ type Row = { key: string; group: string; label: string; hint: string; icon: Icon
  * empty on every open.
  *
  * Saved queries come from `GET /api/saved-queries`, matched on their title or their SQL, and
- * open the SQL editor with that SQL. Actions arrive in a later slice.
+ * open the SQL editor with that SQL. The last group is the five actions a person does from the
+ * palette: four of them navigate, and "Switch theme" runs the header's own toggle.
  */
 export default function CommandPalette({
   open,
   onClose,
   admin,
+  onSwitchTheme,
 }: {
   open: boolean
   onClose: () => void
   admin: boolean
+  onSwitchTheme: () => void
 }) {
   const ref = useRef<HTMLDialogElement>(null)
   const opener = useRef<HTMLElement | null>(null)
@@ -120,12 +123,25 @@ export default function CommandPalette({
       }))
   }, [query, saved.data])
 
-  const rows = useMemo(() => [...pages, ...savedRows, ...tableRows], [pages, savedRows, tableRows])
+  const actions = useMemo<Row[]>(() => {
+    const q = query.trim().toLowerCase()
+    const all: Row[] = [
+      { key: 'action:new-query',   group: 'Actions', label: 'New query',   hint: 'Open the SQL editor', icon: 'terminal', to: '/query' },
+      { key: 'action:load-data',   group: 'Actions', label: 'Load data',   hint: 'Files, uploads and loads', icon: 'upload', to: '/data' },
+      { key: 'action:query-log',   group: 'Actions', label: 'Query log',   hint: 'Recent queries', icon: 'clock', to: '/queries' },
+      { key: 'action:preferences', group: 'Actions', label: 'Preferences', hint: 'Theme and navigation', icon: 'sliders', to: '/preferences' },
+      { key: 'action:theme',       group: 'Actions', label: 'Switch theme', hint: 'The paired theme', icon: 'sun', to: '', run: onSwitchTheme },
+    ]
+    return all.filter(a => !q || a.label.toLowerCase().includes(q) || a.hint.toLowerCase().includes(q))
+  }, [query, onSwitchTheme])
+
+  const rows = useMemo(() => [...pages, ...savedRows, ...tableRows, ...actions], [pages, savedRows, tableRows, actions])
 
   if (!open) return null
 
-  function go(to: string) {
-    navigate(to)
+  function go(row: Row) {
+    if (row.run) row.run()
+    else navigate(row.to)
     onClose()
   }
 
@@ -140,7 +156,7 @@ export default function CommandPalette({
       const row = rows[active]
       if (!row) return
       event.preventDefault()
-      go(row.to)
+      go(row)
     }
   }
 
@@ -188,7 +204,7 @@ export default function CommandPalette({
                   role="option"
                   id={`${id}-opt-${i}`}
                   aria-selected={i === active}
-                  onClick={() => go(row.to)}
+                  onClick={() => go(row)}
                   onMouseEnter={() => setActive(i)}
                   className={[
                     'flex cursor-pointer items-center gap-2.5 rounded-[10px] px-3 py-2 text-sm',
