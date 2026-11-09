@@ -70,6 +70,10 @@ function CatalogNode({
 }) {
   const initialOpen = catalog.name === deepLinkCatalog
   const [open, setOpen] = useState(initialOpen)
+  // The catalog the right pane describes: the URL's catalog (or the API's default) with no
+  // schema open and no table selected (stardelt-nova#584). A table opened from the tree lives
+  // in this page's state, not in the URL, so the selection is part of the test.
+  const current = catalog.name === deepLinkCatalog && !params.get('ns') && selected === null
 
   useEffect(() => {
     if (catalog.name === deepLinkCatalog) setOpen(true)
@@ -101,8 +105,14 @@ function CatalogNode({
       <button
         type="button"
         aria-expanded={open}
+        aria-current={current ? 'true' : undefined}
         onClick={onCatalogClick}
-        className="w-full flex items-center gap-2 text-left px-2 py-1.5 rounded-[8px] hover:bg-bg-soft/40"
+        className={[
+          'w-full flex items-center gap-2 text-left px-2 py-1.5 rounded-[8px]',
+          current
+            ? 'bg-accent/15 text-text border border-accent/30'
+            : 'hover:bg-bg-soft/40 border border-transparent',
+        ].join(' ')}
       >
         <span aria-hidden className="text-text-mute text-xs">
           {open ? '▾' : '▸'}
