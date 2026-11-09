@@ -12,22 +12,40 @@ use axum::{
     http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
-use kube::api::{Api, ApiResource, Patch, PatchParams};
+use kube::api::{Api, ApiResource, DeleteParams, Patch, PatchParams, PostParams};
 use kube::core::GroupVersionKind;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use utoipa::ToSchema;
 
 use crate::AppState;
+use crate::api_json::ApiJson;
 use crate::auth::{Identity, Principal};
 use crate::connection_routes::Fail;
 use crate::pipelines::{ResourceError, answer, no_cluster, resource_fail};
 
 /// The `SparkCluster`'s owner: a group or a person, exactly one of the two.
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ComputeOwner {
     pub group: Option<String>,
     pub user: Option<String>,
+}
+
+/// The pod shape of a driver or executor (`spec.driver` / `spec.executor`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ComputeResources {
+    pub cores: Option<i32>,
+    pub memory: Option<String>,
+}
+
+/// One environment variable of the driver and executors. `value` only: the operator
+/// refuses `connectionRef` until internal#161 slice 7, so Nova does not offer it.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ComputeEnvVar {
+    pub name: String,
+    pub value: String,
 }
 
 /// One `SparkCluster`, as the Compute page needs it.
@@ -39,6 +57,18 @@ pub struct ComputeCluster {
     pub owner: ComputeOwner,
     pub size: String,
     pub runtime: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub driver: Option<ComputeResources>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub executor: Option<ComputeResources>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_executors: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    #[serde(default)]
+    pub env: Vec<ComputeEnvVar>,
+    #[serde(default)]
+    pub spark_conf: std::collections::BTreeMap<String, String>,
     pub phase: String,
     pub endpoint: Option<String>,
     pub started_at: Option<String>,
@@ -108,6 +138,24 @@ fn phase_of(object: &Value) -> String {
     }
 }
 
+/// The environment variables of a spec, skipping entries that carry no `value` (a
+/// `connectionRef` entry cannot be edited and is not shown).
+fn env_of(spec: &Value) -> Vec<ComputeEnvVar> {
+    spec.get("env")
+        .and_then(Value::as_array)
+        .map(|vars| {
+            vars.iter()
+                .filter_map(|var| {
+                    Some(ComputeEnvVar {
+                        name: var.get("name")?.as_str()?.to_string(),
+                        value: var.get("value")?.as_str()?.to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// One cluster as the API answers it, or `None` when the caller may not use it.
 fn view(object: &Value, who: &Identity) -> Option<ComputeCluster> {
     let name = object
@@ -121,6 +169,10 @@ fn view(object: &Value, who: &Identity) -> Option<ComputeCluster> {
     }
     let status = object.get("status").unwrap_or(&Value::Null);
     let text = |value: Option<&Value>| value.and_then(Value::as_str).map(str::to_string);
+    let resources = |pointer: &str| {
+        spec.get(pointer)
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+    };
     Some(ComputeCluster {
         display_name: text(spec.get("displayName")),
         shared: name == "shared",
@@ -136,6 +188,18 @@ fn view(object: &Value, who: &Identity) -> Option<ComputeCluster> {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string(),
+        driver: resources("driver"),
+        executor: resources("executor"),
+        max_executors: spec
+            .get("maxExecutors")
+            .and_then(Value::as_i64)
+            .and_then(|n| i32::try_from(n).ok()),
+        image: text(spec.get("image")),
+        env: env_of(spec),
+        spark_conf: spec
+            .get("sparkConf")
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+            .unwrap_or_default(),
         phase: phase_of(object),
         endpoint: text(status.get("endpoint")),
         started_at: text(status.get("startedAt")),
@@ -169,6 +233,12 @@ fn demo_clusters() -> Vec<ComputeCluster> {
         },
         size: "small".to_string(),
         runtime: "spark-4.1-py3.11".to_string(),
+        driver: None,
+        executor: None,
+        max_executors: None,
+        image: None,
+        env: Vec::new(),
+        spark_conf: std::collections::BTreeMap::new(),
         phase: "Running".to_string(),
         endpoint: None,
         started_at: None,
@@ -391,12 +461,361 @@ pub(crate) async fn stop(
     answer(set_state(&state, &identity, &name, "Stopped").await)
 }
 
+/// The body of `PUT /api/admin/compute/{name}`: everything an administrator may set.
+/// No `state` — Start and Stop own it — and no `metadata`.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ComputeSpecBody {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    pub owner: ComputeOwner,
+    #[serde(default = "default_size")]
+    pub size: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver: Option<ComputeResources>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executor: Option<ComputeResources>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_executors: Option<i32>,
+    pub runtime: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    #[serde(default)]
+    pub env: Vec<ComputeEnvVar>,
+    #[serde(default)]
+    pub spark_conf: std::collections::BTreeMap<String, String>,
+    #[serde(default = "default_idle_stop_minutes")]
+    pub idle_stop_minutes: i32,
+}
+
+fn default_size() -> String {
+    "small".to_string()
+}
+
+fn default_idle_stop_minutes() -> i32 {
+    60
+}
+
+/// A cluster name: 1 to 40 lower-case letters, digits and dashes, starting with a letter
+/// and not ending in a dash — the same rule as the CRD's.
+fn cluster_name_ok(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    !name.is_empty()
+        && name.len() <= 40
+        && bytes[0].is_ascii_lowercase()
+        && bytes[bytes.len() - 1] != b'-'
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
+}
+
+/// One person's user name: 1 to 128 letters, digits, dots, dashes or underscores, starting
+/// with a letter or digit.
+fn user_ok(user: &str) -> bool {
+    !user.is_empty()
+        && user.len() <= 128
+        && user.as_bytes()[0].is_ascii_alphanumeric()
+        && user
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'@' | b'-'))
+}
+
+/// `4Gi` or `512Mi`: digits without a leading zero, then exactly one of the two units.
+fn memory_ok(memory: &str) -> bool {
+    let Some(number) = memory
+        .strip_suffix("Gi")
+        .or_else(|| memory.strip_suffix("Mi"))
+    else {
+        return false;
+    };
+    !number.is_empty() && !number.starts_with('0') && number.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// `spark-4.0-py3.12`: a two-part Spark version and a Python minor version.
+fn runtime_ok(runtime: &str) -> bool {
+    let Some(rest) = runtime.strip_prefix("spark-") else {
+        return false;
+    };
+    let Some((spark, python)) = rest.split_once("-py3.") else {
+        return false;
+    };
+    let digits = |value: &str| !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit());
+    let spark_ok = spark
+        .split_once('.')
+        .is_some_and(|(major, minor)| digits(major) && digits(minor));
+    spark_ok && digits(python)
+}
+
+/// An environment variable name: upper-case letters, digits and underscores, starting with
+/// a letter or underscore, at most 64 bytes.
+fn env_name_ok(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && matches!(name.as_bytes()[0], b'A'..=b'Z' | b'_')
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+}
+
+/// Settings the platform owns: the Kubernetes identity of the pods, the catalog credentials
+/// and the object-store keys a `Connection` supplies (the same predicate the operator uses).
+fn managed_spark_conf_key(key: &str) -> bool {
+    key.starts_with("spark.kubernetes.authenticate.")
+        || key == "spark.kubernetes.namespace"
+        || key.contains("serviceAccount")
+        || (key.starts_with("spark.hadoop.fs.s3a.") && key.contains("key"))
+        || (key.starts_with("spark.sql.catalog.")
+            && (key.contains("credential") || key.contains("token")))
+}
+
+/// The rules `SparkClusterSpec::validate` enforces in the operator, in the same words: a
+/// body the CRD would refuse is a `400` from Nova, never the API server's message.
+fn validate_spec(name: &str, body: &ComputeSpecBody) -> Result<(), String> {
+    if !cluster_name_ok(name) {
+        return Err(format!(
+            "spark cluster name `{name}` must be 1 to 40 lower-case letters, digits and dashes, starting with a letter"
+        ));
+    }
+    let group = body.owner.group.as_deref().filter(|s| !s.is_empty());
+    let user = body.owner.user.as_deref().filter(|s| !s.is_empty());
+    if group.is_some() == user.is_some() {
+        return Err("set exactly one of owner.group and owner.user".to_string());
+    }
+    if let Some(group) = group
+        && !crate::connections::group_ok(group)
+    {
+        return Err("owner.group must be a valid group name".to_string());
+    }
+    if let Some(user) = user
+        && !user_ok(user)
+    {
+        return Err("owner.user must be a valid user name".to_string());
+    }
+    if let Some(display_name) = &body.display_name
+        && display_name.chars().count() > 100
+    {
+        return Err("displayName must be at most 100 characters".to_string());
+    }
+    if !matches!(body.size.as_str(), "small" | "medium" | "large") {
+        return Err("size must be small, medium or large".to_string());
+    }
+    for (what, resources) in [
+        ("driver", body.driver.as_ref()),
+        ("executor", body.executor.as_ref()),
+    ] {
+        let Some(resources) = resources else {
+            continue;
+        };
+        if let Some(cores) = resources.cores
+            && !(1..=16).contains(&cores)
+        {
+            return Err(format!("{what}.cores must be between 1 and 16"));
+        }
+        if let Some(memory) = &resources.memory
+            && !memory_ok(memory)
+        {
+            return Err(format!("{what}.memory must look like `4Gi` or `512Mi`"));
+        }
+    }
+    if let Some(max) = body.max_executors
+        && !(0..=50).contains(&max)
+    {
+        return Err("maxExecutors must be between 0 and 50".to_string());
+    }
+    if !runtime_ok(&body.runtime) {
+        return Err(format!(
+            "runtime `{}` must look like `spark-4.0-py3.12`",
+            body.runtime
+        ));
+    }
+    if let Some(image) = &body.image {
+        if image.len() > 512 {
+            return Err("image must be at most 512 characters".to_string());
+        }
+        if !image.contains("@sha256:") {
+            return Err("pin the image by digest".to_string());
+        }
+    }
+    if body.env.len() > 50 {
+        return Err("env must have at most 50 entries".to_string());
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for var in &body.env {
+        if !env_name_ok(&var.name) {
+            return Err(format!(
+                "env name `{}` must be upper-case letters, digits and underscores, starting with a letter or underscore",
+                var.name
+            ));
+        }
+        if !seen.insert(var.name.as_str()) {
+            return Err(format!(
+                "each env var name may appear once in env: `{}` appears twice",
+                var.name
+            ));
+        }
+        if var.value.len() > 1024 {
+            return Err(format!(
+                "env `{}` value must be at most 1024 characters",
+                var.name
+            ));
+        }
+    }
+    if body.spark_conf.len() > 100 {
+        return Err("sparkConf must have at most 100 entries".to_string());
+    }
+    for key in body.spark_conf.keys() {
+        if managed_spark_conf_key(key) {
+            return Err(format!("sparkConf key {key} is managed by the platform"));
+        }
+    }
+    if !(0..=1440).contains(&body.idle_stop_minutes) {
+        return Err("idleStopMinutes must be between 0 and 1440".to_string());
+    }
+    if body.idle_stop_minutes == 0 && name != "shared" {
+        return Err("only the shared cluster may run without an idle stop".to_string());
+    }
+    Ok(())
+}
+
+/// `PUT /api/admin/compute/{name}`: create the cluster, or replace it as a whole.
+#[utoipa::path(
+    put,
+    operation_id = "admin_compute_upsert",
+    path = "/api/admin/compute/{name}",
+    tag = "internal",
+    description = "Create or replace one `SparkCluster` as a whole: `displayName`, `owner`, `size`, `driver`, `executor`, `maxExecutors`, `runtime`, `image`, `env`, `sparkConf` and `idleStopMinutes`. Administrator-only (the administrator gate is `main`'s). `state` is not part of the body: Start and Stop own it, and a create starts `Stopped` while a replace keeps the state the cluster has. The body is checked against the CRD's rules first, so a value the API server would refuse answers `400` with the CRD's sentence. Answers the `ComputeCluster` view of the written object. `Cache-Control: no-store`.",
+    params(
+        ("name" = String, Path, description = "The cluster's name"),
+    ),
+    request_body = ComputeSpecBody,
+    responses(
+        (status = 200, description = "The cluster as written", body = ComputeCluster),
+        (status = 400, description = "The body is not a valid SparkCluster spec", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 409, description = "The cluster changed while it was saved", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The cluster did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No cluster connection", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn upsert(
+    State(state): State<Arc<AppState>>,
+    principal: Option<Extension<Principal>>,
+    Path(name): Path<String>,
+    ApiJson(body): ApiJson<ComputeSpecBody>,
+) -> Response {
+    let who = actor(principal, &state);
+    if let Err(message) = validate_spec(&name, &body) {
+        return Fail::new(StatusCode::BAD_REQUEST, message).into_response();
+    }
+    let api = match compute_api(&state) {
+        Ok(api) => api,
+        Err(fail) => return fail.into_response(),
+    };
+    let existing = match api.get(&name).await {
+        Ok(object) => Some(object),
+        Err(kube::Error::Api(e)) if e.code == 404 => None,
+        Err(e) => return resource_fail(ResourceError::Unavailable(e.to_string())).into_response(),
+    };
+    let mut spec = serde_json::to_value(&body).expect("a valid body is JSON");
+    let state_word = existing
+        .as_ref()
+        .and_then(|o| o.data.pointer("/spec/state").and_then(Value::as_str))
+        .unwrap_or("Stopped")
+        .to_string();
+    spec["state"] = json!(state_word);
+    let object = kube::api::DynamicObject {
+        types: Some(kube::core::TypeMeta {
+            api_version: "stardelt.io/v1alpha1".into(),
+            kind: "SparkCluster".into(),
+        }),
+        metadata: kube::core::ObjectMeta {
+            name: Some(name.clone()),
+            namespace: Some(crate::cluster::namespace()),
+            resource_version: existing
+                .as_ref()
+                .and_then(|o| o.metadata.resource_version.clone()),
+            ..Default::default()
+        },
+        data: json!({ "spec": spec }),
+    };
+    let written = match &existing {
+        None => api.create(&PostParams::default(), &object).await,
+        Some(_) => api.replace(&name, &PostParams::default(), &object).await,
+    };
+    let written = match written {
+        Ok(object) => object,
+        Err(kube::Error::Api(e)) if e.code == 409 => {
+            return Fail::new(
+                StatusCode::CONFLICT,
+                "the cluster changed while it was saved",
+            )
+            .into_response();
+        }
+        Err(kube::Error::Api(e)) if e.code == 404 => return not_found().into_response(),
+        Err(e) => return resource_fail(ResourceError::Unavailable(e.to_string())).into_response(),
+    };
+    let value = match serde_json::to_value(&written) {
+        Ok(value) => value,
+        Err(e) => return resource_fail(ResourceError::Unavailable(e.to_string())).into_response(),
+    };
+    match view(&value, &who) {
+        Some(cluster) => answer(Ok::<ComputeCluster, Fail>(cluster)),
+        None => Fail::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "the cluster changed while it was saved",
+        )
+        .into_response(),
+    }
+}
+
+/// `DELETE /api/admin/compute/{name}`: remove one cluster, never the shared one.
+#[utoipa::path(
+    delete,
+    operation_id = "admin_compute_delete",
+    path = "/api/admin/compute/{name}",
+    tag = "internal",
+    description = "Delete one `SparkCluster`. Administrator-only (the administrator gate is `main`'s). The `shared` cluster is part of the platform and answers `409`: stop it instead. A name that does not exist answers `404`. Answers `204` with no body. `Cache-Control: no-store`.",
+    params(
+        ("name" = String, Path, description = "The cluster's name"),
+    ),
+    responses(
+        (status = 204, description = "The cluster is gone"),
+        (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such cluster", body = crate::openapi::ErrorResponse),
+        (status = 409, description = "The shared cluster cannot be deleted", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The cluster did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No cluster connection", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn remove(
+    State(state): State<Arc<AppState>>,
+    _principal: Option<Extension<Principal>>,
+    Path(name): Path<String>,
+) -> Response {
+    if name == "shared" {
+        return Fail::new(
+            StatusCode::CONFLICT,
+            "the shared cluster is part of the platform; stop it instead of deleting it",
+        )
+        .into_response();
+    }
+    let api = match compute_api(&state) {
+        Ok(api) => api,
+        Err(fail) => return fail.into_response(),
+    };
+    match api.delete(&name, &DeleteParams::default()).await {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(kube::Error::Api(e)) if e.code == 404 => not_found().into_response(),
+        Err(e) => resource_fail(ResourceError::Unavailable(e.to_string())).into_response(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use axum::http::StatusCode;
     use serde_json::{Value, json};
 
-    use super::{may_act, may_use, owner_of, phase_of, visible_clusters};
+    use super::{may_act, may_use, owner_of, phase_of, validate_spec, visible_clusters};
     use crate::auth::Identity;
 
     fn who(user: &str, groups: &[&str], admin: bool) -> Identity {
@@ -513,6 +932,154 @@ mod tests {
         assert!(!views[0].shared);
         assert!(views[1].shared);
         assert_eq!(views[1].idle_stop_minutes, 0);
+        // A spec without the editable blocks answers them empty, so the Edit form can prefill.
+        assert!(views[0].driver.is_none());
+        assert!(views[0].executor.is_none());
+        assert!(views[0].max_executors.is_none());
+        assert!(views[0].image.is_none());
+        assert!(views[0].env.is_empty());
+        assert!(views[0].spark_conf.is_empty());
+    }
+
+    #[test]
+    fn the_view_carries_the_editable_fields() {
+        let mut object = cluster(
+            "trial",
+            json!({
+                "owner": {"group": "sales"},
+                "runtime": "spark-4.1-py3.11",
+                "driver": {"cores": 2, "memory": "4Gi"},
+                "executor": {"cores": 4},
+                "maxExecutors": 5,
+                "image": "registry.example/spark@sha256:abc",
+                "env": [{"name": "A", "value": "1"}, {"name": "B", "connectionRef": {"name": "c", "key": "k"}}],
+                "sparkConf": {"spark.sql.shuffle.partitions": "8"}
+            }),
+        );
+        object["status"] = json!({"phase": "Running"});
+        let views = visible_clusters(&[object], &who("root", &[], true));
+        let view = &views[0];
+        let driver = view.driver.as_ref().expect("driver");
+        assert_eq!(driver.cores, Some(2));
+        assert_eq!(driver.memory.as_deref(), Some("4Gi"));
+        assert_eq!(view.executor.as_ref().and_then(|e| e.cores), Some(4));
+        assert_eq!(view.max_executors, Some(5));
+        assert_eq!(
+            view.image.as_deref(),
+            Some("registry.example/spark@sha256:abc")
+        );
+        // A `connectionRef` entry cannot be edited in Nova and is not shown.
+        assert_eq!(view.env.len(), 1);
+        assert_eq!(view.env[0].name, "A");
+        assert_eq!(view.env[0].value, "1");
+        assert_eq!(
+            view.spark_conf.get("spark.sql.shuffle.partitions"),
+            Some(&"8".to_string())
+        );
+    }
+
+    /// A valid body, for the `validate_spec` tests that change one field.
+    fn body() -> super::ComputeSpecBody {
+        serde_json::from_value(json!({
+            "owner": {"group": "sales"},
+            "runtime": "spark-4.1-py3.11"
+        }))
+        .expect("a valid body")
+    }
+
+    #[test]
+    fn a_valid_small_group_cluster_passes() {
+        assert_eq!(validate_spec("trial", &body()), Ok(()));
+    }
+
+    #[test]
+    fn exactly_one_owner_is_required() {
+        let mut two = body();
+        two.owner.user = Some("alice".to_string());
+        assert_eq!(
+            validate_spec("trial", &two),
+            Err("set exactly one of owner.group and owner.user".to_string())
+        );
+
+        let mut neither = body();
+        neither.owner.group = None;
+        assert_eq!(
+            validate_spec("trial", &neither),
+            Err("set exactly one of owner.group and owner.user".to_string())
+        );
+    }
+
+    #[test]
+    fn only_the_shared_cluster_may_run_without_an_idle_stop() {
+        let mut trial = body();
+        trial.idle_stop_minutes = 0;
+        assert_eq!(
+            validate_spec("trial", &trial),
+            Err("only the shared cluster may run without an idle stop".to_string())
+        );
+        assert_eq!(validate_spec("shared", &trial), Ok(()));
+    }
+
+    #[test]
+    fn an_image_must_be_pinned_by_digest() {
+        let mut unpinned = body();
+        unpinned.image = Some("registry.example/spark:4.1".to_string());
+        assert_eq!(
+            validate_spec("trial", &unpinned),
+            Err("pin the image by digest".to_string())
+        );
+    }
+
+    #[test]
+    fn a_platform_managed_spark_conf_key_is_refused() {
+        let mut managed = body();
+        managed.spark_conf.insert(
+            "spark.kubernetes.namespace".to_string(),
+            "other".to_string(),
+        );
+        assert_eq!(
+            validate_spec("trial", &managed),
+            Err("sparkConf key spark.kubernetes.namespace is managed by the platform".to_string())
+        );
+    }
+
+    #[test]
+    fn max_executors_stop_at_fifty() {
+        let mut too_many = body();
+        too_many.max_executors = Some(51);
+        assert_eq!(
+            validate_spec("trial", &too_many),
+            Err("maxExecutors must be between 0 and 50".to_string())
+        );
+    }
+
+    #[test]
+    fn a_group_name_with_a_space_is_refused() {
+        let mut bad = body();
+        bad.owner.group = Some("a b".to_string());
+        assert_eq!(
+            validate_spec("trial", &bad),
+            Err("owner.group must be a valid group name".to_string())
+        );
+    }
+
+    #[test]
+    fn a_duplicate_env_name_is_refused() {
+        let mut duplicate = body();
+        duplicate.env = vec![
+            super::ComputeEnvVar {
+                name: "A".to_string(),
+                value: "1".to_string(),
+            },
+            super::ComputeEnvVar {
+                name: "A".to_string(),
+                value: "2".to_string(),
+            },
+        ];
+        assert_eq!(
+            validate_spec("trial", &duplicate),
+            Err("each env var name may appear once in env: `A` appears twice".to_string())
+        );
     }
 
     mod fake_kube {
@@ -529,6 +1096,9 @@ mod tests {
         pub struct Fake {
             pub items: Vec<Value>,
             pub patches: Vec<Value>,
+            pub created: Vec<Value>,
+            pub replaced: Vec<Value>,
+            pub deleted: Vec<String>,
         }
 
         pub type Shared = Arc<Mutex<Fake>>;
@@ -589,19 +1159,76 @@ mod tests {
             Ok(Json(item.clone()))
         }
 
+        async fn create_one(
+            State(state): State<Shared>,
+            Path(_namespace): Path<String>,
+            body: String,
+        ) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
+            let object: Value = serde_json::from_str(&body)
+                .map_err(|_| failure(StatusCode::BAD_REQUEST, "not json"))?;
+            let mut state = state.lock().unwrap();
+            if let Some(name) = object.pointer("/metadata/name").and_then(Value::as_str)
+                && state
+                    .items
+                    .iter()
+                    .any(|item| item["metadata"]["name"] == name)
+            {
+                return Err(failure(StatusCode::CONFLICT, "already exists"));
+            }
+            state.created.push(object.clone());
+            state.items.push(object.clone());
+            Ok((StatusCode::CREATED, Json(object)))
+        }
+
+        async fn put_one(
+            State(state): State<Shared>,
+            Path((_namespace, name)): Path<(String, String)>,
+            body: String,
+        ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+            let object: Value = serde_json::from_str(&body)
+                .map_err(|_| failure(StatusCode::BAD_REQUEST, "not json"))?;
+            let mut state = state.lock().unwrap();
+            let item = state
+                .items
+                .iter_mut()
+                .find(|item| item["metadata"]["name"] == name)
+                .ok_or_else(|| failure(StatusCode::NOT_FOUND, "not found"))?;
+            *item = object.clone();
+            state.replaced.push(object.clone());
+            Ok(Json(object))
+        }
+
+        async fn delete_one(
+            State(state): State<Shared>,
+            Path((_namespace, name)): Path<(String, String)>,
+        ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+            let mut state = state.lock().unwrap();
+            let index = state
+                .items
+                .iter()
+                .position(|item| item["metadata"]["name"] == name)
+                .ok_or_else(|| failure(StatusCode::NOT_FOUND, "not found"))?;
+            let removed = state.items.remove(index);
+            state.deleted.push(name);
+            Ok(Json(removed))
+        }
+
         pub async fn start(items: Vec<Value>) -> (kube::Client, Shared) {
             let shared = Arc::new(Mutex::new(Fake {
                 items,
                 patches: Vec::new(),
+                created: Vec::new(),
+                replaced: Vec::new(),
+                deleted: Vec::new(),
             }));
             let app = Router::new()
                 .route(
                     "/apis/stardelt.io/v1alpha1/namespaces/{namespace}/sparkclusters",
-                    get(many),
+                    get(many).post(create_one),
                 )
                 .route(
                     "/apis/stardelt.io/v1alpha1/namespaces/{namespace}/sparkclusters/{name}",
-                    get(one).patch(patch_one),
+                    get(one).patch(patch_one).put(put_one).delete(delete_one),
                 )
                 .with_state(shared.clone());
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -628,6 +1255,10 @@ mod tests {
             .route("/compute", axum::routing::get(super::list))
             .route("/compute/{name}/start", post(super::start))
             .route("/compute/{name}/stop", post(super::stop))
+            .route(
+                "/admin/compute/{name}",
+                axum::routing::put(super::upsert).delete(super::remove),
+            )
             .with_state(state);
         let router = match who {
             Some(identity) => router.layer(axum::Extension(crate::auth::Principal {
@@ -647,6 +1278,30 @@ mod tests {
             .method(method)
             .uri(uri)
             .body(axum::body::Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        (status, value)
+    }
+
+    /// The same, with a JSON body: the administrator writes carry one.
+    async fn call_json(
+        app: axum::Router,
+        method: &str,
+        uri: &str,
+        body: Value,
+    ) -> (StatusCode, Value) {
+        use tower::ServiceExt;
+
+        let request = axum::http::Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(body.to_string()))
             .unwrap();
         let response = app.oneshot(request).await.unwrap();
         let status = response.status();
@@ -730,5 +1385,119 @@ mod tests {
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(body["error"], "the cluster is starting");
         assert!(shared.lock().unwrap().patches.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_admin_creates_a_cluster() {
+        let (app, shared) = app_with(vec![], Some(who("root", &[], true))).await;
+        let (status, body) = call_json(
+            app,
+            "PUT",
+            "/admin/compute/trial",
+            json!({"owner": {"group": "sales"}, "runtime": "spark-4.1-py3.11"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["name"], "trial");
+        assert_eq!(body["phase"], "Stopped");
+        let created = shared.lock().unwrap().created.clone();
+        assert_eq!(created.len(), 1);
+        assert_eq!(created[0]["metadata"]["name"], "trial");
+        assert_eq!(created[0]["spec"]["owner"]["group"], "sales");
+        assert_eq!(created[0]["spec"]["state"], "Stopped");
+        // The CRD accepts `[]` and `{}`: both always travel.
+        assert_eq!(created[0]["spec"]["env"], json!([]));
+        assert_eq!(created[0]["spec"]["sparkConf"], json!({}));
+        // `image` is absent, never `null` (the CRD refuses `null`).
+        assert!(created[0]["spec"].get("image").is_none());
+    }
+
+    #[tokio::test]
+    async fn an_admin_replaces_and_keeps_the_state() {
+        let (app, shared) = app_with(
+            vec![cluster(
+                "trial",
+                json!({
+                    "owner": {"group": "sales"},
+                    "runtime": "spark-4.1-py3.11",
+                    "size": "small",
+                    "state": "Running"
+                }),
+            )],
+            Some(who("root", &[], true)),
+        )
+        .await;
+        let (status, body) = call_json(
+            app,
+            "PUT",
+            "/admin/compute/trial",
+            json!({"owner": {"group": "sales"}, "runtime": "spark-4.1-py3.11", "size": "large"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["size"], "large");
+        let fake = shared.lock().unwrap();
+        assert!(fake.created.is_empty(), "a replace never creates");
+        assert_eq!(fake.replaced.len(), 1);
+        assert_eq!(fake.replaced[0]["spec"]["size"], "large");
+        assert_eq!(fake.replaced[0]["spec"]["state"], "Running");
+    }
+
+    #[tokio::test]
+    async fn the_shared_cluster_cannot_be_deleted() {
+        let (app, shared) = app_with(
+            vec![cluster(
+                "shared",
+                json!({"owner": {"group": "stardelt-users"}, "idleStopMinutes": 0}),
+            )],
+            Some(who("root", &[], true)),
+        )
+        .await;
+        let (status, body) = call(app, "DELETE", "/admin/compute/shared").await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(
+            body["error"],
+            "the shared cluster is part of the platform; stop it instead of deleting it"
+        );
+        assert!(shared.lock().unwrap().deleted.is_empty());
+    }
+
+    #[tokio::test]
+    async fn deleting_a_missing_cluster_answers_404() {
+        let (app, shared) = app_with(vec![], Some(who("root", &[], true))).await;
+        let (status, body) = call(app, "DELETE", "/admin/compute/trial").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"], "not found");
+        assert!(shared.lock().unwrap().deleted.is_empty());
+    }
+
+    #[tokio::test]
+    async fn deleting_a_cluster_answers_204() {
+        let (app, shared) = app_with(vec![trial()], Some(who("root", &[], true))).await;
+        let (status, _) = call(app, "DELETE", "/admin/compute/trial").await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(shared.lock().unwrap().deleted, ["trial"]);
+    }
+
+    #[tokio::test]
+    async fn an_invalid_body_answers_400() {
+        let (app, shared) = app_with(vec![], Some(who("root", &[], true))).await;
+        let (status, body) = call_json(
+            app,
+            "PUT",
+            "/admin/compute/trial",
+            json!({
+                "owner": {"group": "sales"},
+                "runtime": "spark-4.1-py3.11",
+                "idleStopMinutes": 0
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body["error"],
+            "only the shared cluster may run without an idle stop"
+        );
+        assert!(shared.lock().unwrap().created.is_empty());
     }
 }
