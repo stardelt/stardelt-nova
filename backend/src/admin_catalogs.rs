@@ -80,6 +80,8 @@ pub struct AdminCatalog {
     pub observed_generation: Option<i64>,
     /// `metadata.resourceVersion`: the version this row was read at.
     pub resource_version: Option<String>,
+    /// The GitOps tool that owns this resource, or null. A Nova edit would be reverted by it.
+    pub managed_by: Option<String>,
     /// `spec.grants`, in the order the resource declares them.
     pub grants: Vec<CatalogGrant>,
     /// `status.conditions`: what the access-sync job last reported.
@@ -201,7 +203,7 @@ pub(crate) async fn list(State(state): State<Arc<AppState>>) -> Response {
     operation_id = "admin_catalogs_access_update",
     path = "/api/admin/catalogs/{name}/access",
     tag = "internal",
-    description = "Change one catalog's `spec.owner`, `spec.managedAccess` and `spec.grants` as a JSON merge patch on the `Catalog` resource, carrying the `resourceVersion` the page read. Administrator-only; a non-administrator answers 403 `this view is for platform administrators`. A malformed owner, group name, verb or a duplicate grant is a 400 in the words the form shows; a catalog that changed meanwhile is a 409 `this catalog changed since you opened it; reload`; a name that is not a catalog or no longer exists is a 404; more than 30 changes per administrator in an hour is a 429. Without a cluster connection the answer is 503 `the cluster is not reachable from Nova` (demo mode changes memory instead). Answers the updated row, the same shape as the list, with the new `metadata.generation`; `status.observedGeneration` catches up when the access-sync job runs (about two minutes). Never carries a storage credential. `Cache-Control: no-store`.",
+    description = "Change one catalog's `spec.owner`, `spec.managedAccess` and `spec.grants` as a JSON merge patch on the `Catalog` resource, carrying the `resourceVersion` the page read. Administrator-only; a non-administrator answers 403 `this view is for platform administrators`. A malformed owner, group name, verb or a duplicate grant is a 400 in the words the form shows; a catalog that changed meanwhile is a 409 `this catalog changed since you opened it; reload`, and a catalog a GitOps tool owns (Argo CD or Flux, from its annotations or labels) is a 409 `<name> is managed by <tool>: change its grants in Git` with nothing patched; a name that is not a catalog or no longer exists is a 404; more than 30 changes per administrator in an hour is a 429. Without a cluster connection the answer is 503 `the cluster is not reachable from Nova` (demo mode changes memory instead). Answers the updated row, the same shape as the list, with the new `metadata.generation`; `status.observedGeneration` catches up when the access-sync job runs (about two minutes). Never carries a storage credential. `Cache-Control: no-store`.",
     params(("name" = String, Path, description = "The catalog's name")),
     request_body = CatalogAccessUpdate,
     responses(
@@ -209,7 +211,7 @@ pub(crate) async fn list(State(state): State<Arc<AppState>>) -> Response {
         (status = 400, description = "The owner, a group name, a verb or the grant list is invalid", body = crate::openapi::ErrorResponse),
         (status = 403, description = "The caller is not a platform administrator", body = crate::openapi::ErrorResponse),
         (status = 404, description = "No such catalog", body = crate::openapi::ErrorResponse),
-        (status = 409, description = "The catalog changed since the page read it", body = crate::openapi::ErrorResponse),
+        (status = 409, description = "The catalog changed since the page read it, or a GitOps tool owns it", body = crate::openapi::ErrorResponse),
         (status = 429, description = "More than 30 changes this hour", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The cluster did not answer, or Nova may not patch catalogs", body = crate::openapi::ErrorResponse),
         (status = 503, description = "Nova has no cluster client", body = crate::openapi::ErrorResponse),
@@ -258,6 +260,18 @@ pub(crate) async fn update_access(
             return cluster_unavailable().into_response();
         }
     };
+
+    // A resource a GitOps tool owns is changed in Git, not here: accepting the write would
+    // only have the tool put the old grants back minutes later (internal#106 decision 4).
+    // Nothing is patched, so the refusal spends none of the thirty slots.
+    if let Some(tool) = before.managed_by.clone() {
+        crate::audit::catalog_access_refused(&who, &name, &tool);
+        return Fail::new(
+            StatusCode::CONFLICT,
+            format!("{name} is managed by {tool}: change its grants in Git"),
+        )
+        .into_response();
+    }
 
     // The slot is taken only for an attempt that reached a change (the catalog exists and
     // the body is valid): a typo never spends one of the thirty.
@@ -902,9 +916,34 @@ pub(crate) fn row_from_object(object: &Value) -> AdminCatalog {
         generation: integer(metadata.get("generation")),
         observed_generation: integer(status.get("observedGeneration")),
         resource_version: text(metadata.get("resourceVersion")),
+        managed_by: gitops_owner(metadata),
         grants: grants_of(spec),
         conditions: conditions_of(status),
     }
+}
+
+/// The GitOps tool that owns a `Catalog`, read from its `metadata`, or `None` when Nova is
+/// the only writer. `Argo CD` when the resource carries its tracking id, or its instance
+/// label beside one of its sync or compare options; `Flux` when a kustomize or helm
+/// controller label names it. A tool that owns the resource puts the old grants back
+/// minutes after a Nova edit, so the page says who owns it and the write is refused.
+pub fn gitops_owner(metadata: &Value) -> Option<String> {
+    let annotations = metadata.get("annotations");
+    let labels = metadata.get("labels");
+    let has_annotation = |key: &str| annotations.is_some_and(|a| a.get(key).is_some());
+    let has_label = |key: &str| labels.is_some_and(|l| l.get(key).is_some());
+
+    if has_annotation("argocd.argoproj.io/tracking-id")
+        || (has_label("app.kubernetes.io/instance")
+            && (has_annotation("argocd.argoproj.io/sync-options")
+                || has_annotation("argocd.argoproj.io/compare-options")))
+    {
+        return Some("Argo CD".to_string());
+    }
+    if has_label("kustomize.toolkit.fluxcd.io/name") || has_label("helm.toolkit.fluxcd.io/name") {
+        return Some("Flux".to_string());
+    }
+    None
 }
 
 fn grants_of(spec: &Value) -> Vec<CatalogGrant> {
@@ -998,6 +1037,7 @@ fn demo_row() -> AdminCatalog {
         generation: Some(1),
         observed_generation: Some(1),
         resource_version: Some("1".to_string()),
+        managed_by: None,
         grants: ["browse", "select", "write", "create"]
             .into_iter()
             .map(|verb| CatalogGrant {
@@ -1123,6 +1163,7 @@ mod tests {
                 generation: Some(7),
                 observed_generation: Some(7),
                 resource_version: Some("4211".into()),
+                managed_by: None,
                 grants: vec![
                     CatalogGrant {
                         group: "stardelt-finops".into(),
@@ -1709,6 +1750,85 @@ mod tests {
                     ]
                 }
             })]
+        );
+    }
+
+    #[test]
+    fn gitops_owner_from_argo_flux_or_none() {
+        assert_eq!(
+            gitops_owner(&json!({
+                "annotations": {
+                    "argocd.argoproj.io/tracking-id": "test:stardelt.io/Catalog:stardelt/retailref"
+                }
+            })),
+            Some("Argo CD".to_string())
+        );
+        // The other Argo CD shape: the instance label beside a sync or compare option.
+        assert_eq!(
+            gitops_owner(&json!({
+                "labels": { "app.kubernetes.io/instance": "apps" },
+                "annotations": { "argocd.argoproj.io/sync-options": "Prune=false" }
+            })),
+            Some("Argo CD".to_string())
+        );
+        assert_eq!(
+            gitops_owner(&json!({
+                "labels": {
+                    "kustomize.toolkit.fluxcd.io/name": "apps",
+                    "kustomize.toolkit.fluxcd.io/namespace": "flux-system"
+                }
+            })),
+            Some("Flux".to_string())
+        );
+        assert_eq!(
+            gitops_owner(&json!({ "labels": { "helm.toolkit.fluxcd.io/name": "charts" } })),
+            Some("Flux".to_string())
+        );
+        assert_eq!(gitops_owner(&json!({ "name": "finance" })), None);
+        // An instance label alone is not an owner: many Deployments carry one.
+        assert_eq!(
+            gitops_owner(&json!({ "labels": { "app.kubernetes.io/instance": "nova" } })),
+            None
+        );
+
+        // The row carries the tool, so the page can say who owns the catalog.
+        let mut object = catalog_object("finance", Some("Ready"));
+        object["metadata"]["annotations"] = json!({
+            "argocd.argoproj.io/tracking-id": "test:stardelt.io/Catalog:stardelt/finance"
+        });
+        assert_eq!(
+            row_from_object(&object).managed_by.as_deref(),
+            Some("Argo CD")
+        );
+    }
+
+    #[tokio::test]
+    async fn gitops_owned_catalog_is_409_and_never_patched() {
+        let mut object = catalog_object("finance", Some("Ready"));
+        object["metadata"]["annotations"] = json!({
+            "argocd.argoproj.io/tracking-id": "test:stardelt.io/Catalog:stardelt/finance"
+        });
+        let (client, fake) =
+            fake_kube::start_with_patch(vec![object], StatusCode::OK, StatusCode::OK).await;
+        let state = crate::router_tests::test_state_with_kube(client);
+        let response = update_access(
+            State(state),
+            Path("finance".to_string()),
+            None,
+            ApiJson(wanted_update()),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8_lossy(&body);
+        assert!(
+            body.contains("finance is managed by Argo CD: change its grants in Git"),
+            "{body}"
+        );
+        assert!(
+            fake.lock().unwrap().patches.is_empty(),
+            "a managed catalog is never patched"
         );
     }
 
