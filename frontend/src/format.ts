@@ -77,7 +77,7 @@ export function isBrowsable(app: { browsable?: boolean }): boolean {
 const PLAIN_IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/
 
 /** One SQL identifier part: left as-is when it is plain, otherwise double-quoted. */
-function sqlIdent(part: string): string {
+export function sqlIdent(part: string): string {
   return PLAIN_IDENT.test(part) ? part : `"${part.replace(/"/g, '""')}"`
 }
 

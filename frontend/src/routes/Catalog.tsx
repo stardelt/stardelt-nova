@@ -10,7 +10,7 @@ import ErrorBox from '../components/ErrorBox'
 import SchemaOverview from '../components/SchemaOverview'
 import TableAbout, { type DocsState } from '../components/TableAbout'
 import TableHealth from '../components/TableHealth'
-import { formatTime, sqlTableRef, rowsLabel } from '../format'
+import { formatCount, formatTime, sqlTableRef, rowsLabel, sqlIdent } from '../format'
 import { isAdmin } from '../roles'
 
 type Sel = { ns: string; tbl: string; kind?: 'table' | 'view' }
@@ -121,7 +121,7 @@ export default function Catalog() {
 }
 
 function TableDetail({ ns, tbl, catalog, kind }: Sel & { catalog?: string; kind?: 'table' | 'view' }) {
-  const [tab, setTab] = useState<'preview' | 'columns' | 'details' | 'history'>('preview')
+  const [tab, setTab] = useState<'preview' | 'profile' | 'columns' | 'details' | 'history'>('preview')
   const qc = useQueryClient()
   const me = useQuery({ queryKey: ['me'], queryFn: api.me })
   const isView = kind === 'view'
@@ -168,7 +168,7 @@ function TableDetail({ ns, tbl, catalog, kind }: Sel & { catalog?: string; kind?
   const partSpec = m?.['partition-specs']?.[0]
   const tabs = isView
     ? (['preview'] as const)
-    : (['preview', 'columns', 'details', 'history'] as const)
+    : (['preview', 'profile', 'columns', 'details', 'history'] as const)
 
   return (
     <div className="space-y-4">
@@ -218,6 +218,8 @@ function TableDetail({ ns, tbl, catalog, kind }: Sel & { catalog?: string; kind?
       {meta.isError && <ErrorBox error={meta.error} onRetry={() => meta.refetch()} />}
 
       {tab === 'preview' && <Preview q={preview} />}
+
+      {tab === 'profile' && <Profile ns={ns} tbl={tbl} catalog={catalog} fields={schema?.fields} />}
 
       {tab === 'columns' && (
         <ColumnsTab
@@ -419,6 +421,96 @@ function Preview({ q }: { q: { data?: QueryResult; isLoading: boolean; error: un
       </div>
     </div>
   )
+}
+
+/** Iceberg primitive types whose min/max Trino can order; everything else gets counts only. */
+const ORDERABLE = /^(tinyint|smallint|int|long|float|double|decimal|date|timestamp|string|varchar)/
+
+/**
+ * A column profile over the first 10,000 rows (stardelt-nova#511): how many are null, how many
+ * distinct values, and the range for a type Trino can order. One statement for every column, so
+ * a wide table costs one query, and `LIMIT` rather than `TABLESAMPLE` so a small table still
+ * has numbers. The card says what it sampled and never claims more.
+ */
+function Profile({ ns, tbl, catalog, fields }: {
+  ns: string
+  tbl: string
+  catalog?: string
+  fields?: IcebergField[]
+}) {
+  const stats = useQuery({
+    queryKey: ['profile', catalog, ns, tbl, fields?.map(f => f.name).join(',')],
+    queryFn: () => api.query(profileSql(ns, tbl, catalog, fields ?? [])),
+    enabled: (fields?.length ?? 0) > 0,
+    retry: false,
+    staleTime: 60_000,
+  })
+  if (!fields) return <div className="card p-6 text-text-mute text-sm">loading columns…</div>
+  if (stats.isLoading) return <div className="card p-6 text-text-mute text-sm">profiling the first 10,000 rows…</div>
+  if (stats.isError) return <div className="card p-6"><ErrorBox error={stats.error} onRetry={() => stats.refetch()} /></div>
+  const row = stats.data?.rows[0]
+  const n = row ? Number(row[0]) : 0
+  if (!row || n === 0) return <div className="card p-6 text-text-mute text-sm">The first 10,000 rows are empty, so there is nothing to profile.</div>
+  const columns = fields.filter(f => typeof f.type === 'string')
+  return (
+    <div className="card overflow-x-auto">
+      <div className="px-4 py-2 text-xs text-text-mute border-b border-border">
+        Profiled from the first 10,000 rows · null % and distinct values
+      </div>
+      <table className="w-full text-sm">
+        <thead className="bg-bg-soft/50">
+          <tr>
+            <th className="th px-4 py-2.5">Column</th>
+            <th className="th px-4 py-2.5">Type</th>
+            <th className="th px-4 py-2.5">Nulls</th>
+            <th className="th px-4 py-2.5">Distinct</th>
+            <th className="th px-4 py-2.5">Range</th>
+          </tr>
+        </thead>
+        <tbody>
+          {fields.map(f => {
+            const i = columns.findIndex(c => c.name === f.name)
+            const nulls = i < 0 ? null : Number(row[1 + i * 4])
+            const distinct = i < 0 ? null : Number(row[2 + i * 4])
+            return (
+              <tr key={f.name} className="border-t border-border/60">
+                <td className="td px-4 font-mono">{f.name}</td>
+                <td className="td px-4 font-mono text-text-mute">{typeof f.type === 'string' ? f.type : 'structured'}</td>
+                <td className="td px-4">{nulls == null ? '—' : `${((1 - nulls / n) * 100).toFixed(1)}% null`}</td>
+                <td className="td px-4">{distinct == null ? '—' : formatCount(distinct)}</td>
+                <td className="td px-4 font-mono text-text-dim">{rangeText(row, i, f.type)}</td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+function profileSql(ns: string, tbl: string, catalog: string | undefined, fields: IcebergField[]): string {
+  const parts = fields
+    .filter(f => typeof f.type === 'string')
+    .map((f, i) => {
+      const col = sqlIdent(f.name)
+      // Always four select items per column, so the row offsets stay 1 + i*4: a type
+      // Trino cannot order gets two NULLs instead of min/max.
+      const range = ORDERABLE.test(f.type as string)
+        ? `min(${col}) AS c${i}_min, max(${col}) AS c${i}_max`
+        : `NULL AS c${i}_min, NULL AS c${i}_max`
+      return `count(${col}) AS c${i}_nn, approx_distinct(${col}) AS c${i}_d, ${range}`
+    })
+  const select = ['count(*) AS n', ...parts].join(', ')
+  return `SELECT ${select}\nFROM (SELECT * FROM ${sqlTableRef(ns, tbl, catalog)} LIMIT 10000)`
+}
+
+function rangeText(row: unknown[], i: number, type: string | object): string {
+  // Nested fields and types without an order are not profiled; the statement emits NULLs.
+  if (i < 0 || typeof type !== 'string' || !ORDERABLE.test(type)) return '—'
+  const min = row[3 + i * 4]
+  const max = row[4 + i * 4]
+  if (min == null && max == null) return '—'
+  return `${formatCell(min)} … ${formatCell(max)}`
 }
 
 function HistoryTab({ ns, tbl, catalog }: Sel & { catalog?: string }) {
