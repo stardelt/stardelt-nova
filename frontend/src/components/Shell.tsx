@@ -2,58 +2,14 @@ import { useEffect, useRef, useState } from 'react'
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../api'
-import { Icon, type IconName } from './Icon'
+import { Icon } from './Icon'
 import { applyTheme, counterpart, themeLabel, useTheme } from '../theme'
 import { isAdmin } from '../roles'
+import { NAV_GROUPS } from '../nav'
+import CommandPalette from './CommandPalette'
 import ErrorBoundary from './ErrorBoundary'
 import StageBadge from './StageBadge'
 import UserMenu from './UserMenu'
-
-type NavItem = { to: string; label: string; icon: IconName; end?: boolean }
-/** `admin: true` hides the whole group from non-admins (see `roles.ts`). */
-type NavGroup = { label: string; items: NavItem[]; admin?: boolean }
-
-const groups: NavGroup[] = [
-  {
-    label: 'Explore',
-    items: [
-      { to: '/', label: 'Overview', icon: 'grid', end: true },
-      { to: '/catalog', label: 'Catalog', icon: 'database' },
-      { to: '/query', label: 'SQL editor', icon: 'terminal' },
-      { to: '/queries', label: 'Query log', icon: 'table' },
-      { to: '/lineage', label: 'Lineage', icon: 'lineage' },
-    ],
-  },
-  {
-    label: 'Build',
-    items: [
-      { to: '/data', label: 'Load & transfer', icon: 'upload' },
-      { to: '/connections', label: 'Connections', icon: 'key' },
-      { to: '/pipelines', label: 'Pipelines', icon: 'play' },
-      { to: '/streams', label: 'Streams', icon: 'pulse' },
-      { to: '/deployments', label: 'Deployments', icon: 'arrow' },
-      { to: '/jobs', label: 'Activity', icon: 'clock' },
-      { to: '/notebooks', label: 'Notebooks', icon: 'notebook' },
-    ],
-  },
-  {
-    label: 'Share',
-    items: [{ to: '/dashboards', label: 'Dashboards', icon: 'chart' }],
-  },
-  {
-    // Operating the platform is not a data-engineering task: an analyst has no use for
-    // the service inventory, the workload list or the settings page, and the noise
-    // makes the parts they do use harder to find.
-    label: 'Admin',
-    admin: true,
-    items: [
-      { to: '/admin/catalogs', label: 'Catalogs', icon: 'database' },
-      { to: '/apps', label: 'Apps', icon: 'grid' },
-      { to: '/health', label: 'Health', icon: 'pulse' },
-      { to: '/settings', label: 'Platform settings', icon: 'sliders' },
-    ],
-  },
-]
 
 const titles: Record<string, string> = {
   '/': 'Overview',
@@ -192,7 +148,21 @@ export default function Shell() {
   const title = titleFor(location.pathname)
   const admin = isAdmin(me.data)
   const [navOpen, setNavOpen] = useState(false)
+  const [paletteOpen, setPaletteOpen] = useState(false)
   useEffect(() => { setNavOpen(false) }, [location.pathname])
+
+  // ⌘K / Ctrl+K opens the page palette. The SQL editor owns Ctrl/⌘+Enter, so nothing
+  // else is bound here.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault()
+        setPaletteOpen(v => !v)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
 
   // The navigation collapses to a 64 px icon rail, remembered per person like the theme.
   // The browser copy is the first paint; the server value wins when the state store has one.
@@ -257,6 +227,7 @@ export default function Shell() {
           onClick={() => setNavOpen(false)}
         />
       )}
+      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} admin={admin} />
       <aside
         id="primary-nav"
         className={[
@@ -319,7 +290,7 @@ export default function Shell() {
         </div>
 
         <nav className="px-3 pb-4 flex-1 min-h-0 overflow-y-auto">
-          {groups
+          {NAV_GROUPS
             .filter(group => !group.admin || admin)
             .map((group, index) => (
             <div key={group.label} className={[
