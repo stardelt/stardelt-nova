@@ -75,3 +75,10 @@ from the built UI against the dev cluster: the form with the group datalist and 
 preview of the three catalogs, the `pipeline-<group>` principal and the owner line, and
 the Catalogs list after one create, with `qaenergy`, `qaenergylab` and `qaenergyref` each
 `Ready` with `GrantsReady: Ready`.
+
+`workspace-*.png` — the "My workspace" card on the Notebooks page (stardelt-nova#653) at
+1280×800, dark, from the built UI with stubbed `/api/workspace` answers and the published
+notebooks stubbed empty: `running` with its idle stop in 47 min and the start time, with
+Open JupyterLab and Stop; `stopped` with Start; and `starting` forty-one seconds into a
+spawn, with the pulsing dot and the elapsed seconds. Opening is a plain link to the hub —
+Nova has no `access:servers` scope.

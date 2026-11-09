@@ -47,6 +47,9 @@
 //!   GET  /api/compute                      — the Spark clusters the caller may use
 //!   POST /api/compute/{name}/start         — start one: `spec.state: Running`
 //!   POST /api/compute/{name}/stop          — stop one: `spec.state: Stopped`
+//!   GET  /api/workspace                    — the caller's own JupyterHub server: state, times
+//!   POST /api/workspace/start              — spawn it (JupyterHub service token)
+//!   POST /api/workspace/stop               — stop it
 //!   PUT  /api/admin/compute/{name}  — create or replace a SparkCluster (admin)
 //!   DELETE /api/admin/compute/{name}  — delete one, never the shared one (admin)
 //!   POST /api/pipelines/check               — what the engine says about a statement (EXPLAIN)
@@ -77,6 +80,9 @@
 //! `NOVA_S3_URL`, `NOVA_S3_ACCESS_KEY`, `NOVA_S3_SECRET_KEY` and
 //! `NOVA_S3_NOTEBOOK_BUCKET` (all four or none) switch on published notebooks
 //! (`notebooks.rs`); unset, the routes answer 503.
+//! `NOVA_JUPYTERHUB_API_URL` and `NOVA_JUPYTERHUB_API_TOKEN` (both or neither) switch on
+//! the caller's workspace view (`workspace.rs`); unset, `/api/workspace` answers
+//! `{"state":"unavailable"}` with 200 so the Notebooks page still renders.
 
 mod admin_catalogs;
 mod airflow;
@@ -121,6 +127,7 @@ mod streams;
 mod trino;
 mod user_settings;
 mod warehouses;
+mod workspace;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
@@ -230,6 +237,10 @@ pub struct AppState {
     /// Nova signs in as one service user (built-in role `User`) and decides itself who may
     /// see what: Airflow cannot scope that credential to owner groups.
     pub airflow: Option<airflow::AirflowClient>,
+    /// The caller's own JupyterHub workspace (`workspace.rs`): the hub's API and Nova's
+    /// service token. `None` unless `NOVA_JUPYTERHUB_API_URL` and
+    /// `NOVA_JUPYTERHUB_API_TOKEN` are set — the workspace card then says `unavailable`.
+    pub workspace: Option<workspace::WorkspaceConfig>,
     /// The versioned bucket published notebooks live in (`notebooks.rs`). `None` unless
     /// all four `NOVA_S3_*` variables are set: the notebook routes then answer 503 and
     /// say so, never panic.
@@ -730,6 +741,12 @@ fn api_router() -> Router<Arc<AppState>> {
         .merge(streams::router())
         // Published notebooks: immutable versions, owner-group scoped (stardelt-nova#225).
         .merge(notebooks::router())
+        // The caller's own JupyterHub workspace (stardelt-nova#653): read, start, stop. The
+        // hub user is the caller's own sign-in name; there is no path parameter, so nobody
+        // reaches somebody else's server, and Nova has no `access:servers` scope.
+        .route("/workspace", get(workspace::get))
+        .route("/workspace/start", post(workspace::start))
+        .route("/workspace/stop", post(workspace::stop))
         // Statements: submit, poll, read in chunks, cancel by id (stardelt-nova#272).
         .merge(statements::router())
 }
@@ -896,6 +913,22 @@ async fn main() -> anyhow::Result<()> {
         Err(e) => anyhow::bail!("refusing to start: notebook storage configuration: {e}"),
     };
 
+    // The caller's own JupyterHub workspace (stardelt-nova#653). Both variables or neither:
+    // without them the Notebooks page's workspace card says `unavailable` and still renders.
+    // The service token is a `Secret` and never printed.
+    let workspace = match workspace::WorkspaceConfig::from_env() {
+        Some(cfg) => {
+            info!(api = %cfg.api, idle_seconds = cfg.idle_seconds, "JupyterHub workspace configured");
+            Some(cfg)
+        }
+        None => {
+            info!(
+                "NOVA_JUPYTERHUB_API_URL/NOVA_JUPYTERHUB_API_TOKEN are not set — the workspace card answers unavailable"
+            );
+            None
+        }
+    };
+
     let state = Arc::new(AppState {
         dev_user: std::env::var("NOVA_DEV_USER").unwrap_or_else(|_| "stardelt-dev".into()),
         trino_url: std::env::var("NOVA_TRINO_URL")
@@ -943,6 +976,7 @@ async fn main() -> anyhow::Result<()> {
         table_locks: Mutex::new(HashMap::new()),
         people_touched: Mutex::new(HashMap::new()),
         notebooks,
+        workspace,
         statements: Default::default(),
     });
 
@@ -1073,6 +1107,26 @@ mod router_tests {
             None,
             None,
         )
+    }
+
+    /// An `AppState` whose JupyterHub workspace points at `api` (`workspace.rs` tests): not
+    /// demo, so the handlers really call the hub.
+    pub(crate) fn test_state_with_workspace(api: &str, idle_seconds: i64) -> Arc<AppState> {
+        let mut state = build_test_state(
+            None,
+            "http://127.0.0.1:1",
+            "http://127.0.0.1:1",
+            false,
+            None,
+            None,
+        );
+        Arc::get_mut(&mut state).expect("a fresh state").workspace =
+            Some(workspace::WorkspaceConfig {
+                api: api.to_string(),
+                token: crate::auth::Secret::new("hub-token"),
+                idle_seconds,
+            });
+        state
     }
 
     /// An `AppState` with a cluster client (`admin_catalogs.rs`): the `Catalog` rows come
@@ -1207,6 +1261,7 @@ mod router_tests {
             table_locks: Mutex::new(std::collections::HashMap::new()),
             people_touched: Mutex::new(std::collections::HashMap::new()),
             notebooks: None,
+            workspace: None,
             statements: Default::default(),
         })
     }
@@ -1297,6 +1352,34 @@ mod router_tests {
             "/api/lineage/runs/00000000-0000-0000-0000-000000000000",
         ] {
             let response = get(app.clone(), uri).await;
+            assert_ne!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "{uri} is not registered in api_router"
+            );
+        }
+    }
+
+    /// The workspace routes are wired into the API table (#653): each request reaches its
+    /// handler, never the JSON 404 of an unknown path.
+    #[tokio::test]
+    async fn the_workspace_routes_are_registered() {
+        let (app, _dir) = test_app("workspace-registered");
+        for uri in [
+            "/api/workspace",
+            "/api/workspace/start",
+            "/api/workspace/stop",
+        ] {
+            let request = Request::builder()
+                .method(if uri == "/api/workspace" {
+                    "GET"
+                } else {
+                    "POST"
+                })
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap();
+            let response = app.clone().oneshot(request).await.unwrap();
             assert_ne!(
                 response.status(),
                 StatusCode::NOT_FOUND,

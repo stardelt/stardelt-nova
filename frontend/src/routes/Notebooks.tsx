@@ -1,8 +1,8 @@
 import { useQuery } from '@tanstack/react-query'
-import { Link } from 'react-router-dom'
 import { api, errorMessage } from '../api'
 import { isAdmin } from '../roles'
 import PublishedNotebooks from '../components/PublishedNotebooks'
+import WorkspaceCard from '../components/WorkspaceCard'
 import { safeHttpUrl } from '../format'
 
 // JupyterHub runs as its own app. Prefer the deployed app URL (from /api/apps,
@@ -52,15 +52,10 @@ export default function Notebooks() {
             account, same catalog.
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          {open && (
-            <a href={open} target="_blank" rel="noreferrer" className="btn-primary py-1.5">
-              Open JupyterHub ↗
-            </a>
-          )}
-          <Link to="/profile" className="btn-ghost py-1.5 text-xs">VS Code and tokens</Link>
-        </div>
       </header>
+
+      {/* The caller's own server: state, idle stop, Start and Stop, and the way in (#653). */}
+      <WorkspaceCard open={open} />
 
       {up && base ? (
         <div className="flex flex-wrap items-center gap-2 text-sm">

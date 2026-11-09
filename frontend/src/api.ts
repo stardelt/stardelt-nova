@@ -822,6 +822,19 @@ export type ComputeCluster = {
   shared: boolean
 }
 
+/**
+ * The caller's own JupyterHub workspace (`GET /api/workspace`, stardelt-nova#653). `unavailable`
+ * is a state, not an error: Nova has no hub credentials here or the hub does not answer, and the
+ * page still renders. The times are RFC 3339 in UTC, or `null` while the hub reports none.
+ */
+export type WorkspaceView = {
+  state: 'stopped' | 'starting' | 'running' | 'stopping' | 'unavailable'
+  startedAt: string | null
+  lastActivity: string | null
+  /** `lastActivity` plus the platform's idle limit: when the hub culls an idle server. */
+  idleStopAt: string | null
+}
+
 /** The body of PUT /api/admin/compute/{name}: everything an administrator may set. */
 export type ComputeSpecBody = {
   displayName?: string
@@ -1238,6 +1251,10 @@ export const api = {
   stopCompute:    (name: string)                => jpost<ComputeCluster>(`/api/compute/${seg(name)}/stop`, {}),
   saveCompute:    (name: string, body: ComputeSpecBody) => jput<ComputeCluster>(`/api/admin/compute/${seg(name)}`, body),
   deleteCompute:  (name: string)                => jdel(`/api/admin/compute/${seg(name)}`),
+  /** The caller's own JupyterHub workspace (stardelt-nova#653). */
+  workspace:      ()                            => jget<WorkspaceView>('/api/workspace'),
+  startWorkspace: ()                            => jpost<WorkspaceView>('/api/workspace/start', {}),
+  stopWorkspace:  ()                            => jpost<WorkspaceView>('/api/workspace/stop', {}),
   /** The caller's own groups and their principals (`Schedule`, #210). */
   pipelinePrincipals: ()                      => jget<{ groups: PipelinePrincipal[] }>('/api/pipelines/principals'),
   /** Every run of the caller's pipelines, newest first; the server applies the filters. */
