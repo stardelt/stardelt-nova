@@ -1,17 +1,24 @@
 import { Fragment, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Icon } from './Icon'
-import { NAV_GROUPS, type NavItem } from '../nav'
+import { useQuery } from '@tanstack/react-query'
+import { Icon, type IconName } from './Icon'
+import { api } from '../api'
+import { NAV_GROUPS } from '../nav'
+
+/** One row of the palette: a page, or a table the catalog search found. */
+type Row = { key: string; group: string; label: string; hint: string; icon: IconName; to: string }
 
 /**
- * ⌘K / Ctrl+K: a keyboard-first way to reach a page.
+ * ⌘K / Ctrl+K: a keyboard-first way to reach a page or a table.
  *
- * The list is `NAV_GROUPS`, filtered by the same admin rule as the sidebar, so the
- * palette can never offer a page the person cannot see in navigation. A native
- * `<dialog>` opened with `showModal()` gives focus trapping, an inert page behind it
- * and Escape for free; the query starts empty on every open.
+ * The page list is `NAV_GROUPS`, filtered by the same admin rule as the sidebar, so the
+ * palette can never offer a page the person cannot see in navigation. Tables come from
+ * `GET /api/catalog/search` once the query is two characters long; a result opens the
+ * catalog explorer with that table selected. A native `<dialog>` opened with `showModal()`
+ * gives focus trapping, an inert page behind it and Escape for free; the query starts
+ * empty on every open.
  *
- * This slice is pages only: tables, queries and actions arrive in later slices.
+ * Queries and actions arrive in later slices.
  */
 export default function CommandPalette({
   open,
@@ -29,16 +36,16 @@ export default function CommandPalette({
   const [query, setQuery] = useState('')
   const [active, setActive] = useState(0)
 
-  const rows = useMemo(() => {
+  const pages = useMemo<Row[]>(() => {
     const q = query.trim().toLowerCase()
-    const out: { group: string; item: NavItem }[] = []
+    const out: Row[] = []
     for (const group of NAV_GROUPS) {
       if (group.admin && !admin) continue
       let shown = 0
       for (const item of group.items) {
         if (q && !item.label.toLowerCase().includes(q) && !item.to.toLowerCase().includes(q)) continue
         if (shown >= 8) break
-        out.push({ group: group.label, item })
+        out.push({ key: item.to, group: group.label, label: item.label, hint: item.to, icon: item.icon, to: item.to })
         shown++
       }
     }
@@ -53,11 +60,42 @@ export default function CommandPalette({
     if (!dialog.open) dialog.showModal()
     setQuery('')
     setActive(0)
+    setTableQuery('')
     return () => {
       if (dialog.open) dialog.close()
       opener.current?.focus()
     }
   }, [open])
+
+  const [tableQuery, setTableQuery] = useState('')
+  useEffect(() => {
+    if (!open) return
+    const timer = window.setTimeout(() => setTableQuery(query.trim()), 200)
+    return () => window.clearTimeout(timer)
+  }, [open, query])
+
+  const tables = useQuery({
+    queryKey: ['palette-tables', tableQuery],
+    queryFn: () => api.searchTables(tableQuery, 8),
+    enabled: open && tableQuery.length >= 2,
+    staleTime: 30_000,
+    retry: false,
+  })
+
+  const tableRows = useMemo<Row[]>(
+    () =>
+      (tables.data?.matches ?? []).slice(0, 8).map((m) => ({
+        key: `table:${m.catalog}:${m.namespace}:${m.table}`,
+        group: 'Tables',
+        label: `${m.namespace}.${m.table}`,
+        hint: m.catalog,
+        icon: 'table',
+        to: `/catalog?catalog=${encodeURIComponent(m.catalog)}&ns=${encodeURIComponent(m.namespace)}&tbl=${encodeURIComponent(m.table)}`,
+      })),
+    [tables.data],
+  )
+
+  const rows = useMemo(() => [...pages, ...tableRows], [pages, tableRows])
 
   if (!open) return null
 
@@ -77,7 +115,7 @@ export default function CommandPalette({
       const row = rows[active]
       if (!row) return
       event.preventDefault()
-      go(row.item.to)
+      go(row.to)
     }
   }
 
@@ -97,13 +135,13 @@ export default function CommandPalette({
         <div className="border-b border-border p-3">
           <input
             role="combobox"
-            aria-label="Search pages"
+            aria-label="Search pages and tables"
             aria-expanded="true"
             aria-controls={`${id}-list`}
             aria-activedescendant={activeId}
             autoFocus
             value={query}
-            placeholder="Search pages…"
+            placeholder="Search pages and tables…"
             className="input w-full"
             onChange={(e) => {
               setQuery(e.target.value)
@@ -113,11 +151,11 @@ export default function CommandPalette({
           />
         </div>
         {rows.length === 0 ? (
-          <p className="px-4 py-6 text-text-mute text-sm">No pages match “{query}”.</p>
+          <p className="px-4 py-6 text-text-mute text-sm">Nothing matches “{query}”.</p>
         ) : (
-          <ul id={`${id}-list`} role="listbox" aria-label="Pages" className="min-h-0 overflow-y-auto p-1.5">
+          <ul id={`${id}-list`} role="listbox" aria-label="Results" className="min-h-0 overflow-y-auto p-1.5">
             {rows.map((row, i) => (
-              <Fragment key={row.item.to}>
+              <Fragment key={row.key}>
                 {rows[i - 1]?.group !== row.group && (
                   <li role="presentation" className="label px-3 pb-1 pt-2">{row.group}</li>
                 )}
@@ -125,16 +163,16 @@ export default function CommandPalette({
                   role="option"
                   id={`${id}-opt-${i}`}
                   aria-selected={i === active}
-                  onClick={() => go(row.item.to)}
+                  onClick={() => go(row.to)}
                   onMouseEnter={() => setActive(i)}
                   className={[
                     'flex cursor-pointer items-center gap-2.5 rounded-[10px] px-3 py-2 text-sm',
                     i === active ? 'bg-accent/15 text-text' : 'text-text-dim hover:bg-bg-soft',
                   ].join(' ')}
                 >
-                  <Icon name={row.item.icon} className="w-4 h-4 shrink-0" />
-                  <span className="truncate">{row.item.label}</span>
-                  <span className="ml-auto font-mono text-[11px] text-text-mute">{row.item.to}</span>
+                  <Icon name={row.icon} className="w-4 h-4 shrink-0" />
+                  <span className="truncate">{row.label}</span>
+                  <span className="ml-auto font-mono text-[11px] text-text-mute">{row.hint}</span>
                 </li>
               </Fragment>
             ))}

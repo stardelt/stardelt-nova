@@ -40,7 +40,7 @@ test('Ctrl+K opens the palette, filters pages and navigates', async ({ page }) =
   await page.keyboard.press('Control+k')
   const dialog = page.getByRole('dialog')
   await expect(dialog).toBeVisible()
-  const input = page.getByRole('combobox', { name: 'Search pages' })
+  const input = page.getByRole('combobox', { name: 'Search pages and tables' })
   await expect(input).toBeFocused()
   await input.fill('streams')
   await expect(dialog.getByRole('option')).toHaveCount(1)
@@ -52,7 +52,7 @@ test('Ctrl+K opens the palette, filters pages and navigates', async ({ page }) =
   await page.keyboard.press('Control+k')
   await expect(dialog).toBeVisible()
   await input.fill('health')
-  await expect(dialog.getByText(/No pages match/)).toBeVisible()
+  await expect(dialog.getByText(/Nothing matches/)).toBeVisible()
   await expect(dialog.getByRole('option')).toHaveCount(0)
 })
 
