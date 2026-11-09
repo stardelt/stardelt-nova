@@ -1957,6 +1957,7 @@ mod tests {
             run_starts: Mutex::new(HashMap::new()),
             pipeline_creates: Mutex::new(HashMap::new()),
             catalog_access_changes: Mutex::new(HashMap::new()),
+            team_creates: Mutex::new(HashMap::new()),
             airflow: None,
             table_locks: Mutex::new(HashMap::new()),
             people_touched: Mutex::new(HashMap::new()),

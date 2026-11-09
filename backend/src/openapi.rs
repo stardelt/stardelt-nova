@@ -119,6 +119,7 @@ pub struct ErrorResponse {
         crate::statements::cancel,
         crate::admin_catalogs::list,
         crate::admin_catalogs::update_access,
+        crate::admin_catalogs::create_team,
         crate::apps::list,
         crate::apps::links,
         crate::apps::detail,
@@ -229,6 +230,8 @@ pub struct ErrorResponse {
         crate::admin_catalogs::CatalogGrant,
         crate::admin_catalogs::CatalogCondition,
         crate::admin_catalogs::CatalogAccessUpdate,
+        crate::admin_catalogs::NewTeam,
+        crate::admin_catalogs::NewTeamResponse,
         ErrorResponse,
     )),
     tags(
