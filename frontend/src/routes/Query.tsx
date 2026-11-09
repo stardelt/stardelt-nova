@@ -1,11 +1,13 @@
-import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react'
+import { useEffect, useId, useRef, useState, type CSSProperties, type KeyboardEvent } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
 import {
   api, allTables, downloadCsv, errorMessage, formatCell,
   type QueryResult, type SavedQuery, type TableRef,
 } from '../api'
-import CatalogSelect, { useCatalogs } from '../components/CatalogSelect'
+import { useCatalogs } from '../components/CatalogSelect'
+import CatalogTree from '../components/CatalogTree'
+import CollapsiblePane, { usePaneOpen } from '../components/CollapsiblePane'
 import ErrorBox from '../components/ErrorBox'
 import { Icon } from '../components/Icon'
 import ScheduleDialog from '../components/ScheduleDialog'
@@ -247,8 +249,14 @@ export default function Query() {
   const [deleting, setDeleting] = useState<SavedQuery | null>(null)
   // The last successful save or delete, in the person's words (role="status").
   const [notice, setNotice] = useState<string | null>(null)
+  // The Tables pane's search box; it only narrows what the tree shows.
+  const [filter, setFilter] = useState('')
   const taRef = useRef<HTMLTextAreaElement>(null)
   const empty = sql.trim() === ''
+  // The two side panes are user-collapsible; their state sets the grid's columns (#586).
+  const tablesOpen = usePaneOpen('tables')
+  const historyOpen = usePaneOpen('history')
+  const columns = `${tablesOpen ? '260px' : '40px'} minmax(0,1fr) ${historyOpen ? '260px' : '40px'}`
 
   useEffect(() => {
     const fromUrl = params.get('sql')
@@ -280,21 +288,64 @@ export default function Query() {
     }
   }
 
+  /**
+   * Insert a table name from the Tables pane at the cursor (stardelt-nova#586). The name is
+   * the fully qualified one the editor elsewhere generates (`catalog.schema.table`), and the
+   * caret lands after it, so the next keystroke continues the statement.
+   */
+  function insertTable({ catalog: inCatalog, ns, tbl }: { catalog: string; ns: string; tbl: string }) {
+    const text = sqlTableRef(ns, tbl, inCatalog)
+    const area = taRef.current
+    const start = area ? area.selectionStart : sql.length
+    const end = area ? area.selectionEnd : sql.length
+    setTyped(sql.slice(0, start) + text + sql.slice(end))
+    const caret = start + text.length
+    requestAnimationFrame(() => {
+      const next = taRef.current
+      if (!next) return
+      next.focus()
+      next.setSelectionRange(caret, caret)
+    })
+  }
+
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_280px] gap-5 h-full min-h-0">
+    <div
+      className="grid grid-cols-1 lg:grid-cols-[var(--sql-panes)] content-start lg:content-stretch gap-5 h-full min-h-0"
+      style={{ '--sql-panes': columns } as CSSProperties}
+    >
       <h1 className="sr-only">SQL editor</h1>
+
+      <CollapsiblePane id="tables" title="Tables" side="left">
+        <input
+          value={filter}
+          onChange={e => setFilter(e.target.value)}
+          placeholder="Search tables…"
+          aria-label="Search tables"
+          className="input mb-2 py-1.5"
+        />
+        <div className="min-h-0 flex-1 overflow-auto">
+          {catalogs.isError ? (
+            <ErrorBox error={catalogs.error} onRetry={() => void catalogs.refetch()} />
+          ) : (catalogs.data?.catalogs?.length ?? 0) === 0 ? (
+            <p className="px-2 py-1 text-xs text-text-mute">
+              {catalogs.isPending ? 'catalogs…' : 'No catalog is open to you yet.'}
+            </p>
+          ) : (
+            <CatalogTree
+              key={catalogs.data?.default ?? ''}
+              catalogs={catalogs.data?.catalogs ?? []}
+              defaultCatalog={catalogs.data?.default ?? ''}
+              filter={filter}
+              selected={null}
+              onSelect={() => {}}
+              mode="pick"
+              onPick={insertTable}
+            />
+          )}
+        </div>
+      </CollapsiblePane>
+
       <div className="flex flex-col gap-4 min-h-0 min-w-0">
-        {(catalogs.data?.catalogs?.length ?? 0) > 1 && (
-          <div>
-            <label className="grid gap-1.5">
-              <span className="label">Catalog</span>
-              <CatalogSelect />
-            </label>
-            {/* The choice scopes what Nova generates; it cannot change Trino's session
-                default, and a statement that names its catalog works wherever it is pasted. */}
-            <p className="text-xs text-text-mute mt-1">Samples and inserted table names use this catalog.</p>
-          </div>
-        )}
         <div className="card p-3 focus-within:border-accent/60">
           <textarea
             ref={taRef}
@@ -408,69 +459,71 @@ export default function Query() {
         )}
       </div>
 
-      <aside className="card p-4 overflow-auto">
-        <section>
-          <div className="flex items-center justify-between mb-3">
-            <h3 className="label">History</h3>
-            <button
-              onClick={() => { setHistory([]); saveHistory([]) }}
-              className="text-xs text-text-mute hover:text-text"
-            >clear</button>
-          </div>
-          {history.length === 0 && <div className="text-text-mute text-sm">No queries yet — run one above.</div>}
-          <ul className="space-y-2">
-            {history.map((h, i) => (
-              <li key={i}>
-                <button
-                  onClick={() => { setTyped(h); taRef.current?.focus() }}
-                  className="w-full text-left text-xs font-mono text-text-dim hover:text-text break-all"
-                  title={h}
-                >
-                  {h.length > 60 ? h.slice(0, 60) + '…' : h}
-                </button>
-              </li>
-            ))}
-          </ul>
-        </section>
+      <CollapsiblePane id="history" title="History" side="right">
+        <div className="min-h-0 flex-1 overflow-auto">
+          {/* The pane's own header names the section; this row holds the Clear button. */}
+          <section>
+            <div className="flex items-center justify-end mb-2">
+              <button
+                onClick={() => { setHistory([]); saveHistory([]) }}
+                className="text-xs text-text-mute hover:text-text"
+              >clear</button>
+            </div>
+            {history.length === 0 && <div className="text-text-mute text-sm">No queries yet — run one above.</div>}
+            <ul className="space-y-2">
+              {history.map((h, i) => (
+                <li key={i}>
+                  <button
+                    onClick={() => { setTyped(h); taRef.current?.focus() }}
+                    className="w-full text-left text-xs font-mono text-text-dim hover:text-text break-all"
+                    title={h}
+                  >
+                    {h.length > 60 ? h.slice(0, 60) + '…' : h}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </section>
 
-        <section className="mt-5 border-t border-border pt-4">
-          <div className="flex items-center justify-between mb-3">
-            <h3 className="label">Saved queries</h3>
-            <button
-              type="button"
-              onClick={() => setSaving(true)}
-              disabled={saved.isError}
-              title={saved.isError ? 'The saved queries could not be loaded' : undefined}
-              className="text-xs text-text-mute hover:text-text disabled:opacity-50"
-            >Save query</button>
-          </div>
-          {saved.isPending && <div className="text-text-mute text-sm">saved queries…</div>}
-          {saved.isError && <ErrorBox error={saved.error} onRetry={() => void saved.refetch()} />}
-          {saved.data?.length === 0 && (
-            <div className="text-text-mute text-sm">No saved queries yet — run a query and choose Save query.</div>
-          )}
-          <ul className="space-y-2">
-            {saved.data?.map((row) => (
-              <li key={row.id} className="flex items-start justify-between gap-2">
-                <button
-                  type="button"
-                  onClick={() => { setTyped(row.sql); taRef.current?.focus() }}
-                  className="min-w-0 flex-1 text-left text-xs text-text-dim hover:text-text break-words"
-                  title={row.sql}
-                >
-                  {row.title}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setDeleting(row)}
-                  aria-label={`Delete “${row.title}”`}
-                  className="shrink-0 text-xs text-text-mute hover:text-bad"
-                >Delete</button>
-              </li>
-            ))}
-          </ul>
-        </section>
-      </aside>
+          <section className="mt-5 border-t border-border pt-4">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="label">Saved queries</h3>
+              <button
+                type="button"
+                onClick={() => setSaving(true)}
+                disabled={saved.isError}
+                title={saved.isError ? 'The saved queries could not be loaded' : undefined}
+                className="text-xs text-text-mute hover:text-text disabled:opacity-50"
+              >Save query</button>
+            </div>
+            {saved.isPending && <div className="text-text-mute text-sm">saved queries…</div>}
+            {saved.isError && <ErrorBox error={saved.error} onRetry={() => void saved.refetch()} />}
+            {saved.data?.length === 0 && (
+              <div className="text-text-mute text-sm">No saved queries yet — run a query and choose Save query.</div>
+            )}
+            <ul className="space-y-2">
+              {saved.data?.map((row) => (
+                <li key={row.id} className="flex items-start justify-between gap-2">
+                  <button
+                    type="button"
+                    onClick={() => { setTyped(row.sql); taRef.current?.focus() }}
+                    className="min-w-0 flex-1 text-left text-xs text-text-dim hover:text-text break-words"
+                    title={row.sql}
+                  >
+                    {row.title}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDeleting(row)}
+                    aria-label={`Delete “${row.title}”`}
+                    className="shrink-0 text-xs text-text-mute hover:text-bad"
+                  >Delete</button>
+                </li>
+              ))}
+            </ul>
+          </section>
+        </div>
+      </CollapsiblePane>
 
       {saving && (
         <SaveQueryDialog

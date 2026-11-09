@@ -13,18 +13,31 @@ function forbidden(error: unknown): boolean {
   return error instanceof ApiError && error.status === 403
 }
 
+/**
+ * The tree of catalogs, schemas and tables.
+ *
+ * `mode` decides what a click does (stardelt-nova#586). In `'explore'` — the Catalog page —
+ * a catalog, schema or table click moves the page's selection and the URL. In `'pick'` — the
+ * SQL editor's Tables pane — a catalog click still scopes the page by putting the catalog in
+ * the URL, a schema click only opens the schema, and a table click hands the table to
+ * `onPick` so the editor can insert its name at the cursor.
+ */
 export default function CatalogTree({
   catalogs,
   defaultCatalog,
   filter,
   selected,
   onSelect,
+  mode = 'explore',
+  onPick,
 }: {
   catalogs: Catalog[]
   defaultCatalog: string
   filter: string
   selected: CatalogTreeSelection | null
   onSelect: (sel: CatalogTreeSelection | null) => void
+  mode?: 'explore' | 'pick'
+  onPick?: (ref: { catalog: string; ns: string; tbl: string }) => void
 }) {
   const [params, setParams] = useSearchParams()
   const urlCatalog = params.get('catalog')
@@ -41,6 +54,8 @@ export default function CatalogTree({
           filter={filter}
           selected={selected}
           onSelect={onSelect}
+          mode={mode}
+          onPick={onPick}
           params={params}
           setParams={setParams}
         />
@@ -56,6 +71,8 @@ function CatalogNode({
   filter,
   selected,
   onSelect,
+  mode,
+  onPick,
   params,
   setParams,
 }: {
@@ -65,6 +82,8 @@ function CatalogNode({
   filter: string
   selected: CatalogTreeSelection | null
   onSelect: (sel: CatalogTreeSelection | null) => void
+  mode: 'explore' | 'pick'
+  onPick?: (ref: { catalog: string; ns: string; tbl: string }) => void
   params: URLSearchParams
   setParams: (next: URLSearchParams | ((prev: URLSearchParams) => URLSearchParams), opts?: { replace?: boolean }) => void
 }) {
@@ -142,6 +161,8 @@ function CatalogNode({
             filter={filter}
             selected={selected}
             onSelect={onSelect}
+            mode={mode}
+            onPick={onPick}
             params={params}
             setParams={setParams}
           />
@@ -158,6 +179,8 @@ function CatalogSchemas({
   filter,
   selected,
   onSelect,
+  mode,
+  onPick,
   params,
   setParams,
 }: {
@@ -167,6 +190,8 @@ function CatalogSchemas({
   filter: string
   selected: CatalogTreeSelection | null
   onSelect: (sel: CatalogTreeSelection | null) => void
+  mode: 'explore' | 'pick'
+  onPick?: (ref: { catalog: string; ns: string; tbl: string }) => void
   params: URLSearchParams
   setParams: (next: URLSearchParams | ((prev: URLSearchParams) => URLSearchParams), opts?: { replace?: boolean }) => void
 }) {
@@ -192,6 +217,8 @@ function CatalogSchemas({
             filter={filter}
             selected={selected}
             onSelect={onSelect}
+            mode={mode}
+            onPick={onPick}
             params={params}
             setParams={setParams}
           />
@@ -267,6 +294,8 @@ function SchemaNode({
   filter,
   selected,
   onSelect,
+  mode,
+  onPick,
   params,
   setParams,
 }: {
@@ -276,6 +305,8 @@ function SchemaNode({
   filter: string
   selected: CatalogTreeSelection | null
   onSelect: (sel: CatalogTreeSelection | null) => void
+  mode: 'explore' | 'pick'
+  onPick?: (ref: { catalog: string; ns: string; tbl: string }) => void
   params: URLSearchParams
   setParams: (next: URLSearchParams | ((prev: URLSearchParams) => URLSearchParams), opts?: { replace?: boolean }) => void
 }) {
@@ -286,8 +317,15 @@ function SchemaNode({
   const current = catalogName === deepLinkCatalog && urlNs === ns && !urlTbl && selected === null
   const initialOpen = catalogName === deepLinkCatalog && urlNs === ns
   const [open, setOpen] = useState(initialOpen)
+  const picking = mode === 'pick'
 
   const onSchemaClick = () => {
+    // Picking a table needs the schema open, not the page moved: the SQL editor keeps its
+    // own URL (the catalog in it) while the person browses (stardelt-nova#586).
+    if (picking) {
+      setOpen((o) => !o)
+      return
+    }
     if (current) {
       // Already the schema page: toggle local collapse/expand, the catalog row's pattern.
       setOpen((o) => !o)
@@ -355,14 +393,19 @@ function SchemaNode({
           )}
           {visible.map((id) => {
             const sel = selected?.ns === ns && selected?.tbl === id.name
+            const pick = () => onPick?.({ catalog: catalogName, ns, tbl: id.name })
             return (
-              <li key={id.name}>
+              <li key={id.name} className="group flex items-center gap-1">
                 <button
                   type="button"
-                  onClick={() => onSelect({ ns, tbl: id.name, kind: id.kind ?? 'table' })}
+                  onClick={() =>
+                    picking
+                      ? pick()
+                      : onSelect({ ns, tbl: id.name, kind: id.kind ?? 'table' })
+                  }
                   aria-current={sel ? 'true' : undefined}
                   className={[
-                    'w-full text-left px-2 py-1.5 rounded-[8px] text-sm flex items-center gap-2',
+                    'min-w-0 flex-1 text-left px-2 py-1.5 rounded-[8px] text-sm flex items-center gap-2',
                     sel
                       ? 'bg-accent/15 text-text border border-accent/30'
                       : 'text-text-dim hover:text-text hover:bg-bg-soft/40 border border-transparent',
@@ -371,6 +414,18 @@ function SchemaNode({
                   <ObjectIcon kind={id.kind === 'view' ? 'view' : 'table'} />
                   <span className="truncate">{id.name}</span>
                 </button>
+                {/* The same action, on a target of its own: a table row is one button, so the
+                    insert control cannot live inside it (stardelt-nova#586). */}
+                {picking && (
+                  <button
+                    type="button"
+                    onClick={pick}
+                    aria-label={`Insert ${ns}.${id.name}`}
+                    className="shrink-0 rounded-[8px] px-1.5 py-1 text-sm text-text-mute opacity-0 hover:text-text focus:opacity-100 group-hover:opacity-100"
+                  >
+                    <span aria-hidden="true">⊕</span>
+                  </button>
+                )}
               </li>
             )
           })}
