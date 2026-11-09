@@ -524,7 +524,7 @@ pub(crate) fn catalogs_api(client: kube::Client) -> Api<DynamicObject> {
 /// phase is `Unknown` with no conditions, which is what an unobserved catalog
 /// looks like. Grants and conditions with no `group`/`verb` or `type`/`status`
 /// are dropped rather than guessed at.
-fn row_from_object(object: &Value) -> AdminCatalog {
+pub(crate) fn row_from_object(object: &Value) -> AdminCatalog {
     let spec = object.get("spec").unwrap_or(&Value::Null);
     let status = object
         .get("status")
