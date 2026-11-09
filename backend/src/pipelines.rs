@@ -2050,6 +2050,26 @@ pub struct PipelineListResponse {
     pub pipelines: Vec<PipelineView>,
 }
 
+/// One run in the cross-pipeline list (`GET /api/runs`).
+#[derive(Debug, Clone, PartialEq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RunsListRow {
+    pub namespace: String,
+    pub name: String,
+    /// `spec.ownerGroup`; `None` means administrators only.
+    pub owner_group: Option<String>,
+    /// `sql`, `notebook`, or `pipeline` for a multi-step pipeline (`run_task_kind`).
+    pub kind: String,
+    #[serde(flatten)]
+    pub run: RunView,
+}
+
+/// `GET /api/runs`.
+#[derive(Debug, Clone, PartialEq, Serialize, utoipa::ToSchema)]
+pub struct RunsListResponse {
+    pub runs: Vec<RunsListRow>,
+}
+
 /// `GET /api/pipelines/{namespace}/{name}`: the view, the latest runs and the resource's
 /// parameters, retry policy and options.
 #[derive(Debug, Clone, PartialEq, Serialize, utoipa::ToSchema)]
@@ -2414,6 +2434,18 @@ fn take_run_slot(limiter: &RunStartsLimiter, sub: &str) -> bool {
 /// The most last-run calls in flight at once.
 const LAST_RUN_CONCURRENCY: usize = 8;
 
+/// The most run-list calls in flight at once (`GET /api/runs`).
+const RUN_LIST_CONCURRENCY: usize = 8;
+
+/// `GET /api/runs` answers this many runs when the caller gives no `limit`.
+const RUNS_DEFAULT_LIMIT: usize = 50;
+
+/// `GET /api/runs` never answers more than this many runs.
+const RUNS_MAX_LIMIT: usize = 200;
+
+/// The `kind` values `GET /api/runs` offers; `pipeline` is a multi-step pipeline.
+const RUNS_KINDS: [&str; 3] = ["sql", "notebook", "pipeline"];
+
 /// Find the resource, check the namespace and the caller in that order, and only then answer
 /// the DAG id. A hidden pipeline is indistinguishable from an absent one.
 async fn load_allowed(
@@ -2529,6 +2561,189 @@ async fn list_pipelines(
         })
         .collect();
     Ok(PipelineListResponse { pipelines })
+}
+
+/// `GET /api/runs`: every run of the caller's visible pipelines, newest first, filtered by
+/// `state`, `kind`, `group` and `pipeline`, capped at `limit`. One DAG list, then one run-list
+/// call per loaded pipeline (at most eight at a time); a failing call skips that pipeline
+/// instead of failing the page. Nothing visible means no call to Airflow at all.
+async fn runs_across_pipelines(
+    resources: Option<&PipelineResources>,
+    airflow: Option<&AirflowClient>,
+    who: &Identity,
+    query: &BTreeMap<String, String>,
+) -> Result<RunsListResponse, Fail> {
+    let filter = RunsFilter::parse(query)?;
+
+    let resources = resources.ok_or_else(no_cluster)?;
+    let airflow = scheduler(airflow)?;
+    let namespace = crate::cluster::namespace();
+
+    let mut resources = resources.list().await.map_err(resource_fail)?;
+    resources.retain(|resource| visible(who, spec_of(resource)));
+    resources.sort_by(|a, b| pipeline_name(a).cmp(pipeline_name(b)));
+    if resources.is_empty() {
+        // Nothing visible: do not tell Airflow (or a timing observer) that there is anything.
+        return Ok(RunsListResponse { runs: Vec::new() });
+    }
+
+    let dags: BTreeMap<String, DagSummary> = airflow
+        .list_dags("pipeline", true)
+        .await
+        .map_err(scheduler_fail)?
+        .into_iter()
+        .map(|dag| (dag.dag_id.clone(), dag))
+        .collect();
+
+    let loaded: Vec<(String, String)> = resources
+        .iter()
+        .map(|resource| pipeline_name(resource).to_string())
+        .map(|name| {
+            let dag_id = dag_id_for(&namespace, &name);
+            (name, dag_id)
+        })
+        .filter(|(_, dag_id)| dags.contains_key(dag_id))
+        .collect();
+    let by_name: BTreeMap<&str, &Value> = resources
+        .iter()
+        .map(|resource| (pipeline_name(resource), resource))
+        .collect();
+
+    let runs_per_pipeline: Vec<(String, Vec<DagRun>)> = stream::iter(loaded)
+        .map(|(name, dag_id)| async move {
+            let runs = match airflow.runs(&dag_id, filter.limit as u32).await {
+                Ok(runs) => runs,
+                Err(e) => {
+                    // One DAG that is gone (or failing) must not fail the whole page.
+                    tracing::warn!(dag = %dag_id, error = %e, "could not read a pipeline's runs");
+                    Vec::new()
+                }
+            };
+            (name, runs)
+        })
+        .buffer_unordered(RUN_LIST_CONCURRENCY)
+        .collect()
+        .await;
+
+    let mut rows = Vec::new();
+    for (name, runs) in runs_per_pipeline {
+        let Some(resource) = by_name.get(name.as_str()) else {
+            continue;
+        };
+        let owner_group = spec_of(resource)
+            .get("ownerGroup")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let kind = run_task_kind(resource).unwrap_or("pipeline").to_string();
+        for run in runs {
+            rows.push(RunsListRow {
+                namespace: namespace.clone(),
+                name: name.clone(),
+                owner_group: owner_group.clone(),
+                kind: kind.clone(),
+                run: run_view(&run),
+            });
+        }
+    }
+    Ok(filter.answer(rows))
+}
+
+/// The query of `GET /api/runs`, parsed once: the four filters and the cap. Demo mode parses
+/// the same query, so a bad one refuses there too.
+struct RunsFilter<'a> {
+    limit: usize,
+    kind: Option<&'a str>,
+    state: Option<&'a str>,
+    group: Option<&'a str>,
+    pipeline: Option<(String, String)>,
+}
+
+impl<'a> RunsFilter<'a> {
+    fn parse(query: &'a BTreeMap<String, String>) -> Result<Self, Fail> {
+        Ok(Self {
+            limit: runs_limit(query)?,
+            kind: runs_kind(query)?,
+            state: query.get("state").map(String::as_str),
+            group: query.get("group").map(String::as_str),
+            pipeline: runs_pipeline(query)?,
+        })
+    }
+
+    /// The answer: the filters, newest first, then the cap. A run without a start date goes
+    /// last; the name and the run id keep the order stable within the same second.
+    fn answer(&self, mut rows: Vec<RunsListRow>) -> RunsListResponse {
+        rows.retain(|row| {
+            self.state.is_none_or(|state| row.run.state == state)
+                && self.kind.is_none_or(|kind| row.kind == kind)
+                && self
+                    .group
+                    .is_none_or(|group| row.owner_group.as_deref() == Some(group))
+                && self.pipeline.as_ref().is_none_or(|(namespace, name)| {
+                    row.namespace == *namespace && row.name == *name
+                })
+        });
+        rows.sort_by(|a, b| {
+            b.run
+                .started_at
+                .cmp(&a.run.started_at)
+                .then_with(|| a.name.cmp(&b.name))
+                .then_with(|| a.run.run_id.cmp(&b.run.run_id))
+        });
+        rows.truncate(self.limit);
+        RunsListResponse { runs: rows }
+    }
+}
+
+/// The `limit` of `GET /api/runs`: 50 when absent, a positive integer of at most 200.
+fn runs_limit(query: &BTreeMap<String, String>) -> Result<usize, Fail> {
+    let Some(value) = query.get("limit") else {
+        return Ok(RUNS_DEFAULT_LIMIT);
+    };
+    let limit = value
+        .parse::<usize>()
+        .ok()
+        .filter(|limit| *limit > 0)
+        .ok_or_else(|| Fail::new(StatusCode::BAD_REQUEST, "limit must be a positive integer"))?;
+    if limit > RUNS_MAX_LIMIT {
+        return Err(Fail::new(
+            StatusCode::BAD_REQUEST,
+            "limit must be at most 200",
+        ));
+    }
+    Ok(limit)
+}
+
+/// The `kind` of `GET /api/runs`: one of `sql`, `notebook`, `pipeline` when given.
+fn runs_kind(query: &BTreeMap<String, String>) -> Result<Option<&str>, Fail> {
+    let Some(kind) = query.get("kind").map(String::as_str) else {
+        return Ok(None);
+    };
+    if RUNS_KINDS.contains(&kind) {
+        Ok(Some(kind))
+    } else {
+        Err(Fail::new(
+            StatusCode::BAD_REQUEST,
+            "kind must be one of sql, notebook, pipeline",
+        ))
+    }
+}
+
+/// The `pipeline` filter of `GET /api/runs`: `<namespace>/<name>` when given.
+fn runs_pipeline(query: &BTreeMap<String, String>) -> Result<Option<(String, String)>, Fail> {
+    let Some(value) = query.get("pipeline") else {
+        return Ok(None);
+    };
+    match value.split_once('/') {
+        Some((namespace, name))
+            if !namespace.is_empty() && !name.is_empty() && !name.contains('/') =>
+        {
+            Ok(Some((namespace.to_string(), name.to_string())))
+        }
+        _ => Err(Fail::new(
+            StatusCode::BAD_REQUEST,
+            "pipeline must be <namespace>/<name>",
+        )),
+    }
 }
 
 /// `GET /api/pipelines/{namespace}/{name}`: the view, the latest runs, params and retries.
@@ -3932,6 +4147,8 @@ fn resources(state: &AppState) -> Option<PipelineResources> {
 pub(crate) fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/pipelines", get(list).post(create))
+        // The Runs page (#516): every run of the caller's pipelines, newest first.
+        .route("/runs", get(list_runs))
         // The caller's groups and their pipeline principals, before any `{namespace}/{name}`
         // route can see the word "principals" as a name.
         .route("/pipelines/principals", get(principals))
@@ -4021,6 +4238,54 @@ pub(crate) async fn list(caller: ReadCaller) -> Response {
             resources(signed.state()).as_ref(),
             signed.state().airflow.as_ref(),
             signed.identity(),
+        )
+        .await,
+    )
+}
+
+#[utoipa::path(
+    get,
+    operation_id = "runs_list",
+    path = "/api/runs",
+    tag = "public",
+    description = "The runs of the caller's visible pipelines, newest first. A run carries the pipeline's `namespace`, `name` and `ownerGroup` and a `kind` of `sql`, `notebook` or `pipeline` (a multi-step pipeline). `limit` defaults to 50 and is at most 200. `state`, `kind`, `group` and `pipeline` (`<namespace>/<name>`) narrow the answer; an unknown state answers no rows rather than an error. A failed scheduler read for one pipeline is logged and skipped, not reported. Answers `Cache-Control: no-store`.",
+    params(
+        ("limit" = Option<usize>, Query, description = "Rows to answer; 50 when absent, at most 200"),
+        ("state" = Option<String>, Query, description = "Exact match on the run's state; an unknown state answers no rows"),
+        ("kind" = Option<String>, Query, description = "`sql`, `notebook` or `pipeline`"),
+        ("group" = Option<String>, Query, description = "Exact match on the pipeline's `spec.ownerGroup`"),
+        ("pipeline" = Option<String>, Query, description = "One pipeline as `<namespace>/<name>`"),
+    ),
+    responses(
+        (status = 200, description = "The visible runs, newest first", body = RunsListResponse),
+        (status = 400, description = "`limit`, `kind` or `pipeline` is invalid", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The scheduler or the cluster did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No cluster connection, or the scheduler is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn list_runs(
+    caller: ReadCaller,
+    Query(query): Query<BTreeMap<String, String>>,
+) -> Response {
+    let signed = match caller {
+        // Demo mode has no scheduler: the sample is filtered and capped like a real answer, so
+        // the page's filters and its 400s behave the same way.
+        ReadCaller::Demo => {
+            let result: Result<RunsListResponse, Fail> = match RunsFilter::parse(&query) {
+                Ok(filter) => Ok(filter.answer(crate::demo::runs().runs)),
+                Err(e) => Err(e),
+            };
+            return answer(result);
+        }
+        ReadCaller::Signed(signed) => signed,
+    };
+    answer(
+        runs_across_pipelines(
+            resources(signed.state()).as_ref(),
+            signed.state().airflow.as_ref(),
+            signed.identity(),
+            &query,
         )
         .await,
     )
@@ -5655,6 +5920,303 @@ mod tests {
             last_runs, 2,
             "one last-run call per loaded pipeline: {calls:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn runs_lists_only_visible_pipelines_newest_first() {
+        let resources = memory(&[
+            ("smoke", resource("smoke", Some("analytics"))),
+            ("other", resource("other", Some("finance"))),
+        ]);
+        let (airflow, fake) = fake_airflow::start().await;
+        {
+            let mut fake = fake.lock().unwrap();
+            fake.runs.insert(
+                "stardelt__smoke".into(),
+                vec![
+                    run_started("scheduled__smoke-old", "failed", "2026-10-19T06:00:00Z"),
+                    run_started(SMOKE_RUN, "success", "2026-10-20T07:23:50Z"),
+                ],
+            );
+            fake.runs.insert(
+                "stardelt__other".into(),
+                vec![run_started(OTHER_RUN, "success", "2026-10-21T09:00:00Z")],
+            );
+        }
+
+        let answer = runs_across_pipelines(
+            Some(&resources),
+            Some(&airflow),
+            &who("sub-ada", &["analytics"], false),
+            &BTreeMap::new(),
+        )
+        .await
+        .expect("the runs list succeeds");
+
+        assert_eq!(
+            answer.runs.len(),
+            2,
+            "only the visible pipeline's runs: {:?}",
+            answer.runs
+        );
+        assert!(answer.runs.iter().all(|row| row.name == "smoke"));
+        assert!(
+            answer
+                .runs
+                .iter()
+                .all(|row| row.owner_group.as_deref() == Some("analytics"))
+        );
+        assert!(
+            answer
+                .runs
+                .iter()
+                .all(|row| ["sql", "notebook", "pipeline"].contains(&row.kind.as_str()))
+        );
+        let starts: Vec<Option<&str>> = answer
+            .runs
+            .iter()
+            .map(|row| row.run.started_at.as_deref())
+            .collect();
+        assert_eq!(
+            starts,
+            vec![Some("2026-10-20T07:23:50Z"), Some("2026-10-19T06:00:00Z")],
+            "newest first"
+        );
+    }
+
+    #[tokio::test]
+    async fn runs_filters_by_state_kind_group_and_limit() {
+        fn filter(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+            pairs
+                .iter()
+                .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+                .collect()
+        }
+
+        let resources = memory(&[
+            (
+                "smoke",
+                run_task_resource("smoke", Some("analytics"), "sql"),
+            ),
+            (
+                "notes",
+                run_task_resource("notes", Some("analytics"), "notebook"),
+            ),
+            (
+                "revenue",
+                run_task_resource("revenue", Some("finance"), "sql"),
+            ),
+        ]);
+        let (airflow, fake) = fake_airflow::start().await;
+        {
+            let mut fake = fake.lock().unwrap();
+            fake.dags = vec![
+                dag("stardelt__smoke"),
+                dag("stardelt__notes"),
+                dag("stardelt__revenue"),
+            ];
+            // Newest first, as Airflow answers: a `limit` then keeps the newest run.
+            fake.runs.insert(
+                "stardelt__smoke".into(),
+                vec![
+                    run_started(SMOKE_RUN, "success", "2026-10-20T07:23:50Z"),
+                    run_started("scheduled__smoke-old", "failed", "2026-10-19T06:00:00Z"),
+                ],
+            );
+            fake.runs.insert(
+                "stardelt__notes".into(),
+                vec![run_started(
+                    "scheduled__notes",
+                    "failed",
+                    "2026-10-18T06:00:00Z",
+                )],
+            );
+            fake.runs.insert(
+                "stardelt__revenue".into(),
+                vec![run_started(
+                    "scheduled__revenue",
+                    "failed",
+                    "2026-10-17T06:00:00Z",
+                )],
+            );
+        }
+        let ada = who("sub-ada", &["analytics"], false);
+
+        let all = runs_across_pipelines(Some(&resources), Some(&airflow), &ada, &filter(&[]))
+            .await
+            .expect("the unfiltered list succeeds");
+        assert_eq!(all.runs.len(), 3, "the visible runs: {:?}", all.runs);
+
+        let successes = runs_across_pipelines(
+            Some(&resources),
+            Some(&airflow),
+            &ada,
+            &filter(&[("state", "success")]),
+        )
+        .await
+        .expect("a state filter succeeds");
+        assert_eq!(successes.runs.len(), 1, "{:?}", successes.runs);
+        assert_eq!(successes.runs[0].run.run_id, SMOKE_RUN);
+        assert!(
+            !successes
+                .runs
+                .iter()
+                .any(|row| row.run.run_id == "scheduled__smoke-old"),
+            "an older run of another state is not in the answer"
+        );
+
+        let news = runs_across_pipelines(
+            Some(&resources),
+            Some(&airflow),
+            &ada,
+            &filter(&[("state", "news")]),
+        )
+        .await
+        .expect("an unknown state is not an error");
+        assert!(news.runs.is_empty(), "{:?}", news.runs);
+
+        let sql = runs_across_pipelines(
+            Some(&resources),
+            Some(&airflow),
+            &ada,
+            &filter(&[("kind", "sql")]),
+        )
+        .await
+        .expect("a kind filter succeeds");
+        assert_eq!(sql.runs.len(), 2, "{:?}", sql.runs);
+        assert!(
+            sql.runs
+                .iter()
+                .all(|row| row.kind == "sql" && row.name == "smoke")
+        );
+
+        let finance = runs_across_pipelines(
+            Some(&resources),
+            Some(&airflow),
+            &ada,
+            &filter(&[("group", "finance")]),
+        )
+        .await
+        .expect("a group filter succeeds");
+        assert!(finance.runs.is_empty(), "{:?}", finance.runs);
+
+        let one = runs_across_pipelines(
+            Some(&resources),
+            Some(&airflow),
+            &ada,
+            &filter(&[("limit", "1")]),
+        )
+        .await
+        .expect("a limit succeeds");
+        assert_eq!(one.runs.len(), 1);
+        assert_eq!(one.runs[0].run.run_id, SMOKE_RUN, "the newest row survives");
+    }
+
+    #[tokio::test]
+    async fn runs_rejects_a_bad_limit_and_a_bad_kind() {
+        let resources = memory(&[("smoke", resource("smoke", Some("analytics")))]);
+        let (airflow, fake) = fake_airflow::start().await;
+        let ada = who("sub-ada", &["analytics"], false);
+        let cases: [(&str, &str, &str); 5] = [
+            ("limit", "x", "limit must be a positive integer"),
+            ("limit", "0", "limit must be a positive integer"),
+            ("limit", "201", "limit must be at most 200"),
+            (
+                "kind",
+                "bundle",
+                "kind must be one of sql, notebook, pipeline",
+            ),
+            ("pipeline", "smoke", "pipeline must be <namespace>/<name>"),
+        ];
+        for (key, value, sentence) in cases {
+            let query: BTreeMap<String, String> =
+                [(key.to_string(), value.to_string())].into_iter().collect();
+            let error = runs_across_pipelines(Some(&resources), Some(&airflow), &ada, &query)
+                .await
+                .expect_err("a bad query is refused");
+            assert_eq!(error.status(), StatusCode::BAD_REQUEST, "{key}={value}");
+            assert_eq!(error.message(), sentence, "{key}={value}");
+        }
+        assert!(
+            fake.lock().unwrap().calls.is_empty(),
+            "a refused query never reaches the scheduler"
+        );
+    }
+
+    #[tokio::test]
+    async fn runs_asks_airflow_for_one_dag_list_and_one_run_list_per_loaded_pipeline() {
+        let resources = memory(&[
+            ("smoke", resource("smoke", Some("analytics"))),
+            ("unloaded", resource("unloaded", Some("analytics"))),
+        ]);
+        let (airflow, fake) = fake_airflow::start().await;
+
+        runs_across_pipelines(
+            Some(&resources),
+            Some(&airflow),
+            &who("sub-ada", &["analytics"], false),
+            &BTreeMap::new(),
+        )
+        .await
+        .expect("the runs list succeeds");
+
+        let calls = fake.lock().unwrap().calls.clone();
+        let dag_lists = calls
+            .iter()
+            .filter(|call| call.starts_with("GET /api/v2/dags?"))
+            .count();
+        assert_eq!(
+            dag_lists, 1,
+            "one DAG list for the whole request: {calls:?}"
+        );
+        let run_lists: Vec<&String> = calls
+            .iter()
+            .filter(|call| call.contains("/dagRuns?"))
+            .collect();
+        assert_eq!(
+            run_lists.len(),
+            1,
+            "one run list, only for the loaded pipeline: {calls:?}"
+        );
+        assert!(
+            run_lists
+                .iter()
+                .all(|call| call.contains("stardelt__smoke")),
+            "{calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|call| call.contains("unloaded")),
+            "no call for a DAG the scheduler does not hold: {calls:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn runs_in_demo_mode_answers_the_sample() {
+        let sample = crate::demo::runs();
+        assert!(!sample.runs.is_empty(), "the demo sample has runs");
+        let starts: Vec<Option<&str>> = sample
+            .runs
+            .iter()
+            .map(|row| row.run.started_at.as_deref())
+            .collect();
+        let mut newest_first = starts.clone();
+        newest_first.sort_by(|a, b| b.cmp(a));
+        assert_eq!(starts, newest_first, "the demo sample is newest first");
+    }
+
+    /// One `Pipeline` the Schedule form could have written: a single `run` task of `kind`.
+    fn run_task_resource(name: &str, owner_group: Option<&str>, kind: &str) -> Value {
+        let mut resource = resource(name, owner_group);
+        resource["spec"]["tasks"] = json!([{ "name": "run", "kind": kind }]);
+        resource
+    }
+
+    /// The same run as [`run`], started at `started` (RFC 3339).
+    fn run_started(id: &str, state: &str, started: &str) -> Value {
+        let mut run = run(id, state);
+        run["start_date"] = json!(started);
+        run["logical_date"] = json!(started);
+        run
     }
 
     #[tokio::test]

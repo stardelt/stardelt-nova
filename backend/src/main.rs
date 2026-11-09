@@ -40,6 +40,7 @@
 //!   PUT  /api/connections/{scope}/…/secret  — rotate fields
 //!   DELETE /api/connections/{scope}/…       — delete one
 //!   GET  /api/pipelines                     — the caller's pipelines, with state and last run
+//!   GET  /api/runs                          — every run of the caller's pipelines, newest first
 //!   GET  /api/pipelines/{ns}/{name}         — one pipeline: latest runs, params, options
 //!   GET  /api/streams                      — the caller's StreamApps, with phase and last error
 //!   PATCH /api/streams/{namespace}/{name}  — stop or resume one stream

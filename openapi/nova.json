@@ -4814,6 +4814,115 @@
         }
       }
     },
+    "/api/runs": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "description": "The runs of the caller's visible pipelines, newest first. A run carries the pipeline's `namespace`, `name` and `ownerGroup` and a `kind` of `sql`, `notebook` or `pipeline` (a multi-step pipeline). `limit` defaults to 50 and is at most 200. `state`, `kind`, `group` and `pipeline` (`<namespace>/<name>`) narrow the answer; an unknown state answers no rows rather than an error. A failed scheduler read for one pipeline is logged and skipped, not reported. Answers `Cache-Control: no-store`.",
+        "operationId": "runs_list",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Rows to answer; 50 when absent, at most 200",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "description": "Exact match on the run's state; an unknown state answers no rows",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "description": "`sql`, `notebook` or `pipeline`",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "group",
+            "in": "query",
+            "description": "Exact match on the pipeline's `spec.ownerGroup`",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "pipeline",
+            "in": "query",
+            "description": "One pipeline as `<namespace>/<name>`",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The visible runs, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunsListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`limit`, `kind` or `pipeline` is invalid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token to sign in with",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The scheduler or the cluster did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No cluster connection, or the scheduler is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/saved-queries": {
       "get": {
         "tags": [
@@ -8622,6 +8731,56 @@
             "type": "string"
           }
         }
+      },
+      "RunsListResponse": {
+        "type": "object",
+        "description": "`GET /api/runs`.",
+        "required": [
+          "runs"
+        ],
+        "properties": {
+          "runs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RunsListRow"
+            }
+          }
+        }
+      },
+      "RunsListRow": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/RunView"
+          },
+          {
+            "type": "object",
+            "required": [
+              "namespace",
+              "name",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "description": "`sql`, `notebook`, or `pipeline` for a multi-step pipeline (`run_task_kind`)."
+              },
+              "name": {
+                "type": "string"
+              },
+              "namespace": {
+                "type": "string"
+              },
+              "ownerGroup": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "`spec.ownerGroup`; `None` means administrators only."
+              }
+            }
+          }
+        ],
+        "description": "One run in the cross-pipeline list (`GET /api/runs`)."
       },
       "SavedQuery": {
         "type": "object",

@@ -604,6 +604,30 @@ pub fn pipeline_detail(namespace: &str, name: &str) -> Option<crate::pipelines::
     })
 }
 
+/// `GET /api/runs` in demo mode (#516): every run of the sample pipelines, newest first.
+/// The samples carry one run each — their last — because their detail page has none.
+pub fn runs() -> crate::pipelines::RunsListResponse {
+    let mut runs = Vec::new();
+    for pipeline in pipelines().pipelines {
+        let kind = pipeline
+            .tasks
+            .first()
+            .map(|task| task.kind.clone())
+            .unwrap_or_else(|| "pipeline".into());
+        if let Some(run) = pipeline.last_run.clone() {
+            runs.push(crate::pipelines::RunsListRow {
+                namespace: pipeline.namespace.clone(),
+                name: pipeline.name.clone(),
+                owner_group: pipeline.owner_group.clone(),
+                kind,
+                run,
+            });
+        }
+    }
+    runs.sort_by(|a, b| b.run.started_at.cmp(&a.run.started_at));
+    crate::pipelines::RunsListResponse { runs }
+}
+
 /// `GET /api/pipelines/principals` in demo mode: the two groups above, both able to schedule.
 pub fn pipeline_principals() -> crate::pipelines::PrincipalsResponse {
     use crate::pipelines::{PrincipalView, PrincipalsResponse};
