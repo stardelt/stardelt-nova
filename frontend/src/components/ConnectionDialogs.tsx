@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } fr
 import { ApiError, api, errorMessage, type BreakGlassAnswer, type Connection, type Me } from '../api'
 import { CONNECTION_TYPES, type Field } from '../connectionTypes'
 import { isAdmin } from '../roles'
+import { ConfirmNameField, useConfirmName } from './ConfirmName'
 
 /**
  * The four dialogs of the Connections page: create, rotate, delete and break-glass read.
@@ -794,6 +795,7 @@ export function DeleteConnectionDialog({
   const titleId = `${prefix}-title`
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const confirm = useConfirmName(connection.name)
 
   // Only notebooks consume a connection today (no pipeline, SQL or catalog does — the page copy
   // says so). A managed connection has no consumer at all yet, so deleting one breaks nothing today.
@@ -824,7 +826,7 @@ export function DeleteConnectionDialog({
       onClose={onClose}
       footer={
         <>
-          <button type="button" className="btn-danger" disabled={submitting} onClick={() => void remove()}>
+          <button type="button" className="btn-danger" disabled={submitting || !confirm.ok} onClick={() => void remove()}>
             {submitting ? 'Deleting…' : 'Delete connection'}
           </button>
           <button type="button" className="btn-ghost" onClick={onClose} data-autofocus>Cancel</button>
@@ -837,6 +839,7 @@ export function DeleteConnectionDialog({
         )}
         <p className="text-sm text-text-dim">{consequence}</p>
       </div>
+      {confirm.needed && <ConfirmNameField name={connection.name} typed={confirm.typed} setTyped={confirm.setTyped} />}
       {error && (
         <div role="alert" className="mt-3 rounded-[10px] border border-red-500/40 bg-red-500/10 p-3 text-sm text-bad break-words">
           {error}

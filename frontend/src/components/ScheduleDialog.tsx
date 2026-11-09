@@ -11,6 +11,7 @@ import {
   type PipelineView,
 } from '../api'
 import { formatTime, shortVersion } from '../format'
+import { ConfirmNameField, useConfirmName } from './ConfirmName'
 import {
   BACKOFF_CHOICES,
   DEFAULT_OPTIONS,
@@ -1297,6 +1298,7 @@ export function DeletePipelineDialog({
   const inFlight = useRef(false)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const confirm = useConfirmName(pipeline.name)
 
   async function remove() {
     if (inFlight.current) return
@@ -1321,7 +1323,7 @@ export function DeletePipelineDialog({
       onClose={onClose}
       footer={
         <>
-          <button type="button" className="btn-danger" disabled={submitting} onClick={() => void remove()}>
+          <button type="button" className="btn-danger" disabled={submitting || !confirm.ok} onClick={() => void remove()}>
             {submitting ? 'Deleting…' : 'Delete pipeline'}
           </button>
           <button type="button" className="btn-ghost" onClick={onClose} data-autofocus>
@@ -1334,6 +1336,7 @@ export function DeletePipelineDialog({
         The pipeline and its schedule are removed. Past runs stay readable for a while in Airflow
         but disappear from this page.
       </p>
+      {confirm.needed && <ConfirmNameField name={pipeline.name} typed={confirm.typed} setTyped={confirm.setTyped} />}
       {error && (
         <div role="alert" className="mt-3 rounded-[10px] border border-red-500/40 bg-red-500/10 p-3 text-sm text-bad break-words">
           {error}
