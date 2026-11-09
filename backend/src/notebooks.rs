@@ -911,7 +911,7 @@ pub(crate) fn valid_name(name: &str) -> bool {
 /// A group name is used as an object key prefix. Groups come from the IdP and are
 /// checked against the caller's groups first; this keeps a group that contains a slash
 /// (some IdPs report full paths) from escaping the prefix.
-fn valid_group(group: &str) -> bool {
+pub(crate) fn valid_group(group: &str) -> bool {
     !group.is_empty()
         && group.len() <= 253
         && group
@@ -966,7 +966,7 @@ fn sign_in_again() -> Fail {
     Fail::new(StatusCode::UNAUTHORIZED, "sign in again")
 }
 
-fn forbidden_group(group: &str) -> Fail {
+pub(crate) fn forbidden_group(group: &str) -> Fail {
     Fail::new(
         StatusCode::FORBIDDEN,
         format!("you are not a member of the group {group}"),

@@ -30,6 +30,10 @@ export default function NotebookDetail() {
     queryFn: () => api.notebookParameters(group, name, selected),
     enabled: selected !== undefined,
   })
+  const usage = useQuery({
+    queryKey: ['notebook-usage', group, name],
+    queryFn: () => api.notebookUsage(group, name),
+  })
   const [scheduling, setScheduling] = useState<{ objectVersion: string } | null>(null)
   const [scheduled, setScheduled] = useState<PipelineView | null>(null)
 
@@ -174,6 +178,57 @@ export default function NotebookDetail() {
           )}
         </section>
       )}
+
+      <section className="card p-5">
+        <h2 className="text-lg font-semibold">Where it is used</h2>
+        {usage.isLoading && <p className="mt-2 text-sm text-text-mute">Loading schedules…</p>}
+        {usage.isError && (
+          <div className="mt-2"><ErrorBox error={usage.error} onRetry={() => void usage.refetch()} /></div>
+        )}
+        {usage.data && usage.data.schedules.length === 0 && (
+          <p className="mt-2 text-sm text-text-mute">
+            No schedule runs this notebook yet. Pick a version above and choose “Schedule this version”.
+          </p>
+        )}
+        {usage.data && usage.data.schedules.length > 0 && (
+          <table className="mt-3 w-full text-sm">
+            <caption className="sr-only">Pipelines that run {name}, sorted by name.</caption>
+            <thead className="bg-bg-soft/50">
+              <tr>
+                <th scope="col" className="th px-2 py-2">Pipeline</th>
+                <th scope="col" className="th px-2 py-2">When</th>
+                <th scope="col" className="th px-2 py-2">Pinned version</th>
+                <th scope="col" className="th px-2 py-2">Runs as</th>
+              </tr>
+            </thead>
+            <tbody>
+              {usage.data.schedules.map((row) => {
+                const behind = rows.findIndex((version) => version.objectVersion === row.objectVersion)
+                return (
+                  <tr key={`${row.namespace}/${row.name}`} className="border-t border-border/70">
+                    <td className="td px-2">
+                      <Link
+                        to={`/pipelines/${encodeURIComponent(row.namespace)}/${encodeURIComponent(row.name)}`}
+                        className="font-mono text-xs underline break-all"
+                      >
+                        {row.name}
+                      </Link>
+                    </td>
+                    <td className="td px-2 text-xs">
+                      {row.cron ? <span className="font-mono">{row.cron} · {row.timezone ?? 'UTC'}</span> : 'On demand'}
+                    </td>
+                    <td className="td px-2 text-xs">
+                      <span className="font-mono" title={row.objectVersion}>{shortVersion(row.objectVersion)}</span>
+                      {behind > 0 && <span className="text-text-mute"> · {behind} version{behind === 1 ? '' : 's'} behind</span>}
+                    </td>
+                    <td className="td px-2 text-xs font-mono">{row.runAs ?? '—'}</td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        )}
+      </section>
 
       {scheduling && (
         <ScheduleDialog

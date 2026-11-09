@@ -2070,6 +2070,31 @@ pub struct RunsListResponse {
     pub runs: Vec<RunsListRow>,
 }
 
+/// One pipeline that runs a published notebook (`GET /api/notebooks/{group}/{name}/usage`,
+/// stardelt-nova#517): a Schedule is a one-task `Pipeline` (#516), so this is its resource.
+#[derive(Debug, Clone, PartialEq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct NotebookScheduleRow {
+    pub namespace: String,
+    pub name: String,
+    pub owner_group: String,
+    /// The pinned `config.objectVersion`; a schedule runs exactly these bytes.
+    pub object_version: String,
+    /// `spec.schedule.cron`; `None` for a pipeline that runs on demand.
+    pub cron: Option<String>,
+    /// `spec.schedule.timezone`; `None` for a pipeline that runs on demand.
+    pub timezone: Option<String>,
+    /// `spec.runAs`.
+    pub run_as: Option<String>,
+}
+
+/// `GET /api/notebooks/{group}/{name}/usage`.
+#[derive(Debug, Clone, PartialEq, Serialize, utoipa::ToSchema)]
+pub struct NotebookUsageResponse {
+    /// The visible pipelines that run this notebook, sorted by name.
+    pub schedules: Vec<NotebookScheduleRow>,
+}
+
 /// `GET /api/pipelines/{namespace}/{name}`: the view, the latest runs and the resource's
 /// parameters, retry policy and options.
 #[derive(Debug, Clone, PartialEq, Serialize, utoipa::ToSchema)]
@@ -4149,6 +4174,8 @@ pub(crate) fn router() -> Router<Arc<AppState>> {
         .route("/pipelines", get(list).post(create))
         // The Runs page (#516): every run of the caller's pipelines, newest first.
         .route("/runs", get(list_runs))
+        // The notebook page's "where it is used": the pipelines that run one published notebook (#517).
+        .route("/notebooks/{group}/{name}/usage", get(notebook_usage))
         // The caller's groups and their pipeline principals, before any `{namespace}/{name}`
         // route can see the word "principals" as a name.
         .route("/pipelines/principals", get(principals))
@@ -4289,6 +4316,112 @@ pub(crate) async fn list_runs(
         )
         .await,
     )
+}
+
+/// The visible pipelines whose single task is `kind: notebook` with `config.notebook == name`,
+/// owned by `group`. Administrators get no wider view than a member: the notebook page is
+/// owner-group scoped (the rule `notebooks.rs` documents).
+fn notebook_usage_rows(
+    resources: &[Value],
+    who: &Identity,
+    group: &str,
+    name: &str,
+) -> Vec<NotebookScheduleRow> {
+    let mut rows: Vec<NotebookScheduleRow> = resources
+        .iter()
+        .filter(|resource| visible(who, spec_of(resource)))
+        .filter_map(|resource| {
+            let spec = spec_of(resource);
+            if spec.get("ownerGroup").and_then(Value::as_str) != Some(group) {
+                return None;
+            }
+            let task = spec.get("tasks")?.as_array()?.first()?;
+            if task.get("kind").and_then(Value::as_str) != Some("notebook") {
+                return None;
+            }
+            let config = task.get("config")?;
+            if config.get("notebook").and_then(Value::as_str) != Some(name) {
+                return None;
+            }
+            Some(NotebookScheduleRow {
+                namespace: crate::cluster::namespace(),
+                name: pipeline_name(resource).to_string(),
+                owner_group: group.to_string(),
+                object_version: config.get("objectVersion")?.as_str()?.to_string(),
+                cron: spec
+                    .get("schedule")
+                    .and_then(|s| s.get("cron"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                timezone: spec
+                    .get("schedule")
+                    .and_then(|s| s.get("timezone"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                run_as: spec
+                    .get("runAs")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            })
+        })
+        .collect();
+    rows.sort_by(|a, b| a.name.cmp(&b.name));
+    rows
+}
+
+#[utoipa::path(
+    get,
+    operation_id = "notebooks_usage",
+    path = "/api/notebooks/{group}/{name}/usage",
+    tag = "public",
+    description = "The pipelines that run one published notebook — the schedules and on-demand pipelines of that group, sorted by name. Each row is the one-task `Pipeline` a Schedule created (#516): its pinned `objectVersion`, its cron and timezone when it has a schedule, and its `runAs`. Owner-group scoped: a caller who is not a member of `group` answers 403, and an administrator gets no wider view. Answers `Cache-Control: no-store`.",
+    params(
+        ("group" = String, Path, description = "The notebook's owner group"),
+        ("name" = String, Path, description = "The notebook's `.ipynb` file name"),
+    ),
+    responses(
+        (status = 200, description = "The visible schedules, sorted by name", body = NotebookUsageResponse),
+        (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller is not a member of the group", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The cluster did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No cluster connection", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn notebook_usage(
+    caller: ReadCaller,
+    Path((group, name)): Path<(String, String)>,
+) -> Response {
+    let signed = match caller {
+        ReadCaller::Demo => {
+            return answer(Ok(NotebookUsageResponse {
+                schedules: Vec::new(),
+            }));
+        }
+        ReadCaller::Signed(signed) => *signed,
+    };
+    if !signed.identity().groups.iter().any(|g| g == &group) {
+        return crate::notebooks::forbidden_group(&group).into_response();
+    }
+    if !crate::notebooks::valid_group(&group) {
+        return Fail::new(
+            StatusCode::BAD_REQUEST,
+            "the group name cannot be used as a notebook prefix",
+        )
+        .into_response();
+    }
+    if !crate::notebooks::valid_name(&name) {
+        return Fail::new(StatusCode::BAD_REQUEST, "a notebook name ends in .ipynb")
+            .into_response();
+    }
+    let Some(resources) = resources(signed.state()) else {
+        return no_cluster().into_response();
+    };
+    match resources.list().await {
+        Ok(list) => answer(Ok(NotebookUsageResponse {
+            schedules: notebook_usage_rows(&list, signed.identity(), &group, &name),
+        })),
+        Err(error) => resource_fail(error).into_response(),
+    }
 }
 
 #[utoipa::path(
@@ -10193,6 +10326,38 @@ mod tests {
         assert!(!odd.editable, "the form edits exactly one run task");
         assert_eq!(odd.document.sql, None, "no statement is claimed for it");
         assert_eq!(odd.document.name, "two-tasks");
+    }
+
+    #[tokio::test]
+    async fn notebook_usage_lists_only_this_groups_pipelines_for_the_notebook() {
+        let notebook = |name: &str, group: &str, file: &str, version: &str| {
+            pipeline_resource(
+                name,
+                group,
+                &Statement::Notebook {
+                    name: file.to_string(),
+                    object_version: version.to_string(),
+                    params: Default::default(),
+                },
+                Some(&("0 3 * * *".to_string(), "UTC".to_string())),
+                &Default::default(),
+                &default_options(),
+                "ann",
+            )
+        };
+        let resources = vec![
+            notebook("smoke-daily", "analytics", "smoke.ipynb", "v3"),
+            notebook("other-daily", "analytics", "other.ipynb", "v1"),
+            notebook("fin-daily", "finance", "smoke.ipynb", "v2"),
+        ];
+        let ann = who("sub-ann", &["analytics"], false);
+        let rows = notebook_usage_rows(&resources, &ann, "analytics", "smoke.ipynb");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "smoke-daily");
+        assert_eq!(rows[0].object_version, "v3");
+        assert_eq!(rows[0].cron.as_deref(), Some("0 3 * * *"));
+        // The finance pipeline runs the same file, but the notebook page is group-scoped.
+        assert!(notebook_usage_rows(&resources, &ann, "analytics", "fin-daily").is_empty());
     }
 
     #[tokio::test]
