@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
-import { ApiError, api, type Catalog } from '../api'
+import { ApiError, api, type Catalog, type NamespaceList, type TableList } from '../api'
+import { recall, remember } from '../catalogCache'
 import ErrorBox from './ErrorBox'
 import LayerBadge from './LayerBadge'
 import ObjectIcon from './ObjectIcon'
@@ -93,6 +94,9 @@ function CatalogNode({
   // schema open and no table selected (stardelt-nova#584). A table opened from the tree lives
   // in this page's state, not in the URL, so the selection is part of the test.
   const current = catalog.name === deepLinkCatalog && !params.get('ns') && selected === null
+  const qc = useQueryClient()
+  // The last schema list is shown at once and refreshed in the background (stardelt-nova#644).
+  const loadNamespaces = async () => remember(`ns:${catalog.name}`, await api.namespaces(catalog.name))
 
   useEffect(() => {
     if (catalog.name === deepLinkCatalog) setOpen(true)
@@ -100,9 +104,20 @@ function CatalogNode({
 
   const namespaces = useQuery({
     queryKey: ['catalog', 'namespaces', catalog.name],
-    queryFn: () => api.namespaces(catalog.name),
+    queryFn: loadNamespaces,
+    placeholderData: () => recall<NamespaceList>(`ns:${catalog.name}`),
+    staleTime: 300_000,
     enabled: open,
   })
+
+  // Hovering the row starts the request, so the click that opens it rarely waits.
+  const prefetchNamespaces = () => {
+    void qc.prefetchQuery({
+      queryKey: ['catalog', 'namespaces', catalog.name],
+      queryFn: loadNamespaces,
+      staleTime: 300_000,
+    })
+  }
 
   const onCatalogClick = () => {
     if (catalog.name === urlCatalog) {
@@ -126,6 +141,8 @@ function CatalogNode({
         aria-expanded={open}
         aria-current={current ? 'true' : undefined}
         onClick={onCatalogClick}
+        onMouseEnter={prefetchNamespaces}
+        onFocus={prefetchNamespaces}
         className={[
           'w-full flex items-center gap-2 text-left px-2 py-1.5 rounded-[8px]',
           current
@@ -138,6 +155,9 @@ function CatalogNode({
         </span>
         <ObjectIcon kind="catalog" />
         <span className="text-sm font-medium">{catalog.name}</span>
+        {namespaces.isPlaceholderData && namespaces.isFetching && (
+          <span className="ml-auto h-1.5 w-1.5 rounded-full bg-accent animate-pulse" title="updating" aria-label="updating" />
+        )}
         <LayerBadge layer={catalog.layer} />
       </button>
       {open && (
@@ -344,9 +364,21 @@ function SchemaNode({
 
   const tables = useQuery({
     queryKey: ['catalog', 'tables', catalogName, ns],
-    queryFn: () => api.tables(ns, catalogName),
+    queryFn: async () => remember(`tables:${catalogName}:${ns}`, await api.tables(ns, catalogName)),
+    placeholderData: () => recall<TableList>(`tables:${catalogName}:${ns}`),
+    staleTime: 300_000,
     enabled: open,
   })
+
+  // The last table list shows at once; hovering starts the refresh before the click.
+  const qc = useQueryClient()
+  const prefetchTables = () => {
+    void qc.prefetchQuery({
+      queryKey: ['catalog', 'tables', catalogName, ns],
+      queryFn: async () => remember(`tables:${catalogName}:${ns}`, await api.tables(ns, catalogName)),
+      staleTime: 300_000,
+    })
+  }
 
   const filterTrimmed = filter.trim()
   const matches = (name: string) => {
@@ -366,6 +398,8 @@ function SchemaNode({
         aria-expanded={open}
         aria-current={current ? 'true' : undefined}
         onClick={onSchemaClick}
+        onMouseEnter={prefetchTables}
+        onFocus={prefetchTables}
         className={[
           'w-full flex items-center gap-2 text-left px-2 py-1.5 rounded-[8px]',
           current
@@ -378,6 +412,9 @@ function SchemaNode({
         </span>
         <ObjectIcon kind="schema" />
         <span className="text-sm font-medium">{ns}</span>
+        {tables.isPlaceholderData && tables.isFetching && (
+          <span className="ml-auto h-1.5 w-1.5 rounded-full bg-accent animate-pulse" title="updating" aria-label="updating" />
+        )}
         {tables.data && <span className="ml-auto text-[11px] text-text-mute">{visible.length}</span>}
       </button>
       {open && (
