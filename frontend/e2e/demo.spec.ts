@@ -25,6 +25,31 @@ test('demo mode: the Pipelines page lists the two samples', async ({ page }) => 
   await expect(page.getByText('ingest_orders')).toBeVisible()
 })
 
+test('demo mode: the Pipelines list says where each sample comes from, and the filter narrows it', async ({ page }) => {
+  await page.goto('/pipelines')
+  const daily = page.getByRole('row', { name: /daily_revenue/ })
+  const orders = page.getByRole('row', { name: /ingest_orders/ })
+  // Deployed from the bundle, and one someone changed by hand afterwards (nova#618).
+  await expect(daily).toContainText('Git · shop-etl/prod @ abc1234')
+  await expect(daily.getByText('changed by hand')).toHaveCount(0)
+  await expect(orders).toContainText('Git · shop-etl/prod @ abc1234')
+  await expect(orders.getByText('changed by hand')).toBeVisible()
+  // The choice is in the address, so a reload keeps it; `replace` keeps Back out of it.
+  const filter = page.getByLabel('Source', { exact: true })
+  await filter.selectOption('modified')
+  await expect(page).toHaveURL(/[?&]source=modified\b/)
+  await expect(daily).toHaveCount(0)
+  await expect(orders).toBeVisible()
+  await page.reload()
+  await expect(page.getByLabel('Source', { exact: true })).toHaveValue('modified')
+  await expect(daily).toHaveCount(0)
+  await page.getByLabel('Source', { exact: true }).selectOption('nova')
+  await expect(page.getByText('No pipeline matches this source.')).toBeVisible()
+  await page.getByLabel('Source', { exact: true }).selectOption('all')
+  await expect(daily).toBeVisible()
+  await expect(orders).toBeVisible()
+})
+
 test('demo mode: the Connections page offers no write action that would answer 503', async ({ page }) => {
   await page.goto('/connections')
   await page.waitForLoadState('networkidle')

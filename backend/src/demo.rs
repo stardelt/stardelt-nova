@@ -552,7 +552,16 @@ pub fn pipelines() -> crate::pipelines::PipelineListResponse {
                 run_as: Some("pipeline-analytics".into()),
                 concurrency: "Allow".into(),
                 created_at: Some("2026-10-21T09:15:00Z".into()),
-                deployment: None,
+                // A sample that shows where a pipeline comes from (stardelt-nova#618): deployed
+                // from the `shop-etl` bundle and not touched since.
+                deployment: Some(crate::pipelines::DeploymentView {
+                    bundle: "shop-etl".into(),
+                    target: "prod".into(),
+                    revision: Some("abc1234e5678".into()),
+                    deployed_by: Some("ada".into()),
+                    deployed_at: Some("2026-11-01T08:00:00Z".into()),
+                    modified: None,
+                }),
             },
             PipelineView {
                 name: "ingest_orders".into(),
@@ -574,7 +583,16 @@ pub fn pipelines() -> crate::pipelines::PipelineListResponse {
                 run_as: Some("pipeline-mobility".into()),
                 concurrency: "Allow".into(),
                 created_at: Some("2026-10-29T14:20:00Z".into()),
-                deployment: None,
+                // The same bundle, changed by hand after the deploy: the amber badge
+                // (`deployment.modified`) needs a sample to show.
+                deployment: Some(crate::pipelines::DeploymentView {
+                    bundle: "shop-etl".into(),
+                    target: "prod".into(),
+                    revision: Some("abc1234e5678".into()),
+                    deployed_by: Some("ada".into()),
+                    deployed_at: Some("2026-11-01T08:00:00Z".into()),
+                    modified: Some(true),
+                }),
             },
         ],
     }
