@@ -44,6 +44,9 @@
 //!   GET  /api/pipelines/{ns}/{name}         — one pipeline: latest runs, params, options
 //!   GET  /api/streams                      — the caller's StreamApps, with phase and last error
 //!   PATCH /api/streams/{namespace}/{name}  — stop or resume one stream
+//!   GET  /api/compute                      — the Spark clusters the caller may use
+//!   POST /api/compute/{name}/start         — start one: `spec.state: Running`
+//!   POST /api/compute/{name}/stop          — stop one: `spec.state: Stopped`
 //!   POST /api/pipelines/check               — what the engine says about a statement (EXPLAIN)
 //!   POST /api/pipelines/preview-schedule    — the next fire times of a cron in its zone
 //!   GET  /api/pipelines/{ns}/{name}/runs/{run_id} — one run with its tasks
@@ -85,6 +88,7 @@ mod catalog_metrics;
 mod catalog_search;
 mod catalog_token;
 mod cluster;
+mod compute;
 mod connection_routes;
 mod connections;
 mod data;
@@ -606,6 +610,11 @@ fn api_router() -> Router<Arc<AppState>> {
         // The SQL compute classes and the one this caller lands in (stardelt-nova#236): read
         // from the `SqlWarehouse` objects, non-authoritative — the engine selects by identity.
         .route("/warehouses", get(warehouses::list))
+        // The Spark clusters a person may use (internal#161 slice 5a): the operator translates
+        // a SparkCluster into the Spark server, Nova only lists it and sets `spec.state`.
+        .route("/compute", get(compute::list))
+        .route("/compute/{name}/start", post(compute::start))
+        .route("/compute/{name}/stop", post(compute::stop))
         // What is in each of them (stardelt-nova#249): one row per catalog, read in the
         // background every five minutes by the refresher (#263).
         .route("/catalog/metrics", get(catalog_metrics::get))

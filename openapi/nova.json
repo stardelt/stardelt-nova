@@ -1515,6 +1515,244 @@
         }
       }
     },
+    "/api/compute": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`GET /api/compute`: the Spark clusters this caller may use.",
+        "description": "The Spark clusters the caller may use: an administrator sees every `SparkCluster` of the platform namespace, everyone else the ones owned by one of their groups, owned by them (`owner.user` is the sign-in name) and the `shared` one. Each row carries the owner, the class `size`, the `runtime`, the operator's `phase` (`Starting` for a requested `Running` before it has reported, `Stopped` otherwise), the Connect `endpoint` and `startedAt` while it runs, `lastActivityAt` once the operator reports it, `idleStopMinutes` (`0` on the shared cluster), `canUse` and `shared`. Nothing in Nova is state of its own: the operator translates a `SparkCluster` into the Spark server. Without a cluster connection (demo mode, a local run) the answer is the one shared cluster. Answers `Cache-Control: no-store`.",
+        "operationId": "compute_list",
+        "responses": {
+          "200": {
+            "description": "The caller's clusters, sorted by name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ComputeResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token to sign in with",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The cluster did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No cluster connection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/compute/{name}/start": {
+      "post": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`POST /api/compute/{name}/start`: set `spec.state: Running`.",
+        "description": "Start one Spark cluster by merge-patching `spec.state: Running`; the answer is the updated cluster. Idempotent: a cluster already `Running` answers its view without a patch. A cluster the caller may not use and a name that does not exist both answer the same `404`. A non-administrator on the `shared` cluster answers `403` (it is always on). A cluster the operator is still `Starting` or `Stopping` answers `409`.",
+        "operationId": "compute_start",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "The cluster's name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The cluster, with `spec.state: Running` applied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ComputeCluster"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token to sign in with",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A non-administrator on the shared cluster",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such cluster, or the caller may not use it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The cluster is starting or stopping",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The cluster did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No cluster connection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/compute/{name}/stop": {
+      "post": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`POST /api/compute/{name}/stop`: set `spec.state: Stopped`.",
+        "description": "Stop one Spark cluster by merge-patching `spec.state: Stopped`; the answer is the updated cluster. Idempotent: a cluster already `Stopped` answers its view without a patch. A cluster the caller may not use and a name that does not exist both answer the same `404`. A non-administrator on the `shared` cluster answers `403` (it is always on). A cluster the operator is still `Starting` or `Stopping` answers `409`.",
+        "operationId": "compute_stop",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "The cluster's name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The cluster, with `spec.state: Stopped` applied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ComputeCluster"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token to sign in with",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A non-administrator on the shared cluster",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such cluster, or the caller may not use it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The cluster is starting or stopping",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The cluster did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No cluster connection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/connections": {
       "get": {
         "tags": [
@@ -6612,6 +6850,103 @@
           "type": {
             "type": "string",
             "description": "The field's type as text; a complex type is its JSON text."
+          }
+        }
+      },
+      "ComputeCluster": {
+        "type": "object",
+        "description": "One `SparkCluster`, as the Compute page needs it.",
+        "required": [
+          "name",
+          "owner",
+          "size",
+          "runtime",
+          "phase",
+          "idleStopMinutes",
+          "canUse",
+          "shared"
+        ],
+        "properties": {
+          "canUse": {
+            "type": "boolean"
+          },
+          "displayName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "endpoint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "idleStopMinutes": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "lastActivityAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "owner": {
+            "$ref": "#/components/schemas/ComputeOwner"
+          },
+          "phase": {
+            "type": "string"
+          },
+          "runtime": {
+            "type": "string"
+          },
+          "shared": {
+            "type": "boolean"
+          },
+          "size": {
+            "type": "string"
+          },
+          "startedAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "ComputeOwner": {
+        "type": "object",
+        "description": "The `SparkCluster`'s owner: a group or a person, exactly one of the two.",
+        "properties": {
+          "group": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "user": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "ComputeResponse": {
+        "type": "object",
+        "required": [
+          "clusters"
+        ],
+        "properties": {
+          "clusters": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ComputeCluster"
+            }
           }
         }
       },
