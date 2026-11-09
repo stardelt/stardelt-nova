@@ -170,6 +170,33 @@
   }
 }
 
+/* Motion tokens (nova#512): one easing, three durations. Components use the variables,
+   never a literal duration, so the page rhythm stays one decision. */
+:root {
+  --motion-hover: 120ms;
+  --motion-panel: 200ms;
+  --motion-page: 320ms;
+  --motion-ease: cubic-bezier(.2, .8, .2, 1);
+}
+
+/* A loading block, not a spinner: it keeps the final height while the data is in flight. */
+@keyframes skeleton-shimmer {
+  from { background-position: 100% 0; }
+  to   { background-position: -100% 0; }
+}
+
+.skeleton {
+  border-radius: 8px;
+  background-color: rgb(var(--c-bg-soft));
+  background-image: linear-gradient(90deg, transparent, rgb(var(--c-border) / 0.35), transparent);
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.2s var(--motion-ease) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton { animation: none; background-image: none; }
+}
+
 @layer components {
   .card {
     @apply rounded-[14px] border border-border bg-bg-elev/60;

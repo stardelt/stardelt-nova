@@ -5,6 +5,7 @@ import { ApiError, api, errorMessage, type CatalogStat } from '../api'
 import { formatBytes, formatCount, formatTime, relativeTime, rowsLabel, statusLabel } from '../format'
 import ErrorBox from '../components/ErrorBox'
 import { EmptyState } from '../components/EmptyState'
+import { SkeletonTable } from '../components/Skeleton'
 import { Icon } from '../components/Icon'
 import LayerBadge from '../components/LayerBadge'
 import { isAdmin } from '../roles'
@@ -241,7 +242,7 @@ function CatalogsCard({ metrics, error, denied, admin, pending, refreshing, refr
         </div>
       </div>
       {refreshError && <p role="status" className="text-xs text-bad mb-2 break-words">{refreshError}</p>}
-      {!metrics && !error && <div className="text-text-mute text-sm">loading…</div>}
+      {!metrics && !error && <SkeletonTable rows={8} />}
       {denied && (
         <div className="space-y-1">
           <p role="status" className="text-sm break-words">{errorMessage(error)}</p>
