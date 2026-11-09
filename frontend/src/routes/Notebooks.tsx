@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
+import { Link } from 'react-router-dom'
 import { api, errorMessage } from '../api'
 import { isAdmin } from '../roles'
 import PublishedNotebooks from '../components/PublishedNotebooks'
@@ -26,8 +27,9 @@ const HUBS: Array<{ label: string; path: string }> = [
  * JupyterHub. The embedded frame is gone on purpose (2026-11-02) — JupyterHub is
  * a first-class app in the launcher (`/apps`), and an app the browser frames badly
  * is worse than a button that opens it properly. What stays here is what this page
- * is for: the published notebooks, and the three things a person needs first —
- * how to open their server, how to connect VS Code, and where the API tokens are.
+ * is for: the published notebooks, and the way into the hub. The VS Code steps,
+ * the server and the API tokens are personal settings and live on Profile (Profile
+ * card "Notebooks: your server, tokens and VS Code", stardelt-nova#516).
  */
 export default function Notebooks() {
   const apps = useQuery({ queryKey: ['embeds'], queryFn: api.embeds, refetchInterval: 15_000 })
@@ -39,7 +41,6 @@ export default function Notebooks() {
   const base = (safeHttpUrl(jupyter?.external_url) ?? safeHttpUrl(FALLBACK))?.replace(/\/+$/, '')
   const at = (path: string) => (up && base ? `${base}${path}` : undefined)
   const open = at('/hub/')
-  const user = me.data?.user
 
   return (
     <div className="space-y-5">
@@ -57,6 +58,7 @@ export default function Notebooks() {
               Open JupyterHub ↗
             </a>
           )}
+          <Link to="/profile" className="btn-ghost py-1.5 text-xs">VS Code and tokens</Link>
         </div>
       </header>
 
@@ -88,50 +90,6 @@ export default function Notebooks() {
       )}
 
       <PublishedNotebooks />
-
-      {up && base && (
-        <details className="card px-5 py-3 text-sm">
-          <summary className="cursor-pointer text-text-dim">
-            Connect from VS Code, start your own server, API tokens
-          </summary>
-          <div className="grid gap-6 pt-4 md:grid-cols-2">
-            <section>
-              <h2 className="font-semibold">VS Code</h2>
-              <ol className="list-decimal ml-5 mt-2 space-y-1 text-text-dim">
-                <li>
-                  Create a token under{' '}
-                  <a className="text-accent" href={at('/hub/token')} target="_blank" rel="noreferrer">API tokens</a>.
-                </li>
-                <li>
-                  In VS Code run <em>Jupyter: Specify Jupyter Server for Connections</em>, then choose <em>Existing</em>.
-                </li>
-                <li>
-                  Server URL <code>{base}/user/{user ?? '<you>'}/</code>, and paste the token.
-                </li>
-              </ol>
-              <p className="text-text-mute mt-2">
-                The hub sends you to your own server first; the URL is the one in the address bar
-                after <em>My server</em>. A token is a password for that server — revoke it on the
-                same page.
-              </p>
-            </section>
-            <section>
-              <h2 className="font-semibold">Your server and tokens</h2>
-              <p className="text-text-dim mt-2">
-                <a className="text-accent" href={at('/hub/spawn')} target="_blank" rel="noreferrer">Start server</a>{' '}
-                creates or restarts your JupyterLab.{' '}
-                <a className="text-accent" href={at('/hub/home')} target="_blank" rel="noreferrer">Hub home</a>{' '}
-                shows its status, stops it and holds the server list.
-              </p>
-              <p className="text-text-dim mt-2">
-                <a className="text-accent" href={at('/hub/token')} target="_blank" rel="noreferrer">API tokens</a>{' '}
-                are what VS Code, the <code>jupyter</code> CLI and REST calls use; they are per person,
-                not per notebook.
-              </p>
-            </section>
-          </div>
-        </details>
-      )}
     </div>
   )
 }

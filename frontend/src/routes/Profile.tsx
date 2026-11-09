@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { api } from '../api'
 import ErrorBox from '../components/ErrorBox'
+import NotebookConnections, { useNotebookConnectionsAvailable } from '../components/NotebookConnections'
 import { useYourWarehouse, warehouseHint, warehouseText } from '../components/WarehouseNote'
 import { formatTime } from '../format'
 import { isAdmin } from '../roles'
@@ -97,6 +98,8 @@ export default function Profile() {
   const groups = data?.groups ?? []
   // The SQL compute class this person lands in (#236); `undefined` while it is unknown.
   const warehouse = useYourWarehouse()
+  // Your hub server and the ways into it (#516) — only worth a card when the hub is up.
+  const notebooks = useNotebookConnectionsAvailable()
 
   return (
     <div className="max-w-3xl space-y-6">
@@ -192,6 +195,14 @@ export default function Profile() {
             )}
             {!admin && <p className="mt-2 text-sm text-text-dim">{MEMBER_SENTENCE}</p>}
           </Card>
+
+          {notebooks && (
+            <Card title="Notebooks: your server, tokens and VS Code">
+              <div className="mt-3">
+                <NotebookConnections />
+              </div>
+            </Card>
+          )}
 
           <Card title="What your groups give you today">
             <p className="mt-1 text-xs text-text-mute">As more features arrive this list grows.</p>
