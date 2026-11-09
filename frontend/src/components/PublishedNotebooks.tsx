@@ -157,7 +157,14 @@ function NotebookRow({
   return (
     <Fragment>
       <tr className="border-t border-border/70 hover:bg-bg-soft/30">
-        <td className="td px-5"><span className="font-mono text-xs break-all">{row.name}</span></td>
+        <td className="td px-5">
+          <Link
+            className="underline font-mono text-xs break-all"
+            to={`/notebooks/${encodeURIComponent(row.group)}/${encodeURIComponent(row.name)}`}
+          >
+            {row.name}
+          </Link>
+        </td>
         <td className="td px-3">{row.group}</td>
         <td className="td px-3">
           <span className="font-mono text-xs" title={row.objectVersion}>{shortVersion(row.objectVersion)}</span>

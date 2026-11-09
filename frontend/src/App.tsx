@@ -19,6 +19,7 @@ import Lineage from './routes/Lineage'
 import Health from './routes/Health'
 import Dashboards from './routes/Dashboards'
 import Notebooks from './routes/Notebooks'
+import NotebookDetail from './routes/NotebookDetail'
 import Settings from './routes/Settings'
 import Preferences from './routes/Preferences'
 import Profile from './routes/Profile'
@@ -45,6 +46,7 @@ export default function App() {
         <Route path="/lineage"    element={<Lineage    />} />
         <Route path="/dashboards" element={<Dashboards />} />
         <Route path="/notebooks"  element={<Notebooks  />} />
+        <Route path="/notebooks/:group/:name" element={<NotebookDetail />} />
         <Route path="/health"     element={<RequireAdmin><Health    /></RequireAdmin>} />
         <Route path="/settings"   element={<RequireAdmin><Settings  /></RequireAdmin>} />
         <Route path="/preferences" element={<Preferences />} />
