@@ -1602,11 +1602,13 @@ test.describe('catalog explorer', () => {
     const editor = page.getByLabel('SQL query')
     await expect(editor).toHaveValue('SELECT * FROM warehouse.nyc_taxi.trips LIMIT 100')
 
-    await page.getByRole('combobox', { name: 'Catalog' }).selectOption('finance')
+    // The catalog list is the tree in the Tables pane (#586), not a dropdown.
+    await expect(page.getByRole('combobox', { name: 'Catalog' })).toHaveCount(0)
+    const tree = page.getByRole('list', { name: 'Catalogs' })
+    await tree.getByRole('button', { name: /finance/ }).click()
     // The sample is regenerated for the catalog the person chose, and the choice is in the URL.
     await expect(editor).toHaveValue('SELECT * FROM finance.seed.nation LIMIT 100')
     await expect(page).toHaveURL(/[?&]catalog=finance\b/)
-    await expect(page.getByText('Samples and inserted table names use this catalog.')).toBeVisible()
     judge('/query', await auditPage(page))
     await context.close()
   })

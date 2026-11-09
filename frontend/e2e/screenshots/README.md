@@ -62,3 +62,10 @@ Overview's metrics, catalogs and jobs stubbed so the page behind it renders. The
 open with an empty query, so every group is visible and the admin group is absent: the
 palette applies the same admin filter as the sidebar. At 390 px the panel is 358 px wide
 and the page does not scroll sideways.
+
+`sql-panes-*.png` — the SQL editor's two side panes (stardelt-nova#586) at 1440×900 with
+both open, at 1440×900 with both collapsed, and at 390×900 where both start collapsed,
+dark, from the built demo UI. The Tables pane holds the search box and the catalog tree
+with `warehouse` open on `nyc_taxi`, the History pane the history and the saved queries.
+Collapsed, each pane is a 40 px rail with a rotated label; at 390 px the rails are compact
+bars above and below the editor and the page does not scroll sideways.
