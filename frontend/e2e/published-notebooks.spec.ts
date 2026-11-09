@@ -179,6 +179,36 @@ test.describe('published notebooks', () => {
     await context.close()
   })
 
+  test('the notebook name opens its page with its versions', async ({ browser }) => {
+    const { context, page } = await open(browser)
+    const section = page.getByRole('region', { name: 'Published notebooks' })
+    await section.getByRole('link', { name: 'smoke.ipynb' }).click()
+    await expect(page).toHaveURL('/notebooks/analytics/smoke.ipynb')
+    await expect(page.getByRole('heading', { level: 1, name: 'smoke.ipynb' })).toBeVisible()
+    const table = page.getByRole('table', { name: 'Published versions of smoke.ipynb, newest first.' })
+    await expect(table.getByRole('row')).toHaveCount(3)
+    await expect(table.getByRole('row', { name: new RegExp(V3.slice(0, 8)) })).toBeVisible()
+    await expect(table.getByRole('row', { name: new RegExp(V2.slice(0, 8)) })).toBeVisible()
+    await expect(page.getByRole('heading', { name: `Parameters of ${V3.slice(0, 8)}` })).toBeVisible()
+    await expect(page.getByText('days = 1')).toBeVisible()
+    await expect(page.getByText('region = eu')).toBeVisible()
+
+    const asked = page.waitForRequest((request) =>
+      request.url().includes(`/api/notebooks/analytics/smoke.ipynb/parameters?version=${V2}`),
+    )
+    await table
+      .getByRole('row', { name: new RegExp(V2.slice(0, 8)) })
+      .getByRole('button', { name: 'Schedule this version' })
+      .click()
+    await asked
+    await expect(page.getByRole('heading', { name: `Parameters of ${V2.slice(0, 8)}` })).toBeVisible()
+
+    await page.goto('/notebooks/analytics/smoke.ipynb')
+    await expect(page.getByRole('heading', { level: 1, name: 'smoke.ipynb' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: `Parameters of ${V3.slice(0, 8)}` })).toBeVisible()
+    await context.close()
+  })
+
   test('an empty list says how to publish', async ({ browser }) => {
     const { context, page } = await open(browser, { notebooks: [] })
     const section = page.getByRole('region', { name: 'Published notebooks' })
