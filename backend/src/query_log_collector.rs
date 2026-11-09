@@ -100,6 +100,48 @@ fn dataset(dotted: &str) -> Option<crate::lineage_event::LineageDataset> {
     })
 }
 
+/// Who a query belongs to: `(job namespace, job name, run key)`. The first rule wins.
+///
+/// A query the platform started for a pipeline belongs to that pipeline and shares one run
+/// with every other query of the same run; a notebook query belongs to the notebook helper,
+/// a SQL-editor query to the person at the editor, and everything else to the engine user.
+/// All queries of one run share the same run key, and therefore the same run id.
+fn job_of(record: &QueryLogRecord) -> (String, String, String) {
+    let tag_value = |prefix: &str| {
+        record
+            .client_tags
+            .iter()
+            .find_map(|tag| tag.strip_prefix(prefix).map(str::to_string))
+    };
+    if let Some(pipeline) = tag_value("pipeline=") {
+        let run = tag_value("run=").unwrap_or_else(|| record.query_id.clone());
+        return (
+            "pipeline".to_string(),
+            pipeline.clone(),
+            format!("pipeline:{pipeline}:{run}"),
+        );
+    }
+    if record.source.as_deref() == Some("stardelt-notebook-helper") {
+        return (
+            "notebook".to_string(),
+            record.principal.clone(),
+            record.query_id.clone(),
+        );
+    }
+    if record.client_tags.iter().any(|tag| tag == "nova") {
+        return (
+            "sql-editor".to_string(),
+            record.principal.clone(),
+            record.query_id.clone(),
+        );
+    }
+    (
+        "query".to_string(),
+        record.principal.clone(),
+        record.query_id.clone(),
+    )
+}
+
 fn lineage_from_query(
     record: &crate::query_log_event::QueryLogRecord,
     raw: serde_json::Value,
@@ -111,8 +153,8 @@ fn lineage_from_query(
     if record.tables_read.is_empty() && record.tables_written.is_empty() {
         return None;
     }
-    let run_id =
-        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, record.query_id.as_bytes()).to_string();
+    let (job_namespace, job_name, run_key) = job_of(record);
+    let run_id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, run_key.as_bytes()).to_string();
     let event_time = record
         .ended_at
         .clone()
@@ -134,8 +176,8 @@ fn lineage_from_query(
         schema_url: Some(
             "https://openlineage.io/spec/2-0-2/OpenLineage.json#/$defs/RunEvent".to_string(),
         ),
-        job_namespace: "trino".to_string(),
-        job_name: record.query_id.clone(),
+        job_namespace,
+        job_name,
         run_id,
         inputs,
         outputs,
@@ -556,8 +598,8 @@ mod tests {
         assert_eq!(status, StatusCode::NO_CONTENT);
         let _a = rx.recv().await.unwrap();
         let ev = lrx.recv().await.unwrap();
-        assert_eq!(ev.job_namespace, "trino");
-        assert_eq!(ev.job_name, "20261019_113323_00000_tnvu4");
+        assert_eq!(ev.job_namespace, "sql-editor");
+        assert_eq!(ev.job_name, "alice");
         assert_eq!(ev.event_type, "COMPLETE");
         assert_eq!(ev.inputs.len(), 1);
         assert_eq!(ev.inputs[0].namespace, "hive.tpch");
@@ -566,6 +608,92 @@ mod tests {
         assert_eq!(ev.outputs[0].namespace, "hive.tpch");
         assert_eq!(ev.outputs[0].name, "daily");
         assert!(uuid::Uuid::parse_str(&ev.run_id).is_ok());
+    }
+
+    fn query_record(query_id: &str, principal: &str) -> crate::query_log_event::QueryLogRecord {
+        crate::query_log_event::QueryLogRecord {
+            query_id: query_id.to_string(),
+            state: crate::query_log_event::QueryState::Finished,
+            principal: principal.to_string(),
+            source: None,
+            client_tags: vec![],
+            catalog: None,
+            schema: None,
+            query_type: Some("SELECT".to_string()),
+            sql_text: "select * from orders".to_string(),
+            sql_hash: "x".to_string(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            started_at: None,
+            ended_at: Some("2026-01-01T00:00:01Z".to_string()),
+            stats: None,
+            error_code: None,
+            error_message: None,
+            tables_read: vec!["hive.tpch.orders".to_string()],
+            tables_written: vec![],
+        }
+    }
+
+    #[test]
+    fn a_pipeline_tag_names_the_pipeline_and_one_run_holds_its_queries() {
+        let tags = [
+            "stardelt-pipeline",
+            "pipeline=shop/orders",
+            "task=load",
+            "run=r1",
+        ];
+        let mut first = query_record("q1", "svc-pipeline");
+        first.client_tags = tags.iter().map(|t| t.to_string()).collect();
+        let mut second = query_record("q2", "svc-pipeline");
+        second.client_tags = tags.iter().map(|t| t.to_string()).collect();
+
+        let (namespace, name, _) = job_of(&first);
+        assert_eq!(namespace, "pipeline");
+        assert_eq!(name, "shop/orders");
+
+        let one = lineage_from_query(&first, serde_json::json!({})).unwrap();
+        let two = lineage_from_query(&second, serde_json::json!({})).unwrap();
+        assert_eq!(one.job_namespace, "pipeline");
+        assert_eq!(one.job_name, "shop/orders");
+        assert_eq!(one.run_id, two.run_id, "one pipeline run, one run id");
+    }
+
+    #[test]
+    fn a_pipeline_query_without_a_run_tag_runs_alone() {
+        let mut record = query_record("q3", "svc-pipeline");
+        record.client_tags = vec!["pipeline=shop/orders".to_string()];
+        let (namespace, name, run_key) = job_of(&record);
+        assert_eq!(
+            (namespace.as_str(), name.as_str()),
+            ("pipeline", "shop/orders")
+        );
+        assert_eq!(run_key, "pipeline:shop/orders:q3");
+    }
+
+    #[test]
+    fn a_notebook_helper_query_is_a_notebook_job() {
+        let mut record = query_record("q4", "alice");
+        record.source = Some("stardelt-notebook-helper".to_string());
+        let (namespace, name, _) = job_of(&record);
+        assert_eq!(namespace, "notebook");
+        assert_eq!(name, "alice");
+    }
+
+    #[test]
+    fn a_sql_editor_query_is_a_sql_editor_job() {
+        let mut record = query_record("q5", "alice");
+        record.client_tags = vec!["nova".to_string()];
+        let (namespace, name, _) = job_of(&record);
+        assert_eq!(namespace, "sql-editor");
+        assert_eq!(name, "alice");
+    }
+
+    #[test]
+    fn any_other_query_is_a_query_job_of_its_principal() {
+        let record = query_record("q6", "bob");
+        let (namespace, name, run_key) = job_of(&record);
+        assert_eq!(namespace, "query");
+        assert_eq!(name, "bob");
+        assert_eq!(run_key, "q6");
     }
 
     #[tokio::test]
