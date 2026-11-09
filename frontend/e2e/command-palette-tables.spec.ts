@@ -28,6 +28,7 @@ async function stubApi(page: import('@playwright/test').Page) {
     if (path.startsWith('/api/settings/')) return json(route, { key: path.split('/').pop(), value: null })
     if (path === '/api/catalog/catalogs') return json(route, CATALOGS)
     if (path === '/api/apps/links') return json(route, [])
+    if (path === '/api/saved-queries') return json(route, [])
     if (path === '/api/catalog/search')
       return json(route, {
         query: 'trip',
@@ -45,7 +46,7 @@ test('the palette finds a table and opens it in the catalog explorer', async ({ 
   await page.keyboard.press('Control+k')
   const dialog = page.getByRole('dialog')
   await expect(dialog).toBeVisible()
-  const input = page.getByRole('combobox', { name: 'Search pages and tables' })
+  const input = page.getByRole('combobox', { name: 'Search pages, queries and tables' })
   await input.fill('trip')
   await expect(dialog.getByText('Tables')).toBeVisible()
   await dialog.getByRole('option', { name: /silver\.trips/ }).click()
@@ -58,7 +59,7 @@ test('the keyboard reaches a table result', async ({ page }) => {
   await page.goto('/')
   await expect(page).toHaveTitle('Overview · stardelt Nova')
   await page.keyboard.press('Control+k')
-  const input = page.getByRole('combobox', { name: 'Search pages and tables' })
+  const input = page.getByRole('combobox', { name: 'Search pages, queries and tables' })
   await input.fill('trip')
   await expect(page.getByRole('option', { name: /silver\.trips/ })).toBeVisible()
   await page.keyboard.press('Enter')
