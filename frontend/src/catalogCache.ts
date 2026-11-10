@@ -14,6 +14,14 @@ const PREFIX = 'nova.catalog.v1:'
 const OWNER = 'nova.catalog.owner'
 const MAX_AGE_MS = 24 * 60 * 60 * 1000
 
+/**
+ * Whether this page load has compared the stored owner with the signed-in person.
+ * Until `bindUser` has run, the entries in localStorage belong to whoever used this
+ * browser last — a second person must not see the first person's names while
+ * `/api/me` is still in flight (stardelt-nova#656).
+ */
+let ownerConfirmed = false
+
 type Entry<T> = { at: number; data: T }
 
 function store(): Storage | null {
@@ -31,7 +39,10 @@ function store(): Storage | null {
  */
 export function bindUser(sub: string | undefined): void {
   const ls = store()
-  if (!ls) return
+  if (!ls) {
+    ownerConfirmed = true
+    return
+  }
   try {
     const owner = sub ?? ''
     if (ls.getItem(OWNER) !== owner) {
@@ -43,6 +54,7 @@ export function bindUser(sub: string | undefined): void {
       for (const key of stale) ls.removeItem(key)
     }
     ls.setItem(OWNER, owner)
+    ownerConfirmed = true
   } catch {
     /* no store */
   }
@@ -62,6 +74,7 @@ export function remember<T>(key: string, data: T): T {
 
 /** The last answer for `key`, or `undefined` when absent or older than a day. */
 export function recall<T>(key: string): T | undefined {
+  if (!ownerConfirmed) return undefined
   const ls = store()
   if (!ls) return undefined
   try {
