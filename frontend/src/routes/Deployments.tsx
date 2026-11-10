@@ -58,10 +58,20 @@ export function compareStatus(here: StageRow | undefined, there: StageRow | unde
   return 'different commit'
 }
 
-/** The forge's compare page from the peer's commit to this stage's (GitLab uses `/-/compare`). */
-export function compareUrl(repository: string, from: string, to: string): string {
+/**
+ * The forge's compare page from the peer's commit to this stage's (GitLab uses `/-/compare`).
+ * `null` when the repository is not a URL with a host: a peer may store a value this Nova
+ * would refuse, and one bad row must not blank the page (nova#676).
+ */
+export function compareUrl(repository: string, from: string, to: string): string | null {
   const base = repository.replace(/\/+$/, '')
-  const path = new URL(base).hostname.includes('gitlab') ? '/-/compare/' : '/compare/'
+  let host: string
+  try {
+    host = new URL(base).hostname
+  } catch {
+    return null
+  }
+  const path = host.includes('gitlab') ? '/-/compare/' : '/compare/'
   return `${base}${path}${from.replace(/-dirty$/, '')}...${to.replace(/-dirty$/, '')}`
 }
 
@@ -122,6 +132,10 @@ function StageCompare({ peer }: { peer: string }) {
         <tbody>
           {rows.map(({ key, here, there }) => {
             const row = (here ?? there) as StageRow
+            const promote =
+              here?.repository && here.revision && there?.revision && here.revision !== there.revision
+                ? compareUrl(here.repository, there.revision, here.revision)
+                : null
             return (
               <tr key={key} className="border-t border-border/70 hover:bg-bg-soft/30">
                 <td className="td px-5 font-mono text-xs break-words">{row.bundle} · {row.target}</td>
@@ -141,19 +155,16 @@ function StageCompare({ peer }: { peer: string }) {
                   ) : (
                     <span className="text-text-dim">{compareStatus(here, there, peer)}</span>
                   )}
-                  {here?.revision &&
-                    there?.revision &&
-                    here.revision !== there.revision &&
-                    here.repository && (
-                      <a
-                        href={compareUrl(here.repository, there.revision, here.revision)}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="ml-2 underline text-accent"
-                      >
-                        Promote via pull request
-                      </a>
-                    )}
+                  {promote && (
+                    <a
+                      href={promote}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="ml-2 underline text-accent"
+                    >
+                      Promote via pull request
+                    </a>
+                  )}
                 </td>
               </tr>
             )

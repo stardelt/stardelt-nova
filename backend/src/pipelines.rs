@@ -3556,8 +3556,13 @@ fn check_provenance(provenance: &Provenance) -> Result<(), String> {
         }
     }
     if let Some(repository) = &provenance.repository {
+        // A scheme with no host (`https://`) passes every character rule below but is not an
+        // address a link can be built from; nova#676 showed it blanking the Deployments page.
+        let host = repository
+            .strip_prefix("https://")
+            .and_then(|rest| rest.split('/').next());
         let plain = repository.len() <= 200
-            && repository.starts_with("https://")
+            && host.is_some_and(|host| !host.is_empty())
             && !repository[8..]
                 .chars()
                 .any(|c| c.is_whitespace() || matches!(c, '@' | '?' | '#'));
@@ -8722,6 +8727,20 @@ mod tests {
                 "prod",
                 None,
                 Some("http://git.example/a"),
+                "the repository must be",
+            ),
+            (
+                "shop-etl",
+                "prod",
+                None,
+                Some("https://"),
+                "the repository must be",
+            ),
+            (
+                "shop-etl",
+                "prod",
+                None,
+                Some("https:///shop"),
                 "the repository must be",
             ),
             (
