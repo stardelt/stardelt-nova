@@ -3170,6 +3170,7 @@ mod tests {
                 "admin_console_url",
                 "auth_mode",
                 "demo",
+                "peers",
                 "stage_kind",
                 "stage_name",
                 "user",

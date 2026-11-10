@@ -122,6 +122,7 @@ mod query_log_event;
 mod query_log_store;
 mod saved_queries;
 mod secret_store;
+mod stages;
 mod statements;
 mod streams;
 mod trino;
@@ -160,6 +161,8 @@ pub struct AppState {
     pub warehouse_name: String,
     pub stage_name: Option<String>,
     pub stage_kind: &'static str,
+    /// The peer stages `NOVA_PEER_STAGES` configures, for the stage comparison (`stages.rs`).
+    pub stages: Vec<stages::Peer>,
     /// Lakekeeper warehouse ids by catalog name, filled from the warehouse list on the
     /// first miss (`catalog::warehouse_id_for`). One catalog is one warehouse
     /// (`design/multitenant-catalogs.md` §2); this replaces the single id Nova used to
@@ -269,6 +272,8 @@ struct Me {
     admin_console_url: Option<String>,
     stage_name: Option<String>,
     stage_kind: &'static str,
+    /// The peer stages `NOVA_PEER_STAGES` configures, so the Deployments page can offer them.
+    peers: Vec<stages::Peer>,
 }
 
 /// `/api/me` in `oidc` mode: claims, never tokens. Nova still talks to Trino and
@@ -302,6 +307,8 @@ struct OidcMe<'a> {
     session_expires_at: Option<u64>,
     stage_name: Option<&'a str>,
     stage_kind: &'static str,
+    /// The peer stages `NOVA_PEER_STAGES` configures, so the Deployments page can offer them.
+    peers: Vec<stages::Peer>,
 }
 
 #[utoipa::path(
@@ -329,6 +336,7 @@ pub(crate) async fn me(
             admin_console_url: None,
             stage_name: s.stage_name.clone(),
             stage_kind: s.stage_kind,
+            peers: s.stages.clone(),
         })
         .into_response(),
         Some(Extension(p)) => {
@@ -356,6 +364,7 @@ pub(crate) async fn me(
                 session_expires_at: facts.session_expires_at,
                 stage_name: s.stage_name.as_deref(),
                 stage_kind: s.stage_kind,
+                peers: s.stages.clone(),
             })
             .into_response()
         }
@@ -739,6 +748,8 @@ fn api_router() -> Router<Arc<AppState>> {
         // Pipelines: only the caller's groups' pipelines, administrators see all. Nova checks
         // the resource before it asks Airflow; a hidden pipeline is 404. Uncacheable.
         .merge(pipelines::router())
+        // Stage comparison (nova#660 slice a): this stage's deployments against a peer's.
+        .merge(stages::router())
         // Streams: the caller's StreamApps, read-only. Uncacheable like pipelines.
         .merge(streams::router())
         // Published notebooks: immutable versions, owner-group scoped (stardelt-nova#225).
@@ -952,6 +963,7 @@ async fn main() -> anyhow::Result<()> {
             Ok("test") => "test",
             _ => "dev",
         },
+        stages: stages::peers_from_env(),
         catalog_ids: RwLock::new(HashMap::new()),
         catalog_access: Mutex::new(HashMap::new()),
         catalog_metrics: Mutex::new(HashMap::new()),
@@ -1237,6 +1249,7 @@ mod router_tests {
             warehouse_name: "warehouse".into(),
             stage_name,
             stage_kind,
+            stages: Vec::new(),
             catalog_ids: RwLock::new(HashMap::new()),
             catalog_access: Mutex::new(HashMap::new()),
             catalog_metrics: Mutex::new(HashMap::new()),

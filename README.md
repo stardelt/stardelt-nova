@@ -486,6 +486,7 @@ The backend is configured entirely through environment variables:
 | `NOVA_SECRET_STORE_BREAKGLASS_ROLE` | `breakglass` | The store's JWT sign-in role for an administrator's break-glass read of a group connection: read on `connections/group/*` only, bound to `azp = nova` and the administrator group, 15-minute token. Declared and audited on the store side (stardelt-platform#225) |
 | `NOVA_SECRET_STORE_MOUNT` | `secret` | The KV v2 mount that holds `connections/…` |
 | `NOVA_DEV_USER` | `stardelt-dev` | Static user identity returned by `/api/me` (dev mode only) |
+| `NOVA_PEER_STAGES` | — (empty) | Other stages this Nova may compare its deployed pipelines with, as `name=url` pairs, e.g. `prod=https://nova.prod.example`. Only configured names are accepted, so a browser can never point Nova at an arbitrary address. `GET /api/stages/compare?peer=<name>` calls the peer's `GET /api/pipelines` with the **caller's own token**, so the peer answers with that person's rights; a refused token is `status: "unauthorized"`, no answer within 5 s `status: "unreachable"`. Nova never deploys to a peer and stores no secret for one. `/api/me` lists the names (`peers`) |
 | `NOVA_AUTH_MODE` | `dev` | `dev` (no login) or `oidc` — see [Sign-in](#sign-in-oidc) |
 | `RUST_LOG` | `info` | Tracing filter for the backend (`debug`, `info`, `warn`, …) |
 

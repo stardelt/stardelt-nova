@@ -86,6 +86,7 @@ pub struct ErrorResponse {
         crate::connection_routes::break_glass_managed,
         crate::connection_routes::break_glass_log,
         crate::pipelines::list,
+        crate::stages::compare,
         crate::pipelines::list_runs,
         crate::pipelines::notebook_usage,
         crate::streams::list,
