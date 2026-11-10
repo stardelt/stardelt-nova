@@ -2467,7 +2467,7 @@ test.describe('pipelines', () => {
     await context.close()
   })
 
-  test('deployments: what bundles published is grouped by bundle and stage, a pipeline made by hand is left out', async ({ browser }) => {
+  test('deployments: what bundles published is grouped by bundle and stage, a pipeline made by hand is listed as not in Git', async ({ browser }) => {
     const commit = '0123abcdef0123abcdef0123abcdef0123abcdef'
     const other = 'fedcba9876543210fedcba9876543210fedcba98'
     const evil = '<img src=x onerror="window.__xss=1">'
@@ -2486,7 +2486,7 @@ test.describe('pipelines', () => {
     })
     await expect(page.getByRole('heading', { name: 'Deployments', exact: true })).toBeVisible()
     await expect(page).toHaveTitle('Deployments · stardelt Nova')
-    expect(await page.getByRole('heading', { level: 2 }).allTextContents()).toEqual(['shop-etl · dev', 'shop-etl · prod', 'shop-etl · test'])
+    expect(await page.getByRole('heading', { level: 2 }).allTextContents()).toEqual(['Not in Git', 'shop-etl · dev', 'shop-etl · prod', 'shop-etl · test'])
 
     const prod = page.locator('section', { has: page.getByRole('heading', { name: 'shop-etl · prod' }) })
     await expect(prod).toContainText('2 pipelines · commit 0123abc')
@@ -2504,7 +2504,12 @@ test.describe('pipelines', () => {
     await expect(mixed).toContainText('2 pipelines · 2 different commits')
     const dev = page.locator('section', { has: page.getByRole('heading', { name: 'shop-etl · dev' }) })
     await expect(dev).toContainText('1 pipeline · commit fedcba9 (uncommitted changes)')
-    await expect(page.getByText('by-hand')).toHaveCount(0)
+
+    // Not in Git: the by-hand pipeline (no bundle stamp) and the one changed since its deploy.
+    const outside = page.locator('section', { has: page.getByRole('heading', { name: 'Not in Git' }) })
+    await expect(outside.getByRole('link', { name: 'by-hand' })).toHaveAttribute('href', `/pipelines/${NS}/by-hand`)
+    await expect(outside).toContainText('1 deployed pipeline was changed since deploy; Git has the older version.')
+    await expect(page.getByRole('link', { name: 'by-hand' })).toHaveCount(1)
 
     // The populated page obeys the same rules as the empty one, on a desktop and on a phone.
     expect(await auditPage(page), 'desktop').toEqual([])
@@ -2517,7 +2522,19 @@ test.describe('pipelines', () => {
     const empty = await open(browser, { rows: [pipeline({ name: 'by-hand' })], start: '/deployments' })
     await expect(empty.page.locator('main')).toContainText('Nothing was deployed from a bundle yet.')
     await expect(empty.page.getByRole('link', { name: 'Pipelines', exact: true }).last()).toHaveAttribute('href', '/pipelines')
+    // The by-hand pipeline is the only thing Git would lose, so it is named above the empty state.
+    await expect(empty.page.getByRole('heading', { name: 'Not in Git' })).toBeVisible()
+    await expect(empty.page.getByRole('link', { name: 'by-hand' })).toHaveCount(1)
     await empty.context.close()
+
+    // Every pipeline comes from a bundle and nobody changed it since: nothing to report, no section.
+    const stamped = await open(browser, {
+      rows: [pipeline({ name: 'load', deployment: { bundle: 'shop-etl', target: 'prod', revision: '0123abcdef0123abcdef0123abcdef0123abcdef' } })],
+      start: '/deployments',
+    })
+    await expect(stamped.page.getByRole('heading', { name: 'shop-etl · prod' })).toBeVisible()
+    await expect(stamped.page.getByRole('heading', { name: 'Not in Git' })).toHaveCount(0)
+    await stamped.context.close()
 
     const down = await open(browser, {
       start: '/deployments',

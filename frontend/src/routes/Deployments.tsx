@@ -9,7 +9,8 @@ import { PipelineStateBadge, formatWhen } from './Pipelines'
  * Deployments: the pipelines that `stardelt bundle deploy` published, one block per bundle and
  * stage (target) — which commit each runs, who deployed it and when, and whether anyone changed it
  * since (`deployment.modified`). It only reads the pipeline list; a pipeline made in the interface
- * or with `stardelt apply` carries no stamp and is not listed (the Pipelines page has it).
+ * or with `stardelt apply` carries no stamp, so the card below says a rebuild of the stage from Git
+ * would not bring it back.
  */
 
 type Stage = { bundle: string; target: string; rows: PipelineView[] }
@@ -30,6 +31,14 @@ export function stages(pipelines: PipelineView[]): Stage[] {
     .sort((a, b) => a.bundle.localeCompare(b.bundle) || a.target.localeCompare(b.target))
 }
 
+/** Pipelines a rebuild from Git would not bring back: no bundle stamp, or changed since deploy. */
+export function notInGit(pipelines: PipelineView[]) {
+  return {
+    unstamped: pipelines.filter((p) => !p.deployment).sort((a, b) => a.name.localeCompare(b.name)),
+    changed: pipelines.filter((p) => p.deployment?.modified).length,
+  }
+}
+
 /** "commit 0123abc" when every row runs one commit, else how many differ. */
 function commitsOf(rows: PipelineView[]): string {
   const distinct = new Set(rows.map((row) => row.deployment?.revision ?? ''))
@@ -41,6 +50,7 @@ function commitsOf(rows: PipelineView[]): string {
 export default function Deployments() {
   const list = useQuery({ queryKey: ['pipelines'], queryFn: api.pipelines, refetchInterval: 30_000 })
   const groups = stages(list.data?.pipelines ?? [])
+  const outside = notInGit(list.data?.pipelines ?? [])
   const failed = list.isError && !list.data
 
   return (
@@ -65,6 +75,30 @@ export default function Deployments() {
           <span className="font-mono text-xs">stardelt apply</span> are on the{' '}
           <Link to="/pipelines" className="underline">Pipelines</Link> page.
         </div>
+      )}
+
+      {list.data && (outside.unstamped.length > 0 || outside.changed > 0) && (
+        <section aria-labelledby="not-in-git" className="card px-5 py-4 border-amber-400/40 space-y-2">
+          <h2 id="not-in-git" className="text-base font-semibold">Not in Git</h2>
+          <p className="text-sm text-text-dim">
+            A rebuild of this stage from Git would not bring these back. Add them to a bundle, or export them with{' '}
+            <span className="font-mono text-xs">stardelt export</span>.
+          </p>
+          {outside.unstamped.length > 0 && (
+            <ul className="text-sm flex flex-wrap gap-x-3 gap-y-1">
+              {outside.unstamped.map((p) => (
+                <li key={`${p.namespace}/${p.name}`}>
+                  <Link to={`/pipelines/${encodeURIComponent(p.namespace)}/${encodeURIComponent(p.name)}`} className="underline break-words">{p.name}</Link>
+                </li>
+              ))}
+            </ul>
+          )}
+          {outside.changed > 0 && (
+            <p className="text-sm text-text-mute">
+              {outside.changed} deployed {outside.changed === 1 ? 'pipeline was' : 'pipelines were'} changed since deploy; Git has the older version.
+            </p>
+          )}
+        </section>
       )}
 
       {groups.map((stage, index) => {
