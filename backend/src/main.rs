@@ -673,6 +673,8 @@ fn api_router() -> Router<Arc<AppState>> {
         // Lineage graph (D40): the edges the OpenLineage consumer wrote, scoped to what the
         // caller may see. Restored after #482's merge dropped the routes (nova#483).
         .route("/lineage", get(lineage_api::graph))
+        // Where each column of one table comes from, from the write events' ioMetadata.
+        .route("/lineage/columns", get(lineage_api::columns))
         .route("/lineage/runs/{run_id}", get(lineage_api::run_detail))
         // The caller's own settings: one JSON value per key (state store).
         .route("/settings", get(user_settings::list))

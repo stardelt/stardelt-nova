@@ -1,6 +1,6 @@
 //! Lineage graph API (D40, WP-34a).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use axum::{
@@ -327,6 +327,241 @@ fn demo_graph_response(_start_ns: &str, _start_name: &str) -> Response {
     (StatusCode::OK, Json(graph)).into_response()
 }
 
+/// The checked query string of `/api/lineage/columns` (stardelt-nova#646 slice L5).
+#[derive(Debug, Deserialize)]
+pub struct ColumnsQuery {
+    pub catalog: Option<String>,
+    pub schema: Option<String>,
+    pub table: Option<String>,
+    #[serde(default = "default_days")]
+    pub days: i64,
+}
+
+fn default_days() -> i64 {
+    90
+}
+
+/// One source column of an output column. A source outside the caller's catalogs is
+/// answered as `{ "hidden": true }`, without names.
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ColumnSource {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub catalog: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub table: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub column: Option<String>,
+    #[serde(skip_serializing_if = "is_false")]
+    pub hidden: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ColumnLineageEntry {
+    pub column: String,
+    pub sources: Vec<ColumnSource>,
+    pub last_seen: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ColumnLineage {
+    pub columns: Vec<ColumnLineageEntry>,
+}
+
+/// Merge stored `columns` arrays (newest event first) into one entry per output column:
+/// its source columns, deduplicated, and the newest time the column was written.
+fn merge_columns(
+    rows: &[(serde_json::Value, String)],
+    allowed: &BTreeSet<String>,
+) -> Vec<ColumnLineageEntry> {
+    let mut entries: Vec<ColumnLineageEntry> = Vec::new();
+    let mut index: HashMap<String, usize> = HashMap::new();
+    let mut seen: Vec<HashSet<String>> = Vec::new();
+    for (columns, event_time) in rows {
+        let Some(list) = columns.as_array() else {
+            continue;
+        };
+        for col in list {
+            let Some(name) = col.get("columnName").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let at = match index.get(name) {
+                Some(&at) => at,
+                None => {
+                    index.insert(name.to_string(), entries.len());
+                    seen.push(HashSet::new());
+                    entries.push(ColumnLineageEntry {
+                        column: name.to_string(),
+                        sources: vec![],
+                        last_seen: event_time.clone(),
+                    });
+                    entries.len() - 1
+                }
+            };
+            if event_time > &entries[at].last_seen {
+                entries[at].last_seen = event_time.clone();
+            }
+            let Some(sources) = col.get("sourceColumns").and_then(|v| v.as_array()) else {
+                continue;
+            };
+            for src in sources {
+                let Some((key, source)) = source_of(src, allowed) else {
+                    continue;
+                };
+                if seen[at].insert(key) {
+                    entries[at].sources.push(source);
+                }
+            }
+        }
+    }
+    entries
+}
+
+/// One stored source column, ready for the answer: named when the caller may read its
+/// catalog, `hidden` otherwise. `None` when the row has no catalog to judge.
+fn source_of(
+    src: &serde_json::Value,
+    allowed: &BTreeSet<String>,
+) -> Option<(String, ColumnSource)> {
+    let catalog = src.get("catalog").and_then(|v| v.as_str())?;
+    if !allowed.contains(catalog) {
+        return Some((
+            "hidden".to_string(),
+            ColumnSource {
+                catalog: None,
+                schema: None,
+                table: None,
+                column: None,
+                hidden: true,
+            },
+        ));
+    }
+    let schema = src.get("schema").and_then(|v| v.as_str()).unwrap_or("");
+    let table = src.get("table").and_then(|v| v.as_str()).unwrap_or("");
+    let column = src.get("columnName").and_then(|v| v.as_str()).unwrap_or("");
+    let key = format!("{catalog}|{schema}|{table}|{column}");
+    Some((
+        key,
+        ColumnSource {
+            catalog: Some(catalog.to_string()),
+            schema: Some(schema.to_string()),
+            table: Some(table.to_string()),
+            column: Some(column.to_string()),
+            hidden: false,
+        },
+    ))
+}
+
+const COLUMNS_SQL: &str = "SELECT payload->'ioMetadata'->'output'->'columns', to_char(event_time,'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') \
+     FROM lineage_events \
+     WHERE payload->'ioMetadata'->'output'->>'catalogName' = $1 \
+       AND payload->'ioMetadata'->'output'->>'schema' = $2 \
+       AND payload->'ioMetadata'->'output'->>'table' = $3 \
+       AND event_time > now() - make_interval(days => $4::int) \
+     ORDER BY event_time DESC \
+     LIMIT 200";
+
+#[utoipa::path(
+    get,
+    operation_id = "lineage_columns",
+    path = "/api/lineage/columns",
+    tag = "public",
+    params(
+        ("catalog" = String, Query, description = "Catalog"),
+        ("schema" = String, Query, description = "Schema"),
+        ("table" = String, Query, description = "Table"),
+        ("days" = Option<i64>, Query, description = "Days to look back, 1-365, default 90")
+    ),
+    responses(
+        (status = 200, description = "Where each column comes from", body = ColumnLineage),
+        (status = 400, description = "catalog/schema/table required"),
+        (status = 403, description = "Not visible")
+    )
+)]
+pub async fn columns(
+    State(state): State<Arc<AppState>>,
+    principal: Option<Extension<Principal>>,
+    Query(q): Query<ColumnsQuery>,
+) -> Response {
+    let principal = principal.map(|Extension(p)| p);
+    let (Some(catalog_name), Some(schema), Some(table)) = (q.catalog, q.schema, q.table) else {
+        return error_response(StatusCode::BAD_REQUEST, "catalog/schema/table required");
+    };
+    let days = q.days.clamp(1, 365);
+
+    if state.demo {
+        return (StatusCode::OK, Json(demo_columns_response())).into_response();
+    }
+
+    let (catalog_name, _id) =
+        match catalog::catalog_scope(&state, principal.as_ref(), Some(&catalog_name)).await {
+            Ok(scope) => scope,
+            Err(refusal) => return refusal,
+        };
+    let allowed = match catalog::allowed_catalogs(&state, principal.as_ref()).await {
+        Ok(a) => a,
+        Err(_) => return error_response(StatusCode::BAD_GATEWAY, "could not resolve catalogs"),
+    };
+
+    let pool = match &state.db {
+        Some(p) => p,
+        None => return error_response(StatusCode::SERVICE_UNAVAILABLE, "state store unavailable"),
+    };
+
+    let rows: Vec<(serde_json::Value, String)> = sqlx::query_as(COLUMNS_SQL)
+        .bind(&catalog_name)
+        .bind(&schema)
+        .bind(&table)
+        .bind(days)
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+
+    (
+        StatusCode::OK,
+        Json(ColumnLineage {
+            columns: merge_columns(&rows, &allowed),
+        }),
+    )
+        .into_response()
+}
+
+fn demo_columns_response() -> ColumnLineage {
+    let source = |table: &str, column: &str| ColumnSource {
+        catalog: Some("mobility".to_string()),
+        schema: Some("gold".to_string()),
+        table: Some(table.to_string()),
+        column: Some(column.to_string()),
+        hidden: false,
+    };
+    ColumnLineage {
+        columns: vec![
+            ColumnLineageEntry {
+                column: "total_trips".to_string(),
+                sources: vec![source("kpis", "total_trips")],
+                last_seen: "2026-01-01T00:00:00Z".to_string(),
+            },
+            ColumnLineageEntry {
+                column: "active_days".to_string(),
+                sources: vec![source("kpis", "active_days")],
+                last_seen: "2026-01-01T00:00:00Z".to_string(),
+            },
+            ColumnLineageEntry {
+                column: "total_revenue".to_string(),
+                sources: vec![source("kpis", "total_revenue")],
+                last_seen: "2026-01-01T00:00:00Z".to_string(),
+            },
+        ],
+    }
+}
+
 #[utoipa::path(
     get,
     operation_id = "lineage_run_detail",
@@ -458,4 +693,80 @@ pub async fn run_detail(
         "outputs": outputs,
     }))
     .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn allowed(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|n| n.to_string()).collect()
+    }
+
+    fn source(catalog: &str, schema: &str, table: &str, column: &str) -> serde_json::Value {
+        serde_json::json!({ "catalog": catalog, "schema": schema, "table": table, "columnName": column })
+    }
+
+    fn column(name: &str, sources: Vec<serde_json::Value>) -> serde_json::Value {
+        serde_json::json!({ "columnName": name, "columnType": "bigint", "sourceColumns": sources })
+    }
+
+    #[test]
+    fn merge_keeps_one_entry_per_column_deduplicates_sources_and_the_newest_time() {
+        // Newest first, as the SQL orders them.
+        let rows = vec![
+            (
+                serde_json::json!([column(
+                    "total_trips",
+                    vec![source("mobility", "silver", "yellow_trips", "trip_id")]
+                )]),
+                "2026-11-09T10:00:00Z".to_string(),
+            ),
+            (
+                serde_json::json!([column(
+                    "total_trips",
+                    vec![
+                        source("mobility", "silver", "yellow_trips", "trip_id"),
+                        source("mobility", "silver", "yellow_trips", "zone_id"),
+                    ]
+                )]),
+                "2026-11-08T09:00:00Z".to_string(),
+            ),
+        ];
+        let merged = merge_columns(&rows, &allowed(&["mobility"]));
+        assert_eq!(merged.len(), 1, "one entry per columnName");
+        assert_eq!(merged[0].column, "total_trips");
+        assert_eq!(merged[0].last_seen, "2026-11-09T10:00:00Z");
+        assert_eq!(
+            merged[0].sources.len(),
+            2,
+            "trip_id appears in both events once"
+        );
+        assert_eq!(merged[0].sources[0].column.as_deref(), Some("trip_id"));
+        assert_eq!(merged[0].sources[1].column.as_deref(), Some("zone_id"));
+    }
+
+    #[test]
+    fn a_source_in_a_catalog_outside_the_allowed_set_is_hidden() {
+        let rows = vec![(
+            serde_json::json!([column(
+                "total_trips",
+                vec![
+                    source("mobility", "silver", "yellow_trips", "trip_id"),
+                    source("secret", "silver", "hidden_trips", "trip_id"),
+                ]
+            )]),
+            "2026-11-09T10:00:00Z".to_string(),
+        )];
+        let merged = merge_columns(&rows, &allowed(&["mobility"]));
+        assert_eq!(merged[0].sources.len(), 2);
+        let hidden: Vec<&ColumnSource> = merged[0].sources.iter().filter(|s| s.hidden).collect();
+        assert_eq!(hidden.len(), 1);
+        assert!(hidden[0].catalog.is_none(), "no names on a hidden source");
+        assert!(hidden[0].schema.is_none());
+        assert!(hidden[0].table.is_none());
+        assert!(hidden[0].column.is_none());
+        let json = serde_json::to_value(hidden[0]).unwrap();
+        assert_eq!(json, serde_json::json!({ "hidden": true }));
+    }
 }
