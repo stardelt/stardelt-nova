@@ -16,6 +16,7 @@ use kube::api::{Api, ApiResource, Patch, PatchParams};
 use kube::core::GroupVersionKind;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use utoipa::ToSchema;
 
 use crate::AppState;
@@ -23,8 +24,9 @@ use crate::api_json::ApiJson;
 use crate::auth::Identity;
 use crate::connection_routes::{Caller, Fail, SignedIn};
 use crate::pipelines::{
-    DeploymentView, MANAGED_BY_LABEL, MANAGED_BY_NOVA, Provenance, ResourceError, answer,
-    check_provenance, deployment_of, may_act, no_cluster, resource_fail, stamp_provenance, visible,
+    DIGEST_NOTE, DeploymentView, MANAGED_BY_LABEL, MANAGED_BY_NOVA, Provenance, ResourceError,
+    answer, canonical, check_provenance, deployment_of_with, may_act, no_cluster, resource_fail,
+    stamp_provenance, visible,
 };
 
 /// One `StreamApp`, as the Streams page needs it. No secret, no checkpoint path.
@@ -178,7 +180,7 @@ pub fn stream_view(app: &Value, _who: &Identity) -> StreamView {
             .get("runAs")
             .and_then(Value::as_str)
             .map(str::to_string),
-        deployment: deployment_of(app),
+        deployment: deployment_of_with(app, stream_spec_digest),
     }
 }
 
@@ -383,6 +385,29 @@ fn check_write(name: &str, body: &StreamWrite, who: &Identity) -> Result<Planned
     })
 }
 
+/// What a deploy decides about a stream: the fields a bundle target writes. Not `spec.stopped`
+/// (stopping is not a change to the stream) and not `spec.ownerGroup` (it cannot change on PUT).
+fn stream_spec_digest(resource: &Value) -> String {
+    let spec = resource.get("spec").unwrap_or(resource);
+    let decided = json!([
+        spec.get("source"),
+        spec.get("sink"),
+        spec.get("engine"),
+        spec.get("restartPolicy"),
+    ]);
+    Sha256::digest(canonical(&decided).as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// Replace the pipeline digest `stamp_provenance` wrote with the stream's own: a `StreamApp` has
+/// none of the pipeline fields that digest covers, so it would be a constant (nova#712).
+fn stamp_stream_digest(resource: &mut Value) {
+    let digest = stream_spec_digest(resource);
+    resource["metadata"]["annotations"][DIGEST_NOTE] = json!(digest);
+}
+
 /// Nova's labels for a stream: who wrote it and which group owns it.
 fn stream_labels(group: &str) -> Value {
     let mut labels = serde_json::Map::new();
@@ -412,6 +437,7 @@ fn stream_resource(
     });
     if let Some(provenance) = provenance {
         stamp_provenance(&mut resource, provenance, created_by);
+        stamp_stream_digest(&mut resource);
     }
     resource
 }
@@ -650,6 +676,7 @@ async fn update_stream(
     merged["spec"] = planned.spec.clone();
     if let Some(provenance) = provenance {
         stamp_provenance(&mut merged, provenance, &who.display_name);
+        stamp_stream_digest(&mut merged);
     }
     let patched = api
         .patch(
@@ -807,7 +834,7 @@ mod tests {
 
     use super::{
         StreamSinkBody, StreamSourceBody, StreamWrite, check_write, patch_stream, put_stream,
-        router, stream_resource, stream_view, visible_streams,
+        router, stream_resource, stream_spec_digest, stream_view, visible_streams,
     };
     use crate::auth::Identity;
     use crate::pipelines::{Provenance, deployment_of};
@@ -1135,6 +1162,57 @@ mod tests {
         let plain = stream_resource("a", &planned, "alice", None);
         let view = stream_view(&plain, &who("u", &["sales"], false));
         assert!(view.deployment.is_none(), "an unstamped stream has none");
+    }
+
+    #[test]
+    fn a_stream_digest_tracks_what_a_deploy_decides() {
+        let planned = check_write("a", &body_named("a"), &who("u", &["sales"], false))
+            .expect("the body is accepted");
+        let stamped = stream_resource("a", &planned, "alice", Some(&provenance("taxi", "prod")));
+        let tail = |resource: &Value| {
+            resource
+                .pointer("/metadata/annotations/stardelt.io~1spec-digest")
+                .and_then(Value::as_str)
+                .expect("the stamp carries a digest")
+                .to_string()
+        };
+        let before = tail(&stamped);
+
+        // Stopping a stream is not a change to it.
+        let mut stopped = stamped.clone();
+        stopped["spec"]["stopped"] = json!(true);
+        assert_eq!(stream_spec_digest(&stopped), before);
+
+        // A different sink table is a change a later deploy would overwrite.
+        let mut edited = stamped.clone();
+        edited["spec"]["sink"]["table"] = json!("another_table");
+        assert_ne!(stream_spec_digest(&edited), before);
+    }
+
+    #[test]
+    fn an_edited_stream_says_modified() {
+        let planned = check_write("a", &body_named("a"), &who("u", &["sales"], false))
+            .expect("the body is accepted");
+        let stamped = stream_resource("a", &planned, "alice", Some(&provenance("taxi", "prod")));
+        let plain = stream_view(&stamped, &who("u", &["sales"], false));
+        assert_eq!(
+            plain
+                .deployment
+                .expect("a stamped stream shows its deploy")
+                .modified,
+            None
+        );
+
+        let mut edited = stamped.clone();
+        edited["spec"]["sink"]["table"] = json!("another_table");
+        let changed = stream_view(&edited, &who("u", &["sales"], false));
+        assert_eq!(
+            changed
+                .deployment
+                .expect("the stamp survives the edit")
+                .modified,
+            Some(true)
+        );
     }
 
     mod fake_kube {
