@@ -2980,10 +2980,6 @@ async fn task_logs(
     Ok(log_view(page))
 }
 
-/// The largest executed copy Nova answers: a notebook run's copy carries outputs, so it is
-/// bigger than a published notebook; anything beyond this is refused rather than buffered.
-const MAX_RUN_NOTEBOOK_BYTES: usize = 25 * 1024 * 1024;
-
 /// `^\S{1,64}$` of `[A-Za-z0-9_-]`: what a task id in a run's object key can be.
 fn valid_task_id(task: &str) -> bool {
     (1..=64).contains(&task.chars().count())
@@ -3050,9 +3046,10 @@ async fn task_notebook(
     let bytes = match notebooks::read_run_copy(store, &key).await {
         Ok(bytes) => bytes,
         Err(notebooks::StoreError::Refused(404)) => return Err(no_run_copy()),
+        Err(notebooks::StoreError::TooLarge) => return Err(run_copy_too_large()),
         Err(error) => return Err(notebooks::store_fail(error)),
     };
-    if bytes.len() > MAX_RUN_NOTEBOOK_BYTES {
+    if bytes.len() > notebooks::MAX_RUN_NOTEBOOK_BYTES {
         return Err(run_copy_too_large());
     }
     // The bytes are the loader's own notebook; they go out as they are, never re-rendered.
@@ -6178,6 +6175,57 @@ mod tests {
         .expect_err("hidden");
         assert_eq!(error.status(), StatusCode::NOT_FOUND);
         assert_eq!(error.message(), "no such pipeline");
+    }
+
+    #[tokio::test]
+    async fn run_notebook_over_the_run_copy_cap_is_413() {
+        let resources = memory(&[("daily", resource("daily", Some("analytics")))]);
+        let s3 = FakeS3::start().await;
+        let store = notebook_store(&s3.base);
+        let ada = who("sub-ada", &["analytics"], false);
+        let namespace = crate::cluster::namespace();
+        let run_id = "scheduled__2026-11-10T03:00:00+00:00";
+        let key = notebooks::run_copy_key("analytics", "daily", run_id, "run");
+
+        // A 6 MiB executed copy is over the publish limit and under the run-copy cap.
+        s3.put_raw(&key, &vec![b'x'; 6 * 1024 * 1024], "alice");
+        let response = task_notebook(
+            Some(&resources),
+            Some(&store),
+            &ada,
+            &namespace,
+            "daily",
+            run_id,
+            "run",
+            false,
+        )
+        .await
+        .expect("a 6 MiB executed copy");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Over the run-copy cap the new object answers the promised 413, not a 502.
+        s3.put_raw(
+            &key,
+            &vec![b'x'; notebooks::MAX_RUN_NOTEBOOK_BYTES + 1024],
+            "alice",
+        );
+        let error = task_notebook(
+            Some(&resources),
+            Some(&store),
+            &ada,
+            &namespace,
+            "daily",
+            run_id,
+            "run",
+            false,
+        )
+        .await
+        .expect_err("over the run-copy cap");
+        assert_eq!(error.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(
+            error.message(),
+            "the executed notebook is larger than 25 MiB"
+        );
     }
 
     // -----------------------------------------------------------------------
