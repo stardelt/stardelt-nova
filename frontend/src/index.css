@@ -229,6 +229,27 @@
   }
 }
 
+/* React Flow's own chrome (the zoom and fit buttons) is light-only; the lineage graph paints
+   it with the theme tokens like the rest of the drawing, and gives the focusable nodes the
+   focus ring a keyboard user expects (rule U6). */
+.lineage-flow .react-flow__controls {
+  box-shadow: none;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid rgb(var(--c-border));
+}
+.lineage-flow .react-flow__controls-button {
+  background: rgb(var(--c-bg-elev));
+  border-bottom: 1px solid rgb(var(--c-border));
+  color: rgb(var(--c-text-dim));
+}
+.lineage-flow .react-flow__controls-button:hover {
+  background: rgb(var(--c-bg-soft));
+}
+.lineage-flow .react-flow__controls-button svg {
+  fill: currentColor;
+}
+
 @keyframes emptyIn {
   from {
     opacity: 0;
