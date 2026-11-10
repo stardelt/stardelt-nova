@@ -181,10 +181,6 @@ export default function UserMenu({ me }: { me?: Me }) {
                   className="w-full text-left flex items-center px-3 py-2 rounded-[8px] text-sm hover:bg-bg-soft focus:bg-bg-soft outline-none"
                   title="Sign out of Nova and all connected apps"
                   aria-label="Sign out of Nova and all connected apps"
-                  onClick={() => {
-                    // Let form submit normally
-                    close()
-                  }}
                   ref={(el) => {
                     if (el) items.push(el)
                     itemRefs.current = items.slice()
