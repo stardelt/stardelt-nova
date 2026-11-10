@@ -1647,6 +1647,24 @@ test.describe('catalog explorer', () => {
     await context.close()
   })
 
+  test('the SQL editor shows line numbers that follow the text', async ({ browser }) => {
+    const { context, page } = await open(browser, { body: TWO })
+    await page.goto('/query')
+    const gutter = page.getByTestId('sql-gutter')
+    const editor = page.getByLabel('SQL query')
+    // The sample is one line on this mock (pickSample never returns a newline): one number.
+    await expect(gutter.locator('div')).toHaveCount(1)
+    await expect(gutter.locator('div').first()).toHaveText('1')
+    // A typed newline adds a number immediately.
+    await editor.fill('SELECT 1;\nSELECT 2;')
+    await expect(gutter.locator('div')).toHaveCount(2)
+    await expect(gutter.locator('div').nth(1)).toHaveText('2')
+    // The gutter is decoration: the statement is the accessible content.
+    await expect(gutter).toHaveAttribute('aria-hidden', 'true')
+    judge('/query', await auditPage(page))
+    await context.close()
+  })
+
   test('the catalog page names the owner and who may read and write', async ({ browser }) => {
     // stardelt-nova#584: the facts of stardelt-nova#577 moved from a line under the catalog
     // list to the page the right pane shows, next to the object they describe.
