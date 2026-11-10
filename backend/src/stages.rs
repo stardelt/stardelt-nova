@@ -41,6 +41,9 @@ pub struct StageRow {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revision: Option<String>,
+    /// The bundle's repository, so the page can link the pull request that promotes a commit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub modified: Option<bool>,
 }
@@ -142,6 +145,7 @@ fn rows_of_peer(payload: &serde_json::Value) -> Result<Vec<StageRow>, String> {
             target,
             name,
             revision: text(deployment.get("revision")),
+            repository: text(deployment.get("repository")),
             modified: deployment
                 .get("modified")
                 .and_then(serde_json::Value::as_bool),

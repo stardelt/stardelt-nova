@@ -8046,6 +8046,13 @@
             ],
             "description": "`true` when the run, the schedule, the parameters or the options differ from what the last\ndeploy wrote: someone used the form, the YAML editor or `kubectl` since. Left out when they\nmatch, and for a pipeline stamped before the digest existed."
           },
+          "repository": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The repository the bundle was read from: `https://host/path`, for the compare link."
+          },
           "revision": {
             "type": [
               "string",
@@ -9573,6 +9580,13 @@
             "type": "string",
             "description": "The bundle's name: 3 to 40 lower-case letters, digits and dashes."
           },
+          "repository": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The bundle's repository as an `https://host/path` address, so a later stage can link the\npull request that promotes a commit. Omitted when the bundle's checkout names none."
+          },
           "revision": {
             "type": [
               "string",
@@ -10551,6 +10565,13 @@
           },
           "name": {
             "type": "string"
+          },
+          "repository": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The bundle's repository, so the page can link the pull request that promotes a commit."
           },
           "revision": {
             "type": [
