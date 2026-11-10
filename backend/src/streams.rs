@@ -218,7 +218,7 @@ fn is_reference(value: &str) -> bool {
 }
 
 /// `^[a-z0-9][a-z0-9-]*$` with a length limit: a catalog name.
-fn is_catalog(value: &str) -> bool {
+pub(crate) fn is_catalog(value: &str) -> bool {
     let bytes = value.as_bytes();
     !bytes.is_empty()
         && bytes.len() <= 63
