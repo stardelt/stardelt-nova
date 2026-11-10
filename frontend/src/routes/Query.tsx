@@ -401,7 +401,7 @@ export default function Query() {
                 }}
                 aria-label="SQL query"
                 wrap="off"
-                className="relative h-full w-full resize-none overflow-auto whitespace-pre bg-transparent font-mono text-sm leading-6 text-transparent caret-[var(--color-text)] outline-hidden selection:bg-accent/25 placeholder:text-text-mute"
+                className="relative h-full w-full resize-none overflow-auto whitespace-pre bg-transparent font-mono text-sm leading-6 text-text [-webkit-text-fill-color:transparent] caret-[var(--color-text)] outline-hidden selection:bg-accent/25 placeholder:text-text-mute"
                 spellCheck={false}
                 placeholder="SELECT ..."
               />
