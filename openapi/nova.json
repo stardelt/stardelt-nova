@@ -6545,7 +6545,7 @@
         "tags": [
           "public"
         ],
-        "description": "Check a stream write without writing it. The body is the body of `streams_put`: the stream's `name`, the `ownerGroup` the caller must belong to, `source` (`topic`, optional `connectionRef` naming a `Connection`) and `sink` (`catalog`, `table` as `schema.table`, `mode` `merge` or `append`, `mergeKeys`, optional `checkpointPrefix`), plus an optional `restartPolicy` (`always` or `on-failure`). Every rule a write runs is checked in order — the name, the body's name against the path's, the caller's groups, the topic, the connection reference, the catalog, the table, the mode, the merge keys, the checkpoint prefix, the restart policy — and then the group's ready `ServicePrincipal`. A rule that refuses is an answer, `ok: false` with one sentence in `errors`, status 200, never a 4xx; nothing is written. A cluster that does not answer is still 502 or 503, as on `pipelines_validate`. Answers `Cache-Control: no-store`.",
+        "description": "Check a stream write without writing it. The body is the body of `streams_put`: the stream's `name`, the `ownerGroup` the caller must belong to, `source` (`topic`, optional `connectionRef` naming a `Connection`) and `sink` (`catalog`, `table` as `schema.table`, `mode` `merge` or `append`, `mergeKeys`, optional `checkpointPrefix`), plus an optional `restartPolicy` (`always` or `on-failure`) and an optional `provenance` (`bundle`, `target`, optional `revision` and `repository`). Every rule a write runs is checked in order — the name, the body's name against the path's, the caller's groups, the provenance, the topic, the connection reference, the catalog, the table, the mode, the merge keys, the checkpoint prefix, the restart policy — and then the group's ready `ServicePrincipal`. `provenance` is the stamp a bundle deploy writes; it is checked with the same rules as a pipeline's, and the answer's `deployment` is what is stored. A rule that refuses is an answer, `ok: false` with one sentence in `errors`, status 200, never a 4xx; nothing is written. A cluster that does not answer is still 502 or 503, as on `pipelines_validate`. Answers `Cache-Control: no-store`.",
         "operationId": "streams_validate",
         "requestBody": {
           "content": {
@@ -6606,7 +6606,7 @@
         "tags": [
           "public"
         ],
-        "description": "Create or update one stream (`StreamApp`, D42). The body is the body of `streams_validate`; `name` must be the path's name. Nova writes `runAs: pipeline-<groupId>` itself (never from the body), stamps its own labels and the creator's annotation, and never carries `stopped`: it defaults to `false` on create and an update leaves the stored value alone. Refusals, in this order: a name outside 1 to 40 lower-case letters, digits and dashes starting with a letter, a body name that differs from the path, a group the caller is not a member of, a topic outside 1 to 249 letters, digits, dot, underscore or dash, a bad connection reference, catalog, table, mode, merge key, checkpoint prefix or restart policy — all 400; a group without a ready `ServicePrincipal` 409 with the `principals` route's message; a stream that belongs to another group 404 (the read path's rule, like a stream that does not exist); a body that moves an existing stream to another group 400 \"the group of an existing stream cannot change\"; a stream Nova did not write 409 `this stream was created outside Nova; change it where it was created`; a stream another writer changed between the read and the write 409 `the stream changed while it was being written; retry`. A foreign namespace and a stream that vanished are 404. The answer is the stored stream's view. Answers `Cache-Control: no-store`.",
+        "description": "Create or update one stream (`StreamApp`, D42). The body is the body of `streams_validate`; `name` must be the path's name. `provenance` (`bundle`, `target`, optional `revision` and `repository`) is the stamp a bundle deploy writes; it is checked with the same rules as a pipeline's, and the answer's `deployment` is what is stored. Nova writes `runAs: pipeline-<groupId>` itself (never from the body), stamps its own labels and the creator's annotation, and never carries `stopped`: it defaults to `false` on create and an update leaves the stored value alone. Refusals, in this order: a name outside 1 to 40 lower-case letters, digits and dashes starting with a letter, a body name that differs from the path, a group the caller is not a member of, a topic outside 1 to 249 letters, digits, dot, underscore or dash, a bad connection reference, catalog, table, mode, merge key, checkpoint prefix or restart policy, a bundle stamp outside a pipeline's provenance rules — all 400; a group without a ready `ServicePrincipal` 409 with the `principals` route's message; a stream that belongs to another group 404 (the read path's rule, like a stream that does not exist); a body that moves an existing stream to another group 400 \"the group of an existing stream cannot change\"; a stream Nova did not write 409 `this stream was created outside Nova; change it where it was created`; a stream another writer changed between the read and the write 409 `the stream changed while it was being written; retry`. A foreign namespace and a stream that vanished are 404. The answer is the stored stream's view. Answers `Cache-Control: no-store`.",
         "operationId": "streams_put",
         "parameters": [
           {
@@ -11301,6 +11301,17 @@
             "format": "int64",
             "description": "How many times Spark has submitted the application (`status.attempts`); absent until\nthe operator reports it (operator#336)."
           },
+          "deployment": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/DeploymentView",
+                "description": "What a bundle deploy stamped on the stream: bundle, target, revision, repository,\nwho and when. Absent when no bundle wrote it. `modified` is true when the spec was\nchanged after the last deploy."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "last_checkpoint_at": {
             "type": [
               "string",
@@ -11382,6 +11393,17 @@
           "ownerGroup": {
             "type": "string",
             "description": "The group that owns the stream; the caller must be a member."
+          },
+          "provenance": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Provenance",
+                "description": "Which bundle, target and commit this write deploys (`stardelt bundle deploy`).\nOmitted leaves what the stream already carries untouched."
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "restartPolicy": {
             "type": [

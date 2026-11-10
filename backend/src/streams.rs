@@ -23,8 +23,8 @@ use crate::api_json::ApiJson;
 use crate::auth::Identity;
 use crate::connection_routes::{Caller, Fail, SignedIn};
 use crate::pipelines::{
-    MANAGED_BY_LABEL, MANAGED_BY_NOVA, ResourceError, answer, may_act, no_cluster, resource_fail,
-    visible,
+    DeploymentView, MANAGED_BY_LABEL, MANAGED_BY_NOVA, Provenance, ResourceError, answer,
+    check_provenance, deployment_of, may_act, no_cluster, resource_fail, stamp_provenance, visible,
 };
 
 /// One `StreamApp`, as the Streams page needs it. No secret, no checkpoint path.
@@ -50,6 +50,11 @@ pub struct StreamView {
     pub sink_table: String,
     pub sink_mode: String,
     pub run_as: Option<String>,
+    /// What a bundle deploy stamped on the stream: bundle, target, revision, repository,
+    /// who and when. Absent when no bundle wrote it. `modified` is true when the spec was
+    /// changed after the last deploy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deployment: Option<DeploymentView>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -78,6 +83,10 @@ pub struct StreamWrite {
     /// `always` (default) or `on-failure`.
     #[serde(default)]
     pub restart_policy: Option<String>,
+    /// Which bundle, target and commit this write deploys (`stardelt bundle deploy`).
+    /// Omitted leaves what the stream already carries untouched.
+    #[serde(default)]
+    pub provenance: Option<Provenance>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -169,6 +178,7 @@ pub fn stream_view(app: &Value, _who: &Identity) -> StreamView {
             .get("runAs")
             .and_then(Value::as_str)
             .map(str::to_string),
+        deployment: deployment_of(app),
     }
 }
 
@@ -252,6 +262,12 @@ fn check_write(name: &str, body: &StreamWrite, who: &Identity) -> Result<Planned
             "you are not a member of the group {}",
             body.owner_group
         ));
+    }
+
+    // 3b. A bundle stamp, when the caller gives one: the same rules a pipeline's provenance
+    // runs (`pipelines.rs::check_provenance`).
+    if let Some(provenance) = &body.provenance {
+        check_provenance(provenance)?;
     }
 
     // 4. The topic (the CRD's `^[A-Za-z0-9._-]{1,249}$`).
@@ -377,8 +393,13 @@ fn stream_labels(group: &str) -> Value {
 
 /// The `StreamApp` a create writes: Nova's labels, the group's principal, no client-supplied
 /// metadata.
-fn stream_resource(name: &str, planned: &PlannedStream, created_by: &str) -> Value {
-    json!({
+fn stream_resource(
+    name: &str,
+    planned: &PlannedStream,
+    created_by: &str,
+    provenance: Option<&Provenance>,
+) -> Value {
+    let mut resource = json!({
         "apiVersion": "stardelt.io/v1alpha1",
         "kind": "StreamApp",
         "metadata": {
@@ -388,7 +409,11 @@ fn stream_resource(name: &str, planned: &PlannedStream, created_by: &str) -> Val
             "annotations": { "stardelt.io/created-by": created_by },
         },
         "spec": planned.spec,
-    })
+    });
+    if let Some(provenance) = provenance {
+        stamp_provenance(&mut resource, provenance, created_by);
+    }
+    resource
 }
 
 /// The `StreamApp` resources of Nova's namespace. `None` without a cluster connection.
@@ -618,13 +643,23 @@ async fn update_stream(
     name: &str,
     planned: &PlannedStream,
     who: &Identity,
+    existing: &Value,
+    provenance: Option<&Provenance>,
 ) -> Result<StreamView, Fail> {
+    let mut merged = existing.clone();
+    merged["spec"] = planned.spec.clone();
+    if let Some(provenance) = provenance {
+        stamp_provenance(&mut merged, provenance, &who.display_name);
+    }
     let patched = api
         .patch(
             name,
             &PatchParams::default(),
             &Patch::Merge(json!({
-                "metadata": {"labels": stream_labels(&planned.group)},
+                "metadata": {
+                    "labels": merged.pointer("/metadata/labels").cloned().unwrap_or(Value::Null),
+                    "annotations": merged.pointer("/metadata/annotations").cloned().unwrap_or(Value::Null),
+                },
                 "spec": planned.spec,
             })),
         )
@@ -670,11 +705,19 @@ async fn put_stream(
         Ok(()) => {}
         Err(message) => return Err(Fail::new(StatusCode::CONFLICT, message)),
     }
-    if existing.is_some() {
-        return update_stream(&api, name, &planned, who).await;
+    if let Some(existing) = &existing {
+        return update_stream(
+            &api,
+            name,
+            &planned,
+            who,
+            existing,
+            body.provenance.as_ref(),
+        )
+        .await;
     }
 
-    let resource = stream_resource(name, &planned, &who.display_name);
+    let resource = stream_resource(name, &planned, &who.display_name, body.provenance.as_ref());
     let object: kube::api::DynamicObject = serde_json::from_value(resource)
         .map_err(|e| resource_fail(ResourceError::Unavailable(e.to_string())))?;
     match api.create(&kube::api::PostParams::default(), &object).await {
@@ -687,7 +730,15 @@ async fn put_stream(
             })?;
             let existing = to_value(existing)?;
             check_existing(who, &existing, &body.owner_group)?;
-            update_stream(&api, name, &planned, who).await
+            update_stream(
+                &api,
+                name,
+                &planned,
+                who,
+                &existing,
+                body.provenance.as_ref(),
+            )
+            .await
         }
         Err(other) => Err(unavailable(other)),
     }
@@ -698,7 +749,7 @@ async fn put_stream(
     operation_id = "streams_validate",
     path = "/api/streams/validate",
     tag = "public",
-    description = "Check a stream write without writing it. The body is the body of `streams_put`: the stream's `name`, the `ownerGroup` the caller must belong to, `source` (`topic`, optional `connectionRef` naming a `Connection`) and `sink` (`catalog`, `table` as `schema.table`, `mode` `merge` or `append`, `mergeKeys`, optional `checkpointPrefix`), plus an optional `restartPolicy` (`always` or `on-failure`). Every rule a write runs is checked in order — the name, the body's name against the path's, the caller's groups, the topic, the connection reference, the catalog, the table, the mode, the merge keys, the checkpoint prefix, the restart policy — and then the group's ready `ServicePrincipal`. A rule that refuses is an answer, `ok: false` with one sentence in `errors`, status 200, never a 4xx; nothing is written. A cluster that does not answer is still 502 or 503, as on `pipelines_validate`. Answers `Cache-Control: no-store`.",
+    description = "Check a stream write without writing it. The body is the body of `streams_put`: the stream's `name`, the `ownerGroup` the caller must belong to, `source` (`topic`, optional `connectionRef` naming a `Connection`) and `sink` (`catalog`, `table` as `schema.table`, `mode` `merge` or `append`, `mergeKeys`, optional `checkpointPrefix`), plus an optional `restartPolicy` (`always` or `on-failure`) and an optional `provenance` (`bundle`, `target`, optional `revision` and `repository`). Every rule a write runs is checked in order — the name, the body's name against the path's, the caller's groups, the provenance, the topic, the connection reference, the catalog, the table, the mode, the merge keys, the checkpoint prefix, the restart policy — and then the group's ready `ServicePrincipal`. `provenance` is the stamp a bundle deploy writes; it is checked with the same rules as a pipeline's, and the answer's `deployment` is what is stored. A rule that refuses is an answer, `ok: false` with one sentence in `errors`, status 200, never a 4xx; nothing is written. A cluster that does not answer is still 502 or 503, as on `pipelines_validate`. Answers `Cache-Control: no-store`.",
     request_body = StreamWrite,
     responses(
         (status = 200, description = "The verdict: accepted, or the one sentence that refuses it", body = StreamValidation),
@@ -716,7 +767,7 @@ pub(crate) async fn validate(signed: SignedIn, ApiJson(body): ApiJson<StreamWrit
     operation_id = "streams_put",
     path = "/api/streams/{namespace}/{name}",
     tag = "public",
-    description = "Create or update one stream (`StreamApp`, D42). The body is the body of `streams_validate`; `name` must be the path's name. Nova writes `runAs: pipeline-<groupId>` itself (never from the body), stamps its own labels and the creator's annotation, and never carries `stopped`: it defaults to `false` on create and an update leaves the stored value alone. Refusals, in this order: a name outside 1 to 40 lower-case letters, digits and dashes starting with a letter, a body name that differs from the path, a group the caller is not a member of, a topic outside 1 to 249 letters, digits, dot, underscore or dash, a bad connection reference, catalog, table, mode, merge key, checkpoint prefix or restart policy — all 400; a group without a ready `ServicePrincipal` 409 with the `principals` route's message; a stream that belongs to another group 404 (the read path's rule, like a stream that does not exist); a body that moves an existing stream to another group 400 \"the group of an existing stream cannot change\"; a stream Nova did not write 409 `this stream was created outside Nova; change it where it was created`; a stream another writer changed between the read and the write 409 `the stream changed while it was being written; retry`. A foreign namespace and a stream that vanished are 404. The answer is the stored stream's view. Answers `Cache-Control: no-store`.",
+    description = "Create or update one stream (`StreamApp`, D42). The body is the body of `streams_validate`; `name` must be the path's name. `provenance` (`bundle`, `target`, optional `revision` and `repository`) is the stamp a bundle deploy writes; it is checked with the same rules as a pipeline's, and the answer's `deployment` is what is stored. Nova writes `runAs: pipeline-<groupId>` itself (never from the body), stamps its own labels and the creator's annotation, and never carries `stopped`: it defaults to `false` on create and an update leaves the stored value alone. Refusals, in this order: a name outside 1 to 40 lower-case letters, digits and dashes starting with a letter, a body name that differs from the path, a group the caller is not a member of, a topic outside 1 to 249 letters, digits, dot, underscore or dash, a bad connection reference, catalog, table, mode, merge key, checkpoint prefix or restart policy, a bundle stamp outside a pipeline's provenance rules — all 400; a group without a ready `ServicePrincipal` 409 with the `principals` route's message; a stream that belongs to another group 404 (the read path's rule, like a stream that does not exist); a body that moves an existing stream to another group 400 \"the group of an existing stream cannot change\"; a stream Nova did not write 409 `this stream was created outside Nova; change it where it was created`; a stream another writer changed between the read and the write 409 `the stream changed while it was being written; retry`. A foreign namespace and a stream that vanished are 404. The answer is the stored stream's view. Answers `Cache-Control: no-store`.",
     params(
         ("namespace" = String, Path, description = "The stream's namespace; only Nova's own namespace"),
         ("name" = String, Path, description = "The stream's name"),
@@ -759,6 +810,7 @@ mod tests {
         router, stream_resource, stream_view, visible_streams,
     };
     use crate::auth::Identity;
+    use crate::pipelines::{Provenance, deployment_of};
 
     fn who(sub: &str, groups: &[&str], admin: bool) -> Identity {
         Identity {
@@ -778,7 +830,10 @@ mod tests {
             "metadata": {
                 "name": name,
                 "namespace": crate::cluster::namespace(),
-                "labels": {"app.kubernetes.io/managed-by": "stardelt-nova"}
+                "labels": {
+                    "app.kubernetes.io/managed-by": "stardelt-nova",
+                    "stardelt.io/owner-group": group,
+                }
             },
             "spec": {
                 "ownerGroup": group,
@@ -884,6 +939,7 @@ mod tests {
                 checkpoint_prefix: None,
             },
             restart_policy: None,
+            provenance: None,
         }
     }
 
@@ -970,7 +1026,7 @@ mod tests {
     fn the_resource_carries_nova_labels_and_the_group_principal() {
         let planned = check_write("a", &body_named("a"), &who("u", &["sales"], false))
             .expect("the body is accepted");
-        let resource = stream_resource("a", &planned, "Ada Lovelace");
+        let resource = stream_resource("a", &planned, "Ada Lovelace", None);
         assert_eq!(
             resource.pointer("/spec/runAs"),
             Some(&json!("pipeline-sales"))
@@ -989,6 +1045,96 @@ mod tests {
         );
         assert_eq!(resource.pointer("/spec/stopped"), None, "no `stopped`");
         assert_eq!(resource["kind"], json!("StreamApp"));
+    }
+
+    /// A bundle stamp that every provenance rule accepts.
+    fn provenance(bundle: &str, target: &str) -> Provenance {
+        Provenance {
+            bundle: bundle.to_string(),
+            target: target.to_string(),
+            revision: None,
+            repository: None,
+        }
+    }
+
+    #[test]
+    fn a_write_accepts_a_valid_bundle_stamp() {
+        let mut body = body_named("a");
+        body.provenance = Some(provenance("taxi", "prod"));
+        let planned = check_write("a", &body, &who("u", &["sales"], false))
+            .expect("a plain bundle stamp is accepted");
+        assert_eq!(
+            planned.spec.pointer("/ownerGroup"),
+            Some(&json!("sales")),
+            "the stamp does not change the spec"
+        );
+    }
+
+    #[test]
+    fn a_write_refuses_a_bad_bundle_name() {
+        let mut body = body_named("a");
+        body.provenance = Some(provenance("X", "prod"));
+        let error = check_write("a", &body, &who("u", &["sales"], false))
+            .expect_err("an upper-case bundle name is refused");
+        assert_eq!(
+            error,
+            "the bundle name must be 3 to 40 lower-case letters, digits and dashes"
+        );
+    }
+
+    #[test]
+    fn a_write_refuses_a_bad_revision() {
+        let mut body = body_named("a");
+        body.provenance = Some(Provenance {
+            revision: Some("xyz".to_string()),
+            ..provenance("taxi", "prod")
+        });
+        let error = check_write("a", &body, &who("u", &["sales"], false))
+            .expect_err("a non-hex revision is refused");
+        assert_eq!(
+            error,
+            "the revision must be 7 to 64 hex digits, with -dirty appended when the working tree had uncommitted changes"
+        );
+    }
+
+    #[test]
+    fn the_resource_of_a_stamped_write_carries_the_bundle_and_target() {
+        let planned = check_write("a", &body_named("a"), &who("u", &["sales"], false))
+            .expect("the body is accepted");
+        let stamp = provenance("taxi", "prod");
+        let resource = stream_resource("a", &planned, "alice", Some(&stamp));
+        assert_eq!(
+            resource.pointer("/metadata/labels/stardelt.io~1bundle"),
+            Some(&json!("taxi"))
+        );
+        assert_eq!(
+            resource.pointer("/metadata/labels/stardelt.io~1target"),
+            Some(&json!("prod"))
+        );
+        assert_eq!(
+            resource.pointer("/metadata/labels/app.kubernetes.io~1managed-by"),
+            Some(&json!("stardelt-nova")),
+            "Nova's own labels stay"
+        );
+        let deployment = deployment_of(&resource).expect("the stamp is read back");
+        assert_eq!(deployment.bundle, "taxi");
+        assert_eq!(deployment.target, "prod");
+        assert_eq!(deployment.deployed_by.as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn a_stamped_stream_view_names_its_deployment() {
+        let planned = check_write("a", &body_named("a"), &who("u", &["sales"], false))
+            .expect("the body is accepted");
+        let stamped = stream_resource("a", &planned, "alice", Some(&provenance("taxi", "prod")));
+        let view = stream_view(&stamped, &who("u", &["sales"], false));
+        let deployment = view.deployment.expect("a stamped stream shows its deploy");
+        assert_eq!(deployment.bundle, "taxi");
+        assert_eq!(deployment.target, "prod");
+
+        let plain = stream_resource("a", &planned, "alice", None);
+        let view = stream_view(&plain, &who("u", &["sales"], false));
+        assert!(view.deployment.is_none(), "an unstamped stream has none");
     }
 
     mod fake_kube {

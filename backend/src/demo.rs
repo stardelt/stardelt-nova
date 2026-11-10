@@ -1024,6 +1024,7 @@ pub fn streams() -> crate::streams::StreamsResponse {
         sink_table: table.into(),
         sink_mode: "append".into(),
         run_as: Some("pipeline-mobility".into()),
+        deployment: None,
     };
     StreamsResponse {
         streams: vec![
