@@ -3231,11 +3231,13 @@ test.describe('schedule', () => {
     await first.page.keyboard.press('Escape')
     await expect(dialog).toHaveCount(0)
     // The statement may live in the textarea; it may not live in an attribute or anywhere
-    // outside a textarea (a title, a URL, an error box).
+    // outside a textarea (a title, a URL, an error box). The SQL editor's syntax overlay
+    // (`#736`) is a rendering of the textarea's own value — escaped token spans, no innerHTML
+    // — so it is the textarea's copy and is removed with it.
     expect(await attributes(first.page)).not.toContain(canary)
     const outsideTextareas = await first.page.evaluate(() => {
       const clone = document.documentElement.cloneNode(true) as HTMLElement
-      clone.querySelectorAll('textarea').forEach((element) => element.remove())
+      clone.querySelectorAll('textarea, [data-testid="sql-highlight"]').forEach((element) => element.remove())
       return clone.outerHTML
     })
     expect(outsideTextareas).not.toContain(canary)
