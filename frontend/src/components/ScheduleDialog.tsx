@@ -267,6 +267,7 @@ export default function ScheduleDialog({
   pipeline,
   initialKind = 'sql',
   initialNotebook,
+  startWithNewest,
   onClose,
   onScheduled,
 }: {
@@ -279,6 +280,8 @@ export default function ScheduleDialog({
   initialKind?: RunKind
   /** Create mode: the Notebooks page opens a schedule for this published version (#439). */
   initialNotebook?: { group: string; name: string; objectVersion: string }
+  /** Edit mode: start on "Use newest version" (#518). */
+  startWithNewest?: boolean
   onClose: () => void
   onScheduled: (view: PipelineView) => void
 }) {
@@ -328,7 +331,7 @@ export default function ScheduleDialog({
   const [hoveredGroup, setHoveredGroup] = useState<string | null>(null)
   const [runKind, setRunKind] = useState<RunKind>(() => (editing ? runKindFrom(pipeline) : initialKind))
   const [notebookName, setNotebookName] = useState(() => storedNotebook?.name ?? initialNotebook?.name ?? '')
-  const [version, setVersion] = useState(() => storedNotebook?.objectVersion ?? initialNotebook?.objectVersion ?? '')
+  const [version, setVersion] = useState(() => (editing && startWithNewest ? '' : storedNotebook?.objectVersion ?? initialNotebook?.objectVersion ?? ''))
   const [notebookValues, setNotebookValues] = useState<Record<string, string>>({})
   const [when, setWhen] = useState<WhenPreset>(seed.preset)
   const [time, setTime] = useState(seed.time)

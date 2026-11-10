@@ -220,6 +220,10 @@ export default function NotebookDetail() {
                     <td className="td px-2 text-xs">
                       <span className="font-mono" title={row.objectVersion}>{shortVersion(row.objectVersion)}</span>
                       {behind > 0 && <span className="text-text-mute"> · {behind} version{behind === 1 ? '' : 's'} behind</span>}
+                      {behind > 0 && (
+                        <Link to={`/pipelines/${encodeURIComponent(row.namespace)}/${encodeURIComponent(row.name)}?edit=newest`}
+                          className="ml-2 underline text-accent">Move to newest</Link>
+                      )}
                     </td>
                     <td className="td px-2 text-xs font-mono">{row.runAs ?? '—'}</td>
                   </tr>

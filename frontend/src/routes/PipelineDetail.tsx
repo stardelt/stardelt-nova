@@ -1,6 +1,6 @@
 import { Fragment, useState } from 'react'
 import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { ApiError, api, type LogLine, type PipelineDetail as PipelineDetailView, type RunView } from '../api'
 import ErrorBox from '../components/ErrorBox'
 import { EmptyState } from '../components/EmptyState'
@@ -30,6 +30,8 @@ import {
  */
 export default function PipelineDetail() {
   const { namespace = '', name = '' } = useParams()
+  const [searchParams, setSearchParams] = useSearchParams()
+  const newest = searchParams.get('edit') === 'newest'
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const me = useQuery({ queryKey: ['me'], queryFn: api.me })
@@ -37,7 +39,7 @@ export default function PipelineDetail() {
   const demo = me.data?.demo === true
   const [openRun, setOpenRun] = useState<string | null>(null)
   const [stopping, setStopping] = useState<RunView | null>(null)
-  const [editing, setEditing] = useState(false)
+  const [editing, setEditing] = useState(newest)
   const [deleting, setDeleting] = useState(false)
   const [showDefinition, setShowDefinition] = useState(false)
   const [editingDefinition, setEditingDefinition] = useState(false)
@@ -379,9 +381,14 @@ export default function PipelineDetail() {
         <ScheduleDialog
           mode="edit"
           pipeline={pipeline}
-          onClose={() => setEditing(false)}
+          startWithNewest={newest}
+          onClose={() => {
+            setEditing(false)
+            setSearchParams({}, { replace: true })
+          }}
           onScheduled={(view) => {
             setEditing(false)
+            setSearchParams({}, { replace: true })
             actions.clearError()
             actions.announce(`Saved ${view.name}.`)
             void queryClient.invalidateQueries({ queryKey: ['pipeline', namespace, name] })
