@@ -639,6 +639,7 @@ mod tests {
             dev_user: dev_user.into(),
             trino_url: "http://trino:8080".into(),
             lakekeeper_url: "http://lakekeeper:8181".into(),
+            shared_accounts: vec![],
             // No catalog client in these tests: Lakekeeper is called as before (#222).
             catalog_token: None,
             superset_url: "http://superset:8088".into(),

@@ -3162,10 +3162,13 @@ mod tests {
         assert_eq!(me["session_expires_at"], Value::Null);
     }
 
-    /// `dev` mode keeps the exact pre-OIDC answer: no administrator decision, no session,
-    /// and not even the new keys (`skip_serializing_if` territory — a separate struct).
+    /// `dev` mode keeps the pre-OIDC answer: no administrator decision, no session, and not
+    /// the oidc-only keys (`skip_serializing_if` territory — a separate struct). The one
+    /// exception is `shared_account` (stardelt-nova#725): the public-demo banner reads it, so
+    /// it is always there and always `false` here — a shared account is a fact about an
+    /// oidc sign-in name (`NOVA_SHARED_ACCOUNTS`), and `dev` mode has no IdP.
     #[tokio::test]
-    async fn me_in_dev_mode_has_exactly_the_old_keys() {
+    async fn me_in_dev_mode_has_the_old_keys_and_shared_account_false() {
         let app = Router::new()
             .route("/api/me", get(crate::me))
             .with_state(crate::router_tests::test_state());
@@ -3186,6 +3189,7 @@ mod tests {
                 "auth_mode",
                 "demo",
                 "peers",
+                "shared_account",
                 "stage_kind",
                 "stage_name",
                 "user",
@@ -3194,6 +3198,7 @@ mod tests {
             "{body}"
         );
         assert_eq!(value["auth_mode"], "static-dev");
+        assert_eq!(value["shared_account"], false);
     }
 
     /// The answer holds claims, never credentials: a session whose access token is
