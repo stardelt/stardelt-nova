@@ -59,9 +59,182 @@ pub async fn record(
     }
 }
 
+/// One row of the index, as the search reads it.
+#[derive(Debug, Clone)]
+pub struct IndexedDoc {
+    pub namespace: String,
+    pub table: String,
+    pub search_text: String,
+    pub tags: Vec<String>,
+    pub owner: Option<String>,
+    pub domain: Option<String>,
+}
+
+/// Every indexed row of one catalog. One catalog holds at most a few hundred tables, so
+/// the word and filter rules run in Rust where they are unit-tested.
+pub async fn rows(pool: Option<&PgPool>, catalog: &str) -> Vec<IndexedDoc> {
+    let Some(pool) = pool else { return Vec::new() };
+    let found = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            String,
+            Vec<String>,
+            Option<String>,
+            Option<String>,
+        ),
+    >(
+        "SELECT namespace, table_name, search_text, tags, owner, domain \
+         FROM catalog_doc WHERE catalog = $1 ORDER BY namespace, table_name",
+    )
+    .bind(catalog)
+    .fetch_all(pool)
+    .await;
+    match found {
+        Ok(rows) => rows
+            .into_iter()
+            .map(
+                |(namespace, table, search_text, tags, owner, domain)| IndexedDoc {
+                    namespace,
+                    table,
+                    search_text,
+                    tags,
+                    owner,
+                    domain,
+                },
+            )
+            .collect(),
+        Err(e) => {
+            tracing::warn!("catalog documentation index not read for {catalog}: {e}");
+            Vec::new()
+        }
+    }
+}
+
+/// Whether one indexed row answers every word and every given filter. `words` are already
+/// lowercased; `search_text` is lowercased when it is written.
+pub fn row_matches(
+    row: &IndexedDoc,
+    words: &[String],
+    tag: Option<&str>,
+    owner: Option<&str>,
+    domain: Option<&str>,
+) -> bool {
+    if let Some(tag) = tag
+        && !row.tags.iter().any(|t| t == tag)
+    {
+        return false;
+    }
+    if let Some(owner) = owner
+        && row.owner.as_deref() != Some(owner)
+    {
+        return false;
+    }
+    if let Some(domain) = domain
+        && row.domain.as_deref() != Some(domain)
+    {
+        return false;
+    }
+    words
+        .iter()
+        .all(|word| row.search_text.contains(word.as_str()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn indexed() -> IndexedDoc {
+        let mut doc = doc();
+        // A domain is written lowercase (`catalog_docs::domain_ok`).
+        doc.domain = Some("sales".into());
+        IndexedDoc {
+            namespace: "shop".into(),
+            table: "daily_revenue".into(),
+            search_text: search_text("shop", "daily_revenue", &doc),
+            tags: doc.tags.clone(),
+            owner: doc.owner.clone(),
+            domain: doc.domain.clone(),
+        }
+    }
+
+    fn words(text: &str) -> Vec<String> {
+        text.split_whitespace().map(str::to_lowercase).collect()
+    }
+
+    #[test]
+    fn a_word_in_the_description_matches() {
+        assert!(row_matches(&indexed(), &words("revenue"), None, None, None));
+        assert!(row_matches(
+            &indexed(),
+            &words("daily shop"),
+            None,
+            None,
+            None
+        ));
+    }
+
+    #[test]
+    fn a_tag_filter_rejects_a_row_without_that_tag() {
+        assert!(row_matches(
+            &indexed(),
+            &words("revenue"),
+            Some("finance"),
+            None,
+            None
+        ));
+        assert!(!row_matches(
+            &indexed(),
+            &words("revenue"),
+            Some("ops"),
+            None,
+            None
+        ));
+    }
+
+    #[test]
+    fn an_owner_filter_is_exact() {
+        assert!(row_matches(
+            &indexed(),
+            &words("revenue"),
+            None,
+            Some("analytics"),
+            None
+        ));
+        assert!(!row_matches(
+            &indexed(),
+            &words("revenue"),
+            None,
+            Some("analytic"),
+            None
+        ));
+        assert!(!row_matches(
+            &indexed(),
+            &words("revenue"),
+            None,
+            Some("Analytics"),
+            None
+        ));
+    }
+
+    #[test]
+    fn a_word_in_no_field_is_rejected() {
+        assert!(!row_matches(
+            &indexed(),
+            &words("revenue nothing"),
+            None,
+            None,
+            None
+        ));
+        assert!(!row_matches(&indexed(), &words("zones"), None, None, None));
+    }
+
+    #[test]
+    fn a_domain_filter_is_exact_and_lowercase() {
+        assert!(row_matches(&indexed(), &[], None, None, Some("sales")));
+        assert!(!row_matches(&indexed(), &[], None, None, Some("Sales")));
+    }
 
     fn doc() -> TableDocumentation {
         TableDocumentation {

@@ -958,7 +958,7 @@
         "tags": [
           "public"
         ],
-        "description": "Find tables by name in one catalog. `q` is one or more words; a table matches when its `namespace.table` contains every word, in any case. The catalog's namespaces and tables are listed the way `namespaces_list` and `tables_list` list them, so the answer shows only what the caller may browse; only names are searched (single-level namespaces), not comments or tags. `?catalog=` picks the catalog; omitted, the default one is used. At most 100 namespaces are read per request: `truncated` says when the answer is a prefix.",
+        "description": "Find tables in one catalog. `q` is one or more words; a table matches when its `namespace.table` contains every word, in any case, or when one of its documented fields (the description, a tag, the owner, the domain) contains every word — a table found both ways appears once. `tag`, `owner` and `domain` narrow the answer to documented tables: a table without a documentation row has no tag, owner or domain, so it is not shown. Those three filters need the state store and answer 503 without it (demo mode has none). The catalog's namespaces and tables are listed the way `namespaces_list` and `tables_list` list them, so the answer shows only what the caller may browse; only single-level namespaces are searched. `?catalog=` picks the catalog; omitted, the default one is used. At most 100 namespaces are read per request: `truncated` says when the answer is a prefix.",
         "operationId": "catalog_search",
         "parameters": [
           {
@@ -988,6 +988,33 @@
               "type": "integer",
               "minimum": 0
             }
+          },
+          {
+            "name": "tag",
+            "in": "query",
+            "description": "Only tables carrying this tag (exact, lowercase).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "owner",
+            "in": "query",
+            "description": "Only tables whose owner is this group.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "domain",
+            "in": "query",
+            "description": "Only tables in this domain (exact, lowercase).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -1002,7 +1029,7 @@
             }
           },
           "400": {
-            "description": "`q` is missing or longer than 100 characters, or the catalog name is invalid",
+            "description": "`q` is missing or longer than 100 characters, a filter is blank or longer than 64 characters, or the catalog name is invalid",
             "content": {
               "application/json": {
                 "schema": {
@@ -1033,6 +1060,16 @@
           },
           "502": {
             "description": "The catalog or the engine is not reachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A `tag`, `owner` or `domain` filter was given and the state store is disabled",
             "content": {
               "application/json": {
                 "schema": {
