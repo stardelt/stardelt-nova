@@ -1,6 +1,7 @@
+import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { api, type PipelineView } from '../api'
+import { api, type PipelineView, type StageRow } from '../api'
 import ErrorBox from '../components/ErrorBox'
 import { shortRevision } from '../format'
 import { PipelineStateBadge, formatWhen } from './Pipelines'
@@ -47,8 +48,107 @@ function commitsOf(rows: PipelineView[]): string {
   return only ? `commit ${shortRevision(only)}` : 'no commit recorded'
 }
 
+/** Where a pipeline stands between this stage and the peer. No Git ancestry, no "ahead/behind". */
+export function compareStatus(here: StageRow | undefined, there: StageRow | undefined, peer: string): string {
+  if (here && !there) return 'only here'
+  if (!here && there) return `only in ${peer}`
+  if (!here || !there) return '—'
+  if (there.modified) return `changed in ${peer}`
+  if ((here.revision ?? '') === (there.revision ?? '')) return 'same'
+  return 'different commit'
+}
+
+/** The rows of the comparison, keyed by bundle/target/name, sorted like the page's sections. */
+export function comparisonRows(here: StageRow[], there: StageRow[]) {
+  const key = (row: StageRow) => `${row.bundle}\^@${row.target}\^@${row.name}`
+  const found = new Map<string, { here?: StageRow; there?: StageRow }>()
+  for (const row of here) found.set(key(row), { ...(found.get(key(row)) ?? {}), here: row })
+  for (const row of there) found.set(key(row), { ...(found.get(key(row)) ?? {}), there: row })
+  const sample = (pair: { here?: StageRow; there?: StageRow }) => (pair.here ?? pair.there) as StageRow
+  return [...found.entries()]
+    .map(([k, pair]) => ({ key: k, ...pair }))
+    .sort((a, b) => {
+      const x = sample(a), y = sample(b)
+      return x.bundle.localeCompare(y.bundle) || x.target.localeCompare(y.target) || x.name.localeCompare(y.name)
+    })
+}
+
+/** The compare table for one peer: what each stage runs and what differs. */
+function StageCompare({ peer }: { peer: string }) {
+  const compare = useQuery({
+    queryKey: ['stages-compare', peer],
+    queryFn: () => api.stagesCompare(peer),
+    retry: false,
+    staleTime: 30_000,
+  })
+  if (compare.isLoading) return <p className="text-sm text-text-mute">Comparing with {peer}…</p>
+  if (compare.isError) {
+    return (
+      <div className="card px-5 py-5">
+        <ErrorBox error={compare.error} onRetry={() => void compare.refetch()} />
+      </div>
+    )
+  }
+  const answer = compare.data
+  if (!answer) return null
+  if (answer.status !== 'ok') {
+    return (
+      <div className="card px-5 py-5 text-sm text-text-dim">
+        {answer.detail ?? `Could not read ${peer}.`}
+      </div>
+    )
+  }
+  const rows = comparisonRows(answer.here, answer.there)
+  return (
+    <div className="card relative overflow-x-auto">
+      <table className="w-full text-sm">
+        <caption className="sr-only">The pipelines of this stage against {answer.peerUrl}.</caption>
+        <thead className="bg-bg-soft/50">
+          <tr>
+            <th scope="col" className="th px-5 py-2.5">Bundle · stage</th>
+            <th scope="col" className="th px-3 py-2.5">Pipeline</th>
+            <th scope="col" className="th px-3 py-2.5">Here</th>
+            <th scope="col" className="th px-3 py-2.5">{peer}</th>
+            <th scope="col" className="th px-3 py-2.5">Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map(({ key, here, there }) => {
+            const row = (here ?? there) as StageRow
+            return (
+              <tr key={key} className="border-t border-border/70 hover:bg-bg-soft/30">
+                <td className="td px-5 font-mono text-xs break-words">{row.bundle} · {row.target}</td>
+                <td className="td px-3 break-words">{row.name}</td>
+                <td className="td px-3 font-mono text-xs" title={here?.revision}>
+                  {here?.revision ? shortRevision(here.revision) : '—'}
+                  {here?.modified ? ' · changed' : ''}
+                </td>
+                <td className="td px-3 font-mono text-xs" title={there?.revision}>
+                  {there?.revision ? shortRevision(there.revision) : '—'}
+                  {there?.modified ? ' · changed' : ''}
+                </td>
+                <td className="td px-3">
+                  {compareStatus(here, there, peer) === 'only here' ||
+                  compareStatus(here, there, peer).startsWith('only in') ? (
+                    <span className="badge border-amber-400/40 bg-amber-400/10 text-warn">{compareStatus(here, there, peer)}</span>
+                  ) : (
+                    <span className="text-text-dim">{compareStatus(here, there, peer)}</span>
+                  )}
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
 export default function Deployments() {
   const list = useQuery({ queryKey: ['pipelines'], queryFn: api.pipelines, refetchInterval: 30_000 })
+  const me = useQuery({ queryKey: ['me'], queryFn: api.me })
+  const peers = me.data?.peers ?? []
+  const [peer, setPeer] = useState<string | null>(null)
   const groups = stages(list.data?.pipelines ?? [])
   const outside = notInGit(list.data?.pipelines ?? [])
   const failed = list.isError && !list.data
@@ -62,6 +162,26 @@ export default function Deployments() {
           which commit each pipeline runs, who deployed it, and whether anyone changed it since.
         </p>
       </header>
+
+      {peers.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-sm text-text-mute">Compare with</span>
+          {peers.map((p) => (
+            <button
+              key={p.name}
+              type="button"
+              onClick={() => setPeer(peer === p.name ? null : p.name)}
+              aria-pressed={peer === p.name}
+              className={`badge ${peer === p.name ? 'border-accent/50 bg-accent/10 text-accent' : 'border-border text-text-dim hover:bg-bg-soft/40'}`}
+              title={p.url}
+            >
+              {p.name}
+            </button>
+          ))}
+          {peer && <span className="text-xs text-text-mute">reading {peers.find((p) => p.name === peer)?.url}</span>}
+        </div>
+      )}
+      {peer && <StageCompare peer={peer} />}
 
       {list.isLoading && <p className="text-sm text-text-mute">Reading deployments…</p>}
       {failed && (

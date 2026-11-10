@@ -82,3 +82,11 @@ notebooks stubbed empty: `running` with its idle stop in 47 min and the start ti
 Open JupyterLab and Stop; `stopped` with Start; and `starting` forty-one seconds into a
 spawn, with the pulsing dot and the elapsed seconds. Opening is a plain link to the hub —
 Nova has no `access:servers` scope.
+
+`deployments-compare-*.png` — the Deployments page with a peer stage (stardelt-nova#667) at
+1440×900 and 390×900, dark and light, from the built UI in demo mode with
+`NOVA_PEER_STAGES=prod=http://127.0.0.1:9`, so the "Compare with prod" control and the peer's
+URL are real. The compare answer is stubbed (`status: "unreachable"`, `detail: "prod did not
+answer within 5 seconds"`): in `NOVA_AUTH_MODE=dev` the real `/api/stages/compare` answers 401,
+because it forwards the caller's own token (nova#671). The table itself (`ok`) is not shown —
+that needs two installs.

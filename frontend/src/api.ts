@@ -13,6 +13,8 @@ export type Me = {
   warehouse: string
   stage_name?: string | null
   stage_kind?: 'dev' | 'test' | 'prod'
+  /** The peer stages this Nova compares against (`NOVA_PEER_STAGES`); empty when none. */
+  peers?: { name: string; url: string }[]
   // The fields below are present in oidc mode only — claims, never tokens.
   sub?: string
   email?: string | null
@@ -754,6 +756,26 @@ export type DeploymentView = {
   modified?: boolean
 }
 
+/** One deployed pipeline in a stage comparison (`GET /api/stages/compare`, nova#660). */
+export type StageRow = {
+  bundle: string
+  target: string
+  name: string
+  revision?: string
+  /** True when the pipeline was changed on that stage after its deploy. */
+  modified?: boolean
+}
+
+/** `status` is `ok`, `unauthorized` (the peer refused this session's token) or `unreachable`. */
+export type StageComparison = {
+  peer: string
+  peerUrl: string
+  status: 'ok' | 'unauthorized' | 'unreachable' | string
+  detail?: string
+  here: StageRow[]
+  there: StageRow[]
+}
+
 export type PipelineView = {
   name: string
   namespace: string
@@ -1231,6 +1253,7 @@ export type SettingAnswer = { key: string; value: unknown }
 
 export const api = {
   me:           ()                            => jget<Me>('/api/me'),
+  stagesCompare: (peer: string) => jget<StageComparison>(`/api/stages/compare?peer=${encodeURIComponent(peer)}`),
   /** The caller's personal settings as one JSON object (`{}` when none). */
   settings:     ()                            => jget<Record<string, unknown>>('/api/settings'),
   putSetting:   (key: string, value: unknown) => jput<SettingAnswer>(`/api/settings/${seg(key)}`, value),
