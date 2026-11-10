@@ -1386,6 +1386,11 @@ export const api = {
     const qs = version ? `?${new URLSearchParams({ version }).toString()}` : ''
     return jget<NotebookParameters>(`/api/notebooks/${seg(group)}/${seg(name)}/parameters${qs}`)
   },
+  /** The stored bytes of one published version, for the preview; no `version` means the latest (#684). */
+  notebookContent: (group: string, name: string, version?: string) => {
+    const qs = version ? `?${new URLSearchParams({ version }).toString()}` : ''
+    return jget<NotebookDoc>(`/api/notebooks/${seg(group)}/${seg(name)}/content${qs}`)
+  },
   /** The pipelines that run one published notebook — its schedules and pinned versions (#517). */
   notebookUsage: (group: string, name: string) =>
     jget<NotebookUsageResponse>(`/api/notebooks/${seg(group)}/${seg(name)}/usage`),

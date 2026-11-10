@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState } from 'react'
+import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { ApiError, api, runNotebookUrl } from '../api'
 import { EmptyState } from '../components/EmptyState'
 import ErrorBox from '../components/ErrorBox'
+import NotebookFrame from '../components/NotebookFrame'
 import { renderNotebook } from '../notebookHtml'
 import { PipelineStateBadge } from './Pipelines'
 
@@ -11,17 +12,14 @@ import { PipelineStateBadge } from './Pipelines'
  * One run's executed notebook (#683): the copy the run wrote, every cell's output and the
  * traceback, opened at the cell that failed.
  *
- * The notebook is rendered into an `<iframe sandbox="allow-scripts">` whose sandbox omits the
+ * The notebook is rendered into the sandboxed frame `NotebookFrame`, whose sandbox omits the
  * same-origin permission; its HTML, images and scripts can run but reach neither Nova's DOM nor
- * its API. The frame reports its own height by `postMessage`, and only a message from that
- * frame's window is believed.
+ * its API.
  */
 export default function RunNotebook() {
   const { namespace = '', name = '', runId = '', taskId = '' } = useParams()
   const navigate = useNavigate()
-  const [height, setHeight] = useState(600)
   const [rerunning, setRerunning] = useState(false)
-  const frameRef = useRef<HTMLIFrameElement | null>(null)
 
   const notebook = useQuery({
     queryKey: ['run-notebook', namespace, name, runId, taskId],
@@ -34,17 +32,6 @@ export default function RunNotebook() {
     queryKey: ['pipeline-run', namespace, name, runId],
     queryFn: () => api.pipelineRun(namespace, name, runId),
   })
-
-  useEffect(() => {
-    function onMessage(event: MessageEvent) {
-      if (event.source !== frameRef.current?.contentWindow) return
-      const reported = (event.data as { nbHeight?: unknown } | null)?.nbHeight
-      if (typeof reported !== 'number' || !Number.isFinite(reported)) return
-      setHeight(Math.min(Math.round(reported), 20_000))
-    }
-    window.addEventListener('message', onMessage)
-    return () => window.removeEventListener('message', onMessage)
-  }, [])
 
   const rendered = notebook.data ? renderNotebook(notebook.data) : null
   const missing = notebook.isError && notebook.error instanceof ApiError && notebook.error.status === 404
@@ -111,14 +98,7 @@ export default function RunNotebook() {
             </a>
           </div>
 
-          <iframe
-            ref={frameRef}
-            title="Executed notebook"
-            sandbox="allow-scripts"
-            srcDoc={rendered.html}
-            className="w-full rounded-[10px] border border-border bg-white"
-            style={{ height }}
-          />
+          <NotebookFrame title="Executed notebook" html={rendered.html} />
         </>
       )}
     </div>

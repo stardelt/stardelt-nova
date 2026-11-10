@@ -3,18 +3,20 @@ import { useQuery } from '@tanstack/react-query'
 import { Link, useParams } from 'react-router-dom'
 import { ApiError, api, type PipelineView } from '../api'
 import ErrorBox from '../components/ErrorBox'
+import NotebookFrame from '../components/NotebookFrame'
 import ScheduleDialog from '../components/ScheduleDialog'
 import { formatBytes, formatTime, shortVersion } from '../format'
+import { renderNotebook } from '../notebookHtml'
 
 /**
  * One published notebook (stardelt-nova#517): its versions, newest first, the parameters of the
- * version the person picked, and a schedule for the newest or any older version. The notebook's
- * address is `/notebooks/<group>/<name>`, so a single notebook can be linked and an older
- * version read on its own.
+ * version the person picked, a read-only preview of that version (#684), and a schedule for the
+ * newest or any older version. The notebook's address is `/notebooks/<group>/<name>`, so a single
+ * notebook can be linked and an older version read on its own.
  *
- * The versions route is read first; the parameters route is asked only once a version is known,
- * so an empty list never calls it. A missing notebook store answers 503 — a fact about the
- * installation, not something a Retry could fix.
+ * The versions route is read first; the parameters and content routes are asked only once a
+ * version is known, so an empty list never calls them. A missing notebook store answers 503 — a
+ * fact about the installation, not something a Retry could fix.
  */
 export default function NotebookDetail() {
   const { group = '', name = '' } = useParams()
@@ -33,6 +35,11 @@ export default function NotebookDetail() {
   const usage = useQuery({
     queryKey: ['notebook-usage', group, name],
     queryFn: () => api.notebookUsage(group, name),
+  })
+  const content = useQuery({
+    queryKey: ['notebook-content', group, name, selected],
+    queryFn: () => api.notebookContent(group, name, selected),
+    enabled: selected !== undefined,
   })
   const [scheduling, setScheduling] = useState<{ objectVersion: string } | null>(null)
   const [scheduled, setScheduled] = useState<PipelineView | null>(null)
@@ -175,6 +182,28 @@ export default function NotebookDetail() {
                 </li>
               ))}
             </ul>
+          )}
+        </section>
+      )}
+
+      {rows.length > 0 && (
+        <section className="card p-5">
+          <h2 className="text-lg font-semibold break-words">
+            Preview of {shortVersion(selected)}
+          </h2>
+          <p className="mt-1 text-sm text-text-mute">
+            What this version holds: its cells, without outputs — publishing strips them.
+          </p>
+          {content.isLoading && <p className="mt-2 text-sm text-text-mute">Loading the notebook…</p>}
+          {content.isError && (
+            <div className="mt-2">
+              <ErrorBox error={content.error} onRetry={() => void content.refetch()} />
+            </div>
+          )}
+          {content.data && (
+            <div className="mt-3">
+              <NotebookFrame title={`Preview of ${shortVersion(selected)}`} html={renderNotebook(content.data).html} />
+            </div>
           )}
         </section>
       )}

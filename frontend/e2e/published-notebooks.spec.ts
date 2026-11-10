@@ -56,10 +56,28 @@ const OPS_VERSIONS = [
   { objectVersion: V2, size: 512, uploadedAt: '2026-10-19T09:30:00Z', uploadedBy: 'carol', sha256: 'eeeeeeeeeeeeffff' },
 ]
 const OPS_PARAMS = { parameters: [{ name: 'limit', default: '10' }], objectVersion: V2 }
+/** The stored bytes of each version, by object version: what the page's preview renders (#684). */
+const codeCell = (source: string) => ({
+  cell_type: 'code', metadata: {}, source: [source], outputs: [], execution_count: null,
+})
+const SMOKE_CONTENT: Record<string, unknown> = {
+  [V3]: { cells: [codeCell("print('newest')")], metadata: {} },
+  [V2]: { cells: [codeCell("print('older')")], metadata: {} },
+}
+const OPS_CONTENT: Record<string, unknown> = {
+  [V2]: { cells: [codeCell("print('ops')")], metadata: {} },
+}
 /** What the notebook routes answer, by `group/name`. */
-const NOTEBOOK_ROUTES: Record<string, { versions: unknown[]; parameters: unknown }> = {
-  'analytics/smoke.ipynb': { versions: SMOKE_VERSIONS, parameters: SMOKE_PARAMS },
-  'ops/ops.ipynb': { versions: OPS_VERSIONS, parameters: OPS_PARAMS },
+const NOTEBOOK_ROUTES: Record<
+  string,
+  { versions: unknown[]; parameters: unknown; content: Record<string, unknown>; newest: string }
+> = {
+  'analytics/smoke.ipynb': {
+    versions: SMOKE_VERSIONS, parameters: SMOKE_PARAMS, content: SMOKE_CONTENT, newest: V3,
+  },
+  'ops/ops.ipynb': {
+    versions: OPS_VERSIONS, parameters: OPS_PARAMS, content: OPS_CONTENT, newest: V2,
+  },
 }
 const EMPTY_SENTENCE =
   'No notebook is published in your groups yet. Publish one from JupyterLab with stardelt.publish("file.ipynb").'
@@ -125,10 +143,15 @@ async function open(browser: Browser, {
     }
     const usage = path.match(/^\/api\/notebooks\/([^/]+)\/([^/]+)\/usage$/)
     if (usage) return json(route, decodeURIComponent(usage[1]) === 'analytics' ? SMOKE_USAGE : { schedules: [] })
-    const notebookRoute = /^\/api\/notebooks\/([^/]+)\/([^/]+)\/(versions|parameters)$/.exec(path)
+    const notebookRoute = /^\/api\/notebooks\/([^/]+)\/([^/]+)\/(versions|parameters|content)$/.exec(path)
     if (notebookRoute) {
       const known = NOTEBOOK_ROUTES[`${notebookRoute[1]}/${decodeURIComponent(notebookRoute[2])}`]
       if (notebookRoute[3] === 'versions') return json(route, known ? known.versions : [])
+      if (notebookRoute[3] === 'content') {
+        // The preview of the picked version (#684): the stored bytes of that version.
+        const version = url.searchParams.get('version') ?? known?.newest ?? ''
+        return json(route, (known?.content ?? {})[version] ?? { cells: [], metadata: {} })
+      }
       return json(route, known ? known.parameters : { parameters: [], objectVersion: '' })
     }
     return json(route, [])
@@ -219,6 +242,25 @@ test.describe('published notebooks', () => {
     await page.goto('/notebooks/analytics/smoke.ipynb')
     await expect(page.getByRole('heading', { level: 1, name: 'smoke.ipynb' })).toBeVisible()
     await expect(page.getByRole('heading', { name: `Parameters of ${V3.slice(0, 8)}` })).toBeVisible()
+    await context.close()
+  })
+
+  test('the Preview shows the picked version and follows the version picked', async ({ browser }) => {
+    const { context, page, requests } = await open(browser)
+    await page.goto('/notebooks/analytics/smoke.ipynb')
+    // The latest version first, rendered in the sandboxed frame.
+    await expect(page.getByRole('heading', { name: `Preview of ${V3.slice(0, 8)}` })).toBeVisible()
+    const frame = page.frameLocator('iframe[title="Preview of ' + V3.slice(0, 8) + '"]')
+    await expect(frame.locator('pre.src')).toHaveText("print('newest')")
+    expect(requests).toContain(`/api/notebooks/analytics/smoke.ipynb/content?version=${V3}`)
+
+    // Picking an older version in the table changes the preview to that version's bytes.
+    const table = page.getByRole('table', { name: 'Published versions of smoke.ipynb, newest first.' })
+    await table.getByRole('button', { name: V2.slice(0, 8) }).click()
+    await expect(page.getByRole('heading', { name: `Preview of ${V2.slice(0, 8)}` })).toBeVisible()
+    const older = page.frameLocator('iframe[title="Preview of ' + V2.slice(0, 8) + '"]')
+    await expect(older.locator('pre.src')).toHaveText("print('older')")
+    expect(requests).toContain(`/api/notebooks/analytics/smoke.ipynb/content?version=${V2}`)
     await context.close()
   })
 

@@ -1168,13 +1168,14 @@ fn hex(bytes: &[u8]) -> String {
 // Routes
 // ---------------------------------------------------------------------------
 
-/// The three routes, all uncacheable (the answer carries a person's notebooks).
+/// The routes, all uncacheable (the answer carries a person's notebooks).
 pub(crate) fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/notebooks", get(list))
         .route("/notebooks/{group}/{name}", put(publish).delete(remove))
         .route("/notebooks/{group}/{name}/versions", get(versions))
         .route("/notebooks/{group}/{name}/parameters", get(parameters))
+        .route("/notebooks/{group}/{name}/content", get(content))
         .route_layer(axum::middleware::from_fn(no_store))
 }
 
@@ -1563,6 +1564,81 @@ pub(crate) async fn parameters(
         object_version,
     })
     .into_response()
+}
+
+/// `GET /api/notebooks/{group}/{name}/content`: one stored version's bytes, as they are,
+/// so the notebook page can preview what a schedule would run (stardelt-nova#684).
+#[utoipa::path(
+    get,
+    operation_id = "notebooks_content",
+    path = "/api/notebooks/{group}/{name}/content",
+    tag = "public",
+    description = "One published version's stored bytes, answered `application/json` as they are. The bytes are the notebook Nova stored: outputs emptied, `execution_count` null, so a preview of a published version shows source and markdown only. `?version=<id>` names the immutable version; omitted, the latest is read. Needs a member of `{group}` (403 `you are not a member of the group <g>`; administrators are not exempt). An unknown version is 404 `no such notebook version`. Unset `NOVA_S3_*` is 503 `notebook storage is not configured`; an S3 that is down or refuses is 502. Answers `Cache-Control: no-store`.",
+    params(
+        ("group" = String, Path, description = "One of the caller's groups"),
+        ("name" = String, Path, description = "Notebook file name, ending in .ipynb"),
+        ParametersQuery,
+    ),
+    responses(
+        (status = 200, description = "The stored notebook bytes", body = serde_json::Value),
+        (status = 400, description = "Bad name", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "Not a member of the group", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such notebook version", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The notebook store did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "Notebook storage is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn content(
+    State(state): State<Arc<AppState>>,
+    principal: Option<Extension<Principal>>,
+    Path((group, name)): Path<(String, String)>,
+    Query(query): Query<ParametersQuery>,
+) -> Response {
+    let Some(store) = state.notebooks.as_ref() else {
+        return no_storage().into_response();
+    };
+    let Some(Extension(principal)) = principal else {
+        return sign_in_again().into_response();
+    };
+    if !principal.identity.groups.iter().any(|g| g == &group) {
+        return forbidden_group(&group).into_response();
+    }
+    if !valid_group(&group) {
+        return Fail::new(
+            StatusCode::BAD_REQUEST,
+            "the group name cannot be used as a notebook prefix",
+        )
+        .into_response();
+    }
+    if !valid_name(&name) {
+        return bad_name().into_response();
+    }
+    let version = query
+        .version
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    if version.is_some_and(|version| !object_version_ok(version)) {
+        // A version with whitespace or over 128 characters never came from a publish.
+        return no_such_version().into_response();
+    }
+
+    // The preview renders what the run would execute, so the answer is the stored bytes
+    // themselves; the browser parses them, and nothing is read out or reshaped here.
+    let (bytes, _object_version) = match store.get(&object_key(&group, &name), version).await {
+        Ok(read) => read,
+        Err(StoreError::Refused(404)) => return no_such_version().into_response(),
+        Err(error) => return store_fail(error).into_response(),
+    };
+    (
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        )],
+        bytes,
+    )
+        .into_response()
 }
 
 /// The caller's groups, deduplicated and sorted, for a deterministic listing order
@@ -2700,6 +2776,122 @@ mod tests {
             &admin,
             "GET",
             "/notebooks/other/secret.ipynb/parameters",
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(answer["error"], "you are not a member of the group other");
+    }
+
+    /// stardelt-nova#684: the notebook page previews the picked version, so a member reads
+    /// the stored bytes of exactly that version — and only for its own groups.
+    #[tokio::test]
+    async fn content_route_answers_the_stored_bytes_and_filters_groups() {
+        let s3 = FakeS3::start().await;
+        let state = state(Some(notebook_store(&s3.base)));
+        let alice = app(
+            Arc::clone(&state),
+            Some(principal("alice", &["analytics"], false)),
+        );
+
+        let first_notebook = notebook(vec![
+            json!({"cell_type": "markdown", "metadata": {}, "source": ["# Report\n"]}),
+            code_cell(json!("print('one')")),
+        ]);
+        let (status, published) = call(
+            &alice,
+            "PUT",
+            "/notebooks/analytics/report.ipynb",
+            Some(&body(&first_notebook)),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{published}");
+        let first = published["objectVersion"]
+            .as_str()
+            .expect("the first version")
+            .to_string();
+
+        let second_notebook = notebook(vec![code_cell(json!("print('two')"))]);
+        let (status, published) = call(
+            &alice,
+            "PUT",
+            "/notebooks/analytics/report.ipynb",
+            Some(&body(&second_notebook)),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{published}");
+        let second = published["objectVersion"]
+            .as_str()
+            .expect("the second version")
+            .to_string();
+
+        // No `version`: the latest version's bytes.
+        let (status, answer) = call(
+            &alice,
+            "GET",
+            "/notebooks/analytics/report.ipynb/content",
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        assert!(answer["cells"].is_array(), "{answer}");
+        assert_eq!(answer["cells"].as_array().expect("cells").len(), 1);
+
+        // A pinned version: exactly its cells, never the latest one's.
+        let (status, answer) = call(
+            &alice,
+            "GET",
+            &format!("/notebooks/analytics/report.ipynb/content?version={first}"),
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        assert!(answer["cells"].is_array(), "{answer}");
+        assert_eq!(
+            answer["cells"].as_array().expect("cells").len(),
+            2,
+            "the first version's markdown and code cells, not the second version's one cell"
+        );
+        assert_eq!(
+            answer["cells"][0]["source"],
+            json!(["# Report\n"]),
+            "the first version's markdown cell"
+        );
+        assert_ne!(first, second);
+
+        // An unknown version is a 404: a preview never shows another version's bytes.
+        let (status, answer) = call(
+            &alice,
+            "GET",
+            "/notebooks/analytics/report.ipynb/content?version=nope",
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{answer}");
+        assert_eq!(answer["error"], "no such notebook version");
+
+        // A notebook nobody published is the same 404.
+        let (status, _) = call(
+            &alice,
+            "GET",
+            "/notebooks/analytics/missing.ipynb/content",
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // Another group's notebook stays hidden.
+        let (status, answer) = call(
+            &alice,
+            "GET",
+            "/notebooks/other/secret.ipynb/content",
             None,
             &[],
         )

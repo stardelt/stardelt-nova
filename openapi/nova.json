@@ -3505,6 +3505,114 @@
         }
       }
     },
+    "/api/notebooks/{group}/{name}/content": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`GET /api/notebooks/{group}/{name}/content`: one stored version's bytes, as they are,\nso the notebook page can preview what a schedule would run (stardelt-nova#684).",
+        "description": "One published version's stored bytes, answered `application/json` as they are. The bytes are the notebook Nova stored: outputs emptied, `execution_count` null, so a preview of a published version shows source and markdown only. `?version=<id>` names the immutable version; omitted, the latest is read. Needs a member of `{group}` (403 `you are not a member of the group <g>`; administrators are not exempt). An unknown version is 404 `no such notebook version`. Unset `NOVA_S3_*` is 503 `notebook storage is not configured`; an S3 that is down or refuses is 502. Answers `Cache-Control: no-store`.",
+        "operationId": "notebooks_content",
+        "parameters": [
+          {
+            "name": "group",
+            "in": "path",
+            "description": "One of the caller's groups",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Notebook file name, ending in .ipynb",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "version",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The stored notebook bytes",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Bad name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not a member of the group",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such notebook version",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The notebook store did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Notebook storage is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/notebooks/{group}/{name}/parameters": {
       "get": {
         "tags": [
