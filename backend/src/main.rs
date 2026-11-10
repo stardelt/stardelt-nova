@@ -4,7 +4,7 @@
 //!   GET  /api/me                            — current user + demo flag
 //!   GET  /api/health                        — backend liveness + state-store status
 //!   GET  /api/openapi.json                  — the public API description (unauthenticated, no data)
-//!   GET  /api/auth/login                    — start OIDC sign-in (oidc mode)
+//!   GET  /api/auth/login                    — start OIDC sign-in (oidc mode; ?return_to=, ?login_hint=)
 //!   GET  /api/auth/callback                 — OIDC redirect target (oidc mode)
 //!   POST /api/auth/logout                   — sign out locally and at the IdP
 //!   GET  /api/trino/cluster                 — Trino /v1/info (or demo stub)
