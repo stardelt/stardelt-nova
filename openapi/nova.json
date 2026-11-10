@@ -7231,6 +7231,17 @@
             ],
             "description": "The medallion layer (`bronze`, `silver`, `gold`) from the `stardelt.io/layer` label\nor the catalog's own name; absent for every other catalog (stardelt-nova#109)."
           },
+          "maintenance": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CatalogMaintenance",
+                "description": "`status.maintenance`: what the newest finished maintenance run did, or absent when\nthe operator has not written one yet."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "managedAccess": {
             "type": "boolean",
             "description": "`spec.managedAccess`: the owner cannot grant on this catalog."
@@ -7609,6 +7620,17 @@
             ],
             "description": "`bronze`, `silver` or `gold` when the catalog is a medallion layer — from the\n`stardelt.io/layer` label on its `Catalog` resource, else from its name. Absent for\nevery other catalog."
           },
+          "maintenance": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CatalogMaintenance",
+                "description": "The newest finished maintenance run of this catalog's `Catalog` resource, or `null`\n(operator#476 slice d)."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "name": {
             "type": "string",
             "description": "Catalog name, as the engine and the catalog spell it (`warehouse`, `finance`, …)."
@@ -7619,6 +7641,40 @@
               "null"
             ],
             "description": "`spec.owner` of the catalog's `Catalog` resource: the group that owns it, or `null`\nwhen there is no resource or it names no owner (stardelt-nova#577)."
+          }
+        }
+      },
+      "CatalogMaintenance": {
+        "type": "object",
+        "description": "What the newest finished `maint-<catalog>` Job did (operator#476 slice c).",
+        "properties": {
+          "lastResult": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`Succeeded` or `Failed`."
+          },
+          "lastRun": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The Job's completion time, RFC 3339."
+          },
+          "tablesDone": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "tablesFailed": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
           }
         }
       },

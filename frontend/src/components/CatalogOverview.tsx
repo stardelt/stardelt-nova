@@ -4,6 +4,7 @@ import { ApiError, api, type Catalog } from '../api'
 import ErrorBox from './ErrorBox'
 import LayerBadge from './LayerBadge'
 import ObjectIcon from './ObjectIcon'
+import { relativeTime } from '../format'
 
 /** A 403 says no: the person's grants do not change by asking again. */
 function forbidden(error: unknown): boolean {
@@ -15,6 +16,15 @@ function forbidden(error: unknown): boolean {
  * is the full set). */
 const READ_VERBS = ['browse', 'select']
 const WRITE_VERBS = ['write', 'create', 'manage']
+
+/** "2 h ago · 3 tables optimized" / "· 1 failed" / "—". */
+function maintenanceLine(m?: Catalog['maintenance']): string {
+  if (!m?.lastRun) return '—'
+  const when = relativeTime(Date.parse(m.lastRun))
+  const done = m.tablesDone != null ? `${m.tablesDone} tables optimized` : 'run finished'
+  const failed = m.tablesFailed ? ` · ${m.tablesFailed} failed` : ''
+  return `${when} · ${done}${failed}`
+}
 
 /**
  * The right pane's page for a catalog (stardelt-nova#584): what the catalog is and who may
@@ -63,7 +73,7 @@ export default function CatalogOverview({ catalog }: { catalog: Catalog }) {
         )}
       </header>
 
-      <dl className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-x-6 gap-y-3 text-sm">
+      <dl className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-x-6 gap-y-3 text-sm">
         <div>
           <dt className="text-[11px] uppercase tracking-widest text-text-mute">Owner</dt>
           <dd className="break-words">{owner ?? '—'}</dd>
@@ -79,6 +89,10 @@ export default function CatalogOverview({ catalog }: { catalog: Catalog }) {
         <div>
           <dt className="text-[11px] uppercase tracking-widest text-text-mute">Your access</dt>
           <dd>{canWrite ? 'Read and write' : 'Read only'}</dd>
+        </div>
+        <div>
+          <dt className="text-[11px] uppercase tracking-widest text-text-mute">Last maintenance</dt>
+          <dd className="break-words">{maintenanceLine(catalog.maintenance)}</dd>
         </div>
       </dl>
 

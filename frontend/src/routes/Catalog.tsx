@@ -159,6 +159,7 @@ function TableDetail({ ns, tbl, catalog, kind }: Sel & { catalog?: string; kind?
   // (`?catalog=` absent), so resolve the API's default the same way CatalogSelect does.
   const catalogs = useCatalogs()
   const catalogName = catalog ?? catalogs.data?.default ?? ''
+  const currentCatalog = catalogs.data?.catalogs?.find((row) => row.name === catalogName)
   const lineageHref = catalogName
     ? `/lineage?${new URLSearchParams({ catalog: catalogName, schema: ns, table: tbl }).toString()}`
     : ''
@@ -193,6 +194,13 @@ function TableDetail({ ns, tbl, catalog, kind }: Sel & { catalog?: string; kind?
           )}
           <Link to="/data" className="btn-ghost">Load data</Link>
         </div>
+        {currentCatalog?.maintenance?.lastRun && (
+          <p className="text-xs text-text-mute mt-1">
+            Catalog maintenance: {currentCatalog.maintenance.lastResult === 'Failed'
+              ? `last run failed ${relativeTime(Date.parse(currentCatalog.maintenance.lastRun))}`
+              : `${currentCatalog.maintenance.tablesDone ?? 0} tables optimized ${relativeTime(Date.parse(currentCatalog.maintenance.lastRun))}`}
+          </p>
+        )}
       </header>
 
       {!isView && <TableAbout ns={ns} tbl={tbl} catalog={catalog} me={me.data} docs={docs} onSaved={onDocsSaved} />}
