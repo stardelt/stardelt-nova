@@ -10,6 +10,7 @@ import Jobs from './routes/Jobs'
 import Pipelines from './routes/Pipelines'
 import Runs from './routes/Runs'
 import PipelineDetail from './routes/PipelineDetail'
+import RunNotebook from './routes/RunNotebook'
 import Streams from './routes/Streams'
 import Compute from './routes/Compute'
 import Deployments from './routes/Deployments'
@@ -39,6 +40,7 @@ export default function App() {
         <Route path="/jobs"       element={<Jobs       />} />
         <Route path="/pipelines"  element={<Pipelines  />} />
         <Route path="/pipelines/:namespace/:name" element={<PipelineDetail />} />
+        <Route path="/pipelines/:namespace/:name/runs/:runId/notebook/:taskId" element={<RunNotebook />} />
         <Route path="/runs" element={<Runs />} />
         <Route path="/streams" element={<Streams />} />
         <Route path="/compute" element={<Compute />} />
