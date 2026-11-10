@@ -76,6 +76,9 @@ use crate::connection_routes::Fail;
 /// The largest notebook body Nova accepts, before stripping. A notebook is source
 /// code, not data: 5 MiB is generous for cells and still bounds one request.
 const MAX_NOTEBOOK_BYTES: usize = 5 * 1024 * 1024;
+/// The largest executed run copy Nova answers: a run's copy carries outputs, so it is
+/// bigger than a published notebook. One limit for the store and the route.
+pub(crate) const MAX_RUN_NOTEBOOK_BYTES: usize = 25 * 1024 * 1024;
 /// At most this many parameters are offered as the schedule form (ticket #225).
 const MAX_PARAMETERS: usize = 32;
 /// At most this many versions are listed for one notebook.
@@ -315,9 +318,14 @@ impl NotebookStore {
 
     /// One object version's bytes and its version id: `version: None` reads the latest.
     /// The version comes from the response, so a read of the latest still names the bytes
-    /// it answered (#237). A body over [`MAX_NOTEBOOK_BYTES`] is refused rather than
-    /// buffered: the bucket is shared, and a foreign key must not become a 5 MiB read.
-    async fn get(&self, key: &str, version: Option<&str>) -> Result<(Vec<u8>, String), StoreError> {
+    /// it answered (#237). A body over the caller's limit is refused rather than buffered:
+    /// the bucket is shared, and a foreign key must not become a large read.
+    async fn get(
+        &self,
+        key: &str,
+        version: Option<&str>,
+        max: usize,
+    ) -> Result<(Vec<u8>, String), StoreError> {
         let mut action = self.bucket.get_object(Some(&self.credentials), key);
         if let Some(version) = version {
             action.query_mut().insert("versionId", version.to_string());
@@ -330,13 +338,13 @@ impl NotebookStore {
             .get("content-length")
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.parse::<u64>().ok())
-            .is_some_and(|size| size > MAX_NOTEBOOK_BYTES as u64);
+            .is_some_and(|size| size > max as u64);
         if too_large {
-            return Err(StoreError::Malformed);
+            return Err(StoreError::TooLarge);
         }
         let body = response.bytes().await.map_err(|_| StoreError::Malformed)?;
-        if body.len() > MAX_NOTEBOOK_BYTES {
-            return Err(StoreError::Malformed);
+        if body.len() > max {
+            return Err(StoreError::TooLarge);
         }
         Ok((body.to_vec(), object_version))
     }
@@ -693,6 +701,8 @@ pub(crate) enum StoreError {
     Refused(u16),
     /// A 2xx without the fields this module needs.
     Malformed,
+    /// The object is larger than the caller's limit; the caller decides the sentence.
+    TooLarge,
     /// A write or a read of an object without a version id: versioning is off.
     Unversioned,
 }
@@ -707,6 +717,10 @@ pub(crate) fn store_fail(error: StoreError) -> Fail {
             format!("the notebook store refused the request (HTTP {status})"),
         ),
         StoreError::Malformed => Fail::new(
+            StatusCode::BAD_GATEWAY,
+            "the notebook store sent an unexpected answer",
+        ),
+        StoreError::TooLarge => Fail::new(
             StatusCode::BAD_GATEWAY,
             "the notebook store sent an unexpected answer",
         ),
@@ -944,7 +958,10 @@ pub(crate) fn run_copy_key(owner_group: &str, pipeline: &str, run_id: &str, task
 
 /// The bytes of an executed copy; `Refused(404)` when it was never written or has expired.
 pub(crate) async fn read_run_copy(store: &NotebookStore, key: &str) -> Result<Vec<u8>, StoreError> {
-    store.get(key, None).await.map(|(bytes, _)| bytes)
+    store
+        .get(key, None, MAX_RUN_NOTEBOOK_BYTES)
+        .await
+        .map(|(bytes, _)| bytes)
 }
 
 /// S3 user metadata is US-ASCII. A display name can be anything the IdP reports
@@ -1547,7 +1564,10 @@ pub(crate) async fn parameters(
         return no_such_version().into_response();
     }
 
-    let (bytes, object_version) = match store.get(&object_key(&group, &name), version).await {
+    let (bytes, object_version) = match store
+        .get(&object_key(&group, &name), version, MAX_NOTEBOOK_BYTES)
+        .await
+    {
         Ok(read) => read,
         Err(StoreError::Refused(404)) => return no_such_version().into_response(),
         Err(error) => return store_fail(error).into_response(),
@@ -1626,7 +1646,10 @@ pub(crate) async fn content(
 
     // The preview renders what the run would execute, so the answer is the stored bytes
     // themselves; the browser parses them, and nothing is read out or reshaped here.
-    let (bytes, _object_version) = match store.get(&object_key(&group, &name), version).await {
+    let (bytes, _object_version) = match store
+        .get(&object_key(&group, &name), version, MAX_NOTEBOOK_BYTES)
+        .await
+    {
         Ok(read) => read,
         Err(StoreError::Refused(404)) => return no_such_version().into_response(),
         Err(error) => return store_fail(error).into_response(),
@@ -3459,6 +3482,37 @@ mod tests {
             run_copy_key("analytics", "daily", "a/b c", "run"),
             "_runs/analytics/daily/a_b_c/run.ipynb"
         );
+    }
+
+    #[tokio::test]
+    async fn get_applies_the_callers_limit() {
+        let s3 = FakeS3::start().await;
+        let big = vec![b'x'; MAX_NOTEBOOK_BYTES + 1024];
+        s3.put_raw("_runs/analytics/daily/run/run.ipynb", &big, "alice");
+        let store = notebook_store(&s3.base);
+        let key = "_runs/analytics/daily/run/run.ipynb";
+
+        assert_eq!(
+            store.get(key, None, MAX_NOTEBOOK_BYTES).await,
+            Err(StoreError::TooLarge)
+        );
+        let (bytes, _) = store
+            .get(key, None, MAX_RUN_NOTEBOOK_BYTES)
+            .await
+            .expect("a run copy over the publish limit");
+        assert_eq!(bytes.len(), big.len());
+    }
+
+    #[tokio::test]
+    async fn read_run_copy_accepts_what_a_published_notebook_refuses() {
+        let s3 = FakeS3::start().await;
+        let big = vec![b'x'; MAX_NOTEBOOK_BYTES + 1024];
+        s3.put_raw("_runs/analytics/daily/run/run.ipynb", &big, "alice");
+        let store = notebook_store(&s3.base);
+        let bytes = read_run_copy(&store, "_runs/analytics/daily/run/run.ipynb")
+            .await
+            .expect("the run-copy read uses MAX_RUN_NOTEBOOK_BYTES");
+        assert_eq!(bytes.len(), big.len());
     }
 
     #[test]
