@@ -190,6 +190,10 @@ pub struct AppState {
     /// (`catalog::catalog_layers`). Caller independent: a layer describes the catalog, the
     /// caller only decides which catalogs are listed.
     pub catalog_layers: Mutex<Option<(std::time::Instant, HashMap<String, String>)>>,
+    /// `ServicePrincipal.status.subject -> spec.ownerGroup`, cached for 60 s
+    /// (`query_log_api::principal_owners`). Caller independent: it only says which owner
+    /// group a service principal belongs to; the caller's own groups decide visibility.
+    pub principal_owners: Mutex<Option<(std::time::Instant, HashMap<String, String>)>>,
     pub http: reqwest::Client,
     pub demo: bool,
     /// Forward the caller's own token to Trino, when the platform has configured it to
@@ -971,6 +975,7 @@ async fn main() -> anyhow::Result<()> {
         metrics_round: tokio::sync::Mutex::new(()),
         metrics_refresh: Mutex::new(None),
         catalog_layers: Mutex::new(None),
+        principal_owners: Mutex::new(None),
         http,
         demo: demo_mode,
         forward_identity: env_flag("NOVA_FORWARD_IDENTITY"),
@@ -1257,6 +1262,7 @@ mod router_tests {
             metrics_round: tokio::sync::Mutex::new(()),
             metrics_refresh: Mutex::new(None),
             catalog_layers: Mutex::new(None),
+            principal_owners: Mutex::new(None),
             http: reqwest::Client::new(),
             demo: demo_mode,
             forward_identity: false,

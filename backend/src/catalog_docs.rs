@@ -1423,6 +1423,7 @@ mod tests {
             metrics_round: tokio::sync::Mutex::new(()),
             metrics_refresh: std::sync::Mutex::new(None),
             catalog_layers: std::sync::Mutex::new(None),
+            principal_owners: std::sync::Mutex::new(None),
             http: reqwest::Client::new(),
             demo: false,
             forward_identity: false,
