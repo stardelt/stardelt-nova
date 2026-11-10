@@ -5435,7 +5435,7 @@
           "public"
         ],
         "summary": "`GET /api/query-log?scope=mine|team|all&state=&warehouse=&q=&from=&to=&limit=&cursor=`",
-        "description": "The statements run on the engine, newest first, a page at a time. A person sees their own; an administrator may ask for everyone's with scope=all. Times are epoch milliseconds.",
+        "description": "The statements run on the engine, newest first, a page at a time. A person sees their own; an administrator may ask for everyone's with scope=all. Times are epoch milliseconds. With NOVA_QUERY_LOG_REDACT_LITERALS=1 somebody else's statement shows '?' in place of every string literal.",
         "operationId": "query_log_list",
         "parameters": [
           {
@@ -5564,7 +5564,7 @@
           "public"
         ],
         "summary": "`GET /api/query-log/{id}` — everything stored about one query the caller may see.",
-        "description": "One query with its whole statement. Somebody else's query answers 404, exactly like a missing one; an administrator who opens another person's query is audited.",
+        "description": "One query with its whole statement. Somebody else's query answers 404, exactly like a missing one; an administrator who opens another person's query is audited. With NOVA_QUERY_LOG_REDACT_LITERALS=1 somebody else's statement shows '?' in place of every string literal.",
         "operationId": "query_log_detail",
         "parameters": [
           {

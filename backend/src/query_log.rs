@@ -53,6 +53,62 @@ pub fn visible(row: &RowOwner<'_>, viewer: &Viewer<'_>) -> bool {
         .any(|scope| in_scope(scope, row, viewer))
 }
 
+/// The statement with every string literal replaced by `'?'`.
+///
+/// Fails closed: an unterminated literal redacts to the end of the statement. Comments are copied
+/// unchanged, so an apostrophe in `-- it's` does not start a literal. Numbers and identifiers stay:
+/// they are often the shape of the query (a date partition), and this is about literals of text.
+/// Deliberately does not try to be a SQL parser; over-redacting is acceptable, leaking is not.
+pub fn redact_literals(sql: &str) -> String {
+    let mut out = String::with_capacity(sql.len());
+    let mut chars = sql.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => {
+                out.push_str("'?'");
+                // Consume the literal, `''` is an escaped quote inside it.
+                loop {
+                    match chars.next() {
+                        None => break,
+                        Some('\'') => {
+                            if chars.peek() == Some(&'\'') {
+                                chars.next();
+                            } else {
+                                break;
+                            }
+                        }
+                        Some(_) => {}
+                    }
+                }
+            }
+            '-' if chars.peek() == Some(&'-') => {
+                out.push_str("--");
+                chars.next();
+                for c in chars.by_ref() {
+                    out.push(c);
+                    if c == '\n' {
+                        break;
+                    }
+                }
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                out.push_str("/*");
+                chars.next();
+                let mut prev = '\0';
+                for c in chars.by_ref() {
+                    out.push(c);
+                    if prev == '*' && c == '/' {
+                        break;
+                    }
+                    prev = c;
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,6 +179,36 @@ mod tests {
             &service_principal("airflow-etl", "data-eng"),
             &admin
         ));
+    }
+
+    #[test]
+    fn redact_literals_keeps_the_shape_and_hides_the_values() {
+        assert_eq!(
+            redact_literals("select * from t where name = 'alice'"),
+            "select * from t where name = '?'"
+        );
+        assert_eq!(
+            redact_literals("select * from t where name = 'o''brien'"),
+            "select * from t where name = '?'"
+        );
+        assert_eq!(
+            redact_literals("select 'a', 'b' from t"),
+            "select '?', '?' from t"
+        );
+        assert_eq!(
+            redact_literals("select * from t where d >= '2026-01-01' and n = 3"),
+            "select * from t where d >= '?' and n = 3"
+        );
+        assert_eq!(redact_literals("select 'unterminated"), "select '?'");
+        assert_eq!(
+            redact_literals("select 1 -- it's a comment\nfrom t where x = 'v'"),
+            "select 1 -- it's a comment\nfrom t where x = '?'"
+        );
+        assert_eq!(
+            redact_literals("select 1 /* a 'quoted' word */ from t"),
+            "select 1 /* a 'quoted' word */ from t"
+        );
+        assert_eq!(redact_literals("select id from t"), "select id from t");
     }
 
     #[test]
