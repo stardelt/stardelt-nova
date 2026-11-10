@@ -8750,7 +8750,8 @@
           "jobNamespace",
           "jobName",
           "runId",
-          "eventTime"
+          "eventTime",
+          "runs"
         ],
         "properties": {
           "eventTime": {
@@ -8767,6 +8768,11 @@
           },
           "runId": {
             "type": "string"
+          },
+          "runs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The runs of this job that wrote this edge in the window."
           },
           "to": {
             "type": "string"
@@ -8809,9 +8815,13 @@
           "kind",
           "name",
           "runs",
-          "lastRun"
+          "lastRun",
+          "handMade"
         ],
         "properties": {
+          "handMade": {
+            "type": "boolean"
+          },
           "id": {
             "type": "string"
           },
@@ -8836,9 +8846,14 @@
           "id",
           "namespace",
           "name",
-          "visible"
+          "visible",
+          "handMade"
         ],
         "properties": {
+          "handMade": {
+            "type": "boolean",
+            "description": "True when every used flow that touches this node was a hand-made (ad-hoc) job."
+          },
           "id": {
             "type": "string"
           },
@@ -8882,6 +8897,16 @@
           },
           "visible": {
             "type": "boolean"
+          },
+          "writers": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/LineageWriter"
+            },
+            "description": "The jobs that wrote this node, newest first; only on the focus node."
           }
         }
       },
@@ -8898,9 +8923,42 @@
           },
           "people": {
             "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "description": "Distinct people: the SQL editor and notebooks, never a BI tool."
           },
           "queries": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The tools that read this node, most queries first, at most 5."
+          }
+        }
+      },
+      "LineageWriter": {
+        "type": "object",
+        "description": "One job that wrote the focus table, with its runs in the window.",
+        "required": [
+          "kind",
+          "name",
+          "runs",
+          "lastRun"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string"
+          },
+          "lastRun": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "runs": {
             "type": "integer",
             "format": "int64"
           }
