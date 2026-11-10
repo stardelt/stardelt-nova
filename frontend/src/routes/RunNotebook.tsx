@@ -40,7 +40,7 @@ export default function RunNotebook() {
       if (event.source !== frameRef.current?.contentWindow) return
       const reported = (event.data as { nbHeight?: unknown } | null)?.nbHeight
       if (typeof reported !== 'number' || !Number.isFinite(reported)) return
-      setHeight(Math.min(Math.max(Math.round(reported), 200), 20_000))
+      setHeight(Math.min(Math.round(reported), 20_000))
     }
     window.addEventListener('message', onMessage)
     return () => window.removeEventListener('message', onMessage)
