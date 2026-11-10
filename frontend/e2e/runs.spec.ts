@@ -36,7 +36,11 @@ async function open(page: Page) {
   await page.route('**/api/**', (route) => {
     const url = new URL(route.request().url())
     if (url.pathname === '/api/me') return json(route, ME)
-    if (url.pathname === '/api/runs') return json(route, { runs: [SUCCESS, FAILED, RUNNING] })
+    if (url.pathname === '/api/runs')
+      return json(route, {
+        runs: [SUCCESS, FAILED, RUNNING],
+        groups: ['analytics', 'finance', 'mobility'],
+      })
     return json(route, [])
   })
   await page.goto('/runs')
@@ -87,6 +91,33 @@ test.describe('runs', () => {
     expect(url.searchParams.get('state')).toBe('failed')
     await expect(page).toHaveURL(/[?&]kind=notebook\b/)
     await expect(page).toHaveURL(/[?&]state=failed\b/)
+  })
+
+  test('the group filter offers every visible group, not only the rows answered (#750)', async ({ page }) => {
+    await page.route('**/api/**', (route) => {
+      const url = new URL(route.request().url())
+      if (url.pathname === '/api/me') return json(route, ME)
+      if (url.pathname === '/api/runs') {
+        // The server applies ?group=: the answer holds only finance's run.
+        const rows = url.searchParams.get('group') === 'finance' ? [FAILED] : [SUCCESS, FAILED, RUNNING]
+        return json(route, { runs: rows, groups: ['analytics', 'finance', 'mobility'] })
+      }
+      return json(route, [])
+    })
+    await page.goto('/runs?group=finance')
+
+    const group = page.getByLabel('Group', { exact: true })
+    await expect(group).toHaveValue('finance')
+    await expect(group.locator('option')).toHaveText([
+      'All groups', 'analytics', 'finance', 'mobility',
+    ])
+    await expect(page.getByRole('row')).toHaveCount(2)
+
+    const asked = runsRequests(page, (url) => url.searchParams.get('group') === 'analytics')
+    await group.selectOption('analytics')
+    const request = await asked
+    expect(new URL(request.url()).searchParams.get('group')).toBe('analytics')
+    await expect(page).toHaveURL(/[?&]group=analytics\b/)
   })
 
   test('the row name opens its pipeline', async ({ page }) => {
