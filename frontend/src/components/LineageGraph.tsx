@@ -73,8 +73,8 @@ export type LineageEdgeData = {
 
 export type LineageFlowEdge = Edge<LineageEdgeData, 'lineage'>
 
-/** Left-to-right distance between two steps; a node is 220 wide, so 100 px of line shows. */
-const COLUMN = 320
+/** Left-to-right distance between two steps; a node is 220 wide, so 60 px of line shows. */
+const COLUMN = 280
 /** The height of one row; a node is 64 high, so 32 px sit between two rows. */
 const ROW = 96
 /** A column folds above this many rows — seven tables and the `more` row fit eight. */
@@ -119,7 +119,7 @@ function mergeEdges(edges: LineageEdgeView[]): {
 
 /**
  * The React Flow nodes and edges of one answer. Columns are the API's `level` (`x = level *
- * 320`); inside a column a table sits next to the neighbours it shares with the column before
+ * COLUMN`); inside a column a table sits next to the neighbours it shares with the column before
  * it, so a line crosses as few other lines as possible. `unlimited` holds the columns a
  * person unfolded by clicking `＋ <n> more`.
  */
@@ -433,6 +433,13 @@ function Graph({ graph, days, catalog, showHandMade, fitKey, onPick }: LineageGr
     [graph, showHandMade, unlimited],
   )
 
+  // Rows actually drawn: from the highest to the lowest node, plus one node height.
+  const height = useMemo(() => {
+    const ys = laid.nodes.map(n => n.position.y)
+    const span = ys.length ? Math.max(...ys) - Math.min(...ys) + 64 : 64
+    return Math.min(560, Math.max(260, span + 120))
+  }, [laid])
+
   /** The lit table and its neighbours stay as they are; everything else steps back. */
   const near = useMemo(() => {
     if (lit == null) return null
@@ -490,7 +497,7 @@ function Graph({ graph, days, catalog, showHandMade, fitKey, onPick }: LineageGr
   // Fit on load and whenever the picture changes — or the toolbar's Fit button is pressed.
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      void fitView({ padding: 0.16, maxZoom: 1, duration: 200 })
+      void fitView({ padding: 0.06, maxZoom: 1, duration: 200 })
     }, 0)
     return () => window.clearTimeout(timer)
   }, [fitView, graph, showHandMade, unlimited, fitKey])
@@ -515,49 +522,55 @@ function Graph({ graph, days, catalog, showHandMade, fitKey, onPick }: LineageGr
   )
 
   return (
-    <div className="relative h-[480px] w-full overflow-hidden rounded-[10px] border border-border bg-bg-soft/30">
-      <Arrowheads />
-      <ReactFlow
-        nodes={nodes}
-        edges={edges}
-        nodeTypes={nodeTypes}
-        edgeTypes={edgeTypes}
-        className="lineage-flow"
-        fitView
-        fitViewOptions={{ padding: 0.16, maxZoom: 1 }}
-        minZoom={0.3}
-        maxZoom={1.5}
-        nodesDraggable={false}
-        nodesConnectable={false}
-        nodesFocusable={false}
-        elementsSelectable={false}
-        panOnScroll
-        proOptions={{ hideAttribution: true }}
-        onPaneClick={() => setSelected(null)}
-        onNodeClick={(_event, node) => {
-          if (node.type === 'more') {
-            setUnlimited(prev => new Set([...prev, Number(node.data.level)]))
-            return
-          }
-          const data = node.data as { node: LineageNodeView }
-          if (data.node.visible) setSelected(node.id)
-        }}
-        onNodeMouseEnter={(_event, node) => setHovered(node.id)}
-        onNodeMouseLeave={() => setHovered(null)}
+    <>
+      <div
+        className="relative w-full overflow-hidden rounded-[10px] border border-border bg-bg-soft/30"
+        style={{ height }}
       >
-        <Controls showInteractive={false} position="bottom-left" />
-      </ReactFlow>
-      {focus && (
-        <NodePanel
-          node={focus}
-          jobs={incoming}
-          days={days}
-          catalog={catalog}
-          onClose={() => setSelected(null)}
-          onPick={onPick}
-        />
-      )}
-    </div>
+        <Arrowheads />
+        <ReactFlow
+          nodes={nodes}
+          edges={edges}
+          nodeTypes={nodeTypes}
+          edgeTypes={edgeTypes}
+          className="lineage-flow"
+          fitView
+          fitViewOptions={{ padding: 0.06, maxZoom: 1 }}
+          minZoom={0.3}
+          maxZoom={1.5}
+          nodesDraggable={false}
+          nodesConnectable={false}
+          nodesFocusable={false}
+          elementsSelectable={false}
+          panOnScroll
+          proOptions={{ hideAttribution: true }}
+          onPaneClick={() => setSelected(null)}
+          onNodeClick={(_event, node) => {
+            if (node.type === 'more') {
+              setUnlimited(prev => new Set([...prev, Number(node.data.level)]))
+              return
+            }
+            const data = node.data as { node: LineageNodeView }
+            if (data.node.visible) setSelected(node.id)
+          }}
+          onNodeMouseEnter={(_event, node) => setHovered(node.id)}
+          onNodeMouseLeave={() => setHovered(null)}
+        >
+          <Controls showInteractive={false} position="bottom-left" />
+        </ReactFlow>
+        {focus && (
+          <NodePanel
+            node={focus}
+            jobs={incoming}
+            days={days}
+            catalog={catalog}
+            onClose={() => setSelected(null)}
+            onPick={onPick}
+          />
+        )}
+      </div>
+      <p className="mt-2 text-xs text-text-mute">Point at a line or select a table to see the jobs that move the data.</p>
+    </>
   )
 }
 
