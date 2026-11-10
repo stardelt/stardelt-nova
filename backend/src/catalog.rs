@@ -161,6 +161,10 @@ pub struct CatalogInfo {
     /// `spec.grants` of the catalog's `Catalog` resource, in the order it declares them:
     /// one group and one verb each, empty when there is no resource or no grant.
     pub grants: Vec<crate::admin_catalogs::CatalogGrant>,
+    /// The newest finished maintenance run of this catalog's `Catalog` resource, or `null`
+    /// (operator#476 slice d).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub maintenance: Option<crate::admin_catalogs::CatalogMaintenance>,
 }
 
 /// `GET /api/catalog/catalogs`: the catalogs the caller may browse, the medallion layers
@@ -847,6 +851,7 @@ pub async fn list_catalogs(
             owner,
             description,
             grants,
+            maintenance: entry.and_then(|row| row.maintenance.clone()),
         });
     }
     // The engine answers alphabetically; the medallion layers come first here.
@@ -2025,6 +2030,8 @@ mod tests {
                 ]
             }])
         );
+        // A catalog whose resource carries no `status.maintenance` has no key at all.
+        assert!(!body.to_string().contains("maintenance"));
     }
 
     #[tokio::test]

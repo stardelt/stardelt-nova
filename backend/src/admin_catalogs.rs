@@ -86,6 +86,10 @@ pub struct AdminCatalog {
     pub grants: Vec<CatalogGrant>,
     /// `status.conditions`: what the access-sync job last reported.
     pub conditions: Vec<CatalogCondition>,
+    /// `status.maintenance`: what the newest finished maintenance run did, or absent when
+    /// the operator has not written one yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub maintenance: Option<CatalogMaintenance>,
 }
 
 /// One declared grant: a group and one verb.
@@ -108,6 +112,22 @@ pub struct CatalogCondition {
     pub reason: Option<String>,
     /// The sentence the access-sync job wrote, or `null`.
     pub message: Option<String>,
+}
+
+/// What the newest finished `maint-<catalog>` Job did (operator#476 slice c).
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogMaintenance {
+    /// The Job's completion time, RFC 3339.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_run: Option<String>,
+    /// `Succeeded` or `Failed`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_result: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tables_done: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tables_failed: Option<i64>,
 }
 
 /// The verbs a grant may carry, in the order the dialog shows them.
@@ -919,6 +939,7 @@ pub(crate) fn row_from_object(object: &Value) -> AdminCatalog {
         managed_by: gitops_owner(metadata),
         grants: grants_of(spec),
         conditions: conditions_of(status),
+        maintenance: maintenance_of(status),
     }
 }
 
@@ -981,6 +1002,20 @@ fn conditions_of(status: &Value) -> Vec<CatalogCondition> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// `status.maintenance` of a `Catalog`, or `None` when the operator has not written it
+/// (or wrote something that is not an object). Each field is read with the same
+/// string/number tolerance as the rest of the row: a missing one stays `None`, never a
+/// guessed zero.
+fn maintenance_of(status: &Value) -> Option<CatalogMaintenance> {
+    let maintenance = status.get("maintenance").filter(|m| m.is_object())?;
+    Some(CatalogMaintenance {
+        last_run: text(maintenance.get("lastRun")),
+        last_result: text(maintenance.get("lastResult")),
+        tables_done: integer(maintenance.get("tablesDone")),
+        tables_failed: integer(maintenance.get("tablesFailed")),
+    })
 }
 
 /// A present string or number as text; anything else (absent, `null`, a
@@ -1046,6 +1081,7 @@ fn demo_row() -> AdminCatalog {
             })
             .collect(),
         conditions: Vec::new(),
+        maintenance: None,
     }
 }
 
@@ -1188,6 +1224,7 @@ mod tests {
                         message: Some("no foreign grants".into()),
                     },
                 ],
+                maintenance: None,
             }
         );
         // The wire shape is camelCase, and the API server's credential reference is
@@ -1199,6 +1236,49 @@ mod tests {
         assert_eq!(json["conditions"][0]["type"], "CatalogReady");
         assert!(json.get("credentialSecretRef").is_none());
         assert!(!json.to_string().contains("finance-s3-creds"));
+    }
+
+    #[test]
+    fn maintenance_run_is_read_from_status() {
+        let mut object = catalog_object("mobility", Some("Ready"));
+        object["status"]["maintenance"] = json!({
+            "lastRun": "2026-11-10T02:51:00Z",
+            "lastResult": "Failed",
+            "tablesDone": 2,
+            "tablesFailed": 1
+        });
+        let mapped = row_from_object(&object);
+        assert_eq!(
+            mapped.maintenance,
+            Some(CatalogMaintenance {
+                last_run: Some("2026-11-10T02:51:00Z".into()),
+                last_result: Some("Failed".into()),
+                tables_done: Some(2),
+                tables_failed: Some(1),
+            })
+        );
+        let json = serde_json::to_value(&mapped).unwrap();
+        assert_eq!(json["maintenance"]["lastRun"], "2026-11-10T02:51:00Z");
+        assert_eq!(json["maintenance"]["lastResult"], "Failed");
+        assert_eq!(json["maintenance"]["tablesDone"], 2);
+        assert_eq!(json["maintenance"]["tablesFailed"], 1);
+
+        // No `status.maintenance` — and no status at all — is `None`, never an empty run.
+        assert_eq!(
+            row_from_object(&catalog_object("mobility", Some("Ready"))).maintenance,
+            None
+        );
+        assert_eq!(
+            row_from_object(&catalog_object("sandbox", None)).maintenance,
+            None
+        );
+        // A value that is not an object is not a run either.
+        let mut not_an_object = catalog_object("mobility", Some("Ready"));
+        not_an_object["status"]["maintenance"] = json!("Succeeded");
+        assert_eq!(row_from_object(&not_an_object).maintenance, None);
+        // A resource without the key serializes without it.
+        let plain = serde_json::to_value(row("mobility")).unwrap();
+        assert!(plain.get("maintenance").is_none());
     }
 
     #[test]

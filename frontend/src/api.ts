@@ -110,6 +110,8 @@ export type Catalog = {
   owner?: string | null
   description?: string | null
   grants?: { group: string; verb: string }[]
+  /** The newest finished maintenance run of the catalog's `Catalog` resource (operator#476). */
+  maintenance?: { lastRun?: string; lastResult?: string; tablesDone?: number; tablesFailed?: number }
 }
 
 export type CatalogList = { catalogs: Catalog[]; default: string }
