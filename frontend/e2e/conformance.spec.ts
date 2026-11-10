@@ -5240,8 +5240,11 @@ test.describe('overview metrics', () => {
   })
 
   test('updated_caption_and_admin_refresh_button', async ({ browser }) => {
-    const updatedAt = now - 4 * 60_000
-    const metrics = { catalogs: CATALOGS.map(catalog => ({ ...catalog, updatedAt })), totals: TOTALS, generatedAt: now }
+    // Capture the clock here, not at describe time: the suite takes minutes, and the caption's
+    // minute rounding would otherwise move between render and assertion (nova#710).
+    const testNow = Date.now()
+    const updatedAt = testNow - 4 * 60_000
+    const metrics = { catalogs: CATALOGS.map(catalog => ({ ...catalog, updatedAt })), totals: TOTALS, generatedAt: testNow }
     const context = await browser.newContext({ viewport: { width: 1280, height: 800 } })
     const page = await context.newPage()
     let refreshes = 0
