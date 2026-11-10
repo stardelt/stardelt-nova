@@ -6540,7 +6540,177 @@
         }
       }
     },
+    "/api/streams/validate": {
+      "post": {
+        "tags": [
+          "public"
+        ],
+        "description": "Check a stream write without writing it. The body is the body of `streams_put`: the stream's `name`, the `ownerGroup` the caller must belong to, `source` (`topic`, optional `connectionRef` naming a `Connection`) and `sink` (`catalog`, `table` as `schema.table`, `mode` `merge` or `append`, `mergeKeys`, optional `checkpointPrefix`), plus an optional `restartPolicy` (`always` or `on-failure`). Every rule a write runs is checked in order — the name, the body's name against the path's, the caller's groups, the topic, the connection reference, the catalog, the table, the mode, the merge keys, the checkpoint prefix, the restart policy — and then the group's ready `ServicePrincipal`. A rule that refuses is an answer, `ok: false` with one sentence in `errors`, status 200, never a 4xx; nothing is written. A cluster that does not answer is still 502 or 503, as on `pipelines_validate`. Answers `Cache-Control: no-store`.",
+        "operationId": "streams_validate",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StreamWrite"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The verdict: accepted, or the one sentence that refuses it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StreamValidation"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token to sign in with",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The cluster did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No cluster connection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/streams/{namespace}/{name}": {
+      "put": {
+        "tags": [
+          "public"
+        ],
+        "description": "Create or update one stream (`StreamApp`, D42). The body is the body of `streams_validate`; `name` must be the path's name. Nova writes `runAs: pipeline-<groupId>` itself (never from the body), stamps its own labels and the creator's annotation, and never carries `stopped`: it defaults to `false` on create and an update leaves the stored value alone. Refusals, in this order: a name outside 1 to 40 lower-case letters, digits and dashes starting with a letter, a body name that differs from the path, a group the caller is not a member of, a topic outside 1 to 249 letters, digits, dot, underscore or dash, a bad connection reference, catalog, table, mode, merge key, checkpoint prefix or restart policy — all 400; a group without a ready `ServicePrincipal` 409 with the `principals` route's message; a stream Nova did not write 409 `this stream was created outside Nova; change it where it was created`; a stream another writer changed between the read and the write 409 `the stream changed while it was being written; retry`. A foreign namespace and a stream that vanished are 404. The answer is the stored stream's view. Answers `Cache-Control: no-store`.",
+        "operationId": "streams_put",
+        "parameters": [
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "The stream's namespace; only Nova's own namespace",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "description": "The stream's name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StreamWrite"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The stream as written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StreamView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A rule of the body refuses the write, with its sentence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token to sign in with",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The namespace is not Nova's own",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "No ready principal, a stream written outside Nova, or a concurrent change",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The cluster did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No cluster connection",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
       "patch": {
         "tags": [
           "public"
@@ -10956,6 +11126,70 @@
           }
         }
       },
+      "StreamIssue": {
+        "type": "object",
+        "required": [
+          "message"
+        ],
+        "properties": {
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "StreamSinkBody": {
+        "type": "object",
+        "required": [
+          "catalog",
+          "table"
+        ],
+        "properties": {
+          "catalog": {
+            "type": "string"
+          },
+          "checkpointPrefix": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "mergeKeys": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "mode": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`merge` (default) or `append`."
+          },
+          "table": {
+            "type": "string",
+            "description": "`schema.table`."
+          }
+        }
+      },
+      "StreamSourceBody": {
+        "type": "object",
+        "required": [
+          "topic"
+        ],
+        "properties": {
+          "connectionRef": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Name of the `Connection` (`type: kafka`); absent means the platform's own bus."
+          },
+          "topic": {
+            "type": "string"
+          }
+        }
+      },
       "StreamState": {
         "type": "object",
         "description": "The one verb a stream has: stop or resume by setting `spec.stopped`.",
@@ -10966,6 +11200,24 @@
           "stopped": {
             "type": "boolean",
             "description": "The desired `spec.stopped`."
+          }
+        }
+      },
+      "StreamValidation": {
+        "type": "object",
+        "required": [
+          "ok",
+          "errors"
+        ],
+        "properties": {
+          "errors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StreamIssue"
+            }
+          },
+          "ok": {
+            "type": "boolean"
           }
         }
       },
@@ -11054,6 +11306,39 @@
           },
           "stopped": {
             "type": "boolean"
+          }
+        }
+      },
+      "StreamWrite": {
+        "type": "object",
+        "description": "The body of a stream write (`nova#617` slice a). No credentials: `connectionRef` is the\nname of a `Connection`, and Nova never stores or forwards a secret.",
+        "required": [
+          "name",
+          "ownerGroup",
+          "source",
+          "sink"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The stream's name; the `PUT` path is authoritative and a different body name is refused."
+          },
+          "ownerGroup": {
+            "type": "string",
+            "description": "The group that owns the stream; the caller must be a member."
+          },
+          "restartPolicy": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`always` (default) or `on-failure`."
+          },
+          "sink": {
+            "$ref": "#/components/schemas/StreamSinkBody"
+          },
+          "source": {
+            "$ref": "#/components/schemas/StreamSourceBody"
           }
         }
       },

@@ -8,8 +8,9 @@ use std::sync::Arc;
 use axum::{
     Json, Router,
     extract::Path,
+    http::StatusCode,
     response::{IntoResponse, Response},
-    routing::{get, patch as patch_route},
+    routing::{get, patch as patch_route, post},
 };
 use kube::api::{Api, ApiResource, Patch, PatchParams};
 use kube::core::GroupVersionKind;
@@ -18,9 +19,13 @@ use serde_json::{Value, json};
 use utoipa::ToSchema;
 
 use crate::AppState;
+use crate::api_json::ApiJson;
 use crate::auth::Identity;
 use crate::connection_routes::{Caller, Fail, SignedIn};
-use crate::pipelines::{ResourceError, answer, may_act, no_cluster, resource_fail, visible};
+use crate::pipelines::{
+    MANAGED_BY_LABEL, MANAGED_BY_NOVA, ResourceError, answer, may_act, no_cluster, resource_fail,
+    visible,
+};
 
 /// One `StreamApp`, as the Streams page needs it. No secret, no checkpoint path.
 #[derive(Debug, Serialize, ToSchema)]
@@ -57,6 +62,57 @@ pub struct StreamsResponse {
 pub struct StreamState {
     /// The desired `spec.stopped`.
     pub stopped: bool,
+}
+
+/// The body of a stream write (`nova#617` slice a). No credentials: `connectionRef` is the
+/// name of a `Connection`, and Nova never stores or forwards a secret.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamWrite {
+    /// The stream's name; the `PUT` path is authoritative and a different body name is refused.
+    pub name: String,
+    /// The group that owns the stream; the caller must be a member.
+    pub owner_group: String,
+    pub source: StreamSourceBody,
+    pub sink: StreamSinkBody,
+    /// `always` (default) or `on-failure`.
+    #[serde(default)]
+    pub restart_policy: Option<String>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamSourceBody {
+    /// Name of the `Connection` (`type: kafka`); absent means the platform's own bus.
+    #[serde(default)]
+    pub connection_ref: Option<String>,
+    pub topic: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamSinkBody {
+    pub catalog: String,
+    /// `schema.table`.
+    pub table: String,
+    /// `merge` (default) or `append`.
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub merge_keys: Vec<String>,
+    #[serde(default)]
+    pub checkpoint_prefix: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct StreamValidation {
+    pub ok: bool,
+    pub errors: Vec<StreamIssue>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct StreamIssue {
+    pub message: String,
 }
 
 /// The reason on the operator's `Ready` condition (`StreamAppStatus.conditions`).
@@ -127,6 +183,212 @@ pub fn visible_streams(apps: &[Value], who: &Identity) -> Vec<StreamView> {
         .collect();
     views.sort_by(|a, b| (&a.namespace, &a.name).cmp(&(&b.namespace, &b.name)));
     views
+}
+
+// ---------------------------------------------------------------------------
+// The write rules (pure: no cluster)
+// ---------------------------------------------------------------------------
+
+/// What a write produces once every rule has passed.
+#[derive(Debug)]
+struct PlannedStream {
+    group: String,
+    spec: Value,
+}
+
+/// `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` with a length limit: a connection reference.
+fn is_reference(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let plain = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+    !bytes.is_empty()
+        && bytes.len() <= 63
+        && plain(bytes[0])
+        && plain(bytes[bytes.len() - 1])
+        && bytes.iter().all(|b| plain(*b) || *b == b'-')
+}
+
+/// `^[a-z0-9][a-z0-9-]*$` with a length limit: a catalog name.
+fn is_catalog(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 63
+        && (bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit())
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
+}
+
+/// `[a-z0-9_]+`: one part of a `schema.table`.
+fn is_table_part(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
+fn bad_topic() -> String {
+    "a stream needs a topic of 1 to 249 characters: letters, digits, dot, underscore or dash"
+        .to_string()
+}
+
+fn bad_table() -> String {
+    "sink.table is schema.table, lower-case letters, digits and underscores".to_string()
+}
+
+/// Every rule a stream write runs, in order, with the CRD's own limits
+/// (`crates/stardelt-operator/src/crd.rs:1953-2072`). `Ok` carries the spec to write.
+fn check_write(name: &str, body: &StreamWrite, who: &Identity) -> Result<PlannedStream, String> {
+    // 1. The name the CRD (and the operator) accepts.
+    crate::pipelines::validate_name(name)?;
+
+    // 2. The path names the stream; a body may not rename it.
+    if body.name != name {
+        return Err("the body's name does not match the path".to_string());
+    }
+
+    // 3. One of the caller's own groups — an administrator writes for their groups too.
+    if !who.groups.iter().any(|group| group == &body.owner_group) {
+        return Err(format!(
+            "you are not a member of the group {}",
+            body.owner_group
+        ));
+    }
+
+    // 4. The topic (the CRD's `^[A-Za-z0-9._-]{1,249}$`).
+    let topic = &body.source.topic;
+    if topic.is_empty()
+        || topic.len() > 249
+        || !topic
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    {
+        return Err(bad_topic());
+    }
+
+    // 5. The connection reference, when one is named (a `Connection` name).
+    if let Some(reference) = body.source.connection_ref.as_deref()
+        && !is_reference(reference)
+    {
+        return Err(
+            "source.connectionRef is a Connection name: 1 to 63 lower-case letters, digits and dashes"
+                .to_string(),
+        );
+    }
+
+    // 6. The catalog the sink table lives in.
+    if !is_catalog(&body.sink.catalog) {
+        return Err("sink.catalog is 1 to 63 lower-case letters, digits and dashes".to_string());
+    }
+
+    // 7. The sink table: `schema.table`, both parts lower-case, at most 128 characters.
+    let table = &body.sink.table;
+    match table.split_once('.') {
+        Some((schema, rest))
+            if is_table_part(schema) && is_table_part(rest) && table.len() <= 128 => {}
+        _ => return Err(bad_table()),
+    }
+
+    // 8. The sink mode, `merge` when absent.
+    let mode = body.sink.mode.as_deref().unwrap_or("merge");
+    if mode != "merge" && mode != "append" {
+        return Err("sink.mode is merge or append".to_string());
+    }
+
+    // 9. A merge sink needs 1 to 8 keys; an append sink names none.
+    if mode == "merge" {
+        if body.sink.merge_keys.is_empty() || body.sink.merge_keys.len() > 8 {
+            return Err(
+                "a merge sink needs 1 to 8 mergeKeys, each lower-case letters, digits and underscores"
+                    .to_string(),
+            );
+        }
+        if body
+            .sink
+            .merge_keys
+            .iter()
+            .any(|key| key.len() > 63 || !is_table_part(key))
+        {
+            return Err(
+                "a merge key is 1 to 63 lower-case letters, digits and underscores".to_string(),
+            );
+        }
+    } else if !body.sink.merge_keys.is_empty() {
+        return Err("an append sink may not name mergeKeys".to_string());
+    }
+
+    // 10. The checkpoint prefix, when one is named.
+    if let Some(prefix) = body.sink.checkpoint_prefix.as_deref() {
+        let first = prefix.chars().next();
+        if prefix.is_empty()
+            || prefix.len() > 512
+            || !first.is_some_and(|c| c.is_ascii_alphanumeric())
+            || !prefix
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '/' | '-'))
+        {
+            return Err(
+                "sink.checkpointPrefix is 1 to 512 characters: letters, digits, dot, underscore, slash or dash"
+                    .to_string(),
+            );
+        }
+    }
+
+    // 11. The restart policy, `always` when absent.
+    let restart = body.restart_policy.as_deref().unwrap_or("always");
+    if restart != "always" && restart != "on-failure" {
+        return Err("restartPolicy is always or on-failure".to_string());
+    }
+
+    let mut source = json!({ "topic": body.source.topic });
+    if let Some(reference) = &body.source.connection_ref {
+        source["connectionRef"] = json!(reference);
+    }
+    let mut sink = json!({
+        "catalog": body.sink.catalog,
+        "table": body.sink.table,
+        "mode": mode,
+        "mergeKeys": body.sink.merge_keys,
+    });
+    if let Some(prefix) = &body.sink.checkpoint_prefix {
+        sink["checkpointPrefix"] = json!(prefix);
+    }
+    Ok(PlannedStream {
+        group: body.owner_group.clone(),
+        // `runAs` is server-set: the stream runs as the group's principal (D42 decision 6).
+        // `stopped` is never part of a write: it defaults to `false` on create and an update
+        // leaves the stored value alone.
+        spec: json!({
+            "ownerGroup": body.owner_group,
+            "runAs": format!("pipeline-{}", body.owner_group),
+            "source": source,
+            "sink": sink,
+            "restartPolicy": restart,
+        }),
+    })
+}
+
+/// Nova's labels for a stream: who wrote it and which group owns it.
+fn stream_labels(group: &str) -> Value {
+    let mut labels = serde_json::Map::new();
+    labels.insert(MANAGED_BY_LABEL.to_string(), json!(MANAGED_BY_NOVA));
+    labels.insert("stardelt.io/owner-group".to_string(), json!(group));
+    Value::Object(labels)
+}
+
+/// The `StreamApp` a create writes: Nova's labels, the group's principal, no client-supplied
+/// metadata.
+fn stream_resource(name: &str, planned: &PlannedStream, created_by: &str) -> Value {
+    json!({
+        "apiVersion": "stardelt.io/v1alpha1",
+        "kind": "StreamApp",
+        "metadata": {
+            "name": name,
+            "namespace": crate::cluster::namespace(),
+            "labels": stream_labels(&planned.group),
+            "annotations": { "stardelt.io/created-by": created_by },
+        },
+        "spec": planned.spec,
+    })
 }
 
 /// The `StreamApp` resources of Nova's namespace. `None` without a cluster connection.
@@ -268,11 +530,199 @@ async fn patch_stream(
     Ok(stream_view(&patched, who))
 }
 
+/// The principal check: `Ok(Ok(()))` when the group's `ServicePrincipal` is ready,
+/// `Ok(Err(sentence))` when it is not, `Err` when the cluster did not answer.
+async fn principal_ready(state: &AppState, group: &str) -> Result<Result<(), String>, Fail> {
+    let Some(client) = state.kube.clone() else {
+        return Err(no_cluster());
+    };
+    let principals = crate::pipelines::PipelineResources::cluster(client)
+        .principals()
+        .await
+        .map_err(resource_fail)?;
+    let view = crate::pipelines::principal_view(&principals, group);
+    if view.ready {
+        Ok(Ok(()))
+    } else {
+        Ok(Err(view.message.unwrap_or_default()))
+    }
+}
+
+fn refused(message: String) -> StreamValidation {
+    StreamValidation {
+        ok: false,
+        errors: vec![StreamIssue { message }],
+    }
+}
+
+/// Check a write without writing it: every rule, then the group's principal.
+async fn validate_stream(
+    state: &AppState,
+    who: &Identity,
+    body: StreamWrite,
+) -> Result<StreamValidation, Fail> {
+    if let Err(message) = check_write(&body.name, &body, who) {
+        return Ok(refused(message));
+    }
+    match principal_ready(state, &body.owner_group).await? {
+        Ok(()) => Ok(StreamValidation {
+            ok: true,
+            errors: Vec::new(),
+        }),
+        Err(message) => Ok(refused(message)),
+    }
+}
+
+fn to_value(app: kube::api::DynamicObject) -> Result<Value, Fail> {
+    serde_json::to_value(app).map_err(|e| resource_fail(ResourceError::Unavailable(e.to_string())))
+}
+
+fn unavailable(error: kube::Error) -> Fail {
+    resource_fail(ResourceError::Unavailable(error.to_string()))
+}
+
+/// A stream Nova did not write is not changed here: it belongs to whoever wrote it.
+fn ensure_nova_managed(app: &Value) -> Result<(), Fail> {
+    if crate::pipelines::nova_managed(app) {
+        Ok(())
+    } else {
+        Err(Fail::new(
+            StatusCode::CONFLICT,
+            "this stream was created outside Nova; change it where it was created",
+        ))
+    }
+}
+
+/// The update path: merge the planned spec and Nova's labels into the stored object, answer the
+/// written object's view.
+async fn update_stream(
+    api: &Api<kube::api::DynamicObject>,
+    name: &str,
+    planned: &PlannedStream,
+    who: &Identity,
+) -> Result<StreamView, Fail> {
+    let patched = api
+        .patch(
+            name,
+            &PatchParams::default(),
+            &Patch::Merge(json!({
+                "metadata": {"labels": stream_labels(&planned.group)},
+                "spec": planned.spec,
+            })),
+        )
+        .await
+        .map_err(|e| match e {
+            kube::Error::Api(er) if er.code == 404 => not_found(),
+            kube::Error::Api(er) if er.code == 409 => Fail::new(
+                StatusCode::CONFLICT,
+                "the stream changed while it was being written; retry",
+            ),
+            other => unavailable(other),
+        })?;
+    Ok(stream_view(&to_value(patched)?, who))
+}
+
+/// Create or update one stream: the body is the whole editable state, `spec.stopped` is left
+/// alone, and the answer is the stored object's view.
+async fn put_stream(
+    state: &AppState,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+    body: StreamWrite,
+) -> Result<StreamView, Fail> {
+    if namespace != crate::cluster::namespace() {
+        return Err(not_found());
+    }
+    let planned = check_write(name, &body, who)
+        .map_err(|message| Fail::new(StatusCode::BAD_REQUEST, message))?;
+    match principal_ready(state, &body.owner_group).await? {
+        Ok(()) => {}
+        Err(message) => return Err(Fail::new(StatusCode::CONFLICT, message)),
+    }
+    let api = stream_api(state)?;
+
+    let existing = match api.get(name).await {
+        Ok(app) => Some(to_value(app)?),
+        Err(kube::Error::Api(er)) if er.code == 404 => None,
+        Err(other) => return Err(unavailable(other)),
+    };
+    if let Some(existing) = existing {
+        ensure_nova_managed(&existing)?;
+        return update_stream(&api, name, &planned, who).await;
+    }
+
+    let resource = stream_resource(name, &planned, &who.display_name);
+    let object: kube::api::DynamicObject = serde_json::from_value(resource)
+        .map_err(|e| resource_fail(ResourceError::Unavailable(e.to_string())))?;
+    match api.create(&kube::api::PostParams::default(), &object).await {
+        Ok(created) => Ok(stream_view(&to_value(created)?, who)),
+        // Another writer won the race between the read and the create: take the update path once.
+        Err(kube::Error::Api(er)) if er.code == 409 => {
+            let existing = api.get(name).await.map_err(|e| match e {
+                kube::Error::Api(er) if er.code == 404 => not_found(),
+                other => unavailable(other),
+            })?;
+            ensure_nova_managed(&to_value(existing)?)?;
+            update_stream(&api, name, &planned, who).await
+        }
+        Err(other) => Err(unavailable(other)),
+    }
+}
+
+#[utoipa::path(
+    post,
+    operation_id = "streams_validate",
+    path = "/api/streams/validate",
+    tag = "public",
+    description = "Check a stream write without writing it. The body is the body of `streams_put`: the stream's `name`, the `ownerGroup` the caller must belong to, `source` (`topic`, optional `connectionRef` naming a `Connection`) and `sink` (`catalog`, `table` as `schema.table`, `mode` `merge` or `append`, `mergeKeys`, optional `checkpointPrefix`), plus an optional `restartPolicy` (`always` or `on-failure`). Every rule a write runs is checked in order — the name, the body's name against the path's, the caller's groups, the topic, the connection reference, the catalog, the table, the mode, the merge keys, the checkpoint prefix, the restart policy — and then the group's ready `ServicePrincipal`. A rule that refuses is an answer, `ok: false` with one sentence in `errors`, status 200, never a 4xx; nothing is written. A cluster that does not answer is still 502 or 503, as on `pipelines_validate`. Answers `Cache-Control: no-store`.",
+    request_body = StreamWrite,
+    responses(
+        (status = 200, description = "The verdict: accepted, or the one sentence that refuses it", body = StreamValidation),
+        (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The cluster did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No cluster connection", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn validate(signed: SignedIn, ApiJson(body): ApiJson<StreamWrite>) -> Response {
+    answer(validate_stream(signed.state(), signed.identity(), body).await)
+}
+
+#[utoipa::path(
+    put,
+    operation_id = "streams_put",
+    path = "/api/streams/{namespace}/{name}",
+    tag = "public",
+    description = "Create or update one stream (`StreamApp`, D42). The body is the body of `streams_validate`; `name` must be the path's name. Nova writes `runAs: pipeline-<groupId>` itself (never from the body), stamps its own labels and the creator's annotation, and never carries `stopped`: it defaults to `false` on create and an update leaves the stored value alone. Refusals, in this order: a name outside 1 to 40 lower-case letters, digits and dashes starting with a letter, a body name that differs from the path, a group the caller is not a member of, a topic outside 1 to 249 letters, digits, dot, underscore or dash, a bad connection reference, catalog, table, mode, merge key, checkpoint prefix or restart policy — all 400; a group without a ready `ServicePrincipal` 409 with the `principals` route's message; a stream Nova did not write 409 `this stream was created outside Nova; change it where it was created`; a stream another writer changed between the read and the write 409 `the stream changed while it was being written; retry`. A foreign namespace and a stream that vanished are 404. The answer is the stored stream's view. Answers `Cache-Control: no-store`.",
+    params(
+        ("namespace" = String, Path, description = "The stream's namespace; only Nova's own namespace"),
+        ("name" = String, Path, description = "The stream's name"),
+    ),
+    request_body = StreamWrite,
+    responses(
+        (status = 200, description = "The stream as written", body = StreamView),
+        (status = 400, description = "A rule of the body refuses the write, with its sentence", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "The namespace is not Nova's own", body = crate::openapi::ErrorResponse),
+        (status = 409, description = "No ready principal, a stream written outside Nova, or a concurrent change", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The cluster did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No cluster connection", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn put(
+    signed: SignedIn,
+    Path((namespace, name)): Path<(String, String)>,
+    ApiJson(body): ApiJson<StreamWrite>,
+) -> Response {
+    answer(put_stream(signed.state(), signed.identity(), &namespace, &name, body).await)
+}
+
 /// The stream routes, uncacheable like the pipelines ones.
 pub(crate) fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/streams", get(list))
-        .route("/streams/{namespace}/{name}", patch_route(patch))
+        .route("/streams/validate", post(validate))
+        .route("/streams/{namespace}/{name}", patch_route(patch).put(put))
         .route_layer(axum::middleware::from_fn(crate::pipelines::no_store))
 }
 
@@ -281,7 +731,10 @@ mod tests {
     use axum::http::StatusCode;
     use serde_json::{Value, json};
 
-    use super::{patch_stream, router, stream_view, visible_streams};
+    use super::{
+        StreamSinkBody, StreamSourceBody, StreamWrite, check_write, patch_stream, router,
+        stream_resource, stream_view, visible_streams,
+    };
     use crate::auth::Identity;
 
     fn who(sub: &str, groups: &[&str], admin: bool) -> Identity {
@@ -385,6 +838,130 @@ mod tests {
         let view = stream_view(&app("a", "sales"), &caller);
         assert_eq!(view.namespace, ns);
         // The namespace guard is enforced by patch_stream; the pure mapping stays small.
+    }
+
+    /// A write body that every rule accepts, so a test can break exactly one field.
+    fn body_named(name: &str) -> StreamWrite {
+        StreamWrite {
+            name: name.to_string(),
+            owner_group: "sales".to_string(),
+            source: StreamSourceBody {
+                connection_ref: Some("pegelonline".to_string()),
+                topic: "pegelonline.measurements".to_string(),
+            },
+            sink: StreamSinkBody {
+                catalog: "shared".to_string(),
+                table: "silver.pegelonline_measurements".to_string(),
+                mode: None,
+                merge_keys: vec!["station_id".to_string()],
+                checkpoint_prefix: None,
+            },
+            restart_policy: None,
+        }
+    }
+
+    #[test]
+    fn a_write_needs_a_group_the_caller_is_in() {
+        let error = check_write(
+            "pegelonline-live",
+            &body_named("pegelonline-live"),
+            &who("u", &["marketing"], false),
+        )
+        .expect_err("a group the caller is not in is refused");
+        assert_eq!(error, "you are not a member of the group sales");
+    }
+
+    #[test]
+    fn the_body_name_must_match_the_path() {
+        let error = check_write("a", &body_named("b"), &who("u", &["sales"], false))
+            .expect_err("the body may not rename the stream");
+        assert_eq!(error, "the body's name does not match the path");
+    }
+
+    #[test]
+    fn a_merge_sink_needs_one_to_eight_merge_keys() {
+        let caller = who("u", &["sales"], false);
+        let mut none = body_named("a");
+        none.sink.merge_keys = vec![];
+        let error = check_write("a", &none, &caller).expect_err("no key is refused");
+        assert!(error.contains("1 to 8 mergeKeys"), "{error}");
+
+        let mut nine = body_named("a");
+        nine.sink.merge_keys = (0..9).map(|i| format!("key_{i}")).collect();
+        let error = check_write("a", &nine, &caller).expect_err("nine keys are refused");
+        assert!(error.contains("1 to 8 mergeKeys"), "{error}");
+
+        let mut two = body_named("a");
+        two.sink.merge_keys = vec!["station_id".to_string(), "observed_at".to_string()];
+        let planned = check_write("a", &two, &caller).expect("two keys are accepted");
+        assert_eq!(
+            planned.spec.pointer("/sink/mergeKeys"),
+            Some(&json!(["station_id", "observed_at"]))
+        );
+    }
+
+    #[test]
+    fn an_append_sink_may_not_name_merge_keys() {
+        let mut append = body_named("a");
+        append.sink.mode = Some("append".to_string());
+        let error = check_write("a", &append, &who("u", &["sales"], false))
+            .expect_err("an append sink with a key is refused");
+        assert_eq!(error, "an append sink may not name mergeKeys");
+
+        append.sink.merge_keys = vec![];
+        let planned = check_write("a", &append, &who("u", &["sales"], false))
+            .expect("an append sink without keys is accepted");
+        assert_eq!(
+            planned.spec.pointer("/sink/mode"),
+            Some(&json!("append")),
+            "the body's mode is written"
+        );
+    }
+
+    #[test]
+    fn a_bad_topic_and_a_bad_table_are_refused() {
+        let caller = who("u", &["sales"], false);
+        let mut topic = body_named("a");
+        topic.source.topic = "bad topic!".to_string();
+        let error = check_write("a", &topic, &caller).expect_err("a bad topic is refused");
+        assert_eq!(
+            error,
+            "a stream needs a topic of 1 to 249 characters: letters, digits, dot, underscore or dash"
+        );
+
+        let mut table = body_named("a");
+        table.sink.table = "silver".to_string();
+        let error =
+            check_write("a", &table, &caller).expect_err("a table without a dot is refused");
+        assert_eq!(
+            error,
+            "sink.table is schema.table, lower-case letters, digits and underscores"
+        );
+    }
+
+    #[test]
+    fn the_resource_carries_nova_labels_and_the_group_principal() {
+        let planned = check_write("a", &body_named("a"), &who("u", &["sales"], false))
+            .expect("the body is accepted");
+        let resource = stream_resource("a", &planned, "Ada Lovelace");
+        assert_eq!(
+            resource.pointer("/spec/runAs"),
+            Some(&json!("pipeline-sales"))
+        );
+        assert_eq!(
+            resource.pointer("/metadata/labels/app.kubernetes.io~1managed-by"),
+            Some(&json!("stardelt-nova"))
+        );
+        assert_eq!(
+            resource.pointer("/metadata/labels/stardelt.io~1owner-group"),
+            Some(&json!("sales"))
+        );
+        assert_eq!(
+            resource.pointer("/metadata/annotations/stardelt.io~1created-by"),
+            Some(&json!("Ada Lovelace"))
+        );
+        assert_eq!(resource.pointer("/spec/stopped"), None, "no `stopped`");
+        assert_eq!(resource["kind"], json!("StreamApp"));
     }
 
     mod fake_kube {
