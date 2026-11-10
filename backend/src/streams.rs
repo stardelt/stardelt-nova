@@ -581,6 +581,24 @@ fn unavailable(error: kube::Error) -> Fail {
     resource_fail(ResourceError::Unavailable(error.to_string()))
 }
 
+/// The rules an update of a stored stream must pass before anything is merged: the caller may
+/// act on it (the read path's rule and its 404), Nova wrote it, and its group does not change.
+/// `group` is the body's `ownerGroup`.
+fn check_existing(who: &Identity, existing: &Value, group: &str) -> Result<(), Fail> {
+    let spec = existing.get("spec").unwrap_or(existing);
+    if !may_act(who, spec) {
+        return Err(not_found());
+    }
+    ensure_nova_managed(existing)?;
+    if spec.get("ownerGroup").and_then(Value::as_str) != Some(group) {
+        return Err(Fail::new(
+            StatusCode::BAD_REQUEST,
+            "the group of an existing stream cannot change",
+        ));
+    }
+    Ok(())
+}
+
 /// A stream Nova did not write is not changed here: it belongs to whoever wrote it.
 fn ensure_nova_managed(app: &Value) -> Result<(), Fail> {
     if crate::pipelines::nova_managed(app) {
@@ -636,10 +654,7 @@ async fn put_stream(
     }
     let planned = check_write(name, &body, who)
         .map_err(|message| Fail::new(StatusCode::BAD_REQUEST, message))?;
-    match principal_ready(state, &body.owner_group).await? {
-        Ok(()) => {}
-        Err(message) => return Err(Fail::new(StatusCode::CONFLICT, message)),
-    }
+
     let api = stream_api(state)?;
 
     let existing = match api.get(name).await {
@@ -647,8 +662,15 @@ async fn put_stream(
         Err(kube::Error::Api(er)) if er.code == 404 => None,
         Err(other) => return Err(unavailable(other)),
     };
-    if let Some(existing) = existing {
-        ensure_nova_managed(&existing)?;
+    if let Some(existing) = &existing {
+        check_existing(who, existing, &body.owner_group)?;
+    }
+
+    match principal_ready(state, &body.owner_group).await? {
+        Ok(()) => {}
+        Err(message) => return Err(Fail::new(StatusCode::CONFLICT, message)),
+    }
+    if existing.is_some() {
         return update_stream(&api, name, &planned, who).await;
     }
 
@@ -663,7 +685,8 @@ async fn put_stream(
                 kube::Error::Api(er) if er.code == 404 => not_found(),
                 other => unavailable(other),
             })?;
-            ensure_nova_managed(&to_value(existing)?)?;
+            let existing = to_value(existing)?;
+            check_existing(who, &existing, &body.owner_group)?;
             update_stream(&api, name, &planned, who).await
         }
         Err(other) => Err(unavailable(other)),
@@ -693,7 +716,7 @@ pub(crate) async fn validate(signed: SignedIn, ApiJson(body): ApiJson<StreamWrit
     operation_id = "streams_put",
     path = "/api/streams/{namespace}/{name}",
     tag = "public",
-    description = "Create or update one stream (`StreamApp`, D42). The body is the body of `streams_validate`; `name` must be the path's name. Nova writes `runAs: pipeline-<groupId>` itself (never from the body), stamps its own labels and the creator's annotation, and never carries `stopped`: it defaults to `false` on create and an update leaves the stored value alone. Refusals, in this order: a name outside 1 to 40 lower-case letters, digits and dashes starting with a letter, a body name that differs from the path, a group the caller is not a member of, a topic outside 1 to 249 letters, digits, dot, underscore or dash, a bad connection reference, catalog, table, mode, merge key, checkpoint prefix or restart policy — all 400; a group without a ready `ServicePrincipal` 409 with the `principals` route's message; a stream Nova did not write 409 `this stream was created outside Nova; change it where it was created`; a stream another writer changed between the read and the write 409 `the stream changed while it was being written; retry`. A foreign namespace and a stream that vanished are 404. The answer is the stored stream's view. Answers `Cache-Control: no-store`.",
+    description = "Create or update one stream (`StreamApp`, D42). The body is the body of `streams_validate`; `name` must be the path's name. Nova writes `runAs: pipeline-<groupId>` itself (never from the body), stamps its own labels and the creator's annotation, and never carries `stopped`: it defaults to `false` on create and an update leaves the stored value alone. Refusals, in this order: a name outside 1 to 40 lower-case letters, digits and dashes starting with a letter, a body name that differs from the path, a group the caller is not a member of, a topic outside 1 to 249 letters, digits, dot, underscore or dash, a bad connection reference, catalog, table, mode, merge key, checkpoint prefix or restart policy — all 400; a group without a ready `ServicePrincipal` 409 with the `principals` route's message; a stream that belongs to another group 404 (the read path's rule, like a stream that does not exist); a body that moves an existing stream to another group 400 \"the group of an existing stream cannot change\"; a stream Nova did not write 409 `this stream was created outside Nova; change it where it was created`; a stream another writer changed between the read and the write 409 `the stream changed while it was being written; retry`. A foreign namespace and a stream that vanished are 404. The answer is the stored stream's view. Answers `Cache-Control: no-store`.",
     params(
         ("namespace" = String, Path, description = "The stream's namespace; only Nova's own namespace"),
         ("name" = String, Path, description = "The stream's name"),
@@ -732,8 +755,8 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        StreamSinkBody, StreamSourceBody, StreamWrite, check_write, patch_stream, router,
-        stream_resource, stream_view, visible_streams,
+        StreamSinkBody, StreamSourceBody, StreamWrite, check_write, patch_stream, put_stream,
+        router, stream_resource, stream_view, visible_streams,
     };
     use crate::auth::Identity;
 
@@ -752,7 +775,11 @@ mod tests {
 
     fn app(name: &str, group: &str) -> Value {
         json!({
-            "metadata": {"name": name, "namespace": crate::cluster::namespace()},
+            "metadata": {
+                "name": name,
+                "namespace": crate::cluster::namespace(),
+                "labels": {"app.kubernetes.io/managed-by": "stardelt-nova"}
+            },
             "spec": {
                 "ownerGroup": group,
                 "runAs": format!("pipeline-{group}"),
@@ -1045,6 +1072,27 @@ mod tests {
                     "/apis/stardelt.io/v1alpha1/namespaces/{namespace}/streamapps/{name}",
                     get(one).patch(patch_one),
                 )
+                .route(
+                    "/apis/stardelt.io/v1alpha1/namespaces/{namespace}/serviceprincipals",
+                    get(|| async {
+                        Json(json!({
+                            "apiVersion": "stardelt.io/v1alpha1",
+                            "kind": "ServicePrincipalList",
+                            "items": [
+                                {
+                                    "metadata": {"name": "pipeline-sales", "namespace": "stardelt"},
+                                    "spec": {"ownerGroup": "sales"},
+                                    "status": {"ready": true}
+                                },
+                                {
+                                    "metadata": {"name": "pipeline-marketing", "namespace": "stardelt"},
+                                    "spec": {"ownerGroup": "marketing"},
+                                    "status": {"ready": true}
+                                }
+                            ]
+                        }))
+                    }),
+                )
                 .with_state(shared.clone());
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();
@@ -1081,6 +1129,74 @@ mod tests {
             .await
             .expect_err("outsider gets 404");
         assert_eq!(err.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_member_of_another_group_may_not_overwrite_a_stream() {
+        let (client, shared) = fake_kube::start_with_patch(vec![app("demo", "sales")]).await;
+        let state = crate::router_tests::test_state_with_kube(client);
+        let ns = crate::cluster::namespace();
+        let mut body = body_named("demo");
+        body.owner_group = "marketing".to_string();
+        let err = put_stream(&state, &who("u", &["marketing"], false), &ns, "demo", body)
+            .await
+            .expect_err("an outsider may not overwrite the stream");
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+        assert!(
+            shared.lock().unwrap().patches.is_empty(),
+            "nothing may be written"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_group_of_an_existing_stream_cannot_change() {
+        let (client, shared) = fake_kube::start_with_patch(vec![app("demo", "sales")]).await;
+        let state = crate::router_tests::test_state_with_kube(client);
+        let ns = crate::cluster::namespace();
+        let mut body = body_named("demo");
+        body.owner_group = "marketing".to_string();
+        let err = put_stream(
+            &state,
+            &who("u", &["sales", "marketing"], false),
+            &ns,
+            "demo",
+            body,
+        )
+        .await
+        .expect_err("an update may not move the stream");
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            err.message(),
+            "the group of an existing stream cannot change"
+        );
+        assert!(shared.lock().unwrap().patches.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_owner_may_overwrite_their_own_stream() {
+        let (client, shared) = fake_kube::start_with_patch(vec![app("demo", "sales")]).await;
+        let state = crate::router_tests::test_state_with_kube(client);
+        let ns = crate::cluster::namespace();
+        let view = put_stream(
+            &state,
+            &who("u", &["sales"], false),
+            &ns,
+            "demo",
+            body_named("demo"),
+        )
+        .await
+        .expect("the owner may overwrite");
+        assert_eq!(view.name, "demo");
+        let patches = shared.lock().unwrap().patches.clone();
+        assert_eq!(patches.len(), 1);
+        assert_eq!(
+            patches[0]["spec"]["source"]["topic"],
+            json!("pegelonline.measurements")
+        );
+        assert_eq!(
+            patches[0]["metadata"]["labels"]["stardelt.io/owner-group"],
+            json!("sales")
+        );
     }
 
     #[tokio::test]
