@@ -31,6 +31,8 @@ const graph = () => ({
     { id: 'pipeline|marts/revenue', kind: 'pipeline', name: 'marts/revenue', runs: 16, lastRun: LAST, handMade: false },
     { id: 'sql-editor|alice', kind: 'sql-editor', name: 'alice', runs: 2, lastRun: LAST, handMade: true },
   ],
+  // Two visible tables downstream (a hidden one is not counted), one upstream.
+  impact: { downstream: 2, upstream: 1, downstreamJobs: 2 },
 })
 
 const me = { user: 'alice', auth_mode: 'oidc', demo: false, warehouse: 'warehouse', is_admin: true, groups: ['admins'] }
@@ -208,8 +210,29 @@ test('the window asks the API for the chosen days', async ({ page }) => {
   await expect(page).toHaveURL(/days=90/)
 })
 
-test('a phone gets the two lists instead of the graph', async ({ page }) => {
+test('a chain longer than the drawn steps says how many tables there are', async ({ page }) => {
+  // The answer of a depth=1 request: the focus and its two one-step consumers. A third table
+  // sits two steps away, out of the drawing, and `impact` counts it (nova#748).
+  const deep = graph()
+  deep.impact = { downstream: 3, upstream: 1, downstreamJobs: 3 }
+
   await page.setViewportSize({ width: 390, height: 844 })
+  await stub(page, deep)
+  await page.goto('/lineage?catalog=lakehouse&schema=staging&table=trips_clean&depth=1')
+
+  const note = page.getByTestId('lineage-impact-downstream')
+  await expect(note).toHaveText('3 tables at every step · 2 drawn')
+  // Only the "Used by" list says it; the upstream number is not part of this slice.
+  await expect(page.locator('[data-testid^="lineage-impact"]')).toHaveCount(1)
+
+  // Nothing is said when the drawing already shows every table (the fixture's own answer).
+  await stub(page, graph())
+  await page.goto('/lineage?catalog=lakehouse&schema=staging&table=trips_clean&depth=2')
+  await expect(page.getByText('Used by')).toBeVisible()
+  await expect(page.getByTestId('lineage-impact-downstream')).toHaveCount(0)
+})
+
+test('a phone gets the two lists instead of the graph', async ({ page }) => {  await page.setViewportSize({ width: 390, height: 844 })
   await stub(page)
   await page.goto('/lineage?catalog=lakehouse&schema=staging&table=trips_clean')
 

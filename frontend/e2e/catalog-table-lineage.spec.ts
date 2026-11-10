@@ -53,6 +53,8 @@ const GRAPH = {
     { id: 'sql-editor|alice', kind: 'sql-editor', name: 'alice', runs: 2, lastRun: '2026-11-09T03:30:00Z', handMade: true },
     { id: 'notebook|bob', kind: 'notebook', name: 'bob', runs: 1, lastRun: '2026-11-09T04:30:00Z', handMade: true },
   ],
+  // Three visible tables downstream (revenue, scratch, mart), one upstream.
+  impact: { downstream: 3, upstream: 1, downstreamJobs: 4 },
 }
 
 type Stub = { defaultCatalog?: string; graph?: unknown }
@@ -185,6 +187,7 @@ test('an empty window says so in the summary and on both lists', async ({ page }
     nodes: [{ id: 'lakehouse.sales|orders', namespace: 'lakehouse.sales', name: 'orders', visible: true, level: 0, handMade: false }],
     edges: [],
     jobs: [],
+    impact: { downstream: 0, upstream: 0, downstreamJobs: 0 },
   }
   await stub(page, { graph: focusOnly })
   await page.goto('/catalog?catalog=lakehouse&ns=sales&tbl=orders')

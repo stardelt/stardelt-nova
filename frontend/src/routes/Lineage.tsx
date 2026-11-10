@@ -77,7 +77,12 @@ export default function Lineage() {
     setParams(next)
   }
 
-  const graph: LineageGraphView = data ?? { nodes: [], edges: [], jobs: [] }
+  const graph: LineageGraphView = data ?? {
+    nodes: [],
+    edges: [],
+    jobs: [],
+    impact: { downstream: 0, upstream: 0, downstreamJobs: 0 },
+  }
   const focus = graph.nodes.find(n => n.level === 0) ?? graph.nodes[0]
   const writer = focus?.writers?.[0]
   const handMadeCount = graph.nodes.filter(n => n.handMade).length

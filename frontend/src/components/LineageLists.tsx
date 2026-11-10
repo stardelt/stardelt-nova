@@ -115,6 +115,14 @@ export function LineageLists({ graph, days, catalog }: { graph: LineageGraphView
         direction="down"
         graph={graph}
         catalog={catalog}
+        note={
+          graph.impact.downstream > downstream.length
+            ? {
+                testId: 'lineage-impact-downstream',
+                text: `${graph.impact.downstream} tables at every step · ${downstream.length} drawn`,
+              }
+            : undefined
+        }
       />
     </div>
   )
@@ -128,6 +136,7 @@ function List({
   direction,
   graph,
   catalog,
+  note,
 }: {
   title: string
   empty: string
@@ -136,6 +145,8 @@ function List({
   direction: Direction
   graph: LineageGraphView
   catalog: string
+  /** A line under the heading, when the drawing shows fewer tables than exist. */
+  note?: { testId: string; text: string }
 }) {
   const [showHandMade, setShowHandMade] = useState(false)
   const level = (n: LineageNodeView) => Math.abs(n.level ?? 0)
@@ -153,6 +164,11 @@ function List({
   return (
     <div className="card p-5 min-w-0">
       <div className="label mb-2">{title}</div>
+      {note && (
+        <p className="text-xs text-text-mute mb-2" data-testid={note.testId}>
+          {note.text}
+        </p>
+      )}
       {sorted.length === 0 && hidden === 0 ? (
         <p className="text-sm text-text-mute">{empty}</p>
       ) : (

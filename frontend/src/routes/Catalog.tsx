@@ -864,7 +864,7 @@ function LineageTab({ ns, tbl, catalog }: { ns: string; tbl: string; catalog: st
       </div>
 
       <LineageLists
-        graph={graph.data ?? { nodes: [], edges: [], jobs: [] }}
+        graph={graph.data ?? { nodes: [], edges: [], jobs: [], impact: { downstream: 0, upstream: 0, downstreamJobs: 0 } }}
         days={days}
         catalog={catalog}
       />
