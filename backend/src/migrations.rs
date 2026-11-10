@@ -15,6 +15,7 @@ use axum::{
     routing::post,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use utoipa::ToSchema;
 
 use crate::AppState;
@@ -66,6 +67,10 @@ pub struct PlanAnswer {
     pub ok: bool,
     /// Whether `stardelt_meta.migrations` exists in the catalog yet (false on a fresh catalog).
     pub ledger: bool,
+    /// The identity of this plan: what `bundle approve` takes and what apply needs.
+    pub plan_id: String,
+    /// Whether this Nova can record an approval (a state store is configured).
+    pub approvable: bool,
     pub files: Vec<PlannedFile>,
     /// One sentence per problem: a changed file, a file added before an applied one.
     pub errors: Vec<String>,
@@ -83,6 +88,18 @@ pub struct ApplyRequest {
     /// Run statements that are not additive. Default false.
     #[serde(default)]
     pub allow_breaking: bool,
+    /// The bundle target's `mode` (`targets.<target>.mode` in bundle.yaml):
+    /// `development` or `production`. Client-declared, like `allowBreaking`.
+    #[serde(default = "default_mode")]
+    pub mode: String,
+    /// The `planId` a person other than the caller approved, for a breaking file in a
+    /// production target.
+    #[serde(default)]
+    pub approval_id: Option<String>,
+}
+
+fn default_mode() -> String {
+    "development".into()
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -128,6 +145,24 @@ fn is_sha256(value: &str) -> bool {
         && value
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// Lower-case hex, no dependency on a hex crate.
+fn hex_lower(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// A plan's identity: exactly the work a second person approves. The same `catalog`,
+/// `target` and set of files that would run always give the same id, on any replica.
+fn plan_id(catalog: &str, target: &str, planned: &[PlannedFile]) -> String {
+    let mut lines = vec![format!("catalog={catalog}"), format!("target={target}")];
+    lines.extend(
+        planned
+            .iter()
+            .filter(|f| f.status == "new")
+            .map(|f| format!("{}\t{}\t{}", f.name, f.sha256, f.class)),
+    );
+    hex_lower(&Sha256::digest(lines.join("\n").as_bytes()))
 }
 
 /// Where the scanner is: plain SQL, inside a `'…'` string, a `--` line comment or a
@@ -323,6 +358,15 @@ fn validate(request: &PlanRequest) -> Result<(), String> {
     Ok(())
 }
 
+/// The only two target modes an apply may declare.
+fn validate_mode(mode: &str) -> Result<(), String> {
+    if mode == "development" || mode == "production" {
+        Ok(())
+    } else {
+        Err("mode must be 'development' or 'production'".to_string())
+    }
+}
+
 /// The ledger's DDL, in this order: the schema, then the table. Runs as the caller.
 fn ledger_ddl(catalog: &str) -> [String; 2] {
     [
@@ -360,6 +404,46 @@ fn refusal(files: &[PlannedFile], allow_breaking: bool) -> Option<String> {
                 file.name
             )
         })
+}
+
+/// A breaking change in a production target needs a second person (nova#617 decision 3).
+/// `approver` is the sub of someone who approved `plan`, if anybody did.
+fn approval_refusal(
+    planned: &[PlannedFile],
+    mode: &str,
+    approval_id: Option<&str>,
+    plan: &str,
+    approver: Option<&str>,
+    caller_sub: &str,
+) -> Option<String> {
+    if mode != "production"
+        || !planned
+            .iter()
+            .any(|f| f.status == "new" && f.class == "breaking")
+    {
+        return None;
+    }
+    let ask = format!("stardelt bundle approve {plan}");
+    match approval_id {
+        None => {
+            return Some(format!(
+                "a breaking change in a production target needs a second person: {ask}"
+            ));
+        }
+        Some(id) if id != plan => {
+            return Some(format!(
+                "the approval is for another plan, or the files changed since it was approved: {ask}"
+            ));
+        }
+        Some(_) => {}
+    }
+    match approver {
+        Some(who) if who != caller_sub => None,
+        Some(_) => Some(format!(
+            "the plan's author cannot approve their own plan: ask a second person to run `{ask}`"
+        )),
+        None => Some(format!("no one has approved this plan yet: {ask}")),
+    }
 }
 
 /// Whether `stardelt_meta.migrations` exists in the catalog. Runs as the caller.
@@ -405,7 +489,7 @@ async fn applied(
     operation_id = "migrations_plan",
     path = "/api/migrations/plan",
     tag = "public",
-    description = "What a bundle's migration files would do to one target, and what already ran there (stardelt-nova#617 decision 3). Writes nothing. The body is `catalog`, `target` and `files` (`name` `NNN_<words>.sql`, `sha256`, `sql`); `class` is `additive` when every statement only creates or adds columns or views, else `breaking` with the first non-additive statement in `reason`; `status` is `new`, `applied` (same sha256 in `stardelt_meta.migrations`) or `changed` (applied with another sha256). `ok` is false, with one sentence per problem in `errors`, when a file changed after it was applied or a new file sorts before an applied one. `ledger` is false on a catalog whose `stardelt_meta.migrations` does not exist yet. The ledger is read as the caller, so the caller's own catalog privileges decide what can be read. Answers `Cache-Control: no-store`.",
+    description = "What a bundle's migration files would do to one target, and what already ran there (stardelt-nova#617 decision 3). Writes nothing. The body is `catalog`, `target` and `files` (`name` `NNN_<words>.sql`, `sha256`, `sql`); `class` is `additive` when every statement only creates or adds columns or views, else `breaking` with the first non-additive statement in `reason`; `status` is `new`, `applied` (same sha256 in `stardelt_meta.migrations`) or `changed` (applied with another sha256). `ok` is false, with one sentence per problem in `errors`, when a file changed after it was applied or a new file sorts before an applied one. `ledger` is false on a catalog whose `stardelt_meta.migrations` does not exist yet. `planId` names exactly the files that would run, and is what `approve` takes; `approvable` is false when no state store is configured. The ledger is read as the caller, so the caller's own catalog privileges decide what can be read. Answers `Cache-Control: no-store`.",
     request_body = PlanRequest,
     responses(
         (status = 200, description = "The plan: per file, class and status, plus the problems", body = PlanAnswer),
@@ -462,13 +546,124 @@ pub(crate) async fn plan_handler(
         Vec::new()
     };
     let (files, errors) = plan(&request.files, &rows);
+    let id = plan_id(&request.catalog, &request.target, &files);
+    let mut approvable = state.db.is_some();
+    if let Some(pool) = state.db.as_ref() {
+        let who = crate::saved_queries::owner_sub(Some(who), &state.dev_user);
+        if let Err(e) = sqlx::query(
+            "INSERT INTO migration_plan (plan_id, catalog, target, created_by) \
+             VALUES ($1, $2, $3, $4) ON CONFLICT (plan_id) DO NOTHING",
+        )
+        .bind(&id)
+        .bind(&request.catalog)
+        .bind(&request.target)
+        .bind(&who)
+        .execute(pool)
+        .await
+        {
+            tracing::warn!(error = %e, "recording a migration plan failed");
+            approvable = false;
+        }
+    }
     Json(PlanAnswer {
         ok: errors.is_empty(),
         ledger,
+        plan_id: id,
+        approvable,
         files,
         errors,
     })
     .into_response()
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ApproveRequest {
+    /// The `planId` a plan answered with.
+    pub plan_id: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ApproveAnswer {
+    pub plan_id: String,
+    /// The signed-in name of the person who approved the plan.
+    pub approver: String,
+    /// Epoch milliseconds, as everywhere else.
+    pub approved_at: i64,
+}
+
+/// `POST /api/migrations/approve` — a second person says yes to a plan.
+#[utoipa::path(
+    post,
+    operation_id = "migrations_approve",
+    path = "/api/migrations/approve",
+    tag = "public",
+    description = "Record that the caller has looked at a migration plan, so a breaking change may run in a production target (stardelt-nova#617 decision 3). The body is the `planId` a plan answered with. The plan's own author cannot approve it: a second person has to. Repeating a call is a no-op that answers the same row with the first approval time. Plans and approvals live in the state store.",
+    request_body = ApproveRequest,
+    responses(
+        (status = 200, description = "The recorded approval: who approved and when", body = ApproveAnswer),
+        (status = 400, description = "A malformed request, one sentence", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such plan: it was never planned on this Nova, or the state store was reset", body = crate::openapi::ErrorResponse),
+        (status = 409, description = "The caller is the plan's author: a second person has to approve it", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn approve_handler(
+    caller: Caller,
+    ApiJson(request): ApiJson<ApproveRequest>,
+) -> Response {
+    let state = caller.state();
+    let Some(pool) = state.db.as_ref() else {
+        return crate::saved_queries::unavailable();
+    };
+    let who = caller.principal();
+    let caller_sub = crate::saved_queries::owner_sub(Some(who), &state.dev_user);
+    let created_by: Option<String> =
+        match sqlx::query_scalar("SELECT created_by FROM migration_plan WHERE plan_id = $1")
+            .bind(&request.plan_id)
+            .fetch_optional(pool)
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => return crate::saved_queries::store_failed(e),
+        };
+    let Some(created_by) = created_by else {
+        return crate::saved_queries::error(
+            StatusCode::NOT_FOUND,
+            "unknown plan: it was never planned on this Nova, or the state store was reset",
+        );
+    };
+    if created_by == caller_sub {
+        return crate::saved_queries::error(
+            StatusCode::CONFLICT,
+            &format!(
+                "the plan's author cannot approve their own plan: ask a second person to run `stardelt bundle approve {}`",
+                request.plan_id
+            ),
+        );
+    }
+    let stored = sqlx::query_as::<_, (String, i64)>(
+        "INSERT INTO migration_approval (plan_id, approver_sub, approver_name) \
+         VALUES ($1, $2, $3) \
+         ON CONFLICT (plan_id, approver_sub) DO UPDATE SET approved_at = now() \
+         RETURNING approver_name, (extract(epoch FROM approved_at) * 1000)::bigint AS approved_at",
+    )
+    .bind(&request.plan_id)
+    .bind(&caller_sub)
+    .bind(&who.identity.display_name)
+    .fetch_one(pool)
+    .await;
+    match stored {
+        Ok((approver, approved_at)) => Json(ApproveAnswer {
+            plan_id: request.plan_id,
+            approver,
+            approved_at,
+        })
+        .into_response(),
+        Err(e) => crate::saved_queries::store_failed(e),
+    }
 }
 
 #[utoipa::path(
@@ -502,12 +697,21 @@ pub(crate) async fn apply_handler(
             .into_response();
     }
     let allow_breaking = request.allow_breaking;
+    let mode = request.mode.clone();
+    let approval_id = request.approval_id.clone();
     let check = PlanRequest {
         catalog: request.catalog,
         target: request.target,
         files: request.files,
     };
     if let Err(message) = validate(&check) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": message})),
+        )
+            .into_response();
+    }
+    if let Err(message) = validate_mode(&mode) {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": message})),
@@ -561,6 +765,50 @@ pub(crate) async fn apply_handler(
         return (
             StatusCode::CONFLICT,
             Json(serde_json::json!({"error": sentence})),
+        )
+            .into_response();
+    }
+    let id = plan_id(&catalog, &target, &planned);
+    let caller_sub = crate::saved_queries::owner_sub(Some(who), &state.dev_user);
+    let needed = mode == "production"
+        && planned
+            .iter()
+            .any(|f| f.status == "new" && f.class == "breaking");
+    let approver: Option<String> = if needed {
+        let Some(pool) = state.db.as_ref() else {
+            return crate::saved_queries::unavailable();
+        };
+        match sqlx::query_scalar(
+            "SELECT approver_sub FROM migration_approval \
+             WHERE plan_id = $1 AND approver_sub <> $2 LIMIT 1",
+        )
+        .bind(&id)
+        .bind(&caller_sub)
+        .fetch_optional(pool)
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => return crate::saved_queries::store_failed(e),
+        }
+    } else {
+        None
+    };
+    if let Some(sentence) = approval_refusal(
+        &planned,
+        &mode,
+        approval_id.as_deref(),
+        &id,
+        approver.as_deref(),
+        &caller_sub,
+    ) {
+        return (
+            StatusCode::CONFLICT,
+            Json(ApplyAnswer {
+                ok: false,
+                applied: vec![],
+                skipped: vec![],
+                errors: vec![sentence],
+            }),
         )
             .into_response();
     }
@@ -627,6 +875,7 @@ pub(crate) async fn apply_handler(
 pub(crate) fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/migrations/apply", post(apply_handler))
+        .route("/migrations/approve", post(approve_handler))
         .route("/migrations/plan", post(plan_handler))
         .route_layer(axum::middleware::from_fn(crate::pipelines::no_store))
 }
@@ -809,6 +1058,12 @@ mod tests {
             "001_a.sql is empty"
         );
         assert!(validate(&request("mobilitylab", "prod", vec![good()])).is_ok());
+        assert_eq!(
+            validate_mode("prod").unwrap_err(),
+            "mode must be 'development' or 'production'"
+        );
+        assert!(validate_mode("production").is_ok());
+        assert!(validate_mode("development").is_ok());
     }
 
     #[test]
@@ -857,6 +1112,166 @@ mod tests {
         assert!(
             refusal(std::slice::from_ref(&already_applied_breaking), false).is_none(),
             "an applied file never runs again"
+        );
+    }
+
+    #[test]
+    fn plan_id_is_stable_and_covers_the_work() {
+        fn planned(name: &str, sha: &str, class: &str, status: &str) -> PlannedFile {
+            PlannedFile {
+                name: name.to_string(),
+                sha256: sha.to_string(),
+                class: class.to_string(),
+                status: status.to_string(),
+                statements: 1,
+                reason: None,
+            }
+        }
+        let first = planned("001_a.sql", &sha('a'), "additive", "new");
+        let second = planned("002_b.sql", &sha('b'), "breaking", "new");
+        let files = vec![first, second];
+
+        let id = plan_id("cat", "prod", &files);
+        assert_eq!(id.len(), 64, "{id}");
+        assert!(
+            id.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "{id}"
+        );
+        assert_eq!(
+            id,
+            plan_id("cat", "prod", &files),
+            "the same work gives the same id"
+        );
+        assert_ne!(id, plan_id("cat", "dev", &files), "the target counts");
+        assert_ne!(id, plan_id("other", "prod", &files), "the catalog counts");
+        assert_ne!(
+            id,
+            plan_id(
+                "cat",
+                "prod",
+                &[
+                    planned("001_a.sql", &sha('a'), "additive", "new"),
+                    planned("002_b.sql", &sha('c'), "breaking", "new")
+                ]
+            ),
+            "a changed file counts"
+        );
+        assert_ne!(
+            id,
+            plan_id(
+                "cat",
+                "prod",
+                &[
+                    planned("001_a.sql", &sha('a'), "additive", "new"),
+                    planned("002_b.sql", &sha('b'), "additive", "new")
+                ]
+            ),
+            "a changed class counts"
+        );
+        assert_eq!(
+            id,
+            plan_id(
+                "cat",
+                "prod",
+                &[
+                    planned("001_a.sql", &sha('a'), "additive", "new"),
+                    planned("002_b.sql", &sha('b'), "breaking", "new"),
+                    planned("003_c.sql", &sha('c'), "breaking", "applied")
+                ]
+            ),
+            "an applied file never runs, so it changes nothing"
+        );
+
+        // The request's order does not count either: `plan()` sorts by name.
+        let ordered = plan(
+            &[
+                file("001_a.sql", &sha('a'), "create table t (a int);"),
+                file("002_b.sql", &sha('b'), "drop table t;"),
+            ],
+            &[],
+        );
+        let reordered = plan(
+            &[
+                file("002_b.sql", &sha('b'), "drop table t;"),
+                file("001_a.sql", &sha('a'), "create table t (a int);"),
+            ],
+            &[],
+        );
+        assert_eq!(
+            plan_id("cat", "prod", &ordered.0),
+            plan_id("cat", "prod", &reordered.0)
+        );
+        assert_eq!(plan_id("cat", "prod", &ordered.0), id);
+    }
+
+    #[test]
+    fn a_breaking_change_in_production_needs_another_person() {
+        let planned = |class: &str, status: &str| PlannedFile {
+            name: "001_a.sql".to_string(),
+            sha256: sha('a'),
+            class: class.to_string(),
+            status: status.to_string(),
+            statements: 1,
+            reason: None,
+        };
+        let additive = planned("additive", "new");
+        let breaking = vec![planned("breaking", "new")];
+
+        assert!(
+            approval_refusal(&[], "production", Some("x"), "p", Some("bob"), "alice").is_none(),
+            "nothing runs, nothing to approve"
+        );
+        assert!(
+            approval_refusal(
+                std::slice::from_ref(&additive),
+                "production",
+                None,
+                "p",
+                None,
+                "alice"
+            )
+            .is_none(),
+            "an additive file needs nobody"
+        );
+        let sentence = approval_refusal(&breaking, "production", None, "p", None, "alice")
+            .expect("a sentence");
+        assert!(sentence.contains("stardelt bundle approve"), "{sentence}");
+        assert!(
+            approval_refusal(&breaking, "development", None, "p", None, "alice").is_none(),
+            "a development target needs nobody"
+        );
+        let other = approval_refusal(
+            &breaking,
+            "production",
+            Some("other"),
+            "p",
+            Some("bob"),
+            "alice",
+        )
+        .expect("a sentence");
+        assert!(other.contains("another plan"), "{other}");
+        let own = approval_refusal(
+            &breaking,
+            "production",
+            Some("p"),
+            "p",
+            Some("alice"),
+            "alice",
+        )
+        .expect("a sentence");
+        assert!(own.contains("cannot approve their own plan"), "{own}");
+        assert!(
+            approval_refusal(
+                &breaking,
+                "production",
+                Some("p"),
+                "p",
+                Some("bob"),
+                "alice"
+            )
+            .is_none(),
+            "a second person approved this exact plan"
         );
     }
 }

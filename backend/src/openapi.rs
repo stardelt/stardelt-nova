@@ -95,6 +95,7 @@ pub struct ErrorResponse {
         crate::streams::put,
         crate::migrations::plan_handler,
         crate::migrations::apply_handler,
+        crate::migrations::approve_handler,
         crate::pipelines::principals,
         crate::pipelines::service_principals,
         crate::pipelines::check,
