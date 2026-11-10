@@ -3221,6 +3221,77 @@
         }
       }
     },
+    "/api/migrations/plan": {
+      "post": {
+        "tags": [
+          "public"
+        ],
+        "description": "What a bundle's migration files would do to one target, and what already ran there (stardelt-nova#617 decision 3). Writes nothing. The body is `catalog`, `target` and `files` (`name` `NNN_<words>.sql`, `sha256`, `sql`); `class` is `additive` when every statement only creates or adds columns or views, else `breaking` with the first non-additive statement in `reason`; `status` is `new`, `applied` (same sha256 in `stardelt_meta.migrations`) or `changed` (applied with another sha256). `ok` is false, with one sentence per problem in `errors`, when a file changed after it was applied or a new file sorts before an applied one. `ledger` is false on a catalog whose `stardelt_meta.migrations` does not exist yet. The ledger is read as the caller, so the caller's own catalog privileges decide what can be read. Answers `Cache-Control: no-store`.",
+        "operationId": "migrations_plan",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PlanRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The plan: per file, class and status, plus the problems",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlanAnswer"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A malformed request, one sentence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token to sign in with",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The query engine is not reachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The demo has no catalog to plan migrations against",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/notebooks": {
       "get": {
         "tags": [
@@ -9090,6 +9161,28 @@
           }
         }
       },
+      "MigrationFile": {
+        "type": "object",
+        "description": "One file, as the bundle has it. The client hashes the bytes it deploys.",
+        "required": [
+          "name",
+          "sha256",
+          "sql"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "`NNN_<words>.sql`: three digits, an underscore, lower-case words, `.sql`."
+          },
+          "sha256": {
+            "type": "string",
+            "description": "The file's sha256, 64 lower-case hex digits."
+          },
+          "sql": {
+            "type": "string"
+          }
+        }
+      },
       "NamespacesResponse": {
         "type": "object",
         "description": "Iceberg `ListNamespaces` result: each namespace is a list of levels.",
@@ -9896,6 +9989,101 @@
             "items": {
               "$ref": "#/components/schemas/TaskSpecView"
             }
+          }
+        }
+      },
+      "PlanAnswer": {
+        "type": "object",
+        "required": [
+          "ok",
+          "ledger",
+          "files",
+          "errors"
+        ],
+        "properties": {
+          "errors": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "One sentence per problem: a changed file, a file added before an applied one."
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PlannedFile"
+            }
+          },
+          "ledger": {
+            "type": "boolean",
+            "description": "Whether `stardelt_meta.migrations` exists in the catalog yet (false on a fresh catalog)."
+          },
+          "ok": {
+            "type": "boolean",
+            "description": "False when `errors` is not empty: the bundle must not be applied as it is."
+          }
+        }
+      },
+      "PlanRequest": {
+        "type": "object",
+        "required": [
+          "catalog",
+          "target",
+          "files"
+        ],
+        "properties": {
+          "catalog": {
+            "type": "string",
+            "description": "The catalog the sink tables live in; the ledger is `stardelt_meta` in it."
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MigrationFile"
+            },
+            "description": "Every migration file of the bundle, in any order; the answer sorts them by name."
+          },
+          "target": {
+            "type": "string",
+            "description": "The bundle target whose ledger rows count (`dev`, `prod`, …)."
+          }
+        }
+      },
+      "PlannedFile": {
+        "type": "object",
+        "required": [
+          "name",
+          "sha256",
+          "class",
+          "status",
+          "statements"
+        ],
+        "properties": {
+          "class": {
+            "type": "string",
+            "description": "`additive` when every statement only adds (see `classify`), else `breaking`."
+          },
+          "name": {
+            "type": "string"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The first statement that is not additive, cut to 120 characters. Absent for `additive`."
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "statements": {
+            "type": "integer",
+            "description": "How many statements the file holds, as the splitter counts them.",
+            "minimum": 0
+          },
+          "status": {
+            "type": "string",
+            "description": "`new` (not in the ledger), `applied` (same sha) or `changed` (applied with another sha)."
           }
         }
       },

@@ -93,6 +93,7 @@ pub struct ErrorResponse {
         crate::streams::patch,
         crate::streams::validate,
         crate::streams::put,
+        crate::migrations::plan_handler,
         crate::pipelines::principals,
         crate::pipelines::service_principals,
         crate::pipelines::check,

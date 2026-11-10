@@ -110,6 +110,7 @@ mod jobs;
 mod lineage_api;
 mod lineage_event;
 mod lineage_store;
+mod migrations;
 mod notebooks;
 mod openapi;
 mod people;
@@ -762,6 +763,8 @@ fn api_router() -> Router<Arc<AppState>> {
         .merge(stages::router())
         // Streams: the caller's StreamApps, read-only. Uncacheable like pipelines.
         .merge(streams::router())
+        // Bundle migrations: the plan half (stardelt-nova#617). Uncacheable.
+        .merge(migrations::router())
         // Published notebooks: immutable versions, owner-group scoped (stardelt-nova#225).
         .merge(notebooks::router())
         // The caller's own JupyterHub workspace (stardelt-nova#653): read, start, stop. The

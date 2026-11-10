@@ -4148,11 +4148,11 @@ pub(crate) struct Caller {
 }
 
 impl Caller {
-    fn state(&self) -> &AppState {
+    pub(crate) fn state(&self) -> &AppState {
         &self.state
     }
 
-    fn principal(&self) -> &Principal {
+    pub(crate) fn principal(&self) -> &Principal {
         &self.principal
     }
 }
