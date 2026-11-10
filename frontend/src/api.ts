@@ -939,6 +939,31 @@ export type TaskView = {
 /** `GET …/runs/{runId}`: one run and its task instances. */
 export type RunResponse = { run: RunView; tasks: TaskView[] }
 
+/** One output of an executed code cell, as nbformat 4 stores it (#683). */
+export type NotebookOutput = {
+  output_type: string
+  name?: string
+  text?: string | string[]
+  data?: Record<string, string | string[]>
+  ename?: string
+  evalue?: string
+  traceback?: string[]
+}
+
+/** One cell of an executed notebook (`GET …/tasks/{taskId}/notebook`, #682). */
+export type NotebookCell = {
+  cell_type: string
+  source: string | string[]
+  outputs?: NotebookOutput[]
+  execution_count?: number | null
+}
+
+/** The executed copy of a notebook a run wrote, outputs and all (#682). */
+export type NotebookDoc = {
+  cells: NotebookCell[]
+  metadata?: Record<string, unknown>
+}
+
 /** One log message. Plain text: it is rendered as text, never as markup. */
 export type LogLine = {
   timestamp: string | null
@@ -1244,6 +1269,18 @@ function pipelineLogUrl(
   return query ? `${base}?${query}` : base
 }
 
+/** The executed notebook of one task instance; `download` asks for the file, not the document. */
+export function runNotebookUrl(
+  namespace: string,
+  name: string,
+  runId: string,
+  taskId: string,
+  download = false,
+): string {
+  const base = `/api/pipelines/${seg(namespace)}/${seg(name)}/runs/${seg(runId)}/tasks/${seg(taskId)}/notebook`
+  return download ? `${base}?download=true` : base
+}
+
 function queryLogUrl(p: QueryLogParams): string {
   const qs = new URLSearchParams({ scope: p.scope })
   if (p.state) qs.set('state', p.state)
@@ -1372,6 +1409,9 @@ export const api = {
     jpost<RunView>(`/api/pipelines/${seg(ns)}/${seg(name)}/runs/${seg(runId)}/stop`, {}),
   pipelineLog:  (ns: string, name: string, runId: string, taskId: string, p: PipelineLogParams = {}) =>
     jget<LogPage>(pipelineLogUrl(ns, name, runId, taskId, p)),
+  /** The executed copy of a notebook task's run (#682), outputs and traceback included. */
+  runNotebook: (ns: string, name: string, runId: string, taskId: string) =>
+    jget<NotebookDoc>(runNotebookUrl(ns, name, runId, taskId)),
   apps:         ()                            => jget<PlatformApp[]>('/api/apps'),
   embeds:       ()                            => jget<EmbedApp[]>('/api/embeds'),
   links:        ()                            => jget<AppShortcut[]>('/api/apps/links'),

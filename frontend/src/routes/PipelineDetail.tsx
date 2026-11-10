@@ -484,7 +484,12 @@ function RunRow({
           <td colSpan={8} className="px-4 py-4">
             {/* Sticky and no wider than the card, so the panel stays in view when the runs table scrolls sideways. */}
             <div className="sticky left-0 max-w-[calc(100cqw-2.5rem)]">
-              <RunTasks namespace={pipeline.namespace} name={pipeline.name} runId={run.runId} />
+              <RunTasks
+                namespace={pipeline.namespace}
+                name={pipeline.name}
+                runId={run.runId}
+                notebookTasks={pipeline.tasks.filter((task) => task.kind === 'notebook').map((task) => task.name)}
+              />
             </div>
           </td>
         </tr>
@@ -493,7 +498,17 @@ function RunRow({
   )
 }
 
-function RunTasks({ namespace, name, runId }: { namespace: string; name: string; runId: string }) {
+function RunTasks({
+  namespace,
+  name,
+  runId,
+  notebookTasks,
+}: {
+  namespace: string
+  name: string
+  runId: string
+  notebookTasks: string[]
+}) {
   const [log, setLog] = useState<{ taskId: string; tryNumber: number } | null>(null)
   const tasks = useQuery({
     queryKey: ['pipeline-run', namespace, name, runId],
@@ -549,14 +564,24 @@ function RunTasks({ namespace, name, runId }: { namespace: string; name: string;
                     </td>
                     <td className="td px-3 text-text-dim">{task.operator ?? '—'}</td>
                     <td className="td px-3">
-                      <button
-                        type="button"
-                        className="btn-ghost py-1 px-2 text-xs"
-                        aria-label={`View log of ${task.taskId} try ${task.tryNumber}`}
-                        onClick={() => setLog({ taskId: task.taskId, tryNumber: task.tryNumber })}
-                      >
-                        View log
-                      </button>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <button
+                          type="button"
+                          className="btn-ghost py-1 px-2 text-xs"
+                          aria-label={`View log of ${task.taskId} try ${task.tryNumber}`}
+                          onClick={() => setLog({ taskId: task.taskId, tryNumber: task.tryNumber })}
+                        >
+                          View log
+                        </button>
+                        {notebookTasks.includes(task.taskId) && (
+                          <Link
+                            className="btn-ghost py-1 px-2 text-xs whitespace-nowrap"
+                            to={`/pipelines/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/runs/${encodeURIComponent(runId)}/notebook/${encodeURIComponent(task.taskId)}`}
+                          >
+                            Open notebook
+                          </Link>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 )
