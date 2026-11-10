@@ -252,6 +252,9 @@ export default function Query() {
   // The Tables pane's search box; it only narrows what the tree shows.
   const [filter, setFilter] = useState('')
   const taRef = useRef<HTMLTextAreaElement>(null)
+  // The line-number gutter reads `sql`, never `typed`: the sample is a statement too (#732).
+  const gutterRef = useRef<HTMLDivElement>(null)
+  const lineCount = Math.max(1, sql.split('\n').length)
   const empty = sql.trim() === ''
   // The two side panes are user-collapsible; their state sets the grid's columns (#586).
   const tablesOpen = usePaneOpen('tables')
@@ -347,16 +350,31 @@ export default function Query() {
 
       <div className="flex flex-col gap-4 min-h-0 min-w-0">
         <div className="card p-3 focus-within:border-accent/60">
-          <textarea
-            ref={taRef}
-            value={sql}
-            onChange={e => setTyped(e.target.value)}
-            onKeyDown={onKey}
-            aria-label="SQL query"
-            className="w-full h-36 bg-transparent font-mono text-sm outline-hidden resize-y placeholder:text-text-mute"
-            spellCheck={false}
-            placeholder="SELECT ..."
-          />
+          <div className="flex h-36 gap-2">
+            <div
+              ref={gutterRef}
+              aria-hidden="true"
+              data-testid="sql-gutter"
+              className="w-9 shrink-0 overflow-hidden select-none text-right font-mono text-sm leading-6 text-text-mute"
+            >
+              {Array.from({ length: lineCount }, (_, i) => (
+                <div key={i}>{i + 1}</div>
+              ))}
+            </div>
+            <textarea
+              ref={taRef}
+              value={sql}
+              onChange={e => setTyped(e.target.value)}
+              onKeyDown={onKey}
+              onScroll={e => {
+                if (gutterRef.current) gutterRef.current.scrollTop = e.currentTarget.scrollTop
+              }}
+              aria-label="SQL query"
+              className="w-full h-full bg-transparent font-mono text-sm leading-6 outline-hidden placeholder:text-text-mute"
+              spellCheck={false}
+              placeholder="SELECT ..."
+            />
+          </div>
           <div className="flex flex-wrap items-center gap-2 mt-2">
             <button onClick={run} disabled={running} className="btn-primary py-1.5">
               <Icon name="terminal" className="w-4 h-4" />
