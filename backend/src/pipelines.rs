@@ -4163,6 +4163,33 @@ pub(crate) async fn no_store(request: Request, next: Next) -> Response {
     response
 }
 
+/// The deployed pipelines of this stage, reduced for the stage comparison (`stages.rs`):
+/// only the ones `stardelt bundle deploy` stamped, and only those the caller may see.
+pub(crate) async fn deployed_rows(
+    state: &AppState,
+    who: &Identity,
+) -> Result<Vec<crate::stages::StageRow>, String> {
+    let resources = resources(state).ok_or("this Nova has no cluster connection")?;
+    let list = resources.list().await.map_err(|e| match e {
+        ResourceError::Unavailable(message) => message,
+        _ => "the cluster did not answer".to_string(),
+    })?;
+    Ok(list
+        .iter()
+        .filter(|resource| visible(who, spec_of(resource)))
+        .filter_map(|resource| {
+            let deployment = deployment_of(resource)?;
+            Some(crate::stages::StageRow {
+                bundle: deployment.bundle,
+                target: deployment.target,
+                name: pipeline_name(resource).to_string(),
+                revision: deployment.revision,
+                modified: deployment.modified,
+            })
+        })
+        .collect())
+}
+
 /// The resource client for this request; `None` without a cluster connection.
 fn resources(state: &AppState) -> Option<PipelineResources> {
     state.kube.clone().map(PipelineResources::cluster)
@@ -5766,6 +5793,7 @@ mod tests {
             warehouse_name: "warehouse".into(),
             stage_name: None,
             stage_kind: "dev",
+            stages: Vec::new(),
             catalog_ids: std::sync::RwLock::new(std::collections::HashMap::new()),
             catalog_access: std::sync::Mutex::new(std::collections::HashMap::new()),
             catalog_metrics: std::sync::Mutex::new(std::collections::HashMap::new()),

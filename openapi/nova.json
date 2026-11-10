@@ -5928,6 +5928,78 @@
         }
       }
     },
+    "/api/stages/compare": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "description": "This stage's deployed pipelines against a peer stage's, for the Deployments page. The peer is called with the caller's own token (`GET {peer}/api/pipelines`), so the answer is filtered by that person's rights there. `status` is `ok`, `unauthorized` (the peer refused the token — sign in there) or `unreachable` (no answer within 5 s). Nova neither compares Git ancestry nor deploys to the peer. Answers `Cache-Control: no-store`.",
+        "operationId": "stages_compare",
+        "parameters": [
+          {
+            "name": "peer",
+            "in": "query",
+            "description": "The peer stage's configured name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Both stages' deployed pipelines",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StageComparison"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "No `peer` parameter",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No signed-in caller, so there is no token to forward",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No stage with that name is configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "This stage's cluster did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/statements": {
       "get": {
         "tags": [
@@ -8437,7 +8509,8 @@
           "auth_mode",
           "demo",
           "warehouse",
-          "stage_kind"
+          "stage_kind",
+          "peers"
         ],
         "properties": {
           "admin_console_url": {
@@ -8452,6 +8525,13 @@
           },
           "demo": {
             "type": "boolean"
+          },
+          "peers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Peer"
+            },
+            "description": "The peer stages `NOVA_PEER_STAGES` configures, so the Deployments page can offer them."
           },
           "stage_kind": {
             "type": "string"
@@ -8910,7 +8990,8 @@
           "is_admin",
           "via",
           "identity_forwarding",
-          "stage_kind"
+          "stage_kind",
+          "peers"
         ],
         "properties": {
           "admin_by": {
@@ -8967,6 +9048,13 @@
               "null"
             ]
           },
+          "peers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Peer"
+            },
+            "description": "The peer stages `NOVA_PEER_STAGES` configures, so the Deployments page can offer them."
+          },
           "roles": {
             "type": "array",
             "items": {
@@ -9002,6 +9090,24 @@
           },
           "warehouse": {
             "type": "string"
+          }
+        }
+      },
+      "Peer": {
+        "type": "object",
+        "description": "One configured peer stage.",
+        "required": [
+          "name",
+          "url"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The name the caller passes as `?peer=`; 1 to 24 lower-case letters, digits and dashes."
+          },
+          "url": {
+            "type": "string",
+            "description": "The peer's base URL, without a trailing slash."
           }
         }
       },
@@ -10379,6 +10485,81 @@
           "yours": {
             "type": "boolean",
             "description": "The row this caller will land in: the largest usable class, or the default one."
+          }
+        }
+      },
+      "StageComparison": {
+        "type": "object",
+        "required": [
+          "peer",
+          "peerUrl",
+          "status",
+          "here",
+          "there"
+        ],
+        "properties": {
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "One sentence for the page when `status` is not `ok`; absent otherwise."
+          },
+          "here": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StageRow"
+            },
+            "description": "This stage's deployed pipelines."
+          },
+          "peer": {
+            "type": "string"
+          },
+          "peerUrl": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "description": "`ok`, `unauthorized` or `unreachable`."
+          },
+          "there": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StageRow"
+            },
+            "description": "The peer's, empty when `status` is not `ok`."
+          }
+        }
+      },
+      "StageRow": {
+        "type": "object",
+        "description": "One deployed pipeline of a stage, as the comparison needs it.",
+        "required": [
+          "bundle",
+          "target",
+          "name"
+        ],
+        "properties": {
+          "bundle": {
+            "type": "string"
+          },
+          "modified": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "revision": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target": {
+            "type": "string"
           }
         }
       },

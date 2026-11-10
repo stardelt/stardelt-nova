@@ -646,6 +646,7 @@ mod tests {
             warehouse_name: "warehouse".into(),
             stage_name: None,
             stage_kind: "dev",
+            stages: Vec::new(),
             catalog_ids: std::sync::RwLock::new(std::collections::HashMap::new()),
             catalog_access: std::sync::Mutex::new(std::collections::HashMap::new()),
             catalog_metrics: std::sync::Mutex::new(std::collections::HashMap::new()),
