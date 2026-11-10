@@ -768,7 +768,7 @@ fn invalid_sql() -> &'static str {
 
 /// The name rules of the CRD and of `ServicePrincipalSpec::validate`: 1 to 40 lower-case
 /// letters, digits and dashes, starting with a letter and not ending with a dash.
-fn validate_name(name: &str) -> Result<(), String> {
+pub(crate) fn validate_name(name: &str) -> Result<(), String> {
     let bytes = name.as_bytes();
     let ok = !bytes.is_empty()
         && bytes.len() <= 40
@@ -1320,7 +1320,7 @@ fn principal_message(principal: &Value) -> String {
 
 /// One group's principal: `pipeline-<group>` when a `ServicePrincipal` of that name with
 /// `spec.ownerGroup` equal to the group exists, its `status.ready`, and why not when it is not.
-fn principal_view(principals: &[Value], group: &str) -> PrincipalView {
+pub(crate) fn principal_view(principals: &[Value], group: &str) -> PrincipalView {
     let name = format!("pipeline-{group}");
     let found = principals.iter().find(|principal| {
         principal
@@ -1413,7 +1413,7 @@ fn visible_principals(principals: &[Value], who: &Identity) -> Vec<ServicePrinci
 }
 
 /// Whether Nova wrote this pipeline (and may therefore change or delete it).
-fn nova_managed(resource: &Value) -> bool {
+pub(crate) fn nova_managed(resource: &Value) -> bool {
     resource
         .get("metadata")
         .and_then(|metadata| metadata.get("labels"))
