@@ -686,7 +686,7 @@ fn rfc3339_utc(value: &str) -> String {
 /// Why an object-store request failed. Every sentence is fixed text: no URL, no
 /// signature, no response body.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum StoreError {
+pub(crate) enum StoreError {
     /// DNS, TCP or TLS: the gateway did not answer.
     Unreachable,
     /// It answered non-2xx.
@@ -697,7 +697,7 @@ enum StoreError {
     Unversioned,
 }
 
-fn store_fail(error: StoreError) -> Fail {
+pub(crate) fn store_fail(error: StoreError) -> Fail {
     match error {
         StoreError::Unreachable => {
             Fail::new(StatusCode::BAD_GATEWAY, "the notebook store did not answer")
@@ -925,6 +925,26 @@ pub(crate) fn valid_group(group: &str) -> bool {
 
 fn object_key(group: &str, name: &str) -> String {
     format!("{group}/{name}")
+}
+
+/// The executed copy of one notebook task run; the same key `output_key` writes in the loader.
+pub(crate) fn run_copy_key(owner_group: &str, pipeline: &str, run_id: &str, task: &str) -> String {
+    let safe: String = run_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | '+' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("_runs/{owner_group}/{pipeline}/{safe}/{task}.ipynb")
+}
+
+/// The bytes of an executed copy; `Refused(404)` when it was never written or has expired.
+pub(crate) async fn read_run_copy(store: &NotebookStore, key: &str) -> Result<Vec<u8>, StoreError> {
+    store.get(key, None).await.map(|(bytes, _)| bytes)
 }
 
 /// S3 user metadata is US-ASCII. A display name can be anything the IdP reports
@@ -3225,6 +3245,27 @@ mod tests {
         assert!(!valid_group(""));
         assert!(!valid_group("/stardelt-admins"));
         assert!(!valid_group("team/a"));
+    }
+
+    #[test]
+    fn run_copy_key_matches_the_loader() {
+        assert_eq!(
+            run_copy_key(
+                "analytics",
+                "daily",
+                "scheduled__2026-11-10T03:00:00+00:00",
+                "run"
+            ),
+            "_runs/analytics/daily/scheduled__2026-11-10T03:00:00+00:00/run.ipynb"
+        );
+    }
+
+    #[test]
+    fn run_copy_key_replaces_what_a_run_id_cannot_hold() {
+        assert_eq!(
+            run_copy_key("analytics", "daily", "a/b c", "run"),
+            "_runs/analytics/daily/a_b_c/run.ipynb"
+        );
     }
 
     #[test]

@@ -64,6 +64,7 @@ Browser
          ├─ GET  /api/pipelines/…/runs/:run_id    one run with its task instances
          ├─ POST /api/pipelines/…/runs/:run_id/stop  mark a run failed — not a cancel
          ├─ GET  /api/pipelines/…/tasks/:task_id/logs  one task's log, paged and capped
+         ├─ GET  /api/pipelines/…/tasks/:task_id/notebook  the run's executed notebook, as the run wrote it
          ├─ POST /api/ingest/upload    load CSV/JSON into a table (a failed load keeps the old table)
          ├─ POST /api/transfer         copy table → table (a failed copy keeps the target)
          │

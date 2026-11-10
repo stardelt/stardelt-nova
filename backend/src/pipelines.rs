@@ -2980,6 +2980,105 @@ async fn task_logs(
     Ok(log_view(page))
 }
 
+/// The largest executed copy Nova answers: a notebook run's copy carries outputs, so it is
+/// bigger than a published notebook; anything beyond this is refused rather than buffered.
+const MAX_RUN_NOTEBOOK_BYTES: usize = 25 * 1024 * 1024;
+
+/// `^\S{1,64}$` of `[A-Za-z0-9_-]`: what a task id in a run's object key can be.
+fn valid_task_id(task: &str) -> bool {
+    (1..=64).contains(&task.chars().count())
+        && task
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+}
+
+fn no_notebook_storage() -> Fail {
+    Fail::new(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "notebook storage is not configured",
+    )
+}
+
+fn no_run_copy() -> Fail {
+    Fail::new(
+        StatusCode::NOT_FOUND,
+        "this run's executed notebook is not there: it was never written, or it expired",
+    )
+}
+
+fn run_copy_too_large() -> Fail {
+    Fail::new(
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "the executed notebook is larger than 25 MiB",
+    )
+}
+
+fn bad_task_id() -> Fail {
+    Fail::new(
+        StatusCode::BAD_REQUEST,
+        "a task id is 1 to 64 letters, digits, underscores or dashes",
+    )
+}
+
+/// `GET …/tasks/{task_id}/notebook`: the executed copy of one notebook task run — exactly the
+/// bytes the loader wrote to `_runs/<ownerGroup>/<pipeline>/<run_id>/<task>.ipynb` (#682). The
+/// same visibility rule as the run and its log, the same audit line as a log read, and no
+/// cache: the copy of a run never changes after it is written.
+#[allow(clippy::too_many_arguments)]
+async fn task_notebook(
+    resources: Option<&PipelineResources>,
+    store: Option<&NotebookStore>,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+    run_id: &str,
+    task_id: &str,
+    download: bool,
+) -> Result<Response, Fail> {
+    let resources = resources.ok_or_else(no_cluster)?;
+    let (_, resource) = load_visible(resources, who, namespace, name).await?;
+    let owner = spec_of(&resource)
+        .get("ownerGroup")
+        .and_then(Value::as_str)
+        .ok_or_else(no_such_pipeline)?
+        .to_string();
+    if !valid_task_id(task_id) {
+        return Err(bad_task_id());
+    }
+    let store = store.ok_or_else(no_notebook_storage)?;
+    let key = notebooks::run_copy_key(&owner, name, run_id, task_id);
+    let bytes = match notebooks::read_run_copy(store, &key).await {
+        Ok(bytes) => bytes,
+        Err(notebooks::StoreError::Refused(404)) => return Err(no_run_copy()),
+        Err(error) => return Err(notebooks::store_fail(error)),
+    };
+    if bytes.len() > MAX_RUN_NOTEBOOK_BYTES {
+        return Err(run_copy_too_large());
+    }
+    // The bytes are the loader's own notebook; they go out as they are, never re-rendered.
+    audit::pipeline_log_event(who, namespace, name, run_id, task_id);
+    let mut response = (
+        [
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            ),
+            (header::CACHE_CONTROL, HeaderValue::from_static("no-store")),
+        ],
+        bytes,
+    )
+        .into_response();
+    if download {
+        let disposition =
+            HeaderValue::from_str(&format!("attachment; filename=\"{name}-{task_id}.ipynb\""))
+                .map_err(|_| bad_task_id())?;
+        response
+            .headers_mut()
+            .insert(header::CONTENT_DISPOSITION, disposition);
+    }
+    Ok(response)
+}
+
 // ---------------------------------------------------------------------------
 // Actions: run now, pause, resume, stop a run. Every action writes one audit line.
 // ---------------------------------------------------------------------------
@@ -4267,6 +4366,10 @@ pub(crate) fn router() -> Router<Arc<AppState>> {
             "/pipelines/{namespace}/{name}/runs/{run_id}/tasks/{task_id}/logs",
             get(logs),
         )
+        .route(
+            "/pipelines/{namespace}/{name}/runs/{run_id}/tasks/{task_id}/notebook",
+            get(run_notebook),
+        )
         .route_layer(axum::middleware::from_fn(no_store))
 }
 
@@ -4872,6 +4975,59 @@ pub(crate) async fn logs(
         )
         .await,
     )
+}
+
+#[utoipa::path(
+    get,
+    operation_id = "pipelines_run_task_notebook",
+    path = "/api/pipelines/{namespace}/{name}/runs/{run_id}/tasks/{task_id}/notebook",
+    tag = "public",
+    description = "The executed copy of one notebook task run: the notebook with its outputs and tracebacks, as the run wrote it. That copy is the run's log. The same visibility rule as the run (404 for another group's pipeline), the same audit line as a log read, and `Cache-Control: no-store`. `download=true` also names the file `<pipeline>-<task>.ipynb` in `Content-Disposition`.",
+    params(
+        ("namespace" = String, Path, description = "The Pipeline's namespace (Nova's own)"),
+        ("name" = String, Path, description = "Pipeline name"),
+        ("run_id" = String, Path, description = "Airflow's run id"),
+        ("task_id" = String, Path, description = "Task id: 1 to 64 letters, digits, underscores or dashes"),
+        ("download" = Option<bool>, Query, description = "Answer as a file attachment"),
+    ),
+    responses(
+        (status = 200, description = "The executed notebook, as the run wrote it", body = String),
+        (status = 400, description = "The task id is not 1 to 64 letters, digits, underscores or dashes, or `download` is not true or false", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such pipeline for this caller, a pipeline without a group, or no executed copy for this task", body = crate::openapi::ErrorResponse),
+        (status = 413, description = "The executed notebook is larger than 25 MiB", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The notebook store did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No cluster connection, or notebook storage is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn run_notebook(
+    signed: SignedIn,
+    Path((namespace, name, run_id, task_id)): Path<(String, String, String, String)>,
+    Query(query): Query<BTreeMap<String, String>>,
+) -> Response {
+    let download = match query.get("download").map(String::as_str) {
+        None | Some("false") => false,
+        Some("true") => true,
+        Some(_) => {
+            return Fail::new(StatusCode::BAD_REQUEST, "download must be true or false")
+                .into_response();
+        }
+    };
+    match task_notebook(
+        resources(signed.state()).as_ref(),
+        signed.state().notebooks.as_ref(),
+        signed.identity(),
+        &namespace,
+        &name,
+        &run_id,
+        &task_id,
+        download,
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(e) => e.into_response(),
+    }
 }
 
 #[utoipa::path(
@@ -5999,6 +6155,28 @@ mod tests {
             fake.lock().unwrap().calls.is_empty(),
             "neither route asks Airflow about a hidden pipeline"
         );
+    }
+
+    #[tokio::test]
+    async fn run_notebook_of_a_hidden_pipeline_is_404_not_403() {
+        let resources = memory(&[("hidden", resource("hidden", Some("finance")))]);
+        let outsider = who("sub-ada", &["analytics"], false);
+        let namespace = crate::cluster::namespace();
+
+        let error = task_notebook(
+            Some(&resources),
+            None,
+            &outsider,
+            &namespace,
+            "hidden",
+            "hidden__2026-10-20T08:00:00+00:00",
+            "run",
+            false,
+        )
+        .await
+        .expect_err("hidden");
+        assert_eq!(error.status(), StatusCode::NOT_FOUND);
+        assert_eq!(error.message(), "no such pipeline");
     }
 
     // -----------------------------------------------------------------------

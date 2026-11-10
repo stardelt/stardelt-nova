@@ -107,6 +107,7 @@ pub struct ErrorResponse {
         crate::pipelines::run,
         crate::pipelines::stop,
         crate::pipelines::logs,
+        crate::pipelines::run_notebook,
         crate::trino::run_query,
         crate::saved_queries::list,
         crate::saved_queries::create,
