@@ -9165,7 +9165,8 @@
         "required": [
           "nodes",
           "edges",
-          "jobs"
+          "jobs",
+          "impact"
         ],
         "properties": {
           "edges": {
@@ -9173,6 +9174,9 @@
             "items": {
               "$ref": "#/components/schemas/LineageEdge"
             }
+          },
+          "impact": {
+            "$ref": "#/components/schemas/LineageImpact"
           },
           "jobs": {
             "type": "array",
@@ -9185,6 +9189,32 @@
             "items": {
               "$ref": "#/components/schemas/LineageNode"
             }
+          }
+        }
+      },
+      "LineageImpact": {
+        "type": "object",
+        "description": "The whole closure, at any number of steps (nova#646 L8a). The drawn graph keeps `depth`;\nthese numbers answer \"what breaks if I change this table\".",
+        "required": [
+          "downstream",
+          "upstream",
+          "downstreamJobs"
+        ],
+        "properties": {
+          "downstream": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Distinct visible datasets reachable downstream at any number of steps; the focus is not one."
+          },
+          "downstreamJobs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Distinct jobs (`(job_ns, job)`) on the downstream flows."
+          },
+          "upstream": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The same upstream."
           }
         }
       },

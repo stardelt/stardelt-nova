@@ -1265,6 +1265,8 @@ export type LineageGraphView = {
   nodes: LineageNodeView[]
   edges: LineageEdgeView[]
   jobs: LineageJobView[]
+  /** The whole closure at any number of steps; the drawn graph keeps its depth. */
+  impact: { downstream: number; upstream: number; downstreamJobs: number }
 }
 
 /** One source column; a source the caller may not read carries only `hidden`. */

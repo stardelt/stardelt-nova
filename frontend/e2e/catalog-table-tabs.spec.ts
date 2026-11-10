@@ -43,7 +43,7 @@ async function stub(page: import('@playwright/test').Page) {
       })
     }
     if (path === '/api/query') return json(r, { columns: [], rows: [], row_count: 0 })
-    if (path === '/api/lineage') return json(r, { nodes: [], edges: [], jobs: [] })
+    if (path === '/api/lineage') return json(r, { nodes: [], edges: [], jobs: [], impact: { downstream: 0, upstream: 0, downstreamJobs: 0 } })
     return json(r, {})
   })
 }

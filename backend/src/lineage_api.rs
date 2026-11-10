@@ -112,6 +112,20 @@ pub struct LineageGraph {
     pub nodes: Vec<LineageNode>,
     pub edges: Vec<LineageEdge>,
     pub jobs: Vec<LineageJob>,
+    pub impact: LineageImpact,
+}
+
+/// The whole closure, at any number of steps (nova#646 L8a). The drawn graph keeps `depth`;
+/// these numbers answer "what breaks if I change this table".
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LineageImpact {
+    /// Distinct visible datasets reachable downstream at any number of steps; the focus is not one.
+    pub downstream: i64,
+    /// The same upstream.
+    pub upstream: i64,
+    /// Distinct jobs (`(job_ns, job)`) on the downstream flows.
+    pub downstream_jobs: i64,
 }
 
 #[allow(dead_code)]
@@ -195,6 +209,33 @@ fn job_kind(job_ns: &str) -> String {
     } else {
         job_ns.to_string()
     }
+}
+
+/// Every dataset reachable from `focus` along the flows, at any number of steps. `forward`
+/// follows `from → to` (downstream), otherwise `to → from`. The focus is not in the result
+/// unless a cycle leads back to it.
+fn reachable(flows: &[Flow], focus: &Dataset, forward: bool) -> HashSet<Dataset> {
+    let mut seen: HashSet<Dataset> = HashSet::new();
+    let mut queue: Vec<Dataset> = vec![focus.clone()];
+    while let Some(node) = queue.pop() {
+        for flow in flows {
+            let next = if forward {
+                if flow.from != node {
+                    continue;
+                }
+                &flow.to
+            } else {
+                if flow.to != node {
+                    continue;
+                }
+                &flow.from
+            };
+            if seen.insert(next.clone()) {
+                queue.push(next.clone());
+            }
+        }
+    }
+    seen
 }
 
 /// Build the answer from the window's edge rows. Data flows `from` → `to`; `level` is 0 at
@@ -312,6 +353,28 @@ pub(crate) fn build_graph(
         }
         frontier = next;
     }
+
+    // The whole closure, at any number of steps. The drawn graph keeps `depth`; these numbers
+    // answer "what breaks if I change this table" (nova#646 L8a). Hidden datasets are not
+    // counted: the number must not reveal tables the caller cannot see.
+    let downstream_seen = reachable(&flows, &focus_ds, true);
+    let upstream_seen = reachable(&flows, &focus_ds, false);
+    let count = |seen: &HashSet<Dataset>| -> i64 {
+        seen.iter()
+            .filter(|ds| **ds != focus_ds && visible(&ds.0))
+            .count() as i64
+    };
+    let mut downstream_jobs: HashSet<(&str, &str)> = HashSet::new();
+    for flow in &flows {
+        if flow.from == focus_ds || downstream_seen.contains(&flow.from) {
+            downstream_jobs.insert((flow.job_ns.as_str(), flow.job.as_str()));
+        }
+    }
+    let impact = LineageImpact {
+        downstream: count(&downstream_seen),
+        upstream: count(&upstream_seen),
+        downstream_jobs: downstream_jobs.len() as i64,
+    };
 
     // The newest write that reached each dataset, from every row of the window.
     let mut last_writes: HashMap<Dataset, String> = HashMap::new();
@@ -469,7 +532,12 @@ pub(crate) fn build_graph(
         focus_node.writers = Some(writers);
     }
 
-    LineageGraph { nodes, edges, jobs }
+    LineageGraph {
+        nodes,
+        edges,
+        jobs,
+        impact,
+    }
 }
 
 #[utoipa::path(
@@ -718,6 +786,12 @@ fn demo_graph_response(_start_ns: &str, _start_name: &str) -> Response {
                 hand_made: false,
             },
         ],
+        // One table on each side of the focus; the one downstream row is written by one job.
+        impact: LineageImpact {
+            downstream: 1,
+            upstream: 1,
+            downstream_jobs: 1,
+        },
     };
     (StatusCode::OK, Json(graph)).into_response()
 }
@@ -1431,6 +1505,54 @@ mod tests {
             node(&graph, "mobility.gold", "c").level,
             Some(1),
             "c is downstream"
+        );
+    }
+
+    #[test]
+    fn the_impact_counts_every_step_not_only_the_drawn_ones() {
+        // A seven-step chain d0 → d1 → … → d6, focus d0: the drawing stops at depth 2,
+        // the impact counts the six tables beyond it.
+        let mut rows: Vec<EdgeRow> = Vec::new();
+        for i in 0..6 {
+            let run = format!("r{i}");
+            let job = format!("j{i}");
+            rows.push(edge(
+                &run,
+                "pipeline",
+                &job,
+                "mobility.gold",
+                &format!("d{i}"),
+                false,
+                "2026-11-01T00:00:00Z",
+            ));
+            rows.push(edge(
+                &run,
+                "pipeline",
+                &job,
+                "mobility.gold",
+                &format!("d{}", i + 1),
+                true,
+                "2026-11-01T00:00:00Z",
+            ));
+        }
+        let graph = build_graph(&rows, ("mobility.gold", "d0"), 2, &|_| true);
+        let drawn = graph
+            .nodes
+            .iter()
+            .filter(|n| n.level.unwrap_or(0) > 0)
+            .count();
+        assert_eq!(drawn, 2, "the drawing stops at depth 2");
+        assert_eq!(graph.impact.downstream, 6, "six tables are downstream");
+        assert_eq!(
+            graph.impact.upstream, 0,
+            "nothing feeds the head of the chain"
+        );
+        assert_eq!(graph.impact.downstream_jobs, 6, "one job per step");
+
+        let hidden = build_graph(&rows, ("mobility.gold", "d0"), 2, &|_| false);
+        assert_eq!(
+            hidden.impact.downstream, 0,
+            "a dataset the caller cannot see is not counted"
         );
     }
 
