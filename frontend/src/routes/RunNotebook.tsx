@@ -6,7 +6,7 @@ import { EmptyState } from '../components/EmptyState'
 import ErrorBox from '../components/ErrorBox'
 import NotebookFrame from '../components/NotebookFrame'
 import { renderNotebook } from '../notebookHtml'
-import { PipelineStateBadge } from './Pipelines'
+import { PipelineStateBadge, formatWhen, runDuration } from './Pipelines'
 
 /**
  * One run's executed notebook (#683): the copy the run wrote, every cell's output and the
@@ -33,6 +33,16 @@ export default function RunNotebook() {
     queryFn: () => api.pipelineRun(namespace, name, runId),
   })
 
+  // What ran: the pinned notebook version and its stored parameters. Like the run, a failure
+  // here only leaves those parts out — the executed notebook is the page.
+  const pipeline = useQuery({
+    queryKey: ['pipeline', namespace, name],
+    queryFn: () => api.pipeline(namespace, name),
+  })
+  const spec = pipeline.data?.tasks.find((t) => t.name === taskId)
+  const started = formatWhen(run.data?.run.startedAt)
+  const params = spec?.notebookParams && Object.keys(spec.notebookParams).length > 0 ? spec.notebookParams : null
+
   const rendered = notebook.data ? renderNotebook(notebook.data) : null
   const missing = notebook.isError && notebook.error instanceof ApiError && notebook.error.status === 404
 
@@ -56,7 +66,40 @@ export default function RunNotebook() {
           <h1 className="text-2xl font-bold tracking-tight break-all">Run {runId}</h1>
           {run.data && <PipelineStateBadge state={run.data.run.state} />}
         </div>
+        <p className="text-sm text-text-dim" data-testid="run-provenance">
+          {spec && (
+            <>
+              <span>{spec.notebook || 'notebook'}</span>
+              {spec.objectVersion && (
+                <span title={spec.objectVersion}> · version {spec.objectVersion.slice(0, 8)}</span>
+              )}
+            </>
+          )}
+          {run.data?.run.startedAt && (
+            <span title={started.title}> · started {started.text}</span>
+          )}
+          {run.data && run.data.run.durationSeconds != null && (
+            <span> · took {runDuration(run.data.run.durationSeconds)}</span>
+          )}
+          {run.data && (
+            <span> · started by {run.data.run.triggeredBy ?? run.data.run.type}</span>
+          )}
+          {pipeline.data?.runAs && <span> · as {pipeline.data.runAs}</span>}
+        </p>
       </header>
+
+      {params && (
+        <details className="text-sm">
+          <summary className="cursor-pointer text-text-dim">Parameters ({Object.keys(params).length})</summary>
+          <div className="mt-2 space-y-1 font-mono text-xs">
+            {Object.entries(params).map(([key, value]) => (
+              <div key={key}>
+                {key} = {value}
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
 
       {missing ? (
         <div className="card p-2">
