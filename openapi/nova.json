@@ -8577,7 +8577,7 @@
               "boolean",
               "null"
             ],
-            "description": "`true` when the run, the schedule, the parameters or the options differ from what the last\ndeploy wrote: someone used the form, the YAML editor or `kubectl` since. Left out when they\nmatch, and for a pipeline stamped before the digest existed."
+            "description": "`true` when what the deploy decides differs from what it wrote: a pipeline's run,\nschedule, parameters and options, or a stream's source, sink, engine and restart policy.\nSomeone used the form, the YAML editor or `kubectl` since. Left out when they match, and\nfor a resource stamped before the digest existed."
           },
           "repository": {
             "type": [

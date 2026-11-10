@@ -1793,9 +1793,10 @@ pub struct DeploymentView {
     pub deployed_by: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deployed_at: Option<String>,
-    /// `true` when the run, the schedule, the parameters or the options differ from what the last
-    /// deploy wrote: someone used the form, the YAML editor or `kubectl` since. Left out when they
-    /// match, and for a pipeline stamped before the digest existed.
+    /// `true` when what the deploy decides differs from what it wrote: a pipeline's run,
+    /// schedule, parameters and options, or a stream's source, sink, engine and restart policy.
+    /// Someone used the form, the YAML editor or `kubectl` since. Left out when they match, and
+    /// for a resource stamped before the digest existed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub modified: Option<bool>,
 }
@@ -3577,11 +3578,11 @@ const REVISION_NOTE: &str = "stardelt.io/revision";
 const REPOSITORY_NOTE: &str = "stardelt.io/repository";
 const DEPLOYED_BY_NOTE: &str = "stardelt.io/deployed-by";
 const DEPLOYED_AT_NOTE: &str = "stardelt.io/deployed-at";
-const DIGEST_NOTE: &str = "stardelt.io/spec-digest";
+pub(crate) const DIGEST_NOTE: &str = "stardelt.io/spec-digest";
 
 /// `value` as text with the keys of every object in sorted order, so two spellings of one
 /// document give one text.
-fn canonical(value: &Value) -> String {
+pub(crate) fn canonical(value: &Value) -> String {
     match value {
         Value::Object(map) => {
             let mut keys: Vec<&String> = map.keys().collect();
@@ -3699,8 +3700,12 @@ pub(crate) fn stamp_provenance(resource: &mut Value, provenance: &Provenance, de
     resource["metadata"]["annotations"][DIGEST_NOTE] = json!(digest);
 }
 
-/// What a deploy stamped on a stored pipeline, if it did.
-pub(crate) fn deployment_of(resource: &Value) -> Option<DeploymentView> {
+/// What a deploy stamped on a stored resource, if it did. `digest_of` answers the resource's
+/// current fingerprint: `spec_digest` for a pipeline, the stream's own digest for a `StreamApp`.
+pub(crate) fn deployment_of_with(
+    resource: &Value,
+    digest_of: fn(&Value) -> String,
+) -> Option<DeploymentView> {
     let metadata = resource.get("metadata")?;
     let label = |key: &str| {
         metadata
@@ -3724,9 +3729,14 @@ pub(crate) fn deployment_of(resource: &Value) -> Option<DeploymentView> {
         deployed_by: note(DEPLOYED_BY_NOTE),
         deployed_at: note(DEPLOYED_AT_NOTE),
         modified: note(DIGEST_NOTE)
-            .filter(|digest| *digest != spec_digest(resource))
+            .filter(|digest| *digest != digest_of(resource))
             .map(|_| true),
     })
+}
+
+/// What a deploy stamped on a stored pipeline, if it did.
+pub(crate) fn deployment_of(resource: &Value) -> Option<DeploymentView> {
+    deployment_of_with(resource, spec_digest)
 }
 
 async fn create_pipeline_inner(
