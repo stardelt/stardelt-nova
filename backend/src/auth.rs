@@ -1417,6 +1417,7 @@ pub async fn require_admin(req: Request, next: Next) -> Response {
 #[derive(Deserialize)]
 pub struct LoginParams {
     return_to: Option<String>,
+    login_hint: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1465,6 +1466,16 @@ pub(crate) fn sanitize_code(s: &str) -> String {
         .collect()
 }
 
+/// The OIDC `login_hint` we pass on: a sign-in name of 1–64 characters from
+/// `[A-Za-z0-9._@-]`. Anything else is dropped silently (never echoed).
+pub(crate) fn safe_login_hint(raw: Option<&str>) -> Option<&str> {
+    let s = raw?.trim();
+    let ok = (1..=64).contains(&s.len())
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '@' | '-'));
+    ok.then_some(s)
+}
+
 async fn login(
     State(auth): State<Arc<AuthState>>,
     Query(q): Query<LoginParams>,
@@ -1494,6 +1505,10 @@ async fn login(
         .append_pair("nonce", &nonce)
         .append_pair("code_challenge", &pkce_challenge(&verifier))
         .append_pair("code_challenge_method", "S256");
+
+    if let Some(hint) = safe_login_hint(q.login_hint.as_deref()) {
+        url.query_pairs_mut().append_pair("login_hint", hint);
+    }
 
     if let Err(e) = auth.pending.insert(
         state.clone(),
@@ -3221,6 +3236,19 @@ mod tests {
         assert!(!body.contains('<'));
     }
 
+    /// A login hint is a sign-in name, not free text: it goes into the IdP's URL, so
+    /// anything that is not `[A-Za-z0-9._@-]{1,64}` is dropped rather than escaped.
+    #[test]
+    fn safe_login_hint_accepts_names_and_drops_the_rest() {
+        assert_eq!(safe_login_hint(Some("demo")), Some("demo"));
+        assert_eq!(safe_login_hint(Some(" ada@x.io ")), Some("ada@x.io"));
+        assert_eq!(safe_login_hint(Some("")), None);
+        assert_eq!(safe_login_hint(Some("a b")), None);
+        assert_eq!(safe_login_hint(Some("<x>")), None);
+        assert_eq!(safe_login_hint(Some(&"a".repeat(65))), None);
+        assert_eq!(safe_login_hint(None), None);
+    }
+
     #[tokio::test]
     async fn login_with_unreachable_idp_fails_closed() {
         let Ok(AuthMode::Oidc(mut cfg)) = AuthMode::from_lookup(env(FULL)) else {
@@ -3313,7 +3341,7 @@ mod tests {
         let resp = app
             .clone()
             .oneshot(
-                HttpRequest::get("/api/auth/login?return_to=/catalog")
+                HttpRequest::get("/api/auth/login?return_to=/catalog&login_hint=demo")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -3325,6 +3353,7 @@ mod tests {
         let q: HashMap<String, String> = loc.query_pairs().into_owned().collect();
         assert_eq!(q["code_challenge_method"], "S256");
         assert_eq!(q["response_type"], "code");
+        assert_eq!(q["login_hint"], "demo");
         *idp.challenge.lock().unwrap() = Some(q["code_challenge"].clone());
         *idp.nonce.lock().unwrap() = Some(q["nonce"].clone());
         let login_cookie = resp.headers()[header::SET_COOKIE].to_str().unwrap();
@@ -3401,5 +3430,95 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// The hint reaches the IdP's URL only when it is a plain sign-in name. `a b` is
+    /// dropped, never escaped — and never echoed by Nova.
+    #[tokio::test]
+    async fn login_drops_an_unsafe_login_hint() {
+        #[derive(Default)]
+        struct Idp {
+            challenge: Mutex<Option<String>>,
+            nonce: Mutex<Option<String>>,
+        }
+        let idp = Arc::new(Idp::default());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+
+        let b = base.clone();
+        let disc = move || {
+            let b = b.clone();
+            async move {
+                Json(json!({
+                    "issuer": b,
+                    "authorization_endpoint": format!("{b}/authorize"),
+                    "token_endpoint": format!("{b}/token"),
+                    "jwks_uri": format!("{b}/jwks"),
+                    "end_session_endpoint": format!("{b}/logout"),
+                    "token_endpoint_auth_methods_supported": ["client_secret_post"],
+                }))
+            }
+        };
+        let b = base.clone();
+        let token = move |State(idp): State<Arc<Idp>>,
+                          axum::Form(f): axum::Form<HashMap<String, String>>| {
+            let b = b.clone();
+            async move {
+                let challenge = idp.challenge.lock().unwrap().clone().unwrap();
+                let ok = f.get("grant_type").map(String::as_str) == Some("authorization_code")
+                    && f.get("code").map(String::as_str) == Some("the-code")
+                    && f.get("client_id").map(String::as_str) == Some(CLIENT)
+                    && f.get("client_secret").map(String::as_str) == Some("s3cret")
+                    && f.get("redirect_uri").map(String::as_str)
+                        == Some("https://nova.example.com/api/auth/callback")
+                    && f.get("code_verifier").map(|v| pkce_challenge(v)) == Some(challenge);
+                if !ok {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"error": "invalid_grant"})),
+                    );
+                }
+                let nonce = idp.nonce.lock().unwrap().clone().unwrap();
+                let id = sign(
+                    &json!({ "iss": b, "aud": CLIENT, "sub": "kc-42", "exp": now() + 300,
+                             "nonce": nonce, "preferred_username": "admin",
+                             "groups": ["/stardelt-admins"] }),
+                    Some("k1"),
+                );
+                (
+                    StatusCode::OK,
+                    Json(json!({ "access_token": "opaque", "id_token": id,
+                                 "token_type": "Bearer", "expires_in": 300 })),
+                )
+            }
+        };
+        let mock = Router::new()
+            .route("/.well-known/openid-configuration", get(disc))
+            .route("/jwks", get(|| async { Json(json!({ "keys": jwks() })) }))
+            .route("/token", post(token))
+            .with_state(idp.clone());
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+
+        let Ok(AuthMode::Oidc(mut cfg)) = AuthMode::from_lookup(env(FULL)) else {
+            panic!()
+        };
+        cfg.issuer = base.clone();
+        let auth = AuthState::new(*cfg, reqwest::Client::new());
+        let app = app(auth);
+
+        let resp = app
+            .clone()
+            .oneshot(
+                HttpRequest::get("/api/auth/login?login_hint=a%20b")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        let loc = Url::parse(resp.headers()[header::LOCATION].to_str().unwrap()).unwrap();
+        let q: HashMap<String, String> = loc.query_pairs().into_owned().collect();
+        assert!(!q.contains_key("login_hint"), "{q:?}");
+        assert!(!loc.as_str().contains("a%20b"), "{}", loc.as_str());
     }
 }
