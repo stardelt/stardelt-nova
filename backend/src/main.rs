@@ -44,6 +44,8 @@
 //!   GET  /api/pipelines/{ns}/{name}         — one pipeline: latest runs, params, options
 //!   GET  /api/streams                      — the caller's StreamApps, with phase and last error
 //!   PATCH /api/streams/{namespace}/{name}  — stop or resume one stream
+//!   POST /api/streams/validate             — check a stream write without writing it
+//!   PUT  /api/streams/{namespace}/{name}   — create or update one stream
 //!   GET  /api/compute                      — the Spark clusters the caller may use
 //!   POST /api/compute/{name}/start         — start one: `spec.state: Running`
 //!   POST /api/compute/{name}/stop          — stop one: `spec.state: Stopped`
