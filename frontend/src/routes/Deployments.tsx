@@ -58,6 +58,13 @@ export function compareStatus(here: StageRow | undefined, there: StageRow | unde
   return 'different commit'
 }
 
+/** The forge's compare page from the peer's commit to this stage's (GitLab uses `/-/compare`). */
+export function compareUrl(repository: string, from: string, to: string): string {
+  const base = repository.replace(/\/+$/, '')
+  const path = new URL(base).hostname.includes('gitlab') ? '/-/compare/' : '/compare/'
+  return `${base}${path}${from.replace(/-dirty$/, '')}...${to.replace(/-dirty$/, '')}`
+}
+
 /** The rows of the comparison, keyed by bundle/target/name, sorted like the page's sections. */
 export function comparisonRows(here: StageRow[], there: StageRow[]) {
   const key = (row: StageRow) => `${row.bundle}\^@${row.target}\^@${row.name}`
@@ -134,6 +141,19 @@ function StageCompare({ peer }: { peer: string }) {
                   ) : (
                     <span className="text-text-dim">{compareStatus(here, there, peer)}</span>
                   )}
+                  {here?.revision &&
+                    there?.revision &&
+                    here.revision !== there.revision &&
+                    here.repository && (
+                      <a
+                        href={compareUrl(here.repository, there.revision, here.revision)}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="ml-2 underline text-accent"
+                      >
+                        Promote via pull request
+                      </a>
+                    )}
                 </td>
               </tr>
             )

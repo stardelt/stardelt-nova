@@ -750,6 +750,8 @@ export type DeploymentView = {
   bundle: string
   target: string
   revision?: string
+  /** The bundle's repository (`https://host/path`), for the compare link. */
+  repository?: string
   deployedBy?: string
   deployedAt?: string
   /** True when the pipeline was changed after its last deploy (stardelt-nova drift check). */
@@ -762,6 +764,8 @@ export type StageRow = {
   target: string
   name: string
   revision?: string
+  /** The bundle's repository (`https://host/path`), for the compare link. */
+  repository?: string
   /** True when the pipeline was changed on that stage after its deploy. */
   modified?: boolean
 }

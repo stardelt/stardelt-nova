@@ -1772,6 +1772,10 @@ pub struct Provenance {
     /// working tree had uncommitted changes. Omitted when the bundle is not in a Git checkout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revision: Option<String>,
+    /// The bundle's repository as an `https://host/path` address, so a later stage can link the
+    /// pull request that promotes a commit. Omitted when the bundle's checkout names none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
 }
 
 /// What `view_of` shows of a [`Provenance`], with who deployed and when.
@@ -1782,6 +1786,9 @@ pub struct DeploymentView {
     pub target: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revision: Option<String>,
+    /// The repository the bundle was read from: `https://host/path`, for the compare link.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deployed_by: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3471,6 +3478,7 @@ async fn plan_pipeline(
 const BUNDLE_LABEL: &str = "stardelt.io/bundle";
 const TARGET_LABEL: &str = "stardelt.io/target";
 const REVISION_NOTE: &str = "stardelt.io/revision";
+const REPOSITORY_NOTE: &str = "stardelt.io/repository";
 const DEPLOYED_BY_NOTE: &str = "stardelt.io/deployed-by";
 const DEPLOYED_AT_NOTE: &str = "stardelt.io/deployed-at";
 const DIGEST_NOTE: &str = "stardelt.io/spec-digest";
@@ -3547,6 +3555,19 @@ fn check_provenance(provenance: &Provenance) -> Result<(), String> {
             );
         }
     }
+    if let Some(repository) = &provenance.repository {
+        let plain = repository.len() <= 200
+            && repository.starts_with("https://")
+            && !repository[8..]
+                .chars()
+                .any(|c| c.is_whitespace() || matches!(c, '@' | '?' | '#'));
+        if !plain {
+            return Err(
+                "the repository must be an https address of at most 200 characters, without a user or a token"
+                    .into(),
+            );
+        }
+    }
     Ok(())
 }
 
@@ -3560,6 +3581,14 @@ fn stamp_provenance(resource: &mut Value, provenance: &Provenance, deployed_by: 
         None => {
             if let Some(map) = notes.as_object_mut() {
                 map.remove(REVISION_NOTE);
+            }
+        }
+    }
+    match &provenance.repository {
+        Some(repository) => notes[REPOSITORY_NOTE] = json!(repository),
+        None => {
+            if let Some(map) = notes.as_object_mut() {
+                map.remove(REPOSITORY_NOTE);
             }
         }
     }
@@ -3590,6 +3619,7 @@ fn deployment_of(resource: &Value) -> Option<DeploymentView> {
         bundle: label(BUNDLE_LABEL)?,
         target: label(TARGET_LABEL)?,
         revision: note(REVISION_NOTE),
+        repository: note(REPOSITORY_NOTE),
         deployed_by: note(DEPLOYED_BY_NOTE),
         deployed_at: note(DEPLOYED_AT_NOTE),
         modified: note(DIGEST_NOTE)
@@ -4184,6 +4214,7 @@ pub(crate) async fn deployed_rows(
                 target: deployment.target,
                 name: pipeline_name(resource).to_string(),
                 revision: deployment.revision,
+                repository: deployment.repository,
                 modified: deployment.modified,
             })
         })
@@ -8607,6 +8638,7 @@ mod tests {
             bundle: bundle.into(),
             target: target.into(),
             revision: revision.map(str::to_string),
+            repository: None,
         }
     }
 
@@ -8666,16 +8698,45 @@ mod tests {
     async fn a_deploy_that_names_something_odd_is_refused_before_anything_is_written() {
         let resources = analytics_ready();
         let ada = who("sub-ada", &["analytics"], false);
-        for (bundle, target, revision, sentence) in [
-            ("Shop", "prod", None, "the bundle name must be"),
-            ("ab", "prod", None, "the bundle name must be"),
-            ("shop-etl", "Prod", None, "the target must be"),
-            ("shop-etl", "", None, "the target must be"),
-            ("shop-etl", "prod", Some("main"), "the revision must be"),
-            ("shop-etl", "prod", Some("abc"), "the revision must be"),
+        for (bundle, target, revision, repository, sentence) in [
+            ("Shop", "prod", None, None, "the bundle name must be"),
+            ("ab", "prod", None, None, "the bundle name must be"),
+            ("shop-etl", "Prod", None, None, "the target must be"),
+            ("shop-etl", "", None, None, "the target must be"),
+            (
+                "shop-etl",
+                "prod",
+                Some("main"),
+                None,
+                "the revision must be",
+            ),
+            (
+                "shop-etl",
+                "prod",
+                Some("abc"),
+                None,
+                "the revision must be",
+            ),
+            (
+                "shop-etl",
+                "prod",
+                None,
+                Some("http://git.example/a"),
+                "the repository must be",
+            ),
+            (
+                "shop-etl",
+                "prod",
+                None,
+                Some("https://ada:tok@git.example/a"),
+                "the repository must be",
+            ),
         ] {
             let mut body = create_body("daily-trips", "analytics", "select 1");
-            body.provenance = Some(provenance(bundle, target, revision));
+            body.provenance = Some(Provenance {
+                repository: repository.map(str::to_string),
+                ..provenance(bundle, target, revision)
+            });
             let error = create_pipeline(
                 Some(&resources),
                 None,
