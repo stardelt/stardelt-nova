@@ -500,7 +500,7 @@ function Graph({ graph, days, catalog, showHandMade, fitKey, onPick }: LineageGr
       void fitView({ padding: 0.06, maxZoom: 1, duration: 200 })
     }, 0)
     return () => window.clearTimeout(timer)
-  }, [fitView, graph, showHandMade, unlimited, fitKey])
+  }, [fitView, graph, showHandMade, unlimited, fitKey, selected])
 
   // Escape closes the panel, as a dialog would.
   useEffect(() => {
@@ -524,7 +524,9 @@ function Graph({ graph, days, catalog, showHandMade, fitKey, onPick }: LineageGr
   return (
     <>
       <div
-        className="relative w-full overflow-hidden rounded-[10px] border border-border bg-bg-soft/30"
+        className={`relative w-full overflow-hidden rounded-[10px] border border-border bg-bg-soft/30${
+          focus != null ? ' md:pr-[352px]' : ''
+        }`}
         style={{ height }}
       >
         <Arrowheads />
