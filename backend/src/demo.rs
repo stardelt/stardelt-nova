@@ -1027,6 +1027,7 @@ pub fn streams() -> crate::streams::StreamsResponse {
         deployment: None,
     };
     StreamsResponse {
+        namespace: "stardelt".to_string(),
         streams: vec![
             row(
                 "pegelonline-live",

@@ -6565,7 +6565,7 @@
         "tags": [
           "public"
         ],
-        "description": "The calling user's streams: every `StreamApp` of their groups, and all of them for an administrator. `phase` is the operator's `status.phase` (`Pending` when it has not reported yet); `lastError` is the application's own terminal message when the phase is `Failed`; `lastCheckpointAt` is the time of the newest checkpoint commit, absent until the operator reports it. `stopped` is `spec.stopped`. `attempts` is how many times Spark has submitted the application and `lastSubmittedAt` when it last did; both are absent until the operator reports them. No connection credentials and no checkpoint prefix are part of an answer. Answers `Cache-Control: no-store`.",
+        "description": "The calling user's streams: every `StreamApp` of their groups, and all of them for an administrator. `phase` is the operator's `status.phase` (`Pending` when it has not reported yet); `lastError` is the application's own terminal message when the phase is `Failed`; `lastCheckpointAt` is the time of the newest checkpoint commit, absent until the operator reports it. `stopped` is `spec.stopped`. `attempts` is how many times Spark has submitted the application and `lastSubmittedAt` when it last did; both are absent until the operator reports them. `namespace` is Nova's own namespace; every stream lives there, and it is the `<namespace>` segment a write's path takes. No connection credentials and no checkpoint prefix are part of an answer. Answers `Cache-Control: no-store`.",
         "operationId": "streams_list",
         "responses": {
           "200": {
@@ -11669,9 +11669,14 @@
       "StreamsResponse": {
         "type": "object",
         "required": [
+          "namespace",
           "streams"
         ],
         "properties": {
+          "namespace": {
+            "type": "string",
+            "description": "Nova's own namespace: every stream lives here, and a write's path names it."
+          },
           "streams": {
             "type": "array",
             "items": {
