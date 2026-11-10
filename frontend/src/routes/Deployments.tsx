@@ -80,11 +80,13 @@ export function comparisonRows(here: StageRow[], there: StageRow[]) {
     })
 }
 
-/** The compare table for one peer: what each stage runs and what differs. */
-function StageCompare({ peer }: { peer: string }) {
+/** The compare table for one peer: what each stage runs and what differs. `keep401` lets the
+ * backend's refusal reach the page in dev auth mode (nova#671): there is no token to forward,
+ * so the answer is a sentence about the install, not a session that expired. */
+function StageCompare({ peer, keep401 }: { peer: string; keep401: boolean }) {
   const compare = useQuery({
-    queryKey: ['stages-compare', peer],
-    queryFn: () => api.stagesCompare(peer),
+    queryKey: ['stages-compare', peer, keep401],
+    queryFn: () => api.stagesCompare(peer, keep401),
     retry: false,
     staleTime: 30_000,
   })
@@ -201,7 +203,7 @@ export default function Deployments() {
           {peer && <span className="text-xs text-text-mute">reading {peers.find((p) => p.name === peer)?.url}</span>}
         </div>
       )}
-      {peer && <StageCompare peer={peer} />}
+      {peer && <StageCompare peer={peer} keep401={me.data?.auth_mode !== 'oidc'} />}
 
       {list.isLoading && <p className="text-sm text-text-mute">Reading deployments…</p>}
       {failed && (

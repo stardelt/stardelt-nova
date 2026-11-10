@@ -1033,9 +1033,11 @@ function checkAuth(path: string, r: Response) {
   }
 }
 
-async function jget<T>(path: string): Promise<T> {
+async function jget<T>(path: string, keep401 = false): Promise<T> {
   const r = await send(path)
-  checkAuth(path, r)
+  // `keep401` is for a call whose 401 is an answer about the request, not a missing session:
+  // the page shows the backend's sentence instead of leaving it for a sign-in round trip.
+  if (!(keep401 && r.status === 401)) checkAuth(path, r)
   if (!r.ok) {
     console.debug('api', path, r.status)
     throw new ApiError(errorText(await r.text().catch(() => '')) || statusSentence(r.status), r.status)
@@ -1257,7 +1259,8 @@ export type SettingAnswer = { key: string; value: unknown }
 
 export const api = {
   me:           ()                            => jget<Me>('/api/me'),
-  stagesCompare: (peer: string) => jget<StageComparison>(`/api/stages/compare?peer=${encodeURIComponent(peer)}`),
+  stagesCompare: (peer: string, keep401 = false) =>
+    jget<StageComparison>(`/api/stages/compare?peer=${encodeURIComponent(peer)}`, keep401),
   /** The caller's personal settings as one JSON object (`{}` when none). */
   settings:     ()                            => jget<Record<string, unknown>>('/api/settings'),
   putSetting:   (key: string, value: unknown) => jput<SettingAnswer>(`/api/settings/${seg(key)}`, value),
