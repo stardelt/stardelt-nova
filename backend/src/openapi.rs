@@ -126,6 +126,7 @@ pub struct ErrorResponse {
         crate::notebooks::list,
         crate::notebooks::versions,
         crate::notebooks::parameters,
+        crate::notebooks::content,
         crate::statements::submit,
         crate::statements::list,
         crate::statements::poll,
