@@ -1202,14 +1202,21 @@ export type LineageNodeView = {
   level?: number
   /** The newest event time of an edge that wrote this node. */
   lastWrite?: string
+  /** True when every flow that touches this node came from an ad-hoc job. */
+  handMade: boolean
   /** Read-only queries against this node in the window. */
   readers?: LineageReadersView
+  /** The jobs that wrote this table, pipeline first; only on the focus node. */
+  writers?: { kind: string; name: string; runs: number; lastRun: string }[]
 }
 
 export type LineageReadersView = {
   queries: number
+  /** Distinct people (the SQL editor and notebooks), never a BI tool. */
   people: number
   lastRead: string
+  /** The tools that read this table, most queries first. */
+  tools?: string[]
 }
 
 /** One job that wrote an edge of the answer. */
@@ -1219,6 +1226,8 @@ export type LineageJobView = {
   name: string
   runs: number
   lastRun: string
+  /** True for every kind but a pipeline. */
+  handMade: boolean
 }
 
 export type LineageEdgeView = {
@@ -1228,6 +1237,8 @@ export type LineageEdgeView = {
   jobName: string
   runId: string
   eventTime: string
+  /** The runs of this job that wrote this edge in the window. */
+  runs: number
 }
 
 export type LineageGraphView = {
