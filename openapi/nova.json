@@ -5205,7 +5205,7 @@
           {
             "name": "scope",
             "in": "query",
-            "description": "mine (default), team or all. all is for administrators; team stays empty until ownership is recorded",
+            "description": "mine (default), team or all. team is the queries of the service principals owned by the caller's groups; all is for administrators",
             "required": false,
             "schema": {
               "type": "string"

@@ -2,10 +2,10 @@
 //! `GET /api/query-log/{id}`.
 //!
 //! A person sees their own queries; an administrator can see everyone's (`scope=all`) and is
-//! audited when opening somebody else's statement; the `team` scope (queries of service
-//! principals the person's group owns) stays empty until ownership data exists. The rule itself
-//! lives in `query_log.rs`; the SQL here only narrows rows, and every row is checked against
-//! that rule again before it leaves. Somebody else's id answers `404`, exactly like a missing one.
+//! audited when opening somebody else's statement; the `team` scope holds the queries of the
+//! service principals the person's group owns. The rule itself lives in `query_log.rs`; the SQL
+//! here only narrows rows, and every row is checked against that rule again before it leaves.
+//! Somebody else's id answers `404`, exactly like a missing one.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -17,6 +17,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use kube::api::{Api, ApiResource, DynamicObject, GroupVersionKind, ListParams};
 use serde::Serialize;
 use sqlx::{FromRow, Postgres, QueryBuilder};
 use utoipa::ToSchema;
@@ -32,6 +33,68 @@ const MAX_LIMIT: i64 = 200;
 const MAX_SEARCH_CHARS: usize = 200;
 /// The statement preview in the list; the detail has the whole text.
 const PREVIEW_CHARS: i32 = 300;
+
+/// How long the subject→owner lookup is reused. A principal is created rarely; a stale
+/// minute only costs one member not seeing a brand-new principal's queries yet.
+const OWNER_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// `status.subject -> spec.ownerGroup` for the `ServicePrincipal` resources of Nova's
+/// namespace. A resource without `status.subject` (external identity mode, or a principal
+/// the operator has not converged yet) is skipped: its queries stay visible to
+/// administrators only. A missing cluster client, a refused list or a read that is not JSON
+/// yields an empty map — the team scope then shows nothing, never an error.
+pub fn owner_groups(principals: &[serde_json::Value]) -> HashMap<String, String> {
+    principals
+        .iter()
+        .filter_map(|p| {
+            let subject = p["status"]["subject"].as_str()?.trim();
+            let group = p["spec"]["ownerGroup"].as_str()?.trim();
+            (!subject.is_empty() && !group.is_empty())
+                .then(|| (subject.to_string(), group.to_string()))
+        })
+        .collect()
+}
+
+async fn principal_owners(s: &AppState) -> HashMap<String, String> {
+    if let Some((at, map)) = s
+        .principal_owners
+        .lock()
+        .expect("principal owners poisoned")
+        .as_ref()
+        && at.elapsed() < OWNER_TTL
+    {
+        return map.clone();
+    }
+    let Some(kube) = s.kube.clone() else {
+        return HashMap::new();
+    };
+    let api: Api<DynamicObject> = Api::namespaced_with(
+        kube,
+        &crate::cluster::namespace(),
+        &ApiResource::from_gvk(&GroupVersionKind::gvk(
+            "stardelt.io",
+            "v1alpha1",
+            "ServicePrincipal",
+        )),
+    );
+    let map = match api.list(&ListParams::default()).await {
+        Ok(list) => owner_groups(
+            &list
+                .items
+                .iter()
+                .filter_map(|o| serde_json::to_value(o).ok())
+                .collect::<Vec<_>>(),
+        ),
+        Err(e) => {
+            tracing::warn!(error = %e, "cannot list ServicePrincipals; the team scope stays empty");
+            HashMap::new()
+        }
+    };
+    *s.principal_owners
+        .lock()
+        .expect("principal owners poisoned") = Some((std::time::Instant::now(), map.clone()));
+    map
+}
 
 /// The person asking, with owned data (a [`Viewer`] borrows it).
 struct Caller {
@@ -236,7 +299,7 @@ pub struct QueryLogPage {
     tag = "public",
     description = "The statements run on the engine, newest first, a page at a time. A person sees their own; an administrator may ask for everyone's with scope=all. Times are epoch milliseconds.",
     params(
-        ("scope" = Option<String>, Query, description = "mine (default), team or all. all is for administrators; team stays empty until ownership is recorded"),
+        ("scope" = Option<String>, Query, description = "mine (default), team or all. team is the queries of the service principals owned by the caller's groups; all is for administrators"),
         ("state" = Option<String>, Query, description = "QUEUED, FINISHED, FAILED or CANCELED, in any case"),
         ("warehouse" = Option<String>, Query, description = "Only queries that ran on this warehouse"),
         ("q" = Option<String>, Query, description = "Text inside the statement, or an exact query id; at most 200 characters"),
@@ -268,8 +331,12 @@ pub async fn list(
     if params.scope == Scope::All && !who.is_admin {
         return error(StatusCode::FORBIDDEN, "the all scope is for administrators");
     }
-    if params.scope == Scope::Team {
-        // Service-principal ownership is not recorded yet, so no row can belong to a team.
+    let owners = if params.scope == Scope::Team {
+        principal_owners(&s).await
+    } else {
+        HashMap::new()
+    };
+    if params.scope == Scope::Team && owners.is_empty() {
         return Json(serde_json::json!({ "items": [], "nextCursor": null })).into_response();
     }
 
@@ -286,6 +353,12 @@ pub async fn list(
             .push_bind(who.username.clone())
             .push(" OR principal = ")
             .push_bind(who.sub.clone())
+            .push(")");
+    }
+    if params.scope == Scope::Team {
+        let subjects: Vec<String> = owners.keys().cloned().collect();
+        q.push(" AND principal = ANY(")
+            .push_bind(subjects)
             .push(")");
     }
     if let Some(state) = &params.state {
@@ -332,7 +405,7 @@ pub async fn list(
     rows.retain(|r| {
         let owner = RowOwner {
             principal: &r.principal,
-            owner_group: None,
+            owner_group: owners.get(&r.principal).map(String::as_str),
         };
         in_scope(params.scope, &owner, &viewer)
     });
@@ -507,9 +580,10 @@ pub async fn detail(
     let Some(r) = row else {
         return not_found();
     };
+    let owners = principal_owners(&s).await;
     let owner = RowOwner {
         principal: &r.principal,
-        owner_group: None,
+        owner_group: owners.get(&r.principal).map(String::as_str),
     };
     if !visible(&owner, &who.viewer()) {
         return not_found();
@@ -730,5 +804,57 @@ mod tests {
     fn wildcards_in_a_search_text_are_literals() {
         assert_eq!(like_pattern("50%_off\\"), "%50\\%\\_off\\\\%");
         assert_eq!(like_pattern("plain"), "%plain%");
+    }
+
+    #[test]
+    fn the_owner_map_reads_the_subject_and_the_group_and_skips_the_unset() {
+        let principals = vec![
+            serde_json::json!({"metadata": {"name": "pipeline-mobility-analytics"},
+                               "spec": {"ownerGroup": "mobility-analytics"},
+                               "status": {"subject": "e385bcb7-9484-48b9-8d60-8f509fc6cbd9"}}),
+            serde_json::json!({"metadata": {"name": "pipeline-old"},
+                               "spec": {"ownerGroup": "old"}}),
+            serde_json::json!({"metadata": {"name": "pipeline-retail-analytics"},
+                               "spec": {"ownerGroup": "retail-analytics"},
+                               "status": {"subject": "2b256a3d-aad8-4f02-960e-6fadcfc09a88"}}),
+        ];
+        let map = owner_groups(&principals);
+        assert_eq!(map.len(), 2, "{map:?}");
+        assert_eq!(
+            map.get("e385bcb7-9484-48b9-8d60-8f509fc6cbd9")
+                .map(String::as_str),
+            Some("mobility-analytics")
+        );
+        assert_eq!(
+            map.get("2b256a3d-aad8-4f02-960e-6fadcfc09a88")
+                .map(String::as_str),
+            Some("retail-analytics")
+        );
+    }
+
+    #[test]
+    fn a_team_row_is_the_owner_groups_row() {
+        let groups = ["mobility-analytics".to_string()];
+        let member = Viewer {
+            username: "carol",
+            sub: "carol",
+            groups: &groups,
+            is_admin: false,
+        };
+        let subject = "e385bcb7-9484-48b9-8d60-8f509fc6cbd9";
+        let owners = HashMap::from([(subject.to_string(), "mobility-analytics".to_string())]);
+        let row = RowOwner {
+            principal: subject,
+            owner_group: owners.get(subject).map(String::as_str),
+        };
+        assert!(in_scope(Scope::Team, &row, &member));
+        let retail = ["retail-analytics".to_string()];
+        let outsider = Viewer {
+            username: "dave",
+            sub: "dave",
+            groups: &retail,
+            is_admin: false,
+        };
+        assert!(!in_scope(Scope::Team, &row, &outsider));
     }
 }
