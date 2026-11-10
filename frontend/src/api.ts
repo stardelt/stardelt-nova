@@ -1178,7 +1178,7 @@ export type QueryLogDetail = {
 }
 
 export type QueryLogParams = {
-  scope: 'mine' | 'all'
+  scope: 'mine' | 'team' | 'all'
   state?: string
   q?: string
   /** Epoch milliseconds: only queries created at or after this. */
