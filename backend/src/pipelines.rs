@@ -3631,7 +3631,7 @@ fn dashed_name(text: &str, shortest: usize, longest: usize) -> bool {
 
 /// The rules for what a deploy may stamp on a pipeline: short, plain words that are valid label
 /// values. `Err` is the sentence the caller sees.
-fn check_provenance(provenance: &Provenance) -> Result<(), String> {
+pub(crate) fn check_provenance(provenance: &Provenance) -> Result<(), String> {
     if !dashed_name(&provenance.bundle, 3, 40) {
         return Err("the bundle name must be 3 to 40 lower-case letters, digits and dashes".into());
     }
@@ -3673,7 +3673,7 @@ fn check_provenance(provenance: &Provenance) -> Result<(), String> {
 }
 
 /// Write a deploy's provenance on `resource`: the two labels, the revision (or none), who and when.
-fn stamp_provenance(resource: &mut Value, provenance: &Provenance, deployed_by: &str) {
+pub(crate) fn stamp_provenance(resource: &mut Value, provenance: &Provenance, deployed_by: &str) {
     resource["metadata"]["labels"][BUNDLE_LABEL] = json!(provenance.bundle);
     resource["metadata"]["labels"][TARGET_LABEL] = json!(provenance.target);
     let notes = &mut resource["metadata"]["annotations"];
@@ -3700,7 +3700,7 @@ fn stamp_provenance(resource: &mut Value, provenance: &Provenance, deployed_by: 
 }
 
 /// What a deploy stamped on a stored pipeline, if it did.
-fn deployment_of(resource: &Value) -> Option<DeploymentView> {
+pub(crate) fn deployment_of(resource: &Value) -> Option<DeploymentView> {
     let metadata = resource.get("metadata")?;
     let label = |key: &str| {
         metadata
