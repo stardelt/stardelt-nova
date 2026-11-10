@@ -73,7 +73,7 @@ export default function QueryLog() {
   // Demo mode has no state store, so the log route answers 503 (#500). Do not ask.
   const demo = me.data?.demo === true
 
-  const [scope, setScope] = useState<'mine' | 'all'>('mine')
+  const [scope, setScope] = useState<'mine' | 'team' | 'all'>('mine')
   const [state, setState] = useState<StateFilter>('')
   const [rangeIdx, setRangeIdx] = useState(1)
   const [search, setSearch] = useState('')
@@ -92,8 +92,9 @@ export default function QueryLog() {
     return () => document.removeEventListener('mousedown', onMouseDown)
   }, [])
 
-  // A person who is not an administrator never has the all scope, whatever the state says.
-  const effectiveScope = admin ? scope : 'mine'
+  // The all scope is for administrators; team is for every signed-in person (the API decides
+  // which rows their groups own, and answers an empty page when none are).
+  const effectiveScope = admin || scope !== 'all' ? scope : 'mine'
   const range = RANGES[rangeIdx]
 
   const log = useInfiniteQuery({
@@ -119,7 +120,7 @@ export default function QueryLog() {
   const items = useMemo(() => (log.data?.pages ?? []).flatMap(p => p.items), [log.data])
   const shown = useMemo(() => {
     const extra = new Set<ColumnId>(columns)
-    if (effectiveScope === 'all') extra.add('user')
+    if (effectiveScope !== 'mine') extra.add('user')
     return extra
   }, [columns, effectiveScope])
   // The expander, the six default columns and whatever the person added.
@@ -137,7 +138,11 @@ export default function QueryLog() {
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Query log</h1>
           <p className="text-text-dim text-sm mt-1">
-            {effectiveScope === 'all' ? 'Queries of everyone, newest first.' : 'The queries you ran, newest first.'}
+            {effectiveScope === 'all'
+              ? 'Queries of everyone, newest first.'
+              : effectiveScope === 'team'
+                ? 'Queries run by the service principals your groups own, newest first.'
+                : 'The queries you ran, newest first.'}
           </p>
         </div>
         <div className="text-xs text-text-mute flex items-center gap-2" aria-live="polite">
@@ -147,9 +152,10 @@ export default function QueryLog() {
       </header>
 
       <div className="flex flex-wrap items-center gap-3">
-        {admin && (
-          <div role="group" aria-label="Whose queries" className="flex rounded-[10px] border border-border overflow-hidden text-sm">
-            {(['mine', 'all'] as const).map(s => (
+        <div role="group" aria-label="Whose queries" className="flex rounded-[10px] border border-border overflow-hidden text-sm">
+          {(['mine', 'team', 'all'] as const)
+            .filter(s => s !== 'all' || admin)
+            .map(s => (
               <button
                 key={s}
                 type="button"
@@ -157,11 +163,10 @@ export default function QueryLog() {
                 onClick={() => setScope(s)}
                 className={`px-3 py-1.5 ${scope === s ? 'bg-accent-solid text-white' : 'bg-bg-elev/60 text-text-dim hover:text-text'}`}
               >
-                {s === 'mine' ? 'Mine' : 'Everyone'}
+                {s === 'mine' ? 'Mine' : s === 'team' ? 'Team' : 'Everyone'}
               </button>
             ))}
-          </div>
-        )}
+        </div>
         <div role="group" aria-label="Status" className="flex flex-wrap gap-1.5">
           {STATE_CHIPS.map(c => (
             <button
