@@ -56,6 +56,10 @@ export type SavedQuery = {
   warehouse: string
   created_at: number
   updated_at: number
+  /** The caller's `sub` (or `static-dev` user in dev mode). */
+  owner_sub: string
+  /** Groups the query is shared with; empty when it is not shared. */
+  shared_with: string[]
 }
 
 export type Warehouse = { name: string; id: string }
@@ -1110,6 +1114,20 @@ async function jdel(path: string): Promise<void> {
   }
 }
 
+/** A POST whose success is `204` and carries no body (the share routes). */
+async function jsendNoContent(path: string, body: unknown): Promise<void> {
+  const r = await send(path, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  checkAuth(path, r)
+  if (!r.ok) {
+    console.debug('api', path, r.status)
+    throw new ApiError(errorText(await r.text().catch(() => '')) || statusSentence(r.status), r.status)
+  }
+}
+
 const seg = encodeURIComponent
 
 /**
@@ -1321,6 +1339,8 @@ export const api = {
   saveQuery:   (req: { title: string; sql: string; warehouse: string }) =>
     jpost<SavedQuery>('/api/saved-queries', req),
   deleteSavedQuery: (id: number)              => jdel(`/api/saved-queries/${id}`),
+  shareSavedQuery:   (id: number, group: string) => jsendNoContent(`/api/saved-queries/${id}/share`, { group }),
+  unshareSavedQuery: (id: number, group: string) => jdel(`/api/saved-queries/${id}/share/${seg(group)}`),
   connections:  ()                            => jget<{ connections: Connection[] }>('/api/connections'),
   createConnection: (req: NewConnectionRequest) => jpost<Connection>('/api/connections', req),
   rotateConnection: (path: string, secret: Record<string, string>) => jput<Connection>(path, { secret }),
