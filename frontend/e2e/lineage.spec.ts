@@ -77,12 +77,30 @@ test('the graph puts sources left and consumers right, and labels only on hover'
   // One row per table, the focus included: nothing is drawn twice.
   expect(await page.locator('.react-flow__node').count()).toBe(4)
 
+  // The graph fits itself when the answer arrives; a pointer that arrives while it still
+  // moves misses the table it aimed at.
+  await expect.poll(async () => {
+    const before = await box('trips_clean')
+    await page.waitForTimeout(80)
+    const after = await box('trips_clean')
+    return Math.abs(before.x - after.x) + Math.abs(before.y - after.y)
+  }).toBeLessThan(1)
+
   // The job name is not on the drawing until a node is looked at. (The toolbar's
   // "Made by" line names the focus table's writer, which is not an edge label.)
   const drawing = page.locator('.react-flow')
   await expect(drawing.getByText('taxi/load-trips')).toHaveCount(0)
-  await node('trips_clean').hover()
-  await expect(drawing.getByText('taxi/load-trips')).toBeVisible()
+  // A browser reports a mouse enter when the pointer changes the element under it. The
+  // enter onto a table that is still settling can be followed by a leave in the same frame,
+  // so the pointer leaves the drawing and comes back until the table holds the labels.
+  const focus = await box('trips_clean')
+  await expect.poll(async () => {
+    await page.mouse.move(2, 2)
+    await page.waitForTimeout(60)
+    await page.mouse.move(focus.x + focus.width / 2, focus.y + focus.height / 2)
+    await page.waitForTimeout(150)
+    return drawing.getByText('taxi/load-trips').count()
+  }).toBeGreaterThan(0)
   await expect(drawing.getByText('marts/revenue').first()).toBeVisible()
 })
 
