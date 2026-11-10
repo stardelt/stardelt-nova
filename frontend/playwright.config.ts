@@ -19,6 +19,12 @@ const server = (p: number, demo: boolean) => ({
     NOVA_STATIC_DIR: 'dist',
     NOVA_AUTH_MODE: 'dev',
     NOVA_DEV_USER: demo ? 'demo' : 'e2e',
+    // Neither server has a cluster behind it, on any machine: without this,
+    // `kube::Config::infer()` (`backend/src/main.rs:852`) picks up the
+    // developer's ~/.kube/config and `GET /api/compute` lists real
+    // SparkClusters, so e2e/compute.spec.ts fails on every cluster-connected
+    // checkout but passes in CI (stardelt-nova#744).
+    KUBECONFIG: '/dev/null',
     ...(demo ? { NOVA_DEMO: '1' } : {}),
   },
 })
