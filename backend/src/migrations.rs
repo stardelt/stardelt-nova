@@ -1,9 +1,10 @@
-//! Bundle migrations, plan half (stardelt-nova#617 decision 3): what a bundle's
-//! `sql/migrations/*.sql` would do to one target, and what already ran there.
+//! Bundle migrations (stardelt-nova#617 decision 3): what a bundle's
+//! `sql/migrations/*.sql` would do to one target, what already ran there, and the
+//! apply route that runs the new files and records them.
 //!
 //! The ledger is `stardelt_meta.migrations` in the target catalog:
-//! `file`, `sha256`, `target`, `applied_at`, `applied_by`. This module only reads it;
-//! the apply endpoint (the next slice) creates it and appends rows.
+//! `file`, `sha256`, `target`, `applied_at`, `applied_by`. The plan reads it; the
+//! apply route creates it on first use and appends one row per file it ran.
 
 use std::sync::Arc;
 
@@ -67,6 +68,33 @@ pub struct PlanAnswer {
     pub ledger: bool,
     pub files: Vec<PlannedFile>,
     /// One sentence per problem: a changed file, a file added before an applied one.
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyRequest {
+    /// The catalog the migration tables live in; the ledger is `stardelt_meta` in it.
+    pub catalog: String,
+    /// The bundle target whose ledger rows count (`dev`, `prod`, …).
+    pub target: String,
+    /// Every migration file of the bundle; the answer runs the `new` ones in name order.
+    pub files: Vec<MigrationFile>,
+    /// Run statements that are not additive. Default false.
+    #[serde(default)]
+    pub allow_breaking: bool,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyAnswer {
+    /// False when `errors` is not empty: nothing after the failing file was applied.
+    pub ok: bool,
+    /// Files this call ran and recorded, in name order.
+    pub applied: Vec<String>,
+    /// Files the ledger already had with the same sha256.
+    pub skipped: Vec<String>,
+    /// One sentence per problem.
     pub errors: Vec<String>,
 }
 
@@ -295,6 +323,45 @@ fn validate(request: &PlanRequest) -> Result<(), String> {
     Ok(())
 }
 
+/// The ledger's DDL, in this order: the schema, then the table. Runs as the caller.
+fn ledger_ddl(catalog: &str) -> [String; 2] {
+    [
+        format!("CREATE SCHEMA IF NOT EXISTS \"{catalog}\".stardelt_meta"),
+        format!(
+            "CREATE TABLE IF NOT EXISTS \"{catalog}\".stardelt_meta.migrations (\
+             file varchar, sha256 varchar, target varchar, \
+             applied_at timestamp(6) with time zone, applied_by varchar)"
+        ),
+    ]
+}
+
+/// The row for one applied file. `NOT EXISTS` keeps a retried call from writing it twice.
+fn ledger_row(catalog: &str, file: &str, sha256: &str, target: &str, actor: &str) -> String {
+    let actor = actor.replace('\'', "''");
+    format!(
+        "INSERT INTO \"{catalog}\".stardelt_meta.migrations (file, sha256, target, applied_at, applied_by) \
+         SELECT '{file}', '{sha256}', '{target}', current_timestamp, '{actor}' \
+         WHERE NOT EXISTS (SELECT 1 FROM \"{catalog}\".stardelt_meta.migrations \
+         WHERE file = '{file}' AND target = '{target}')"
+    )
+}
+
+/// The sentence that refuses this call, or `None` when it may run.
+fn refusal(files: &[PlannedFile], allow_breaking: bool) -> Option<String> {
+    if allow_breaking {
+        return None;
+    }
+    files
+        .iter()
+        .find(|f| f.status == "new" && f.class == "breaking")
+        .map(|file| {
+            format!(
+                "{} has statements that are not additive: rerun with allowBreaking (the CLI's --allow-breaking)",
+                file.name
+            )
+        })
+}
+
 /// Whether `stardelt_meta.migrations` exists in the catalog. Runs as the caller.
 async fn ledger_exists(
     state: &AppState,
@@ -404,8 +471,162 @@ pub(crate) async fn plan_handler(
     .into_response()
 }
 
+#[utoipa::path(
+    post,
+    operation_id = "migrations_apply",
+    path = "/api/migrations/apply",
+    tag = "public",
+    description = "Run a bundle's new migration files against one target, once each, and record them in stardelt_meta.migrations in that catalog (stardelt-nova#617 decision 3). Files already applied with the same sha256 are skipped; a file whose content changed after it was applied, or a new file that sorts before an applied one, is refused (409). Statements that are not additive need allowBreaking. The statements and the ledger writes run as the caller, so the caller's catalog privileges apply.",
+    request_body = ApplyRequest,
+    responses(
+        (status = 200, description = "What ran and what the ledger already had", body = ApplyAnswer),
+        (status = 400, description = "A malformed request, or a statement the engine refused: one sentence", body = crate::openapi::ErrorResponse),
+        (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 409, description = "Refused before anything ran: a changed or reordered file (ApplyAnswer with the errors), or a breaking file without allowBreaking (one sentence)", body = ApplyAnswer),
+        (status = 502, description = "The query engine is not reachable", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "The demo has no catalog to run migrations against", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn apply_handler(
+    caller: Caller,
+    ApiJson(request): ApiJson<ApplyRequest>,
+) -> Response {
+    let state = caller.state();
+    if state.demo {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(
+                serde_json::json!({"error": "the demo has no catalog to plan migrations against"}),
+            ),
+        )
+            .into_response();
+    }
+    let allow_breaking = request.allow_breaking;
+    let check = PlanRequest {
+        catalog: request.catalog,
+        target: request.target,
+        files: request.files,
+    };
+    if let Err(message) = validate(&check) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": message})),
+        )
+            .into_response();
+    }
+    let PlanRequest {
+        catalog,
+        target,
+        files,
+    } = check;
+    let who = caller.principal();
+    let ledger = match ledger_exists(state, Some(who), &catalog).await {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                crate::trino::error_status(&e),
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
+        }
+    };
+    let rows = if ledger {
+        match applied(state, Some(who), &catalog, &target).await {
+            Ok(v) => v,
+            Err(e) => {
+                return (
+                    crate::trino::error_status(&e),
+                    Json(serde_json::json!({"error": e})),
+                )
+                    .into_response();
+            }
+        }
+    } else {
+        Vec::new()
+    };
+    let (planned, errors) = plan(&files, &rows);
+    if !errors.is_empty() {
+        return (
+            StatusCode::CONFLICT,
+            Json(ApplyAnswer {
+                ok: false,
+                applied: vec![],
+                skipped: vec![],
+                errors,
+            }),
+        )
+            .into_response();
+    }
+    if let Some(sentence) = refusal(&planned, allow_breaking) {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": sentence})),
+        )
+            .into_response();
+    }
+    for sql in ledger_ddl(&catalog) {
+        if let Err(e) = crate::trino::execute(state, sql, Some(who)).await {
+            return (
+                crate::trino::error_status(&e),
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
+        }
+    }
+    let mut ran = Vec::new();
+    let mut skipped = Vec::new();
+    for planned_file in &planned {
+        if planned_file.status == "applied" {
+            skipped.push(planned_file.name.clone());
+            continue;
+        }
+        let Some(file) = files.iter().find(|f| f.name == planned_file.name) else {
+            continue;
+        };
+        for (index, statement) in statements(&file.sql).iter().enumerate() {
+            if let Err(e) = crate::trino::execute(state, statement.clone(), Some(who)).await {
+                return (
+                    crate::trino::error_status(&e),
+                    Json(serde_json::json!({"error": format!(
+                        "{}: statement {} failed: {e}",
+                        planned_file.name,
+                        index + 1
+                    )})),
+                )
+                    .into_response();
+            }
+        }
+        let row = ledger_row(
+            &catalog,
+            &planned_file.name,
+            &planned_file.sha256,
+            &target,
+            &who.identity.display_name,
+        );
+        if let Err(e) = crate::trino::execute(state, row, Some(who)).await {
+            return (
+                crate::trino::error_status(&e),
+                Json(serde_json::json!({"error": format!(
+                    "{} ran but was not recorded: {e}",
+                    planned_file.name
+                )})),
+            )
+                .into_response();
+        }
+        ran.push(planned_file.name.clone());
+    }
+    Json(ApplyAnswer {
+        ok: true,
+        applied: ran,
+        skipped,
+        errors: vec![],
+    })
+    .into_response()
+}
+
 pub(crate) fn router() -> Router<Arc<AppState>> {
     Router::new()
+        .route("/migrations/apply", post(apply_handler))
         .route("/migrations/plan", post(plan_handler))
         .route_layer(axum::middleware::from_fn(crate::pipelines::no_store))
 }
@@ -588,5 +809,54 @@ mod tests {
             "001_a.sql is empty"
         );
         assert!(validate(&request("mobilitylab", "prod", vec![good()])).is_ok());
+    }
+
+    #[test]
+    fn ledger_ddl_names_the_catalog() {
+        let ddl = ledger_ddl("mobilitylab");
+        assert_eq!(
+            ddl[0],
+            "CREATE SCHEMA IF NOT EXISTS \"mobilitylab\".stardelt_meta"
+        );
+        assert!(
+            ddl[1].starts_with(
+                "CREATE TABLE IF NOT EXISTS \"mobilitylab\".stardelt_meta.migrations ("
+            )
+        );
+        assert!(ddl[1].contains("applied_at timestamp(6) with time zone"));
+    }
+
+    #[test]
+    fn ledger_row_is_idempotent_and_escapes_the_actor() {
+        let row = ledger_row("c", "001_init.sql", &sha('a'), "prod", "O'Brien");
+        assert!(row.contains("SELECT '001_init.sql', '"));
+        assert!(row.contains(", 'prod', current_timestamp, 'O''Brien'"));
+        assert!(row.contains("WHERE NOT EXISTS (SELECT 1 FROM \"c\".stardelt_meta.migrations"));
+        assert!(row.ends_with("WHERE file = '001_init.sql' AND target = 'prod')"));
+    }
+
+    #[test]
+    fn refusal_allows_additive_and_needs_the_flag_for_breaking() {
+        let planned = |class: &str, status: &str| PlannedFile {
+            name: "001_a.sql".to_string(),
+            sha256: sha('a'),
+            class: class.to_string(),
+            status: status.to_string(),
+            statements: 1,
+            reason: None,
+        };
+        let additive = planned("additive", "new");
+        let breaking = planned("breaking", "new");
+        let already_applied_breaking = planned("breaking", "applied");
+
+        assert!(refusal(std::slice::from_ref(&additive), false).is_none());
+        assert!(refusal(std::slice::from_ref(&additive), true).is_none());
+        let sentence = refusal(std::slice::from_ref(&breaking), false).expect("a sentence");
+        assert!(sentence.starts_with("001_a.sql has statements that are not additive"));
+        assert!(refusal(std::slice::from_ref(&breaking), true).is_none());
+        assert!(
+            refusal(std::slice::from_ref(&already_applied_breaking), false).is_none(),
+            "an applied file never runs again"
+        );
     }
 }

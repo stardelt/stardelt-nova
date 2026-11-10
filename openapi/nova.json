@@ -3221,6 +3221,87 @@
         }
       }
     },
+    "/api/migrations/apply": {
+      "post": {
+        "tags": [
+          "public"
+        ],
+        "description": "Run a bundle's new migration files against one target, once each, and record them in stardelt_meta.migrations in that catalog (stardelt-nova#617 decision 3). Files already applied with the same sha256 are skipped; a file whose content changed after it was applied, or a new file that sorts before an applied one, is refused (409). Statements that are not additive need allowBreaking. The statements and the ledger writes run as the caller, so the caller's catalog privileges apply.",
+        "operationId": "migrations_apply",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApplyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "What ran and what the ledger already had",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApplyAnswer"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A malformed request, or a statement the engine refused: one sentence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token to sign in with",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Refused before anything ran: a changed or reordered file (ApplyAnswer with the errors), or a breaking file without allowBreaking (one sentence)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApplyAnswer"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The query engine is not reachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The demo has no catalog to run migrations against",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/migrations/plan": {
       "post": {
         "tags": [
@@ -7440,6 +7521,71 @@
           },
           "name": {
             "type": "string"
+          }
+        }
+      },
+      "ApplyAnswer": {
+        "type": "object",
+        "required": [
+          "ok",
+          "applied",
+          "skipped",
+          "errors"
+        ],
+        "properties": {
+          "applied": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Files this call ran and recorded, in name order."
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "One sentence per problem."
+          },
+          "ok": {
+            "type": "boolean",
+            "description": "False when `errors` is not empty: nothing after the failing file was applied."
+          },
+          "skipped": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Files the ledger already had with the same sha256."
+          }
+        }
+      },
+      "ApplyRequest": {
+        "type": "object",
+        "required": [
+          "catalog",
+          "target",
+          "files"
+        ],
+        "properties": {
+          "allowBreaking": {
+            "type": "boolean",
+            "description": "Run statements that are not additive. Default false."
+          },
+          "catalog": {
+            "type": "string",
+            "description": "The catalog the migration tables live in; the ledger is `stardelt_meta` in it."
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MigrationFile"
+            },
+            "description": "Every migration file of the bundle; the answer runs the `new` ones in name order."
+          },
+          "target": {
+            "type": "string",
+            "description": "The bundle target whose ledger rows count (`dev`, `prod`, …)."
           }
         }
       },
