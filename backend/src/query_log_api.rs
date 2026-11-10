@@ -25,7 +25,7 @@ use utoipa::ToSchema;
 use crate::AppState;
 use crate::auth::Principal;
 use crate::people;
-use crate::query_log::{RowOwner, Scope, Viewer, in_scope, visible};
+use crate::query_log::{RowOwner, Scope, Viewer, in_scope, redact_literals, visible};
 use crate::saved_queries::{error, not_found, store_failed, unavailable};
 
 const DEFAULT_LIMIT: i64 = 50;
@@ -132,6 +132,12 @@ impl Caller {
             is_admin: self.is_admin,
         }
     }
+}
+
+/// Is this row the caller's own? The engine user is the `sub` once authz 8/8 is live, and the
+/// sign-in name before it; both count, exactly as `Scope::Mine` does.
+fn is_own_row(principal: &str, who: &Caller) -> bool {
+    principal == who.username || principal == who.sub
 }
 
 /// The checked query string of the list route.
@@ -297,7 +303,7 @@ pub struct QueryLogPage {
     operation_id = "query_log_list",
     path = "/api/query-log",
     tag = "public",
-    description = "The statements run on the engine, newest first, a page at a time. A person sees their own; an administrator may ask for everyone's with scope=all. Times are epoch milliseconds.",
+    description = "The statements run on the engine, newest first, a page at a time. A person sees their own; an administrator may ask for everyone's with scope=all. Times are epoch milliseconds. With NOVA_QUERY_LOG_REDACT_LITERALS=1 somebody else's statement shows '?' in place of every string literal.",
     params(
         ("scope" = Option<String>, Query, description = "mine (default), team or all. team is the queries of the service principals owned by the caller's groups; all is for administrators"),
         ("state" = Option<String>, Query, description = "QUEUED, FINISHED, FAILED or CANCELED, in any case"),
@@ -437,6 +443,13 @@ pub async fn list(
             item.user_name = display.get(&item.user).cloned();
         }
     }
+    if s.redact_query_log_literals {
+        for item in &mut items {
+            if !is_own_row(&item.user, &who) {
+                item.sql = redact_literals(&item.sql);
+            }
+        }
+    }
     Json(QueryLogPage {
         items,
         next_cursor: next,
@@ -542,7 +555,7 @@ pub struct QueryLogDetail {
     operation_id = "query_log_detail",
     path = "/api/query-log/{id}",
     tag = "public",
-    description = "One query with its whole statement. Somebody else's query answers 404, exactly like a missing one; an administrator who opens another person's query is audited.",
+    description = "One query with its whole statement. Somebody else's query answers 404, exactly like a missing one; an administrator who opens another person's query is audited. With NOVA_QUERY_LOG_REDACT_LITERALS=1 somebody else's statement shows '?' in place of every string literal.",
     params(("id" = String, Path, description = "The engine's query id")),
     responses(
         (status = 200, description = "The stored query", body = QueryLogDetail),
@@ -612,6 +625,11 @@ pub async fn detail(
         code,
         message: r.error_message,
     });
+    let sql = if s.redact_query_log_literals && !is_own_row(&r.principal, &who) {
+        redact_literals(&r.sql_text)
+    } else {
+        r.sql_text.clone()
+    };
     Json(QueryLogDetail {
         id: r.query_id,
         state: r.state,
@@ -623,7 +641,7 @@ pub async fn detail(
         catalog: r.catalog,
         schema: r.schema_name,
         query_type: r.query_type,
-        sql: r.sql_text,
+        sql,
         sql_hash: r.sql_hash,
         created_at: r.created_ms,
         started_at: r.started_ms,

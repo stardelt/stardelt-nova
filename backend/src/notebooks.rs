@@ -2044,6 +2044,7 @@ mod tests {
             http: reqwest::Client::new(),
             demo: false,
             forward_identity: false,
+            redact_query_log_literals: false,
             jobs: Mutex::new(Vec::new()),
             demo_state: std::sync::RwLock::new(DemoState::default()),
             kube: None,

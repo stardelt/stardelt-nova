@@ -203,6 +203,9 @@ pub struct AppState {
     /// rather than a UI one. The catalog is not in this: Lakekeeper always sees Nova's own
     /// service token (`catalog_token.rs`), because per-user catalog rights do not exist yet.
     pub forward_identity: bool,
+    /// Show the statement of somebody else's query with its string literals replaced by `'?'`
+    /// (`NOVA_QUERY_LOG_REDACT_LITERALS=1`). Off by default; the owner always sees their own text.
+    pub redact_query_log_literals: bool,
     pub jobs: Mutex<Vec<jobs::Job>>,
     pub demo_state: RwLock<demo::DemoState>,
     /// Cluster client for the read-only workload view. `None` in demo mode, or when
@@ -980,6 +983,7 @@ async fn main() -> anyhow::Result<()> {
         http,
         demo: demo_mode,
         forward_identity: env_flag("NOVA_FORWARD_IDENTITY"),
+        redact_query_log_literals: env_flag("NOVA_QUERY_LOG_REDACT_LITERALS"),
         jobs: Mutex::new(Vec::new()),
         demo_state: RwLock::new(demo_state),
         kube,
@@ -1267,6 +1271,7 @@ mod router_tests {
             http: reqwest::Client::new(),
             demo: demo_mode,
             forward_identity: false,
+            redact_query_log_literals: false,
             jobs: Mutex::new(Vec::new()),
             demo_state: RwLock::new(demo::DemoState::default()),
             kube,
