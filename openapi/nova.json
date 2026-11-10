@@ -3098,6 +3098,71 @@
         }
       }
     },
+    "/api/lineage/columns": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "operationId": "lineage_columns",
+        "parameters": [
+          {
+            "name": "catalog",
+            "in": "query",
+            "description": "Catalog",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "schema",
+            "in": "query",
+            "description": "Schema",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "table",
+            "in": "query",
+            "description": "Table",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "days",
+            "in": "query",
+            "description": "Days to look back, 1-365, default 90",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Where each column comes from",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ColumnLineage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "catalog/schema/table required"
+          },
+          "403": {
+            "description": "Not visible"
+          }
+        }
+      }
+    },
     "/api/lineage/runs/{run_id}": {
       "get": {
         "tags": [
@@ -7306,6 +7371,75 @@
           "type": {
             "type": "string",
             "description": "The field's type as text; a complex type is its JSON text."
+          }
+        }
+      },
+      "ColumnLineage": {
+        "type": "object",
+        "required": [
+          "columns"
+        ],
+        "properties": {
+          "columns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ColumnLineageEntry"
+            }
+          }
+        }
+      },
+      "ColumnLineageEntry": {
+        "type": "object",
+        "required": [
+          "column",
+          "sources",
+          "lastSeen"
+        ],
+        "properties": {
+          "column": {
+            "type": "string"
+          },
+          "lastSeen": {
+            "type": "string"
+          },
+          "sources": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ColumnSource"
+            }
+          }
+        }
+      },
+      "ColumnSource": {
+        "type": "object",
+        "description": "One source column of an output column. A source outside the caller's catalogs is\nanswered as `{ \"hidden\": true }`, without names.",
+        "properties": {
+          "catalog": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "column": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "hidden": {
+            "type": "boolean"
+          },
+          "schema": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "table": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
-import { ApiError, api, errorMessage, formatCell, type IcebergField, type LineageNodeView, type QueryResult, type TableDocumentation, type TableMetadata } from '../api'
+import { ApiError, api, errorMessage, formatCell, type ColumnSource, type IcebergField, type LineageNodeView, type QueryResult, type TableDocumentation, type TableMetadata } from '../api'
 import { useCatalogs } from '../components/CatalogSelect'
 import CatalogBreadcrumb from '../components/CatalogBreadcrumb'
 import CatalogOverview from '../components/CatalogOverview'
@@ -226,7 +226,7 @@ function TableDetail({ ns, tbl, catalog, kind }: Sel & { catalog?: string; kind?
         <ColumnsTab
           ns={ns}
           tbl={tbl}
-          catalog={catalog}
+          catalog={catalogName ?? catalog}
           fields={schema?.fields}
           docs={docs}
           onSaved={onDocsSaved}
@@ -239,6 +239,38 @@ function TableDetail({ ns, tbl, catalog, kind }: Sel & { catalog?: string; kind?
 
       {tab === 'lineage' && <LineageTab ns={ns} tbl={tbl} catalog={catalogName} />}
     </div>
+  )
+}
+
+/** Where one column comes from: `schema.table.column`, the table linking to its lineage page. */
+function ColumnSources({ loading, failed, sources }: {
+  loading: boolean
+  failed: boolean
+  sources: ColumnSource[]
+}) {
+  if (failed) return null
+  if (loading) return <span className="text-text-mute">…</span>
+  if (sources.length === 0) return <>—</>
+  return (
+    <ul className="space-y-0.5">
+      {sources.map((s, i) => (
+        <li key={i} className="text-xs font-mono break-words">
+          {s.hidden || !s.catalog || !s.schema || !s.table || !s.column
+            ? <span className="text-text-mute">a column you cannot see</span>
+            : (
+              <>
+                <Link
+                  to={lineageHref({ namespace: `${s.catalog}.${s.schema}`, name: s.table })}
+                  className="text-accent hover:underline"
+                >
+                  {s.schema}.{s.table}
+                </Link>
+                <span className="text-text-dim">.{s.column}</span>
+              </>
+            )}
+        </li>
+      ))}
+    </ul>
   )
 }
 
@@ -260,6 +292,17 @@ function ColumnsTab({ ns, tbl, catalog, fields, docs, onSaved }: {
   const area = useRef<HTMLTextAreaElement>(null)
   const editButtons = useRef(new Map<string, HTMLButtonElement>())
   const pendingFocus = useRef<string | null>(null)
+
+  // Where each column comes from: what Trino recorded when this table was written (#650).
+  // Lineage never breaks the tab, so a failure leaves the cell empty and says nothing.
+  const lineage = useQuery({
+    queryKey: ['lineage-columns', catalog, ns, tbl],
+    queryFn: () => api.lineageColumns(catalog!, ns, tbl),
+    enabled: Boolean(catalog),
+    retry: false,
+    staleTime: 60_000,
+  })
+  const sourcesByColumn = new Map((lineage.data?.columns ?? []).map(c => [c.column, c.sources]))
 
   useEffect(() => {
     if (editing !== null) {
@@ -315,6 +358,7 @@ function ColumnsTab({ ns, tbl, catalog, fields, docs, onSaved }: {
               <th className="th px-4 py-2.5">#</th>
               <th className="th px-4 py-2.5">Column</th>
               <th className="th px-4 py-2.5">Type</th>
+              <th className="th px-4 py-2.5">From</th>
               <th className="th px-4 py-2.5">Required</th>
               <th className="th px-4 py-2.5">Description</th>
             </tr>
@@ -325,6 +369,13 @@ function ColumnsTab({ ns, tbl, catalog, fields, docs, onSaved }: {
                 <td className="td px-4 text-text-mute font-mono">{f.id}</td>
                 <td className="td px-4 font-mono break-words">{f.name}</td>
                 <td className="td px-4 text-text-dim font-mono break-words">{typeof f.type === 'string' ? f.type : JSON.stringify(f.type)}</td>
+                <td className="td px-4 text-text-dim max-w-[20rem]">
+                  <ColumnSources
+                    loading={lineage.isLoading}
+                    failed={lineage.isError}
+                    sources={sourcesByColumn.get(f.name) ?? []}
+                  />
+                </td>
                 <td className="td px-4 text-text-mute">{f.required ? 'yes' : '—'}</td>
                 <td className="td px-4 text-text-dim max-w-[32rem]">
                   {editing === f.name ? (

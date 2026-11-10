@@ -1159,6 +1159,25 @@ export type LineageGraphView = {
   edges: LineageEdgeView[]
 }
 
+/** One source column; a source the caller may not read carries only `hidden`. */
+export type ColumnSource = {
+  catalog?: string
+  schema?: string
+  table?: string
+  column?: string
+  hidden?: boolean
+}
+
+export type ColumnLineageEntry = {
+  column: string
+  sources: ColumnSource[]
+  lastSeen: string
+}
+
+export type ColumnLineage = {
+  columns: ColumnLineageEntry[]
+}
+
 function pipelineLogUrl(
   namespace: string,
   name: string,
@@ -1326,6 +1345,9 @@ export const api = {
     const query = qs.toString()
     return jget<LineageGraphView>(query ? `/api/lineage?${query}` : '/api/lineage')
   },
+  /** Where each column of one table comes from (stardelt-nova#650). */
+  lineageColumns: (catalog: string, schema: string, table: string) =>
+    jget<ColumnLineage>(`/api/lineage/columns?${new URLSearchParams({ catalog, schema, table }).toString()}`),
 }
 
 /**
