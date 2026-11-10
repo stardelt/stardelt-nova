@@ -94,6 +94,7 @@ mod apps;
 mod audit;
 mod auth;
 mod catalog;
+mod catalog_doc_store;
 mod catalog_docs;
 mod catalog_metrics;
 mod catalog_search;

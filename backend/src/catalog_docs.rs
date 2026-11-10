@@ -850,7 +850,9 @@ async fn write_documentation(
     };
     let can_rollback_v = may_rollback(who, catalog_owner.as_deref());
     let rollback_rule_v = rollback_rule(who, catalog_owner.as_deref());
-    Ok(documentation(&loaded, who, can_rollback_v, rollback_rule_v))
+    let doc = documentation(&loaded, who, can_rollback_v, rollback_rule_v);
+    crate::catalog_doc_store::record(state.db.as_ref(), catalog.name, ns, tbl, &doc).await;
+    Ok(doc)
 }
 
 /// `PUT /api/catalog/tables/{ns}/{tbl}/columns/{column}/description`.
@@ -922,7 +924,9 @@ where
     };
     let can_rollback_v = may_rollback(who, catalog_owner.as_deref());
     let rollback_rule_v = rollback_rule(who, catalog_owner.as_deref());
-    Ok(documentation(&loaded, who, can_rollback_v, rollback_rule_v))
+    let doc = documentation(&loaded, who, can_rollback_v, rollback_rule_v);
+    crate::catalog_doc_store::record(state.db.as_ref(), catalog.name, ns, tbl, &doc).await;
+    Ok(doc)
 }
 
 /// The only escaping a Trino string literal needs at these sizes: `'` doubles, and nothing
