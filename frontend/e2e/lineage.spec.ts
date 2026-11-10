@@ -291,3 +291,23 @@ test('the selected table opens in the catalog', async ({ page }) => {
   await link.click()
   await expect(page).toHaveURL(/\/catalog\?catalog=lakehouse&ns=staging&tbl=trips_clean/)
 })
+
+test('the panel reserves its width, so the consumer cards are not under it', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await stub(page)
+  await page.goto('/lineage?catalog=lakehouse&schema=staging&table=trips_clean')
+
+  const node = (name: string) => page.locator('main').getByRole('button', { name: new RegExp(name) })
+  await node('trips_clean').click()
+
+  const flow = (await page.locator('.react-flow').boundingBox())!
+  const panel = (await page.getByRole('complementary', { name: /trips_clean lineage/ }).boundingBox())!
+  // The flow's right edge stops at the panel's left edge: nothing is drawn under the panel.
+  expect(flow.x + flow.width).toBeLessThanOrEqual(panel.x + 0.5)
+
+  // Escape closes the panel and the graph gets the width back.
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('complementary', { name: /trips_clean lineage/ })).toHaveCount(0)
+  const wide = (await page.locator('.react-flow').boundingBox())!
+  expect(wide.width).toBeGreaterThan(flow.width + 300)
+})
