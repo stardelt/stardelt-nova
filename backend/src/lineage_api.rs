@@ -1,6 +1,6 @@
 //! Lineage graph API (D40, WP-34a).
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use axum::{
@@ -45,17 +45,27 @@ pub struct LineageNode {
     /// The newest event time of an edge that wrote this node.
     #[serde(rename = "lastWrite", skip_serializing_if = "Option::is_none")]
     pub last_write: Option<String>,
+    /// True when every used flow that touches this node was a hand-made (ad-hoc) job.
+    #[serde(rename = "handMade")]
+    pub hand_made: bool,
     /// Read-only queries against this node in the window (visible nodes only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub readers: Option<LineageReaders>,
+    /// The jobs that wrote this node, newest first; only on the focus node.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub writers: Option<Vec<LineageWriter>>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LineageReaders {
     pub queries: i64,
+    /// Distinct people: the SQL editor and notebooks, never a BI tool.
     pub people: i64,
     pub last_read: String,
+    /// The tools that read this node, most queries first, at most 5.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<String>,
 }
 
 /// One job that wrote an edge of the answer, with its runs in the window.
@@ -63,6 +73,18 @@ pub struct LineageReaders {
 #[serde(rename_all = "camelCase")]
 pub struct LineageJob {
     pub id: String,
+    pub kind: String,
+    pub name: String,
+    pub runs: i64,
+    pub last_run: String,
+    #[serde(rename = "handMade")]
+    pub hand_made: bool,
+}
+
+/// One job that wrote the focus table, with its runs in the window.
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LineageWriter {
     pub kind: String,
     pub name: String,
     pub runs: i64,
@@ -81,6 +103,8 @@ pub struct LineageEdge {
     pub run_id: String,
     #[serde(rename = "eventTime")]
     pub event_time: String,
+    /// The runs of this job that wrote this edge in the window.
+    pub runs: i64,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -121,48 +145,331 @@ fn dataset_id(ns: &str, name: &str) -> String {
 }
 
 /// Edges inside the window; `$1` is the window in days.
-const EDGES_SQL: &str = "SELECT run_id::text, job_namespace, job_name, dataset_namespace, dataset_name, direction \
+const EDGES_SQL: &str = "SELECT run_id::text, job_namespace, job_name, dataset_namespace, dataset_name, direction, \
+       to_char(event_time, 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') \
      FROM lineage_edges \
      WHERE event_time > now() - make_interval(days => $1::int)";
 
-/// Each run's newest event time inside the window.
-const EDGE_TIMES_SQL: &str = "SELECT run_id::text, to_char(MAX(event_time), 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') \
-     FROM lineage_edges \
-     WHERE event_time > now() - make_interval(days => $1::int) \
-     GROUP BY run_id";
-
 /// Readers of the visible datasets in the window (lineage L2, stardelt-nova#647).
-const READERS_SQL: &str = "SELECT dataset_namespace, dataset_name, sum(queries), count(DISTINCT job_name), \
+const READERS_SQL: &str = "SELECT dataset_namespace, dataset_name, job_namespace, job_name, sum(queries), \
        to_char(max(last_read), 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') \
      FROM lineage_reads \
      WHERE day > (now() - make_interval(days => $1::int))::date \
        AND job_namespace IN ('sql-editor','query','notebook') \
        AND (dataset_namespace, dataset_name) IN (SELECT * FROM unnest($2::text[], $3::text[])) \
-     GROUP BY 1, 2";
+     GROUP BY 1, 2, 3, 4";
 
-/// The level of a dataset one run away from `level`: a dataset the run reads sits one
-/// level further upstream (negative), one it writes one level further downstream (positive).
-fn adjacent_level(level: i32, direction: &str) -> i32 {
-    if direction == "input" {
-        level - 1
+/// One `lineage_edges` row: a dataset of one run, in or out.
+#[derive(Debug, Clone)]
+pub(crate) struct EdgeRow {
+    pub run: String,
+    pub job_ns: String,
+    pub job: String,
+    pub ns: String,
+    pub name: String,
+    pub output: bool,
+    pub time: String,
+}
+
+/// A dataset pair one job wrote, with the runs that wrote it in the window.
+struct Flow {
+    from: (String, String),
+    to: (String, String),
+    job_ns: String,
+    job: String,
+    runs: HashSet<String>,
+    last: String,
+    last_run: String,
+}
+
+type Dataset = (String, String);
+
+fn dataset(ns: &str, name: &str) -> Dataset {
+    (ns.to_string(), name.to_string())
+}
+
+/// A job namespace as the answer names it: a query id's namespace is a query, not a job kind.
+fn job_kind(job_ns: &str) -> String {
+    if job_ns == "trino" {
+        "query".to_string()
     } else {
-        level + 1
+        job_ns.to_string()
     }
 }
 
-/// The datasets a run links `current` to, each with its level. The run's own datasets are
-/// `(direction, namespace, name)` rows.
-fn run_neighbours(
-    datasets: &[(String, String, String)],
-    current_ns: &str,
-    current_name: &str,
-    level: i32,
-) -> Vec<(String, String, i32)> {
-    datasets
+/// Build the answer from the window's edge rows. Data flows `from` → `to`; `level` is 0 at
+/// the focus, negative upstream, positive downstream.
+pub(crate) fn build_graph(
+    rows: &[EdgeRow],
+    focus: (&str, &str),
+    depth: i32,
+    visible: &dyn Fn(&str) -> bool,
+) -> LineageGraph {
+    // One flow per (input, output, job): 30 daily runs of one job are one flow.
+    let mut by_run: BTreeMap<&str, (Vec<&EdgeRow>, Vec<&EdgeRow>)> = BTreeMap::new();
+    for row in rows {
+        let entry = by_run.entry(row.run.as_str()).or_default();
+        if row.output {
+            entry.1.push(row);
+        } else {
+            entry.0.push(row);
+        }
+    }
+
+    let mut flows: Vec<Flow> = Vec::new();
+    let mut flow_index: HashMap<(Dataset, Dataset, String, String), usize> = HashMap::new();
+    for (run, (inputs, outputs)) in &by_run {
+        for i in inputs {
+            for o in outputs {
+                if i.ns == o.ns && i.name == o.name {
+                    continue;
+                }
+                let key = (
+                    dataset(&i.ns, &i.name),
+                    dataset(&o.ns, &o.name),
+                    i.job_ns.clone(),
+                    i.job.clone(),
+                );
+                let at = match flow_index.get(&key) {
+                    Some(&at) => at,
+                    None => {
+                        flow_index.insert(key.clone(), flows.len());
+                        flows.push(Flow {
+                            from: key.0,
+                            to: key.1,
+                            job_ns: key.2,
+                            job: key.3,
+                            runs: HashSet::new(),
+                            last: String::new(),
+                            last_run: String::new(),
+                        });
+                        flows.len() - 1
+                    }
+                };
+                let flow = &mut flows[at];
+                flow.runs.insert((*run).to_string());
+                let time = if i.time >= o.time { &i.time } else { &o.time };
+                if flow.last.is_empty() || *time > flow.last {
+                    flow.last = time.clone();
+                    flow.last_run = (*run).to_string();
+                }
+            }
+        }
+    }
+
+    // The walks. A node keeps the level of the first path that reaches it; both walks share
+    // the levels, so neither turns around at a node the other one found.
+    let focus_ds = dataset(focus.0, focus.1);
+    let mut levels: HashMap<Dataset, i32> = HashMap::new();
+    levels.insert(focus_ds.clone(), 0);
+    let mut order: Vec<Dataset> = vec![focus_ds.clone()];
+    let mut used: HashSet<usize> = HashSet::new();
+
+    let mut frontier = vec![focus_ds.clone()];
+    while !frontier.is_empty() {
+        let mut next: Vec<Dataset> = Vec::new();
+        for node in &frontier {
+            let level = levels[node];
+            if level - 1 < -depth {
+                continue;
+            }
+            for (at, flow) in flows.iter().enumerate() {
+                if flow.to != *node {
+                    continue;
+                }
+                if levels.contains_key(&flow.from) {
+                    continue;
+                }
+                used.insert(at);
+                levels.insert(flow.from.clone(), level - 1);
+                order.push(flow.from.clone());
+                next.push(flow.from.clone());
+            }
+        }
+        frontier = next;
+    }
+
+    let mut frontier = vec![focus_ds.clone()];
+    while !frontier.is_empty() {
+        let mut next: Vec<Dataset> = Vec::new();
+        for node in &frontier {
+            let level = levels[node];
+            if level + 1 > depth {
+                continue;
+            }
+            for (at, flow) in flows.iter().enumerate() {
+                if flow.from != *node {
+                    continue;
+                }
+                if levels.contains_key(&flow.to) {
+                    continue;
+                }
+                used.insert(at);
+                levels.insert(flow.to.clone(), level + 1);
+                order.push(flow.to.clone());
+                next.push(flow.to.clone());
+            }
+        }
+        frontier = next;
+    }
+
+    // The newest write that reached each dataset, from every row of the window.
+    let mut last_writes: HashMap<Dataset, String> = HashMap::new();
+    for row in rows.iter().filter(|r| r.output) {
+        let entry = last_writes.entry(dataset(&row.ns, &row.name)).or_default();
+        if row.time > *entry {
+            *entry = row.time.clone();
+        }
+    }
+
+    // Nodes, focus first, in the order the walks found them.
+    let mut nodes: Vec<LineageNode> = Vec::new();
+    let mut hidden_ids: HashMap<Dataset, String> = HashMap::new();
+    let mut hidden_seq: usize = 0;
+    for ds in &order {
+        let is_visible = ds == &focus_ds || visible(&ds.0);
+        let id = if is_visible {
+            dataset_id(&ds.0, &ds.1)
+        } else {
+            hidden_ids.entry(ds.clone()).or_insert_with(|| {
+                hidden_seq += 1;
+                format!("hidden-{hidden_seq}")
+            });
+            hidden_ids[ds].clone()
+        };
+        let hand_made = if ds == &focus_ds {
+            false
+        } else {
+            used.iter().all(|&at| {
+                let flow = &flows[at];
+                (flow.from != *ds && flow.to != *ds) || flow.job_ns != "pipeline"
+            })
+        };
+        let (namespace, name, label) = if is_visible {
+            (ds.0.clone(), ds.1.clone(), None)
+        } else {
+            (String::new(), String::new(), Some(hidden_label()))
+        };
+        nodes.push(LineageNode {
+            id,
+            namespace,
+            name,
+            visible: is_visible,
+            label,
+            level: if is_visible { Some(levels[ds]) } else { None },
+            last_write: if is_visible {
+                last_writes.get(ds).cloned()
+            } else {
+                None
+            },
+            hand_made,
+            readers: None,
+            writers: None,
+        });
+    }
+
+    // One edge per used flow.
+    let id_of = |ds: &Dataset| -> String {
+        match hidden_ids.get(ds) {
+            Some(id) => id.clone(),
+            None => dataset_id(&ds.0, &ds.1),
+        }
+    };
+    let mut edges: Vec<LineageEdge> = Vec::new();
+    for (at, flow) in flows.iter().enumerate() {
+        if !used.contains(&at) {
+            continue;
+        }
+        edges.push(LineageEdge {
+            from: id_of(&flow.from),
+            to: id_of(&flow.to),
+            job_namespace: flow.job_ns.clone(),
+            job_name: flow.job.clone(),
+            run_id: flow.last_run.clone(),
+            event_time: flow.last.clone(),
+            runs: flow.runs.len() as i64,
+        });
+    }
+
+    // One entry per job of the used flows.
+    let mut jobs: Vec<LineageJob> = Vec::new();
+    let mut job_index: HashMap<(String, String), usize> = HashMap::new();
+    let mut job_runs: Vec<HashSet<String>> = Vec::new();
+    for (at, flow) in flows.iter().enumerate() {
+        if !used.contains(&at) {
+            continue;
+        }
+        let key = (job_kind(&flow.job_ns), flow.job.clone());
+        let at_idx = match job_index.get(&key) {
+            Some(&idx) => idx,
+            None => {
+                job_index.insert(key.clone(), jobs.len());
+                job_runs.push(HashSet::new());
+                jobs.push(LineageJob {
+                    id: format!("{}|{}", key.0, key.1),
+                    kind: key.0.clone(),
+                    name: key.1.clone(),
+                    runs: 0,
+                    last_run: flow.last.clone(),
+                    hand_made: key.0 != "pipeline",
+                });
+                jobs.len() - 1
+            }
+        };
+        for run in &flow.runs {
+            job_runs[at_idx].insert(run.clone());
+        }
+        if flow.last > jobs[at_idx].last_run {
+            jobs[at_idx].last_run = flow.last.clone();
+        }
+    }
+    for (job, runs) in jobs.iter_mut().zip(job_runs) {
+        job.runs = runs.len() as i64;
+    }
+    jobs.sort_by(|a, b| a.id.cmp(&b.id));
+
+    // The jobs that wrote the focus, pipeline first.
+    let mut writers: Vec<LineageWriter> = Vec::new();
+    let mut writer_index: HashMap<(String, String), usize> = HashMap::new();
+    let mut writer_runs: Vec<HashSet<String>> = Vec::new();
+    for row in rows
         .iter()
-        .filter(|(_, ns, name)| ns != current_ns || name != current_name)
-        .map(|(direction, ns, name)| (ns.clone(), name.clone(), adjacent_level(level, direction)))
-        .collect()
+        .filter(|r| r.output && r.ns == focus.0 && r.name == focus.1)
+    {
+        let key = (job_kind(&row.job_ns), row.job.clone());
+        let at = match writer_index.get(&key) {
+            Some(&at) => at,
+            None => {
+                writer_index.insert(key.clone(), writers.len());
+                writer_runs.push(HashSet::new());
+                writers.push(LineageWriter {
+                    kind: key.0.clone(),
+                    name: key.1.clone(),
+                    runs: 0,
+                    last_run: row.time.clone(),
+                });
+                writers.len() - 1
+            }
+        };
+        writer_runs[at].insert(row.run.clone());
+        if row.time > writers[at].last_run {
+            writers[at].last_run = row.time.clone();
+        }
+    }
+    for (writer, runs) in writers.iter_mut().zip(writer_runs) {
+        writer.runs = runs.len() as i64;
+    }
+    writers.sort_by(|a, b| {
+        (a.kind != "pipeline")
+            .cmp(&(b.kind != "pipeline"))
+            .then(b.runs.cmp(&a.runs))
+            .then(b.last_run.cmp(&a.last_run))
+    });
+    if let Some(focus_node) = nodes.first_mut() {
+        focus_node.writers = Some(writers);
+    }
+
+    LineageGraph { nodes, edges, jobs }
 }
 
 #[utoipa::path(
@@ -224,216 +531,96 @@ pub async fn graph(
         None => return error_response(StatusCode::SERVICE_UNAVAILABLE, "state store unavailable"),
     };
 
-    let start_id = dataset_id(&start_ns, &start_name);
-
-    // Load the edges and their times inside the window.
-    let rows: Vec<(String, String, String, String, String, String)> = sqlx::query_as(EDGES_SQL)
-        .bind(days)
-        .fetch_all(pool)
-        .await
-        .unwrap_or_default();
-
-    let times: Vec<(String, String)> = sqlx::query_as(EDGE_TIMES_SQL)
-        .bind(days)
-        .fetch_all(pool)
-        .await
-        .unwrap_or_default();
-    let time_map: HashMap<String, String> = times.into_iter().collect();
-
-    // Group by run
-    #[allow(clippy::type_complexity)]
-    let mut runs: HashMap<String, (String, String, Vec<(String, String, String)>)> = HashMap::new();
-    for row in &rows {
-        runs.entry(row.0.clone())
-            .or_insert_with(|| (row.1.clone(), row.2.clone(), vec![]))
-            .2
-            .push((row.5.clone(), row.3.clone(), row.4.clone()));
-    }
-
-    let mut result_nodes: HashMap<String, LineageNode> = HashMap::new();
-    let mut result_edges: Vec<LineageEdge> = Vec::new();
-    let mut hidden_ids: HashMap<String, String> = HashMap::new(); // real id -> opaque id
-    let mut hidden_seq: usize = 0;
-
-    // Add start node (must be visible, checked above)
-    result_nodes.insert(
-        start_id.clone(),
-        LineageNode {
-            id: start_id.clone(),
-            namespace: start_ns.clone(),
-            name: start_name.clone(),
-            visible: true,
-            label: None,
-            level: Some(0),
-            last_write: None,
-            readers: None,
-        },
-    );
-
-    let mut to_visit = vec![(start_ns.clone(), start_name.clone(), 0i32, start_id.clone())];
-    let mut visited = HashSet::new();
-    visited.insert((start_ns.clone(), start_name.clone()));
-
-    while let Some((cur_ns, cur_name, d, cur_id)) = to_visit.pop() {
-        if d >= depth {
-            continue;
-        }
-        let cur_level = result_nodes
-            .get(&cur_id)
-            .and_then(|n| n.level)
+    let rows: Vec<(String, String, String, String, String, String, String)> =
+        sqlx::query_as(EDGES_SQL)
+            .bind(days)
+            .fetch_all(pool)
+            .await
             .unwrap_or_default();
-        for (run_id, (job_ns, job_name, datasets)) in &runs {
-            let has_cur = datasets
-                .iter()
-                .any(|(_, dns, dname)| dns == &cur_ns && dname == &cur_name);
-            if !has_cur {
-                continue;
-            }
-            for (dns, dname, node_level) in run_neighbours(datasets, &cur_ns, &cur_name, cur_level)
-            {
-                let real_id = dataset_id(&dns, &dname);
-                let ds_catalog = dns.split('.').next().unwrap_or("");
-                let is_visible = allowed.is_empty()
-                    || allowed.contains(ds_catalog)
-                    || (catalog_name.is_some()
-                        && allowed
-                            .iter()
-                            .any(|a| dns.starts_with(&format!("{a}.")) || dns == *a));
-                let nds_id = if is_visible {
-                    real_id.clone()
-                } else if let Some(id) = hidden_ids.get(&real_id) {
-                    id.clone()
-                } else {
-                    hidden_seq += 1;
-                    let id = format!("hidden-{hidden_seq}");
-                    hidden_ids.insert(real_id.clone(), id.clone());
-                    id
-                };
-                if !visited.contains(&(dns.clone(), dname.clone())) {
-                    // The level of the first path that reaches a node is the one it keeps.
-                    let level = if is_visible {
-                        Some(
-                            result_nodes
-                                .get(&nds_id)
-                                .and_then(|n| n.level)
-                                .unwrap_or(node_level),
-                        )
-                    } else {
-                        None
-                    };
-                    let (namespace, name, label) = if is_visible {
-                        (dns.clone(), dname.clone(), None)
-                    } else {
-                        (String::new(), String::new(), Some(hidden_label()))
-                    };
-                    result_nodes.insert(
-                        nds_id.clone(),
-                        LineageNode {
-                            id: nds_id.clone(),
-                            namespace,
-                            name,
-                            visible: is_visible,
-                            label,
-                            level,
-                            last_write: None,
-                            readers: None,
-                        },
-                    );
-                    if d + 1 < depth {
-                        to_visit.push((dns.clone(), dname.clone(), d + 1, nds_id.clone()));
-                        visited.insert((dns.clone(), dname.clone()));
-                    }
-                }
-                result_edges.push(LineageEdge {
-                    from: cur_id.clone(),
-                    to: nds_id.clone(),
-                    job_namespace: job_ns.clone(),
-                    job_name: job_name.clone(),
-                    run_id: run_id.clone(),
-                    event_time: time_map
-                        .get(run_id)
-                        .cloned()
-                        .unwrap_or_else(|| "2026-01-01T00:00:00Z".to_string()),
-                });
-            }
-        }
-    }
+    let edge_rows: Vec<EdgeRow> = rows
+        .into_iter()
+        .map(|(run, job_ns, job, ns, name, direction, time)| EdgeRow {
+            run,
+            job_ns,
+            job,
+            ns,
+            name,
+            output: direction == "output",
+            time,
+        })
+        .collect();
 
-    // The newest write that reached each visible node.
-    for edge in &result_edges {
-        if let Some(node) = result_nodes.get_mut(&edge.to)
-            && node.visible
-            && node
-                .last_write
-                .as_ref()
-                .is_none_or(|seen| edge.event_time > *seen)
-        {
-            node.last_write = Some(edge.event_time.clone());
-        }
-    }
+    let is_visible = |ns: &str| -> bool {
+        let ds_catalog = ns.split('.').next().unwrap_or("");
+        allowed.is_empty()
+            || allowed.contains(ds_catalog)
+            || (catalog_name.is_some()
+                && allowed
+                    .iter()
+                    .any(|a| ns.starts_with(&format!("{a}.")) || ns == a))
+    };
+    let mut graph = build_graph(&edge_rows, (&start_ns, &start_name), depth, &is_visible);
 
     // Readers of the visible nodes, in one query.
     let mut read_ns: Vec<String> = Vec::new();
     let mut read_names: Vec<String> = Vec::new();
-    for node in result_nodes.values().filter(|n| n.visible) {
+    for node in graph.nodes.iter().filter(|n| n.visible) {
         read_ns.push(node.namespace.clone());
         read_names.push(node.name.clone());
     }
     if !read_ns.is_empty() {
-        let reads: Vec<(String, String, i64, i64, String)> = sqlx::query_as(READERS_SQL)
+        struct ReadAcc {
+            queries: i64,
+            people: HashSet<String>,
+            tools: HashMap<String, i64>,
+            last_read: String,
+        }
+        let reads: Vec<(String, String, String, String, i64, String)> = sqlx::query_as(READERS_SQL)
             .bind(days)
             .bind(&read_ns)
             .bind(&read_names)
             .fetch_all(pool)
             .await
             .unwrap_or_default();
-        for (ns, name, queries, people, last_read) in reads {
-            if let Some(node) = result_nodes.get_mut(&dataset_id(&ns, &name)) {
+        let mut accs: HashMap<String, ReadAcc> = HashMap::new();
+        for (ns, name, job_ns, job, queries, last_read) in reads {
+            let acc = accs
+                .entry(dataset_id(&ns, &name))
+                .or_insert_with(|| ReadAcc {
+                    queries: 0,
+                    people: HashSet::new(),
+                    tools: HashMap::new(),
+                    last_read: String::new(),
+                });
+            acc.queries += queries;
+            match job_ns.as_str() {
+                "sql-editor" | "notebook" => {
+                    acc.people.insert(job);
+                }
+                "query" => {
+                    *acc.tools.entry(job).or_default() += queries;
+                }
+                _ => {}
+            }
+            if last_read > acc.last_read {
+                acc.last_read = last_read;
+            }
+        }
+        for (id, acc) in accs {
+            let mut tools: Vec<(String, i64)> = acc.tools.into_iter().collect();
+            tools.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+            let tools: Vec<String> = tools.into_iter().take(5).map(|(name, _)| name).collect();
+            if let Some(node) = graph.nodes.iter_mut().find(|n| n.id == id) {
                 node.readers = Some(LineageReaders {
-                    queries,
-                    people,
-                    last_read,
+                    queries: acc.queries,
+                    people: acc.people.len() as i64,
+                    last_read: acc.last_read,
+                    tools,
                 });
             }
         }
     }
 
-    // One entry per job that wrote an edge of the answer.
-    let mut jobs: Vec<LineageJob> = Vec::new();
-    let mut job_index: HashMap<(String, String), usize> = HashMap::new();
-    let mut job_runs: Vec<HashSet<String>> = Vec::new();
-    for edge in &result_edges {
-        let key = (edge.job_namespace.clone(), edge.job_name.clone());
-        let at = match job_index.get(&key) {
-            Some(&at) => at,
-            None => {
-                job_index.insert(key.clone(), jobs.len());
-                job_runs.push(HashSet::new());
-                jobs.push(LineageJob {
-                    id: format!("{}|{}", key.0, key.1),
-                    kind: key.0.clone(),
-                    name: key.1.clone(),
-                    runs: 0,
-                    last_run: edge.event_time.clone(),
-                });
-                jobs.len() - 1
-            }
-        };
-        job_runs[at].insert(edge.run_id.clone());
-        if edge.event_time > jobs[at].last_run {
-            jobs[at].last_run = edge.event_time.clone();
-        }
-    }
-    for (job, runs) in jobs.iter_mut().zip(job_runs) {
-        job.runs = runs.len() as i64;
-    }
-    jobs.sort_by(|a, b| a.id.cmp(&b.id));
-
-    let graph = LineageGraph {
-        nodes: result_nodes.into_values().collect(),
-        edges: result_edges,
-        jobs,
-    };
     (StatusCode::OK, Json(graph)).into_response()
 }
 
@@ -449,7 +636,9 @@ fn demo_graph_response(_start_ns: &str, _start_name: &str) -> Response {
                 label: None,
                 level: Some(-1),
                 last_write: None,
+                hand_made: false,
                 readers: None,
+                writers: None,
             },
             LineageNode {
                 id: "analytics|trips_by_borough".to_string(),
@@ -459,11 +648,19 @@ fn demo_graph_response(_start_ns: &str, _start_name: &str) -> Response {
                 label: None,
                 level: Some(0),
                 last_write: last_write.clone(),
+                hand_made: false,
                 readers: Some(LineageReaders {
                     queries: 12,
                     people: 3,
                     last_read: "2026-01-01T00:00:00Z".to_string(),
+                    tools: vec!["supertable".to_string()],
                 }),
+                writers: Some(vec![LineageWriter {
+                    kind: "pipeline".to_string(),
+                    name: "trips_by_borough_job".to_string(),
+                    runs: 30,
+                    last_run: "2026-01-01T00:00:00Z".to_string(),
+                }]),
             },
             LineageNode {
                 id: "analytics|daily_revenue".to_string(),
@@ -473,11 +670,14 @@ fn demo_graph_response(_start_ns: &str, _start_name: &str) -> Response {
                 label: None,
                 level: Some(1),
                 last_write: last_write.clone(),
+                hand_made: false,
                 readers: Some(LineageReaders {
                     queries: 5,
                     people: 2,
                     last_read: "2026-01-01T00:00:00Z".to_string(),
+                    tools: vec![],
                 }),
+                writers: None,
             },
         ],
         edges: vec![
@@ -488,6 +688,7 @@ fn demo_graph_response(_start_ns: &str, _start_name: &str) -> Response {
                 job_name: "trips_by_borough_job".to_string(),
                 run_id: "00000000-0000-0000-0000-000000000001".to_string(),
                 event_time: "2026-01-01T00:00:00Z".to_string(),
+                runs: 30,
             },
             LineageEdge {
                 from: "nyc_taxi|yellow_trips".to_string(),
@@ -496,6 +697,7 @@ fn demo_graph_response(_start_ns: &str, _start_name: &str) -> Response {
                 job_name: "daily_revenue_job".to_string(),
                 run_id: "00000000-0000-0000-0000-000000000002".to_string(),
                 event_time: "2026-01-01T00:00:00Z".to_string(),
+                runs: 30,
             },
         ],
         jobs: vec![
@@ -505,6 +707,7 @@ fn demo_graph_response(_start_ns: &str, _start_name: &str) -> Response {
                 name: "daily_revenue_job".to_string(),
                 runs: 1,
                 last_run: "2026-01-01T00:00:00Z".to_string(),
+                hand_made: false,
             },
             LineageJob {
                 id: "pipeline|trips_by_borough_job".to_string(),
@@ -512,6 +715,7 @@ fn demo_graph_response(_start_ns: &str, _start_name: &str) -> Response {
                 name: "trips_by_borough_job".to_string(),
                 runs: 1,
                 last_run: "2026-01-01T00:00:00Z".to_string(),
+                hand_made: false,
             },
         ],
     };
@@ -961,47 +1165,273 @@ mod tests {
         assert_eq!(json, serde_json::json!({ "hidden": true }));
     }
 
-    fn run(rows: &[(&str, &str, &str)]) -> Vec<(String, String, String)> {
-        rows.iter()
-            .map(|(direction, ns, name)| (direction.to_string(), ns.to_string(), name.to_string()))
-            .collect()
+    fn edge(
+        run: &str,
+        job_ns: &str,
+        job: &str,
+        ns: &str,
+        name: &str,
+        output: bool,
+        time: &str,
+    ) -> EdgeRow {
+        EdgeRow {
+            run: run.to_string(),
+            job_ns: job_ns.to_string(),
+            job: job.to_string(),
+            ns: ns.to_string(),
+            name: name.to_string(),
+            output,
+            time: time.to_string(),
+        }
     }
 
-    /// The level of every dataset the walk reaches from `focus`, and the focus at 0.
-    fn levels(focus: (&str, &str), runs: &[Vec<(String, String, String)>]) -> HashMap<String, i32> {
-        let mut levels: HashMap<String, i32> = HashMap::new();
-        levels.insert(format!("{}|{}", focus.0, focus.1), 0);
-        for datasets in runs {
-            if !datasets
-                .iter()
-                .any(|(_, ns, name)| ns == focus.0 && name == focus.1)
-            {
-                continue;
-            }
-            for (ns, name, level) in run_neighbours(datasets, focus.0, focus.1, 0) {
-                levels.entry(format!("{ns}|{name}")).or_insert(level);
-            }
+    /// Three pipelines over one table: 30 load runs, 30 zone-stat runs, 5 ad-hoc queries
+    /// that write a scratch table and 2 backfill queries.
+    fn fixture() -> Vec<EdgeRow> {
+        let mut rows: Vec<EdgeRow> = Vec::new();
+        for day in 0..30 {
+            let time = format!("2026-10-{:02}T00:00:00Z", day + 1);
+            let load = format!("load-{day}");
+            let zones = format!("zones-{day}");
+            rows.push(edge(
+                &load,
+                "pipeline",
+                "taxi/load-trips",
+                "l.landing",
+                "raw",
+                false,
+                &time,
+            ));
+            rows.push(edge(
+                &load,
+                "pipeline",
+                "taxi/load-trips",
+                "l.staging",
+                "clean",
+                true,
+                &time,
+            ));
+            rows.push(edge(
+                &zones,
+                "pipeline",
+                "taxi/zone-stats",
+                "l.staging",
+                "clean",
+                false,
+                &time,
+            ));
+            rows.push(edge(
+                &zones,
+                "pipeline",
+                "taxi/zone-stats",
+                "l.ref",
+                "zones",
+                false,
+                &time,
+            ));
+            rows.push(edge(
+                &zones,
+                "pipeline",
+                "taxi/zone-stats",
+                "l.marts",
+                "zone_stats",
+                true,
+                &time,
+            ));
         }
-        levels
+        for i in 0..5 {
+            let run = format!("adhoc-{i}");
+            let job = format!("q{i}");
+            rows.push(edge(
+                &run,
+                "trino",
+                &job,
+                "l.staging",
+                "clean",
+                false,
+                "2026-11-01T00:00:00Z",
+            ));
+            rows.push(edge(
+                &run,
+                "trino",
+                &job,
+                "l.scratch",
+                "tmp",
+                true,
+                "2026-11-01T00:00:00Z",
+            ));
+        }
+        for i in 0..2 {
+            let run = format!("adhoc2-{i}");
+            let job = format!("q2{i}");
+            rows.push(edge(
+                &run,
+                "trino",
+                &job,
+                "l.landing",
+                "raw_2023",
+                false,
+                "2026-10-30T00:00:00Z",
+            ));
+            rows.push(edge(
+                &run,
+                "trino",
+                &job,
+                "l.staging",
+                "clean",
+                true,
+                "2026-10-30T00:00:00Z",
+            ));
+        }
+        rows
+    }
+
+    fn graph_of(rows: &[EdgeRow], focus: (&str, &str), depth: i32) -> LineageGraph {
+        build_graph(rows, focus, depth, &|_| true)
+    }
+
+    fn node<'a>(graph: &'a LineageGraph, ns: &str, name: &str) -> &'a LineageNode {
+        graph
+            .nodes
+            .iter()
+            .find(|n| n.namespace == ns && n.name == name)
+            .unwrap_or_else(|| panic!("no node {ns}.{name}"))
+    }
+
+    #[test]
+    fn edges_point_the_way_data_flows() {
+        let graph = graph_of(&fixture(), ("l.staging", "clean"), 2);
+        let raw = dataset_id("l.landing", "raw");
+        let clean = dataset_id("l.staging", "clean");
+        assert!(
+            graph.edges.iter().any(|e| e.from == raw && e.to == clean),
+            "raw feeds clean"
+        );
+        assert!(
+            !graph.edges.iter().any(|e| e.from == clean && e.to == raw),
+            "clean is not fed by its own source"
+        );
+    }
+
+    #[test]
+    fn a_sibling_input_is_not_a_source() {
+        let graph = graph_of(&fixture(), ("l.staging", "clean"), 3);
+        assert!(
+            !graph
+                .nodes
+                .iter()
+                .any(|n| n.namespace == "l.ref" && n.name == "zones"),
+            "zones is a sibling input of the run, not a source of clean"
+        );
+    }
+
+    #[test]
+    fn runs_of_one_job_make_one_edge() {
+        let graph = graph_of(&fixture(), ("l.staging", "clean"), 2);
+        let raw = dataset_id("l.landing", "raw");
+        let clean = dataset_id("l.staging", "clean");
+        let edges: Vec<&LineageEdge> = graph
+            .edges
+            .iter()
+            .filter(|e| e.from == raw && e.to == clean)
+            .collect();
+        assert_eq!(edges.len(), 1, "30 runs of one job are one edge");
+        assert_eq!(edges[0].runs, 30);
+        assert!(
+            graph.edges.len() <= 4,
+            "the answer has at most four edges, found {}",
+            graph.edges.len()
+        );
+    }
+
+    #[test]
+    fn the_pipeline_is_the_writer() {
+        let graph = graph_of(&fixture(), ("l.staging", "clean"), 2);
+        let focus = graph
+            .nodes
+            .iter()
+            .find(|n| n.level == Some(0))
+            .expect("focus node");
+        let writers = focus.writers.as_ref().expect("the focus has writers");
+        assert_eq!(writers[0].kind, "pipeline");
+        assert_eq!(writers[0].name, "taxi/load-trips");
+        assert_eq!(writers[0].runs, 30);
+        assert!(
+            writers.iter().skip(1).any(|w| w.kind == "query"),
+            "an ad-hoc query is listed after the pipeline"
+        );
+    }
+
+    #[test]
+    fn ad_hoc_tables_are_marked() {
+        let graph = graph_of(&fixture(), ("l.staging", "clean"), 2);
+        assert!(
+            node(&graph, "l.scratch", "tmp").hand_made,
+            "a query-created table is hand-made"
+        );
+        assert!(
+            !node(&graph, "l.marts", "zone_stats").hand_made,
+            "a pipeline-written table is not hand-made"
+        );
     }
 
     #[test]
     fn levels_along_a_chain_are_negative_upstream_zero_at_the_focus_and_positive_downstream() {
         // Fixture chain a → b → c, focus b: a = -1, b = 0, c = 1.
-        let runs = vec![
-            run(&[
-                ("input", "mobility.silver", "a"),
-                ("output", "mobility.gold", "b"),
-            ]),
-            run(&[
-                ("input", "mobility.gold", "b"),
-                ("output", "mobility.gold", "c"),
-            ]),
+        let rows = vec![
+            edge(
+                "1",
+                "pipeline",
+                "j1",
+                "mobility.silver",
+                "a",
+                false,
+                "2026-11-01T00:00:00Z",
+            ),
+            edge(
+                "1",
+                "pipeline",
+                "j1",
+                "mobility.gold",
+                "b",
+                true,
+                "2026-11-01T00:00:00Z",
+            ),
+            edge(
+                "2",
+                "pipeline",
+                "j2",
+                "mobility.gold",
+                "b",
+                false,
+                "2026-11-01T00:00:00Z",
+            ),
+            edge(
+                "2",
+                "pipeline",
+                "j2",
+                "mobility.gold",
+                "c",
+                true,
+                "2026-11-01T00:00:00Z",
+            ),
         ];
-        let levels = levels(("mobility.gold", "b"), &runs);
-        assert_eq!(levels.get("mobility.silver|a"), Some(&-1), "a is upstream");
-        assert_eq!(levels.get("mobility.gold|b"), Some(&0), "b is the focus");
-        assert_eq!(levels.get("mobility.gold|c"), Some(&1), "c is downstream");
+        let graph = graph_of(&rows, ("mobility.gold", "b"), 2);
+        assert_eq!(
+            node(&graph, "mobility.silver", "a").level,
+            Some(-1),
+            "a is upstream"
+        );
+        assert_eq!(
+            node(&graph, "mobility.gold", "b").level,
+            Some(0),
+            "b is the focus"
+        );
+        assert_eq!(
+            node(&graph, "mobility.gold", "c").level,
+            Some(1),
+            "c is downstream"
+        );
     }
 
     #[tokio::test]
@@ -1029,11 +1459,12 @@ mod tests {
         }
 
         #[allow(clippy::type_complexity)]
-        let rows: Vec<(String, String, String, String, String, String)> = sqlx::query_as(EDGES_SQL)
-            .bind(30i32)
-            .fetch_all(&pool)
-            .await
-            .unwrap();
+        let rows: Vec<(String, String, String, String, String, String, String)> =
+            sqlx::query_as(EDGES_SQL)
+                .bind(30i32)
+                .fetch_all(&pool)
+                .await
+                .unwrap();
         let seen: Vec<&str> = rows
             .iter()
             .map(|r| r.0.as_str())
