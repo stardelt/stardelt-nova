@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
-import { ApiError, api, errorMessage, formatCell, type ColumnSource, type IcebergField, type LineageNodeView, type QueryResult, type TableDocumentation, type TableMetadata } from '../api'
+import { ApiError, api, errorMessage, formatCell, type ColumnSource, type IcebergField, type LineageEdgeView, type LineageNodeView, type QueryResult, type TableDocumentation, type TableMetadata } from '../api'
 import { useCatalogs } from '../components/CatalogSelect'
 import CatalogBreadcrumb from '../components/CatalogBreadcrumb'
 import CatalogOverview from '../components/CatalogOverview'
@@ -11,7 +11,7 @@ import { Icon } from '../components/Icon'
 import SchemaOverview from '../components/SchemaOverview'
 import TableAbout, { type DocsState } from '../components/TableAbout'
 import TableHealth from '../components/TableHealth'
-import { formatCount, formatTime, sqlTableRef, rowsLabel, sqlIdent } from '../format'
+import { formatCount, formatTime, relativeTime, sqlTableRef, rowsLabel, sqlIdent } from '../format'
 import { isAdmin } from '../roles'
 
 type Sel = { ns: string; tbl: string; kind?: 'table' | 'view' }
@@ -763,15 +763,16 @@ function HistoryTab({ ns, tbl, catalog }: Sel & { catalog?: string }) {
 }
 
 /**
- * One hop up and one hop down from this table (stardelt-nova#511): the datasets that feed it and
- * the ones it feeds, from `/api/lineage` at depth 1. Nodes the person may not read are listed with
- * a note and are not links, so the card never turns into a 403. The full graph stays one click
- * away.
+ * Where this table comes from and what depends on it (stardelt-nova#649, lineage L4): a written-by
+ * and read-by summary, then every upstream and downstream dataset the chosen window knows, each
+ * with the job that connects it. Nodes the person may not read are listed with a note and are not
+ * links, so the card never turns into a 403. The drawn graph stays one click away.
  */
 function LineageTab({ ns, tbl, catalog }: { ns: string; tbl: string; catalog: string }) {
+  const [days, setDays] = useState(30)
   const graph = useQuery({
-    queryKey: ['lineage', 'one-hop', catalog, ns, tbl],
-    queryFn: () => api.lineage({ catalog: catalog || undefined, schema: ns, table: tbl, depth: 1 }),
+    queryKey: ['lineage', 'tab', catalog, ns, tbl, days],
+    queryFn: () => api.lineage({ catalog: catalog || undefined, schema: ns, table: tbl, depth: 5, days }),
     enabled: Boolean(catalog),
     retry: false,
     staleTime: 60_000,
@@ -782,53 +783,144 @@ function LineageTab({ ns, tbl, catalog }: { ns: string; tbl: string; catalog: st
 
   const nodes = graph.data?.nodes ?? []
   const edges = graph.data?.edges ?? []
-  // The id the backend uses for this table; a demo graph may omit the catalog prefix.
-  const byId = new Map(nodes.map(n => [n.id, n]))
-  const current = byId.has(`${catalog}.${ns}|${tbl}`) ? `${catalog}.${ns}|${tbl}` : `${ns}|${tbl}`
-  const pick = (ids: string[]) => {
-    const seen = new Set<string>()
-    const out: LineageNodeView[] = []
-    for (const id of ids) {
-      const n = byId.get(id)
-      if (n && !seen.has(n.id)) { seen.add(n.id); out.push(n) }
-    }
-    return out
+  const jobs = graph.data?.jobs ?? []
+  const focus = nodes.find(n => n.level === 0)
+  // Each edge names its job by namespace and name; a graph that lists no jobs still gets a pill.
+  const pillOf = (e: LineageEdgeView) => {
+    const job = jobs.find(j => j.id === `${e.jobNamespace}|${e.jobName}`)
+    return { kind: job?.kind ?? e.jobNamespace, name: job?.name ?? e.jobName }
   }
-  const upstream = pick(edges.filter(e => e.to === current).map(e => e.from))
-  const downstream = pick(edges.filter(e => e.from === current).map(e => e.to))
+  const newest = (list: LineageEdgeView[]) =>
+    [...list].sort((a, b) => b.eventTime.localeCompare(a.eventTime))[0]
+  // The job that wrote this table: the newest edge into it.
+  const writerEdge = newest(edges.filter(e => e.to === focus?.id))
+  const readers = focus?.readers
+  const level = (n: LineageNodeView) => Math.abs(n.level ?? 0)
+  const order = (a: LineageNodeView, b: LineageNodeView) =>
+    level(a) - level(b) || a.name.localeCompare(b.name)
+  const upstream = nodes.filter(n => (n.level ?? 0) < 0).sort(order)
+  const downstream = nodes.filter(n => (n.level ?? 0) > 0).sort(order)
 
-  const row = (n: LineageNodeView) => (
-    <li key={n.id} className="flex items-center gap-2 py-1.5">
-      <Icon name="table" className="w-4 h-4 text-text-mute shrink-0" />
-      {n.visible ? (
-        <Link to={lineageHref(n)} className="text-sm text-accent hover:underline font-mono truncate">{n.namespace}.{n.name}</Link>
-      ) : (
-        <span className="text-sm text-text-mute font-mono truncate" title="You may not read this table">
-          {n.namespace}.{n.name} · not visible to you
+  const row = (n: LineageNodeView, up: boolean) => {
+    const edge = newest(edges.filter(e => (up ? e.from === n.id : e.to === n.id)))
+    const pill = edge ? pillOf(edge) : undefined
+    return (
+      <li key={n.id} className="flex flex-wrap items-center gap-2 py-1.5">
+        <span
+          className="rounded-full border border-border px-1.5 py-0.5 text-[10px] font-mono text-text-mute shrink-0"
+          title={up ? `${level(n)} step${level(n) === 1 ? '' : 's'} upstream` : `${level(n)} step${level(n) === 1 ? '' : 's'} downstream`}
+        >
+          L{level(n)}
         </span>
-      )}
-    </li>
-  )
+        {n.visible ? (
+          <Link to={lineageHref(n)} className="text-sm text-accent hover:underline font-mono truncate">{n.namespace}.{n.name}</Link>
+        ) : (
+          <span className="text-sm text-text-mute font-mono truncate" title="You may not read this table">
+            {n.label ?? `${n.namespace}.${n.name}`} · not visible to you
+          </span>
+        )}
+        {pill && (
+          <span className="inline-flex items-center gap-1 min-w-0">
+            <span className="text-xs text-text-mute">via</span>
+            <JobPill job={pill} />
+          </span>
+        )}
+        <span className="text-xs text-text-mute ml-auto shrink-0" title={formatTime(n.lastWrite ?? '')}>
+          {n.lastWrite ? `last write ${relativeTime(Date.parse(n.lastWrite))}` : 'no write in this window'}
+        </span>
+      </li>
+    )
+  }
 
-  const fullGraph = new URLSearchParams({ schema: ns, table: tbl, catalog })
+  const fullGraph = new URLSearchParams({ schema: ns, table: tbl, catalog, depth: '2' })
   return (
     <div className="space-y-4">
+      <div className="card p-5 space-y-2">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="text-sm text-text-dim flex flex-wrap items-center gap-2">
+            <span>Written by</span>
+            {writerEdge ? (
+              <>
+                <JobPill job={pillOf(writerEdge)} />
+                <span className="text-text-mute">·</span>
+                <span className="text-text-mute" title={formatTime(writerEdge.eventTime)}>
+                  last write {relativeTime(Date.parse(writerEdge.eventTime))}
+                </span>
+              </>
+            ) : (
+              <span className="text-text-mute">nothing in {days} days</span>
+            )}
+          </div>
+          <label className="flex items-center gap-2 text-xs text-text-mute">
+            Window
+            <select
+              className="input py-1 pr-7 text-sm"
+              aria-label="Lineage window"
+              value={days}
+              onChange={e => setDays(Number(e.target.value))}
+            >
+              <option value={7}>7 days</option>
+              <option value={30}>30 days</option>
+              <option value={90}>90 days</option>
+            </select>
+          </label>
+        </div>
+        <div className="text-sm text-text-dim">
+          {readers
+            ? `Read by ${readers.people} ${readers.people === 1 ? 'person' : 'people'} · ${formatCount(readers.queries)} ${readers.queries === 1 ? 'query' : 'queries'} in ${days} days`
+            : `No reads in ${days} days`}
+        </div>
+      </div>
+
       <div className="grid md:grid-cols-2 gap-4">
         <div className="card p-5">
           <div className="label mb-2">Upstream — what feeds this table</div>
           {upstream.length === 0
-            ? <p className="text-sm text-text-mute">No upstream table is recorded.</p>
-            : <ul>{upstream.map(row)}</ul>}
+            ? <p className="text-sm text-text-mute">Nothing upstream in {days} days.</p>
+            : <ul>{upstream.map(n => row(n, true))}</ul>}
         </div>
         <div className="card p-5">
-          <div className="label mb-2">Downstream — what reads this table</div>
+          <div className="label mb-2">Downstream — what depends on this table</div>
           {downstream.length === 0
-            ? <p className="text-sm text-text-mute">No downstream table is recorded.</p>
-            : <ul>{downstream.map(row)}</ul>}
+            ? <p className="text-sm text-text-mute">Nothing depends on this table in {days} days.</p>
+            : <ul>{downstream.map(n => row(n, false))}</ul>}
         </div>
       </div>
-      <Link to={`/lineage?${fullGraph.toString()}`} className="btn-ghost">Open the full lineage graph</Link>
+
+      <Link to={`/lineage?${fullGraph.toString()}`} className="btn-ghost">Open graph</Link>
     </div>
+  )
+}
+
+/** The job behind a lineage edge: a pipeline is a link, a person is the name they read. */
+function JobPill({ job }: { job: { kind: string; name: string } }) {
+  const icon = job.kind === 'pipeline' ? 'play' : job.kind === 'notebook' ? 'notebook' : 'list'
+  const body = (
+    <>
+      <Icon name={icon} className="w-3.5 h-3.5 shrink-0" />
+      <span className="font-mono truncate max-w-[16rem]">{job.name}</span>
+    </>
+  )
+  // A pipeline job is named `<namespace>/<name>`, which is its page.
+  if (job.kind === 'pipeline') {
+    return (
+      <Link
+        to={`/pipelines/${job.name.split('/').map(encodeURIComponent).join('/')}`}
+        className="inline-flex items-center gap-1 rounded-full border border-border px-2 py-0.5 text-xs text-accent hover:underline"
+        title={`Pipeline ${job.name}`}
+      >
+        {body}
+      </Link>
+    )
+  }
+  const what = job.kind === 'notebook' ? 'Notebook' : job.kind === 'sql-editor' ? 'SQL editor' : job.kind === 'query' ? 'Query' : job.kind
+  return (
+    <span
+      className="inline-flex items-center gap-1 rounded-full border border-border px-2 py-0.5 text-xs text-text-dim"
+      title={`${what} · ${job.name}`}
+    >
+      {body}
+    </span>
   )
 }
 
