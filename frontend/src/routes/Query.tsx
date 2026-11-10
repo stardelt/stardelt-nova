@@ -13,6 +13,16 @@ import { Icon } from '../components/Icon'
 import ScheduleDialog from '../components/ScheduleDialog'
 import WarehouseNote from '../components/WarehouseNote'
 import { formatCount, sqlTableRef } from '../format'
+import { tokenizeSql, type SqlTokenKind } from '../sqlHighlight'
+
+/** The colour each token kind carries in the editor overlay (#501 slice 2). */
+const TOKEN_CLASS: Record<SqlTokenKind, string> = {
+  keyword: 'text-accent',
+  string: 'text-ok',
+  comment: 'text-text-mute italic',
+  number: 'text-warn',
+  plain: 'text-text',
+}
 
 const HISTORY_KEY = 'stardelt-nova:history'
 const HISTORY_LIMIT = 50
@@ -254,6 +264,8 @@ export default function Query() {
   const taRef = useRef<HTMLTextAreaElement>(null)
   // The line-number gutter reads `sql`, never `typed`: the sample is a statement too (#732).
   const gutterRef = useRef<HTMLDivElement>(null)
+  // The coloured overlay behind the textarea; it reads `sql` too, so the first paint has colour.
+  const highlightRef = useRef<HTMLPreElement>(null)
   const lineCount = Math.max(1, sql.split('\n').length)
   const empty = sql.trim() === ''
   // The two side panes are user-collapsible; their state sets the grid's columns (#586).
@@ -361,19 +373,39 @@ export default function Query() {
                 <div key={i}>{i + 1}</div>
               ))}
             </div>
-            <textarea
-              ref={taRef}
-              value={sql}
-              onChange={e => setTyped(e.target.value)}
-              onKeyDown={onKey}
-              onScroll={e => {
-                if (gutterRef.current) gutterRef.current.scrollTop = e.currentTarget.scrollTop
-              }}
-              aria-label="SQL query"
-              className="w-full h-full bg-transparent font-mono text-sm leading-6 outline-hidden placeholder:text-text-mute"
-              spellCheck={false}
-              placeholder="SELECT ..."
-            />
+            <div className="relative min-h-0 min-w-0 flex-1">
+              <pre
+                ref={highlightRef}
+                aria-hidden="true"
+                data-testid="sql-highlight"
+                className="pointer-events-none absolute inset-0 m-0 overflow-hidden whitespace-pre font-mono text-sm leading-6 text-text"
+              >
+                {tokenizeSql(sql).map((token, i) => (
+                  <span key={i} data-token={token.kind} className={TOKEN_CLASS[token.kind]}>
+                    {token.text}
+                  </span>
+                ))}
+              </pre>
+              <textarea
+                ref={taRef}
+                value={sql}
+                onChange={e => setTyped(e.target.value)}
+                onKeyDown={onKey}
+                onScroll={e => {
+                  const { scrollTop, scrollLeft } = e.currentTarget
+                  if (gutterRef.current) gutterRef.current.scrollTop = scrollTop
+                  if (highlightRef.current) {
+                    highlightRef.current.scrollTop = scrollTop
+                    highlightRef.current.scrollLeft = scrollLeft
+                  }
+                }}
+                aria-label="SQL query"
+                wrap="off"
+                className="relative h-full w-full resize-none overflow-auto whitespace-pre bg-transparent font-mono text-sm leading-6 text-transparent caret-[var(--color-text)] outline-hidden selection:bg-accent/25 placeholder:text-text-mute"
+                spellCheck={false}
+                placeholder="SELECT ..."
+              />
+            </div>
           </div>
           <div className="flex flex-wrap items-center gap-2 mt-2">
             <button onClick={run} disabled={running} className="btn-primary py-1.5">
