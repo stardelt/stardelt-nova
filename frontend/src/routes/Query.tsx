@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
 import {
   api, allTables, downloadCsv, errorMessage, formatCell,
-  type QueryResult, type SavedQuery, type TableRef,
+  type Me, type QueryResult, type SavedQuery, type TableRef,
 } from '../api'
 import { useCatalogs } from '../components/CatalogSelect'
 import CatalogTree from '../components/CatalogTree'
@@ -223,6 +223,113 @@ function DeleteQueryDialog({
   )
 }
 
+/**
+ * Share one saved query with a group (`POST /api/saved-queries/{id}/share`). The groups
+ * offered are the caller's own, minus the ones the query is already shared with: the API
+ * answers `204` for a group the caller is not in, and sharing again would say nothing.
+ */
+function ShareQueryDialog({
+  row,
+  me,
+  onClose,
+  onShared,
+}: {
+  row: SavedQuery
+  me: Me | undefined
+  onClose: () => void
+  onShared: (group: string) => void
+}) {
+  const ref = useRef<HTMLDialogElement>(null)
+  const opener = useRef<HTMLElement | null>(null)
+  const select = useRef<HTMLSelectElement>(null)
+  const cancel = useRef<HTMLButtonElement>(null)
+  const id = useId()
+  const titleId = `${id}-title`
+  const qc = useQueryClient()
+  const available = (me?.groups ?? []).filter((g) => !row.shared_with.includes(g))
+  const [group, setGroup] = useState(available[0] ?? '')
+  const share = useMutation({
+    mutationFn: (g: string) => api.shareSavedQuery(row.id, g),
+    onSuccess: (_answer, g) => {
+      void qc.invalidateQueries({ queryKey: ['saved-queries'] })
+      onShared(g)
+    },
+  })
+
+  useEffect(() => {
+    const dialog = ref.current
+    if (!dialog) return
+    opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    if (!dialog.open) dialog.showModal()
+    if (select.current) select.current.focus()
+    else cancel.current?.focus()
+    return () => {
+      if (dialog.open) dialog.close()
+      opener.current?.focus()
+    }
+  }, [])
+
+  return (
+    <dialog
+      ref={ref}
+      aria-labelledby={titleId}
+      onCancel={(event) => {
+        event.preventDefault()
+        onClose()
+      }}
+      className="m-auto w-[min(32rem,calc(100vw_-_2rem))] max-w-none rounded-[14px] border border-border bg-bg-elev p-0 text-text shadow-2xl backdrop:bg-black/60"
+    >
+      <div className="flex max-h-[85vh] flex-col">
+        <div className="px-5 pt-5">
+          <h2 id={titleId} className="text-lg font-semibold">Share “{row.title}”</h2>
+        </div>
+        <form
+          className="min-h-0 space-y-3 overflow-y-auto px-5 py-4 text-sm"
+          onSubmit={(e) => {
+            e.preventDefault()
+            if (group !== '' && !share.isPending) share.mutate(group)
+          }}
+        >
+          {available.length === 0 ? (
+            <p className="text-xs text-text-mute">Every group you are in already has this query.</p>
+          ) : (
+            <>
+              <label className="grid gap-1.5">
+                <span className="label">Share with group</span>
+                <select
+                  ref={select}
+                  value={group}
+                  onChange={(e) => setGroup(e.target.value)}
+                  aria-label="Share with group"
+                  className="w-full rounded-[10px] border border-border bg-bg-soft/60 px-3 py-2 text-sm text-text outline-hidden focus:border-accent/60"
+                >
+                  {available.map((g) => <option key={g} value={g}>{g}</option>)}
+                </select>
+              </label>
+              <p className="text-xs text-text-mute">Everyone in the group can open it from their saved queries and run it. Only you can delete it.</p>
+            </>
+          )}
+          {share.error != null && (
+            <div role="alert" className="rounded-[10px] border border-red-500/40 bg-red-500/10 p-3 text-sm text-bad break-words">
+              {errorMessage(share.error)}
+            </div>
+          )}
+          <div className="flex flex-wrap items-center justify-end gap-2 border-t border-border pt-3">
+            {available.length > 0 && (
+              <button type="submit" className="btn-primary py-1.5" disabled={group === '' || share.isPending}>
+                {share.isPending ? 'Sharing…' : 'Share'}
+              </button>
+            )}
+            <button ref={cancel} type="button" className="btn-ghost" onClick={onClose}>
+              Cancel
+            </button>
+          </div>
+        </form>
+      </div>
+    </dialog>
+  )
+}
+
 export default function Query() {
   const [params] = useSearchParams()
   // The catalog the person works in. It names the catalogs the sample is generated from,
@@ -245,10 +352,14 @@ export default function Query() {
   const [scheduling, setScheduling] = useState(false)
   const [scheduled, setScheduled] = useState<{ name: string; namespace: string } | null>(null)
   const saved = useQuery({ queryKey: ['saved-queries'], queryFn: () => api.savedQueries() })
+  const me = useQuery({ queryKey: ['me'], queryFn: api.me })
   const [saving, setSaving] = useState(false)
   const [deleting, setDeleting] = useState<SavedQuery | null>(null)
-  // The last successful save or delete, in the person's words (role="status").
-  const [notice, setNotice] = useState<string | null>(null)
+  const [sharing, setSharing] = useState<SavedQuery | null>(null)
+  const qc = useQueryClient()
+  // The last successful save, delete, share or unshare, in the person's words (role="status");
+  // a failed unshare sets `bad`, because it is the API's sentence and not a confirmation.
+  const [notice, setNotice] = useState<{ text: string; bad?: boolean } | null>(null)
   // The Tables pane's search box; it only narrows what the tree shows.
   const [filter, setFilter] = useState('')
   const taRef = useRef<HTMLTextAreaElement>(null)
@@ -309,6 +420,24 @@ export default function Query() {
       next.focus()
       next.setSelectionRange(caret, caret)
     })
+  }
+
+  /** `/api/me` carries `sub` in oidc mode only; dev mode reports the static user as `user`, which is what the store wrote as `owner_sub`. */
+  const mySub = me.data?.sub ?? me.data?.user ?? ''
+  const mine = (row: SavedQuery) => row.owner_sub === mySub
+
+  /**
+   * Stop sharing one query with one group (`DELETE /api/saved-queries/{id}/share/{group}`).
+   * A failure is shown: the API's sentence explains why the row still says "shared with".
+   */
+  async function unshare(row: SavedQuery, group: string) {
+    try {
+      await api.unshareSavedQuery(row.id, group)
+      setNotice({ text: `Stopped sharing “${row.title}” with ${group}.` })
+      await qc.invalidateQueries({ queryKey: ['saved-queries'] })
+    } catch (e: unknown) {
+      setNotice({ text: errorMessage(e), bad: true })
+    }
   }
 
   return (
@@ -414,7 +543,10 @@ export default function Query() {
         )}
 
         {notice && (
-          <p role="status" className="text-sm text-ok break-words">{notice}</p>
+          <p
+            role={notice.bad ? 'alert' : 'status'}
+            className={`text-sm break-words ${notice.bad ? 'text-bad' : 'text-ok'}`}
+          >{notice.text}</p>
         )}
 
         {error && (
@@ -522,20 +654,47 @@ export default function Query() {
             <ul className="space-y-2">
               {saved.data?.map((row) => (
                 <li key={row.id} className="flex items-start justify-between gap-2">
-                  <button
-                    type="button"
-                    onClick={() => { setTyped(row.sql); taRef.current?.focus() }}
-                    className="min-w-0 flex-1 text-left text-xs text-text-dim hover:text-text break-words"
-                    title={row.sql}
-                  >
-                    {row.title}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setDeleting(row)}
-                    aria-label={`Delete “${row.title}”`}
-                    className="shrink-0 text-xs text-text-mute hover:text-bad"
-                  >Delete</button>
+                  <div className="min-w-0 flex-1">
+                    <button
+                      type="button"
+                      onClick={() => { setTyped(row.sql); taRef.current?.focus() }}
+                      className="w-full text-left text-xs text-text-dim hover:text-text break-words"
+                      title={row.sql}
+                    >
+                      {row.title}
+                    </button>
+                    {row.shared_with.length > 0 && (
+                      <div className="text-[11px] text-text-mute">
+                        shared with {row.shared_with.join(', ')}
+                        {mine(row) && row.shared_with.map((group) => (
+                          <button
+                            key={group}
+                            type="button"
+                            onClick={() => void unshare(row, group)}
+                            aria-label={`Stop sharing “${row.title}” with ${group}`}
+                            className="ml-1 underline hover:text-bad"
+                          >Unshare</button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  {mine(row) ? (
+                    <div className="flex shrink-0 items-start gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setSharing(row)}
+                        className="text-xs text-text-mute hover:text-text"
+                      >Share</button>
+                      <button
+                        type="button"
+                        onClick={() => setDeleting(row)}
+                        aria-label={`Delete “${row.title}”`}
+                        className="text-xs text-text-mute hover:text-bad"
+                      >Delete</button>
+                    </div>
+                  ) : (
+                    <span className="shrink-0 text-[11px] text-text-mute">shared with you</span>
+                  )}
                 </li>
               ))}
             </ul>
@@ -549,7 +708,7 @@ export default function Query() {
           onClose={() => setSaving(false)}
           onSaved={(title) => {
             setSaving(false)
-            setNotice(`Saved “${title}”.`)
+            setNotice({ text: `Saved “${title}”.` })
           }}
         />
       )}
@@ -560,7 +719,19 @@ export default function Query() {
           onClose={() => setDeleting(null)}
           onDeleted={(title) => {
             setDeleting(null)
-            setNotice(`Deleted “${title}”.`)
+            setNotice({ text: `Deleted “${title}”.` })
+          }}
+        />
+      )}
+
+      {sharing && (
+        <ShareQueryDialog
+          row={sharing}
+          me={me.data}
+          onClose={() => setSharing(null)}
+          onShared={(group) => {
+            setSharing(null)
+            setNotice({ text: `Shared “${sharing.title}” with ${group}.` })
           }}
         />
       )}

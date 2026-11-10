@@ -19,7 +19,7 @@ const ME = {
 const CATALOGS = { catalogs: [{ name: 'lakehouse' }] }
 
 const SAVED = [
-  { id: 1, title: 'trip revenue', sql: 'SELECT 1', warehouse: 'warehouse', created_at: 0, updated_at: 0 },
+  { id: 1, title: 'trip revenue', sql: 'SELECT 1', warehouse: 'warehouse', created_at: 0, updated_at: 0, owner_sub: 'alice', shared_with: [] },
 ]
 
 /** Every API call the shell and the SQL editor make, plus the saved queries the palette reads. */
