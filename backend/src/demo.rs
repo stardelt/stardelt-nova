@@ -645,7 +645,15 @@ pub fn runs() -> crate::pipelines::RunsListResponse {
         }
     }
     runs.sort_by(|a, b| b.run.started_at.cmp(&a.run.started_at));
-    crate::pipelines::RunsListResponse { runs }
+    // The choice of the group filter: every sample pipeline's group, sorted, not the rows.
+    let groups: Vec<String> = pipelines()
+        .pipelines
+        .iter()
+        .filter_map(|pipeline| pipeline.owner_group.clone())
+        .collect::<std::collections::BTreeSet<String>>()
+        .into_iter()
+        .collect();
+    crate::pipelines::RunsListResponse { runs, groups }
 }
 
 /// `GET /api/pipelines/principals` in demo mode: the two groups above, both able to schedule.

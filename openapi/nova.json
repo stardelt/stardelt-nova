@@ -11260,9 +11260,17 @@
         "type": "object",
         "description": "`GET /api/runs`.",
         "required": [
-          "runs"
+          "runs",
+          "groups"
         ],
         "properties": {
+          "groups": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Every owner group of a pipeline the caller can see, sorted; the runs filters do not\nnarrow it. Administrators (`ownerGroup: null`) are not a group."
+          },
           "runs": {
             "type": "array",
             "items": {

@@ -2076,6 +2076,9 @@ pub struct RunsListRow {
 #[derive(Debug, Clone, PartialEq, Serialize, utoipa::ToSchema)]
 pub struct RunsListResponse {
     pub runs: Vec<RunsListRow>,
+    /// Every owner group of a pipeline the caller can see, sorted; the runs filters do not
+    /// narrow it. Administrators (`ownerGroup: null`) are not a group.
+    pub groups: Vec<String>,
 }
 
 /// One pipeline that runs a published notebook (`GET /api/notebooks/{group}/{name}/usage`,
@@ -2617,8 +2620,21 @@ async fn runs_across_pipelines(
     resources.sort_by(|a, b| pipeline_name(a).cmp(pipeline_name(b)));
     if resources.is_empty() {
         // Nothing visible: do not tell Airflow (or a timing observer) that there is anything.
-        return Ok(RunsListResponse { runs: Vec::new() });
+        return Ok(RunsListResponse {
+            runs: Vec::new(),
+            groups: Vec::new(),
+        });
     }
+
+    // The groups of the visible pipelines, not of the rows: the runs filters and the cap must
+    // not narrow the choice (`?group=` would otherwise collapse the list to one option).
+    let groups: Vec<String> = resources
+        .iter()
+        .filter_map(|resource| spec_of(resource).get("ownerGroup").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect::<BTreeSet<String>>()
+        .into_iter()
+        .collect();
 
     let dags: BTreeMap<String, DagSummary> = airflow
         .list_dags("pipeline", true)
@@ -2678,7 +2694,7 @@ async fn runs_across_pipelines(
             });
         }
     }
-    Ok(filter.answer(rows))
+    Ok(filter.answer(rows, groups))
 }
 
 /// The query of `GET /api/runs`, parsed once: the four filters and the cap. Demo mode parses
@@ -2703,8 +2719,9 @@ impl<'a> RunsFilter<'a> {
     }
 
     /// The answer: the filters, newest first, then the cap. A run without a start date goes
-    /// last; the name and the run id keep the order stable within the same second.
-    fn answer(&self, mut rows: Vec<RunsListRow>) -> RunsListResponse {
+    /// last; the name and the run id keep the order stable within the same second. `groups`
+    /// is the unfiltered choice of the caller's visible groups.
+    fn answer(&self, mut rows: Vec<RunsListRow>, groups: Vec<String>) -> RunsListResponse {
         rows.retain(|row| {
             self.state.is_none_or(|state| row.run.state == state)
                 && self.kind.is_none_or(|kind| row.kind == kind)
@@ -2723,7 +2740,7 @@ impl<'a> RunsFilter<'a> {
                 .then_with(|| a.run.run_id.cmp(&b.run.run_id))
         });
         rows.truncate(self.limit);
-        RunsListResponse { runs: rows }
+        RunsListResponse { runs: rows, groups }
     }
 }
 
@@ -4473,7 +4490,10 @@ pub(crate) async fn list_runs(
         // the page's filters and its 400s behave the same way.
         ReadCaller::Demo => {
             let result: Result<RunsListResponse, Fail> = match RunsFilter::parse(&query) {
-                Ok(filter) => Ok(filter.answer(crate::demo::runs().runs)),
+                Ok(filter) => {
+                    let sample = crate::demo::runs();
+                    Ok(filter.answer(sample.runs, sample.groups))
+                }
                 Err(e) => Err(e),
             };
             return answer(result);
@@ -6624,6 +6644,62 @@ mod tests {
         assert!(
             !calls.iter().any(|call| call.contains("unloaded")),
             "no call for a DAG the scheduler does not hold: {calls:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn runs_names_every_visible_group_whatever_the_filter() {
+        let resources = memory(&[
+            ("alpha", resource("alpha", Some("a"))),
+            ("beta", resource("beta", Some("b"))),
+            ("root-only", resource("root-only", None)),
+        ]);
+        let (airflow, fake) = fake_airflow::start().await;
+        {
+            let mut fake = fake.lock().unwrap();
+            fake.dags = vec![dag("stardelt__alpha"), dag("stardelt__beta")];
+            fake.runs.insert(
+                "stardelt__alpha".into(),
+                vec![run_started(
+                    "scheduled__alpha",
+                    "success",
+                    "2026-10-20T07:00:00Z",
+                )],
+            );
+            fake.runs.insert(
+                "stardelt__beta".into(),
+                vec![run_started(
+                    "scheduled__beta",
+                    "success",
+                    "2026-10-21T07:00:00Z",
+                )],
+            );
+        }
+
+        let all =
+            runs_across_pipelines(Some(&resources), Some(&airflow), &admin(), &BTreeMap::new())
+                .await
+                .expect("the unfiltered list succeeds");
+        assert_eq!(all.runs.len(), 2, "one run each: {:?}", all.runs);
+        assert_eq!(
+            all.groups,
+            vec!["a".to_string(), "b".to_string()],
+            "every visible group, sorted; administrators are not a group"
+        );
+
+        let a = runs_across_pipelines(
+            Some(&resources),
+            Some(&airflow),
+            &admin(),
+            &BTreeMap::from([("group".to_string(), "a".to_string())]),
+        )
+        .await
+        .expect("a group filter succeeds");
+        assert_eq!(a.runs.len(), 1, "only group a's run: {:?}", a.runs);
+        assert_eq!(
+            a.groups,
+            vec!["a".to_string(), "b".to_string()],
+            "the group filter does not narrow the choice"
         );
     }
 

@@ -59,8 +59,9 @@ export default function Runs() {
   })
 
   const rows: RunsListRow[] = runs.data?.runs ?? []
-  // The groups that actually appear in the answer; `null` is administrators, not a choice.
-  const groups = [...new Set(rows.map((row) => row.ownerGroup).filter((g): g is string => g != null))]
+  // The groups of every visible pipeline, from the server: they do not collapse to the rows
+  // of a chosen filter (`?group=` would otherwise leave one option; #750).
+  const groups = runs.data?.groups ?? []
   const empty = rows.length === 0
 
   return (

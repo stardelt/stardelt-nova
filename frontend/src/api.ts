@@ -746,8 +746,9 @@ export type RunsListRow = {
   /** `sql`, `notebook`, or `pipeline` for a multi-step pipeline. */
   kind: 'sql' | 'notebook' | 'pipeline'
 } & RunView
-/** `GET /api/runs` — the runs of the caller's pipelines, newest first. */
-export type RunsListResponse = { runs: RunsListRow[] }
+/** `GET /api/runs` — the runs of the caller's pipelines, newest first. `groups` is every
+ *  group the caller can see, sorted; the filters do not narrow it (#750). */
+export type RunsListResponse = { runs: RunsListRow[]; groups: string[] }
 
 /** One pipeline in the list: the resource plus what the scheduler says about it. */
 /**
