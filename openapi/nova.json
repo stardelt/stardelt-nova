@@ -3339,12 +3339,94 @@
         }
       }
     },
+    "/api/migrations/approve": {
+      "post": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`POST /api/migrations/approve` — a second person says yes to a plan.",
+        "description": "Record that the caller has looked at a migration plan, so a breaking change may run in a production target (stardelt-nova#617 decision 3). The body is the `planId` a plan answered with. The plan's own author cannot approve it: a second person has to. Repeating a call is a no-op that answers the same row with the first approval time. Plans and approvals live in the state store.",
+        "operationId": "migrations_approve",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApproveRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The recorded approval: who approved and when",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApproveAnswer"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A malformed request, one sentence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token to sign in with",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such plan: it was never planned on this Nova, or the state store was reset",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The caller is the plan's author: a second person has to approve it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The state store is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/migrations/plan": {
       "post": {
         "tags": [
           "public"
         ],
-        "description": "What a bundle's migration files would do to one target, and what already ran there (stardelt-nova#617 decision 3). Writes nothing. The body is `catalog`, `target` and `files` (`name` `NNN_<words>.sql`, `sha256`, `sql`); `class` is `additive` when every statement only creates or adds columns or views, else `breaking` with the first non-additive statement in `reason`; `status` is `new`, `applied` (same sha256 in `stardelt_meta.migrations`) or `changed` (applied with another sha256). `ok` is false, with one sentence per problem in `errors`, when a file changed after it was applied or a new file sorts before an applied one. `ledger` is false on a catalog whose `stardelt_meta.migrations` does not exist yet. The ledger is read as the caller, so the caller's own catalog privileges decide what can be read. Answers `Cache-Control: no-store`.",
+        "description": "What a bundle's migration files would do to one target, and what already ran there (stardelt-nova#617 decision 3). Writes nothing. The body is `catalog`, `target` and `files` (`name` `NNN_<words>.sql`, `sha256`, `sql`); `class` is `additive` when every statement only creates or adds columns or views, else `breaking` with the first non-additive statement in `reason`; `status` is `new`, `applied` (same sha256 in `stardelt_meta.migrations`) or `changed` (applied with another sha256). `ok` is false, with one sentence per problem in `errors`, when a file changed after it was applied or a new file sorts before an applied one. `ledger` is false on a catalog whose `stardelt_meta.migrations` does not exist yet. `planId` names exactly the files that would run, and is what `approve` takes; `approvable` is false when no state store is configured. The ledger is read as the caller, so the caller's own catalog privileges decide what can be read. Answers `Cache-Control: no-store`.",
         "operationId": "migrations_plan",
         "requestBody": {
           "content": {
@@ -7609,6 +7691,13 @@
             "type": "boolean",
             "description": "Run statements that are not additive. Default false."
           },
+          "approvalId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The `planId` a person other than the caller approved, for a breaking file in a\nproduction target."
+          },
           "catalog": {
             "type": "string",
             "description": "The catalog the migration tables live in; the ledger is `stardelt_meta` in it."
@@ -7620,9 +7709,47 @@
             },
             "description": "Every migration file of the bundle; the answer runs the `new` ones in name order."
           },
+          "mode": {
+            "type": "string",
+            "description": "The bundle target's `mode` (`targets.<target>.mode` in bundle.yaml):\n`development` or `production`. Client-declared, like `allowBreaking`."
+          },
           "target": {
             "type": "string",
             "description": "The bundle target whose ledger rows count (`dev`, `prod`, …)."
+          }
+        }
+      },
+      "ApproveAnswer": {
+        "type": "object",
+        "required": [
+          "planId",
+          "approver",
+          "approvedAt"
+        ],
+        "properties": {
+          "approvedAt": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Epoch milliseconds, as everywhere else."
+          },
+          "approver": {
+            "type": "string",
+            "description": "The signed-in name of the person who approved the plan."
+          },
+          "planId": {
+            "type": "string"
+          }
+        }
+      },
+      "ApproveRequest": {
+        "type": "object",
+        "required": [
+          "planId"
+        ],
+        "properties": {
+          "planId": {
+            "type": "string",
+            "description": "The `planId` a plan answered with."
           }
         }
       },
@@ -10248,10 +10375,16 @@
         "required": [
           "ok",
           "ledger",
+          "planId",
+          "approvable",
           "files",
           "errors"
         ],
         "properties": {
+          "approvable": {
+            "type": "boolean",
+            "description": "Whether this Nova can record an approval (a state store is configured)."
+          },
           "errors": {
             "type": "array",
             "items": {
@@ -10272,6 +10405,10 @@
           "ok": {
             "type": "boolean",
             "description": "False when `errors` is not empty: the bundle must not be applied as it is."
+          },
+          "planId": {
+            "type": "string",
+            "description": "The identity of this plan: what `bundle approve` takes and what apply needs."
           }
         }
       },
