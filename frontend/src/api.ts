@@ -10,6 +10,8 @@ export type Me = {
   /** `static-dev` (no login) or `oidc`. */
   auth_mode: 'static-dev' | 'oidc' | string
   demo: boolean
+  /** This sign-in is shared by many people (the public demo); reset nightly. */
+  shared_account?: boolean
   warehouse: string
   stage_name?: string | null
   stage_kind?: 'dev' | 'test' | 'prod'

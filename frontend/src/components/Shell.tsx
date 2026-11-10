@@ -398,6 +398,11 @@ export default function Shell() {
         </header>
 
         <main id="main" tabIndex={-1} className="flex-1 min-h-0 overflow-auto p-3 sm:p-6 outline-none">
+          {me.data?.shared_account && (
+            <div role="note" className="mb-3 rounded-lg border border-amber-400/40 bg-amber-400/10 px-3 py-2 text-sm text-warn">
+              Public demo: everyone signs in as this account and can see what you type and save. Everything is deleted every night at 03:00 UTC. Please do not enter personal data.
+            </div>
+          )}
           <ErrorBoundary key={location.pathname}>
             <Outlet />
           </ErrorBoundary>

@@ -126,6 +126,7 @@ mod query_log_event;
 mod query_log_store;
 mod saved_queries;
 mod secret_store;
+mod shared_accounts;
 mod stages;
 mod statements;
 mod streams;
@@ -200,6 +201,10 @@ pub struct AppState {
     pub principal_owners: Mutex<Option<(std::time::Instant, HashMap<String, String>)>>,
     pub http: reqwest::Client,
     pub demo: bool,
+    /// The sign-in names `NOVA_SHARED_ACCOUNTS` lists: one account many visitors use (the
+    /// public demo). `/api/me` says so and the account's saved queries, settings and
+    /// query-log rows are removed nightly (`shared_accounts.rs`).
+    pub shared_accounts: Vec<String>,
     /// Forward the caller's own token to Trino, when the platform has configured it to
     /// accept it (`NOVA_FORWARD_IDENTITY=1`). Off by default: sending a bearer to an engine
     /// that does not validate it buys nothing, and turning it on is a platform decision
@@ -278,6 +283,8 @@ struct Me {
     user: String,
     auth_mode: &'static str,
     demo: bool,
+    /// This sign-in is shared by many people (the public demo); its data is reset nightly.
+    shared_account: bool,
     warehouse: String,
     /// `None` in `dev` mode: there is no IdP, so no console.
     admin_console_url: Option<String>,
@@ -294,6 +301,8 @@ struct OidcMe<'a> {
     user: &'a str,
     auth_mode: &'static str,
     demo: bool,
+    /// This sign-in is shared by many people (the public demo); its data is reset nightly.
+    shared_account: bool,
     warehouse: &'a str,
     sub: &'a str,
     email: Option<&'a str>,
@@ -343,6 +352,7 @@ pub(crate) async fn me(
             user: s.dev_user.clone(),
             auth_mode: "static-dev",
             demo: s.demo,
+            shared_account: false,
             warehouse: s.warehouse_name.clone(),
             admin_console_url: None,
             stage_name: s.stage_name.clone(),
@@ -359,6 +369,7 @@ pub(crate) async fn me(
                 user: &id.display_name,
                 auth_mode: "oidc",
                 demo: s.demo,
+                shared_account: shared_accounts::is_shared(&s.shared_accounts, &id.display_name),
                 warehouse: &s.warehouse_name,
                 sub: &id.sub,
                 email: id.email.as_deref(),
@@ -987,6 +998,7 @@ async fn main() -> anyhow::Result<()> {
         principal_owners: Mutex::new(None),
         http,
         demo: demo_mode,
+        shared_accounts: shared_accounts::from_env(),
         forward_identity: env_flag("NOVA_FORWARD_IDENTITY"),
         redact_query_log_literals: env_flag("NOVA_QUERY_LOG_REDACT_LITERALS"),
         jobs: Mutex::new(Vec::new()),
@@ -1105,7 +1117,8 @@ async fn main() -> anyhow::Result<()> {
     // Second listener for the engine's event feed; off unless NOVA_INTERNAL_ADDR is set.
     query_log_collector::start(state.db.clone()).await?;
     if let Some(pool) = state.db.clone() {
-        query_log_store::spawn_retention(pool);
+        query_log_store::spawn_retention(pool.clone());
+        shared_accounts::spawn_nightly(pool, state.shared_accounts.clone());
     }
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     axum::serve(listener, app).await?;
@@ -1258,6 +1271,7 @@ mod router_tests {
             dev_user: "test".into(),
             trino_url: trino_url.into(),
             lakekeeper_url: lakekeeper_url.into(),
+            shared_accounts: vec![],
             catalog_token,
             superset_url: "http://127.0.0.1:1".into(),
             jupyterhub_url: "http://127.0.0.1:1".into(),

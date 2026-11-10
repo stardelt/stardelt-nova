@@ -90,3 +90,9 @@ URL are real. The compare answer is stubbed (`status: "unreachable"`, `detail: "
 answer within 5 seconds"`): in `NOVA_AUTH_MODE=dev` the real `/api/stages/compare` answers 401,
 because it forwards the caller's own token (nova#671). The table itself (`ok`) is not shown —
 that needs two installs.
+
+`shared-account-*.png` — the public-demo banner on the Catalog page (stardelt-nova#725) at
+1440×900 and 390×900, Graphite and Silver, from the built demo UI with the banner's
+condition forced on for the shot (in `dev` mode `/api/me` answers `shared_account: false`,
+so it does not render otherwise). At 390 px it wraps to four lines above the catalog and
+covers no control.

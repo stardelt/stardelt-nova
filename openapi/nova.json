@@ -9252,6 +9252,7 @@
           "user",
           "auth_mode",
           "demo",
+          "shared_account",
           "warehouse",
           "stage_kind",
           "peers"
@@ -9276,6 +9277,10 @@
               "$ref": "#/components/schemas/Peer"
             },
             "description": "The peer stages `NOVA_PEER_STAGES` configures, so the Deployments page can offer them."
+          },
+          "shared_account": {
+            "type": "boolean",
+            "description": "This sign-in is shared by many people (the public demo); its data is reset nightly."
           },
           "stage_kind": {
             "type": "string"
@@ -9748,6 +9753,7 @@
           "user",
           "auth_mode",
           "demo",
+          "shared_account",
           "warehouse",
           "sub",
           "groups",
@@ -9835,6 +9841,10 @@
             "format": "int64",
             "description": "Unix seconds at which the browser session can no longer be renewed and the\nperson signs in again; `None` for an Authorization-header call, which has no\nsession. Never the access token's own `exp`.",
             "minimum": 0
+          },
+          "shared_account": {
+            "type": "boolean",
+            "description": "This sign-in is shared by many people (the public demo); its data is reset nightly."
           },
           "stage_kind": {
             "type": "string"
