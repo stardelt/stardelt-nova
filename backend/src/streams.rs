@@ -61,6 +61,8 @@ pub struct StreamView {
 
 #[derive(Serialize, ToSchema)]
 pub struct StreamsResponse {
+    /// Nova's own namespace: every stream lives here, and a write's path names it.
+    pub namespace: String,
     pub streams: Vec<StreamView>,
 }
 
@@ -181,6 +183,14 @@ pub fn stream_view(app: &Value, _who: &Identity) -> StreamView {
             .and_then(Value::as_str)
             .map(str::to_string),
         deployment: deployment_of_with(app, stream_spec_digest),
+    }
+}
+
+/// The answer of `GET /api/streams`: the namespace and the caller's visible streams.
+fn streams_response(namespace: &str, apps: &[Value], who: &Identity) -> StreamsResponse {
+    StreamsResponse {
+        namespace: namespace.to_string(),
+        streams: visible_streams(apps, who),
     }
 }
 
@@ -485,7 +495,7 @@ fn not_found() -> Fail {
     operation_id = "streams_list",
     path = "/api/streams",
     tag = "public",
-    description = "The calling user's streams: every `StreamApp` of their groups, and all of them for an administrator. `phase` is the operator's `status.phase` (`Pending` when it has not reported yet); `lastError` is the application's own terminal message when the phase is `Failed`; `lastCheckpointAt` is the time of the newest checkpoint commit, absent until the operator reports it. `stopped` is `spec.stopped`. `attempts` is how many times Spark has submitted the application and `lastSubmittedAt` when it last did; both are absent until the operator reports them. No connection credentials and no checkpoint prefix are part of an answer. Answers `Cache-Control: no-store`.",
+    description = "The calling user's streams: every `StreamApp` of their groups, and all of them for an administrator. `phase` is the operator's `status.phase` (`Pending` when it has not reported yet); `lastError` is the application's own terminal message when the phase is `Failed`; `lastCheckpointAt` is the time of the newest checkpoint commit, absent until the operator reports it. `stopped` is `spec.stopped`. `attempts` is how many times Spark has submitted the application and `lastSubmittedAt` when it last did; both are absent until the operator reports them. `namespace` is Nova's own namespace; every stream lives there, and it is the `<namespace>` segment a write's path takes. No connection credentials and no checkpoint prefix are part of an answer. Answers `Cache-Control: no-store`.",
     responses(
         (status = 200, description = "The caller's streams, sorted by namespace and name", body = StreamsResponse),
         (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
@@ -499,9 +509,11 @@ pub(crate) async fn list(caller: Caller) -> Response {
         Caller::Signed(signed) => *signed,
     };
     let result = match stream_apps(signed.state()).await {
-        Ok(apps) => Ok(StreamsResponse {
-            streams: visible_streams(&apps, signed.identity()),
-        }),
+        Ok(apps) => Ok(streams_response(
+            &crate::cluster::namespace(),
+            &apps,
+            signed.identity(),
+        )),
         Err(fail) => Err(fail),
     };
     answer(result)
@@ -834,7 +846,8 @@ mod tests {
 
     use super::{
         StreamSinkBody, StreamSourceBody, StreamWrite, check_write, patch_stream, put_stream,
-        router, stream_resource, stream_spec_digest, stream_view, visible_streams,
+        router, stream_resource, stream_spec_digest, stream_view, streams_response,
+        visible_streams,
     };
     use crate::auth::Identity;
     use crate::pipelines::{Provenance, deployment_of};
@@ -870,6 +883,29 @@ mod tests {
             },
             "status": {"phase": "Running", "lastError": null}
         })
+    }
+
+    #[test]
+    fn the_answer_names_the_namespace_where_every_stream_lives() {
+        let answer = streams_response(
+            "stardelt",
+            &[app("demo", "sales")],
+            &who("u", &["sales"], false),
+        );
+        assert_eq!(answer.namespace, "stardelt");
+        assert_eq!(answer.streams.len(), 1);
+        assert_eq!(answer.streams[0].namespace, "stardelt");
+    }
+
+    #[test]
+    fn the_demo_answer_carries_the_namespace_too() {
+        assert_eq!(crate::demo::streams().namespace, "stardelt");
+        assert!(
+            crate::demo::streams()
+                .streams
+                .iter()
+                .all(|s| s.namespace == "stardelt")
+        );
     }
 
     #[test]
