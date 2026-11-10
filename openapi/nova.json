@@ -3079,6 +3079,16 @@
               "type": "integer",
               "format": "int32"
             }
+          },
+          {
+            "name": "days",
+            "in": "query",
+            "description": "Time window in days, 1–365, default 30",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
           }
         ],
         "responses": {
@@ -8226,7 +8236,8 @@
         "type": "object",
         "required": [
           "nodes",
-          "edges"
+          "edges",
+          "jobs"
         ],
         "properties": {
           "edges": {
@@ -8235,11 +8246,46 @@
               "$ref": "#/components/schemas/LineageEdge"
             }
           },
+          "jobs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LineageJob"
+            }
+          },
           "nodes": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/LineageNode"
             }
+          }
+        }
+      },
+      "LineageJob": {
+        "type": "object",
+        "description": "One job that wrote an edge of the answer, with its runs in the window.",
+        "required": [
+          "id",
+          "kind",
+          "name",
+          "runs",
+          "lastRun"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "lastRun": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "runs": {
+            "type": "integer",
+            "format": "int64"
           }
         }
       },
@@ -8261,14 +8307,61 @@
               "null"
             ]
           },
+          "lastWrite": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The newest event time of an edge that wrote this node."
+          },
+          "level": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "0 for the focus table, negative upstream, positive downstream (visible nodes only)."
+          },
           "name": {
             "type": "string"
           },
           "namespace": {
             "type": "string"
           },
+          "readers": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LineageReaders",
+                "description": "Read-only queries against this node in the window (visible nodes only)."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "visible": {
             "type": "boolean"
+          }
+        }
+      },
+      "LineageReaders": {
+        "type": "object",
+        "required": [
+          "queries",
+          "people",
+          "lastRead"
+        ],
+        "properties": {
+          "lastRead": {
+            "type": "string"
+          },
+          "people": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "queries": {
+            "type": "integer",
+            "format": "int64"
           }
         }
       },

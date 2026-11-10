@@ -23,6 +23,8 @@ pub struct GraphQuery {
     pub table: Option<String>,
     #[serde(default = "default_depth")]
     pub depth: i32,
+    /// Time window in days, 1-365, default 30.
+    pub days: Option<i32>,
 }
 
 fn default_depth() -> i32 {
@@ -37,6 +39,34 @@ pub struct LineageNode {
     pub visible: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// 0 for the focus table, negative upstream, positive downstream (visible nodes only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub level: Option<i32>,
+    /// The newest event time of an edge that wrote this node.
+    #[serde(rename = "lastWrite", skip_serializing_if = "Option::is_none")]
+    pub last_write: Option<String>,
+    /// Read-only queries against this node in the window (visible nodes only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readers: Option<LineageReaders>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LineageReaders {
+    pub queries: i64,
+    pub people: i64,
+    pub last_read: String,
+}
+
+/// One job that wrote an edge of the answer, with its runs in the window.
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LineageJob {
+    pub id: String,
+    pub kind: String,
+    pub name: String,
+    pub runs: i64,
+    pub last_run: String,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -57,6 +87,7 @@ pub struct LineageEdge {
 pub struct LineageGraph {
     pub nodes: Vec<LineageNode>,
     pub edges: Vec<LineageEdge>,
+    pub jobs: Vec<LineageJob>,
 }
 
 #[allow(dead_code)]
@@ -89,6 +120,51 @@ fn dataset_id(ns: &str, name: &str) -> String {
     format!("{}|{}", ns, name)
 }
 
+/// Edges inside the window; `$1` is the window in days.
+const EDGES_SQL: &str = "SELECT run_id::text, job_namespace, job_name, dataset_namespace, dataset_name, direction \
+     FROM lineage_edges \
+     WHERE event_time > now() - make_interval(days => $1::int)";
+
+/// Each run's newest event time inside the window.
+const EDGE_TIMES_SQL: &str = "SELECT run_id::text, to_char(MAX(event_time), 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') \
+     FROM lineage_edges \
+     WHERE event_time > now() - make_interval(days => $1::int) \
+     GROUP BY run_id";
+
+/// Readers of the visible datasets in the window (lineage L2, stardelt-nova#647).
+const READERS_SQL: &str = "SELECT dataset_namespace, dataset_name, sum(queries), count(DISTINCT job_name), \
+       to_char(max(last_read), 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') \
+     FROM lineage_reads \
+     WHERE day > (now() - make_interval(days => $1::int))::date \
+       AND job_namespace IN ('sql-editor','query','notebook') \
+       AND (dataset_namespace, dataset_name) IN (SELECT * FROM unnest($2::text[], $3::text[])) \
+     GROUP BY 1, 2";
+
+/// The level of a dataset one run away from `level`: a dataset the run reads sits one
+/// level further upstream (negative), one it writes one level further downstream (positive).
+fn adjacent_level(level: i32, direction: &str) -> i32 {
+    if direction == "input" {
+        level - 1
+    } else {
+        level + 1
+    }
+}
+
+/// The datasets a run links `current` to, each with its level. The run's own datasets are
+/// `(direction, namespace, name)` rows.
+fn run_neighbours(
+    datasets: &[(String, String, String)],
+    current_ns: &str,
+    current_name: &str,
+    level: i32,
+) -> Vec<(String, String, i32)> {
+    datasets
+        .iter()
+        .filter(|(_, ns, name)| ns != current_ns || name != current_name)
+        .map(|(direction, ns, name)| (ns.clone(), name.clone(), adjacent_level(level, direction)))
+        .collect()
+}
+
 #[utoipa::path(
     get,
     operation_id = "lineage_graph",
@@ -98,7 +174,8 @@ fn dataset_id(ns: &str, name: &str) -> String {
         ("catalog" = Option<String>, Query, description = "Catalog"),
         ("schema" = Option<String>, Query, description = "Schema"),
         ("table" = Option<String>, Query, description = "Table"),
-        ("depth" = Option<i32>, Query, description = "Depth 1-5, default 2")
+        ("depth" = Option<i32>, Query, description = "Depth 1-5, default 2"),
+        ("days" = Option<i32>, Query, description = "Time window in days, 1–365, default 30")
     ),
     responses(
         (status = 200, description = "Lineage graph", body = LineageGraph),
@@ -112,6 +189,7 @@ pub async fn graph(
 ) -> Response {
     let principal = principal.map(|Extension(p)| p);
     let depth = q.depth.clamp(1i32, 5i32);
+    let days = q.days.unwrap_or(30).clamp(1, 365);
 
     // Determine the starting dataset
     let (start_ns, start_name, catalog_name) = match (&q.catalog, &q.schema, &q.table) {
@@ -148,21 +226,18 @@ pub async fn graph(
 
     let start_id = dataset_id(&start_ns, &start_name);
 
-    // Load all edges
-    let rows: Vec<(String, String, String, String, String, String)> = sqlx::query_as(
-        "SELECT run_id::text, job_namespace, job_name, dataset_namespace, dataset_name, direction FROM lineage_edges"
-    )
-    .fetch_all(pool)
-    .await
-    .unwrap_or_default();
+    // Load the edges and their times inside the window.
+    let rows: Vec<(String, String, String, String, String, String)> = sqlx::query_as(EDGES_SQL)
+        .bind(days)
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
 
-    // Get event times
-    let times: Vec<(String, String)> = sqlx::query_as(
-        "SELECT run_id::text, to_char(MAX(event_time), 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') FROM lineage_edges GROUP BY run_id"
-    )
-    .fetch_all(pool)
-    .await
-    .unwrap_or_default();
+    let times: Vec<(String, String)> = sqlx::query_as(EDGE_TIMES_SQL)
+        .bind(days)
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
     let time_map: HashMap<String, String> = times.into_iter().collect();
 
     // Group by run
@@ -189,6 +264,9 @@ pub async fn graph(
             name: start_name.clone(),
             visible: true,
             label: None,
+            level: Some(0),
+            last_write: None,
+            readers: None,
         },
     );
 
@@ -200,6 +278,10 @@ pub async fn graph(
         if d >= depth {
             continue;
         }
+        let cur_level = result_nodes
+            .get(&cur_id)
+            .and_then(|n| n.level)
+            .unwrap_or_default();
         for (run_id, (job_ns, job_name, datasets)) in &runs {
             let has_cur = datasets
                 .iter()
@@ -207,18 +289,16 @@ pub async fn graph(
             if !has_cur {
                 continue;
             }
-            for (_dir, dns, dname) in datasets {
-                if dns == &cur_ns && dname == &cur_name {
-                    continue;
-                }
-                let real_id = dataset_id(dns, dname);
+            for (dns, dname, node_level) in run_neighbours(datasets, &cur_ns, &cur_name, cur_level)
+            {
+                let real_id = dataset_id(&dns, &dname);
                 let ds_catalog = dns.split('.').next().unwrap_or("");
                 let is_visible = allowed.is_empty()
                     || allowed.contains(ds_catalog)
                     || (catalog_name.is_some()
                         && allowed
                             .iter()
-                            .any(|a| dns.starts_with(&format!("{a}.")) || dns == a));
+                            .any(|a| dns.starts_with(&format!("{a}.")) || dns == *a));
                 let nds_id = if is_visible {
                     real_id.clone()
                 } else if let Some(id) = hidden_ids.get(&real_id) {
@@ -230,29 +310,35 @@ pub async fn graph(
                     id
                 };
                 if !visited.contains(&(dns.clone(), dname.clone())) {
-                    if !is_visible {
-                        result_nodes.insert(
-                            nds_id.clone(),
-                            LineageNode {
-                                id: nds_id.clone(),
-                                namespace: String::new(),
-                                name: String::new(),
-                                visible: false,
-                                label: Some(hidden_label()),
-                            },
-                        );
+                    // The level of the first path that reaches a node is the one it keeps.
+                    let level = if is_visible {
+                        Some(
+                            result_nodes
+                                .get(&nds_id)
+                                .and_then(|n| n.level)
+                                .unwrap_or(node_level),
+                        )
                     } else {
-                        result_nodes.insert(
-                            nds_id.clone(),
-                            LineageNode {
-                                id: nds_id.clone(),
-                                namespace: dns.clone(),
-                                name: dname.clone(),
-                                visible: true,
-                                label: None,
-                            },
-                        );
-                    }
+                        None
+                    };
+                    let (namespace, name, label) = if is_visible {
+                        (dns.clone(), dname.clone(), None)
+                    } else {
+                        (String::new(), String::new(), Some(hidden_label()))
+                    };
+                    result_nodes.insert(
+                        nds_id.clone(),
+                        LineageNode {
+                            id: nds_id.clone(),
+                            namespace,
+                            name,
+                            visible: is_visible,
+                            label,
+                            level,
+                            last_write: None,
+                            readers: None,
+                        },
+                    );
                     if d + 1 < depth {
                         to_visit.push((dns.clone(), dname.clone(), d + 1, nds_id.clone()));
                         visited.insert((dns.clone(), dname.clone()));
@@ -273,14 +359,86 @@ pub async fn graph(
         }
     }
 
+    // The newest write that reached each visible node.
+    for edge in &result_edges {
+        if let Some(node) = result_nodes.get_mut(&edge.to)
+            && node.visible
+            && node
+                .last_write
+                .as_ref()
+                .is_none_or(|seen| edge.event_time > *seen)
+        {
+            node.last_write = Some(edge.event_time.clone());
+        }
+    }
+
+    // Readers of the visible nodes, in one query.
+    let mut read_ns: Vec<String> = Vec::new();
+    let mut read_names: Vec<String> = Vec::new();
+    for node in result_nodes.values().filter(|n| n.visible) {
+        read_ns.push(node.namespace.clone());
+        read_names.push(node.name.clone());
+    }
+    if !read_ns.is_empty() {
+        let reads: Vec<(String, String, i64, i64, String)> = sqlx::query_as(READERS_SQL)
+            .bind(days)
+            .bind(&read_ns)
+            .bind(&read_names)
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default();
+        for (ns, name, queries, people, last_read) in reads {
+            if let Some(node) = result_nodes.get_mut(&dataset_id(&ns, &name)) {
+                node.readers = Some(LineageReaders {
+                    queries,
+                    people,
+                    last_read,
+                });
+            }
+        }
+    }
+
+    // One entry per job that wrote an edge of the answer.
+    let mut jobs: Vec<LineageJob> = Vec::new();
+    let mut job_index: HashMap<(String, String), usize> = HashMap::new();
+    let mut job_runs: Vec<HashSet<String>> = Vec::new();
+    for edge in &result_edges {
+        let key = (edge.job_namespace.clone(), edge.job_name.clone());
+        let at = match job_index.get(&key) {
+            Some(&at) => at,
+            None => {
+                job_index.insert(key.clone(), jobs.len());
+                job_runs.push(HashSet::new());
+                jobs.push(LineageJob {
+                    id: format!("{}|{}", key.0, key.1),
+                    kind: key.0.clone(),
+                    name: key.1.clone(),
+                    runs: 0,
+                    last_run: edge.event_time.clone(),
+                });
+                jobs.len() - 1
+            }
+        };
+        job_runs[at].insert(edge.run_id.clone());
+        if edge.event_time > jobs[at].last_run {
+            jobs[at].last_run = edge.event_time.clone();
+        }
+    }
+    for (job, runs) in jobs.iter_mut().zip(job_runs) {
+        job.runs = runs.len() as i64;
+    }
+    jobs.sort_by(|a, b| a.id.cmp(&b.id));
+
     let graph = LineageGraph {
         nodes: result_nodes.into_values().collect(),
         edges: result_edges,
+        jobs,
     };
     (StatusCode::OK, Json(graph)).into_response()
 }
 
 fn demo_graph_response(_start_ns: &str, _start_name: &str) -> Response {
+    let last_write = Some("2026-01-01T00:00:00Z".to_string());
     let graph = LineageGraph {
         nodes: vec![
             LineageNode {
@@ -289,6 +447,9 @@ fn demo_graph_response(_start_ns: &str, _start_name: &str) -> Response {
                 name: "yellow_trips".to_string(),
                 visible: true,
                 label: None,
+                level: Some(-1),
+                last_write: None,
+                readers: None,
             },
             LineageNode {
                 id: "analytics|trips_by_borough".to_string(),
@@ -296,6 +457,13 @@ fn demo_graph_response(_start_ns: &str, _start_name: &str) -> Response {
                 name: "trips_by_borough".to_string(),
                 visible: true,
                 label: None,
+                level: Some(0),
+                last_write: last_write.clone(),
+                readers: Some(LineageReaders {
+                    queries: 12,
+                    people: 3,
+                    last_read: "2026-01-01T00:00:00Z".to_string(),
+                }),
             },
             LineageNode {
                 id: "analytics|daily_revenue".to_string(),
@@ -303,13 +471,20 @@ fn demo_graph_response(_start_ns: &str, _start_name: &str) -> Response {
                 name: "daily_revenue".to_string(),
                 visible: true,
                 label: None,
+                level: Some(1),
+                last_write: last_write.clone(),
+                readers: Some(LineageReaders {
+                    queries: 5,
+                    people: 2,
+                    last_read: "2026-01-01T00:00:00Z".to_string(),
+                }),
             },
         ],
         edges: vec![
             LineageEdge {
                 from: "nyc_taxi|yellow_trips".to_string(),
                 to: "analytics|trips_by_borough".to_string(),
-                job_namespace: "default".to_string(),
+                job_namespace: "pipeline".to_string(),
                 job_name: "trips_by_borough_job".to_string(),
                 run_id: "00000000-0000-0000-0000-000000000001".to_string(),
                 event_time: "2026-01-01T00:00:00Z".to_string(),
@@ -317,10 +492,26 @@ fn demo_graph_response(_start_ns: &str, _start_name: &str) -> Response {
             LineageEdge {
                 from: "nyc_taxi|yellow_trips".to_string(),
                 to: "analytics|daily_revenue".to_string(),
-                job_namespace: "default".to_string(),
+                job_namespace: "pipeline".to_string(),
                 job_name: "daily_revenue_job".to_string(),
                 run_id: "00000000-0000-0000-0000-000000000002".to_string(),
                 event_time: "2026-01-01T00:00:00Z".to_string(),
+            },
+        ],
+        jobs: vec![
+            LineageJob {
+                id: "pipeline|daily_revenue_job".to_string(),
+                kind: "pipeline".to_string(),
+                name: "daily_revenue_job".to_string(),
+                runs: 1,
+                last_run: "2026-01-01T00:00:00Z".to_string(),
+            },
+            LineageJob {
+                id: "pipeline|trips_by_borough_job".to_string(),
+                kind: "pipeline".to_string(),
+                name: "trips_by_borough_job".to_string(),
+                runs: 1,
+                last_run: "2026-01-01T00:00:00Z".to_string(),
             },
         ],
     };
@@ -768,5 +959,98 @@ mod tests {
         assert!(hidden[0].column.is_none());
         let json = serde_json::to_value(hidden[0]).unwrap();
         assert_eq!(json, serde_json::json!({ "hidden": true }));
+    }
+
+    fn run(rows: &[(&str, &str, &str)]) -> Vec<(String, String, String)> {
+        rows.iter()
+            .map(|(direction, ns, name)| (direction.to_string(), ns.to_string(), name.to_string()))
+            .collect()
+    }
+
+    /// The level of every dataset the walk reaches from `focus`, and the focus at 0.
+    fn levels(focus: (&str, &str), runs: &[Vec<(String, String, String)>]) -> HashMap<String, i32> {
+        let mut levels: HashMap<String, i32> = HashMap::new();
+        levels.insert(format!("{}|{}", focus.0, focus.1), 0);
+        for datasets in runs {
+            if !datasets
+                .iter()
+                .any(|(_, ns, name)| ns == focus.0 && name == focus.1)
+            {
+                continue;
+            }
+            for (ns, name, level) in run_neighbours(datasets, focus.0, focus.1, 0) {
+                levels.entry(format!("{ns}|{name}")).or_insert(level);
+            }
+        }
+        levels
+    }
+
+    #[test]
+    fn levels_along_a_chain_are_negative_upstream_zero_at_the_focus_and_positive_downstream() {
+        // Fixture chain a → b → c, focus b: a = -1, b = 0, c = 1.
+        let runs = vec![
+            run(&[
+                ("input", "mobility.silver", "a"),
+                ("output", "mobility.gold", "b"),
+            ]),
+            run(&[
+                ("input", "mobility.gold", "b"),
+                ("output", "mobility.gold", "c"),
+            ]),
+        ];
+        let levels = levels(("mobility.gold", "b"), &runs);
+        assert_eq!(levels.get("mobility.silver|a"), Some(&-1), "a is upstream");
+        assert_eq!(levels.get("mobility.gold|b"), Some(&0), "b is the focus");
+        assert_eq!(levels.get("mobility.gold|c"), Some(&1), "c is downstream");
+    }
+
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn an_edge_older_than_the_window_is_not_returned() {
+        use crate::db::test_support::migrated_pool;
+        let pool = migrated_pool().await;
+        let old_run = "00000000-0000-0000-0000-00000000b001";
+        let new_run = "00000000-0000-0000-0000-00000000b002";
+        for (run_id, age_days) in [(old_run, 90i32), (new_run, 0i32)] {
+            sqlx::query("DELETE FROM lineage_edges WHERE run_id = $1::uuid")
+                .bind(run_id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO lineage_edges (run_id, job_namespace, job_name, dataset_namespace, dataset_name, direction, event_time) \
+                 VALUES ($1::uuid, 'pipeline', 'window-job', 'mobility.gold', 'kpis', 'output', now() - make_interval(days => $2::int))",
+            )
+            .bind(run_id)
+            .bind(age_days)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        #[allow(clippy::type_complexity)]
+        let rows: Vec<(String, String, String, String, String, String)> = sqlx::query_as(EDGES_SQL)
+            .bind(30i32)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        let seen: Vec<&str> = rows
+            .iter()
+            .map(|r| r.0.as_str())
+            .filter(|r| *r == old_run || *r == new_run)
+            .collect();
+        assert_eq!(
+            seen,
+            vec![new_run],
+            "the 90-day-old edge is outside the 30-day window"
+        );
+
+        for run_id in [old_run, new_run] {
+            sqlx::query("DELETE FROM lineage_edges WHERE run_id = $1::uuid")
+                .bind(run_id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
     }
 }

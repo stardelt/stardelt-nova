@@ -1143,6 +1143,27 @@ export type LineageNodeView = {
   name: string
   visible: boolean
   label?: string | null
+  /** 0 for the focus table, negative upstream, positive downstream (visible nodes). */
+  level?: number
+  /** The newest event time of an edge that wrote this node. */
+  lastWrite?: string
+  /** Read-only queries against this node in the window. */
+  readers?: LineageReadersView
+}
+
+export type LineageReadersView = {
+  queries: number
+  people: number
+  lastRead: string
+}
+
+/** One job that wrote an edge of the answer. */
+export type LineageJobView = {
+  id: string
+  kind: string
+  name: string
+  runs: number
+  lastRun: string
 }
 
 export type LineageEdgeView = {
@@ -1157,6 +1178,7 @@ export type LineageEdgeView = {
 export type LineageGraphView = {
   nodes: LineageNodeView[]
   edges: LineageEdgeView[]
+  jobs: LineageJobView[]
 }
 
 /** One source column; a source the caller may not read carries only `hidden`. */
@@ -1336,12 +1358,13 @@ export const api = {
     jpost<{ namespace: string }>(catalogPath('/api/catalog/namespaces', catalog), { namespace }),
   upload:       (req: UploadRequest)          => jpost<UploadResult>('/api/ingest/upload', req),
   transfer:     (req: TransferRequest)        => jpost<TransferResult>('/api/transfer', req),
-  lineage:      (params: { catalog?: string; schema?: string; table?: string; depth?: number }) => {
+  lineage:      (params: { catalog?: string; schema?: string; table?: string; depth?: number; days?: number }) => {
     const qs = new URLSearchParams()
     if (params.catalog) qs.set('catalog', params.catalog)
     if (params.schema) qs.set('schema', params.schema)
     if (params.table) qs.set('table', params.table)
     if (params.depth != null) qs.set('depth', String(params.depth))
+    if (params.days != null) qs.set('days', String(params.days))
     const query = qs.toString()
     return jget<LineageGraphView>(query ? `/api/lineage?${query}` : '/api/lineage')
   },
