@@ -68,7 +68,7 @@ test('a table page profiles its columns over the first 10,000 rows', async ({ pa
   await page.goto('/catalog?catalog=warehouse&ns=sales&tbl=orders')
 
   // The tab sits between Preview and Columns, and only a table has it.
-  const profileTab = page.getByRole('button', { name: 'profile' })
+  const profileTab = page.getByRole('tab', { name: 'profile' })
   await expect(profileTab).toBeVisible()
 
   await profileTab.click()
@@ -84,13 +84,13 @@ test('a table page profiles its columns over the first 10,000 rows', async ({ pa
   await tree.getByRole('button', { name: 'sales' }).click()
   await tree.getByRole('button', { name: /report/ }).click()
   await expect(page.getByRole('heading', { name: 'report', level: 1 })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'profile' })).toHaveCount(0)
+  await expect(page.getByRole('tab', { name: 'profile' })).toHaveCount(0)
 })
 
 test('a failed profile statement is one calm error box with Retry', async ({ page }) => {
   await stub(page, true)
   await page.goto('/catalog?catalog=warehouse&ns=sales&tbl=orders')
-  await page.getByRole('button', { name: 'profile' }).click()
+  await page.getByRole('tab', { name: 'profile' }).click()
 
   const alert = page.locator('[role="alert"]')
   await expect(alert).toHaveCount(1)

@@ -88,9 +88,9 @@ test('catalog explorer shows a tree of catalogs, schemas and tables', async ({ p
   await tree.getByRole('button', { name: /runs_view/ }).click()
   await expect(page.getByRole('heading', { name: 'runs_view' })).toBeVisible()
   // A view keeps the preview and no table-only tabs.
-  await expect(page.getByRole('button', { name: 'columns' })).toHaveCount(0)
-  await expect(page.getByRole('button', { name: 'details' })).toHaveCount(0)
-  await expect(page.getByRole('button', { name: 'history' })).toHaveCount(0)
-  await expect(page.getByRole('button', { name: 'preview' })).toBeVisible()
+  await expect(page.getByRole('tab', { name: 'columns' })).toHaveCount(0)
+  await expect(page.getByRole('tab', { name: 'details' })).toHaveCount(0)
+  await expect(page.getByRole('tab', { name: 'history' })).toHaveCount(0)
+  await expect(page.getByRole('tab', { name: 'preview' })).toBeVisible()
   await expect(page.getByText('View', { exact: true })).toBeVisible()
 })

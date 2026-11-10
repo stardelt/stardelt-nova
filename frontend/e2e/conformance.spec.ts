@@ -1298,7 +1298,7 @@ test.describe('table documentation', () => {
     await expect(card.getByText(rule, { exact: true })).toBeVisible()
     expect(await page.getByRole('button', { name: /^Edit/ }).count()).toBe(0)
 
-    await page.getByRole('button', { name: 'columns' }).click()
+    await page.getByRole('tab', { name: 'columns' }).click()
     await expect(page.getByText('the amount', { exact: true })).toBeVisible()
     expect(await page.getByRole('button', { name: /^Edit/ }).count()).toBe(0)
     await context.close()
@@ -1320,7 +1320,7 @@ test.describe('table documentation', () => {
       }),
     })
     await expect(card).toContainText(EVIL)
-    await page.getByRole('button', { name: 'columns' }).click()
+    await page.getByRole('tab', { name: 'columns' }).click()
     await expect(page.getByText(EVIL).first()).toBeVisible()
     const rendered = await page.evaluate(() => ({
       xss: (window as unknown as { __xss: number }).__xss,
@@ -1474,7 +1474,7 @@ test.describe('table documentation', () => {
 
   test('column description edit', async ({ browser }) => {
     const { context, page, requests } = await open(browser)
-    await page.getByRole('button', { name: 'columns' }).click()
+    await page.getByRole('tab', { name: 'columns' }).click()
     await page.getByRole('button', { name: 'Edit description of amount' }).click()
     await page.getByRole('textbox', { name: 'Description of amount' }).fill('the amount in cents')
     await page.getByRole('button', { name: 'Save description of amount' }).click()
@@ -1499,7 +1499,7 @@ test.describe('table documentation', () => {
     expect((await auditPage(page)).filter((finding) => finding.rule === 'U5')).toEqual([])
     await page.getByRole('button', { name: 'Cancel' }).click()
 
-    await page.getByRole('button', { name: 'columns' }).click()
+    await page.getByRole('tab', { name: 'columns' }).click()
     await page.getByRole('button', { name: 'Edit description of amount' }).click()
     expect((await auditPage(page)).filter((finding) => finding.rule === 'U5')).toEqual([])
     await context.close()
