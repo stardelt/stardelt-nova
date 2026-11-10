@@ -206,12 +206,13 @@ function TableDetail({ ns, tbl, catalog, kind }: Sel & { catalog?: string; kind?
       {!isView && <TableAbout ns={ns} tbl={tbl} catalog={catalog} me={me.data} docs={docs} onSaved={onDocsSaved} />}
       {!isView && <TableHealth ns={ns} tbl={tbl} catalog={catalog} />}
 
-      <div className="flex gap-2">
+      <div className="flex flex-wrap gap-2" role="tablist" aria-label="Table views">
         {tabs.map(t => (
           <button
             key={t}
+            role="tab"
             onClick={() => setTab(t)}
-            aria-pressed={tab === t}
+            aria-selected={tab === t}
             className={[
               'px-3 py-1.5 rounded-[8px] text-sm border capitalize',
               tab === t

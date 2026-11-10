@@ -78,10 +78,10 @@ test('the lineage tab summarises the writer and readers and lists both direction
   await page.goto('/catalog?catalog=lakehouse&ns=sales&tbl=orders')
 
   // The tab reads nothing until it is open.
-  await expect(page.getByRole('button', { name: 'lineage' })).toBeVisible()
+  await expect(page.getByRole('tab', { name: 'lineage' })).toBeVisible()
   expect(lineageRequests).toEqual([])
 
-  await page.getByRole('button', { name: 'lineage' }).click()
+  await page.getByRole('tab', { name: 'lineage' }).click()
 
   // The summary: the job of the newest edge into this table, and its readers.
   await expect(page.getByText('Written by')).toBeVisible()
@@ -125,7 +125,7 @@ test('choosing 7 days refetches with that window', async ({ page }) => {
   })
   await stub(page)
   await page.goto('/catalog?catalog=lakehouse&ns=sales&tbl=orders')
-  await page.getByRole('button', { name: 'lineage' }).click()
+  await page.getByRole('tab', { name: 'lineage' }).click()
   await expect(page.getByText('Read by 2 people · 7 queries in 30 days')).toBeVisible()
 
   await page.getByLabel('Lineage window').selectOption('7')
@@ -142,7 +142,7 @@ test('an empty window says so on both lists and in the summary', async ({ page }
   }
   await stub(page, { graph: focusOnly })
   await page.goto('/catalog?catalog=lakehouse&ns=sales&tbl=orders')
-  await page.getByRole('button', { name: 'lineage' }).click()
+  await page.getByRole('tab', { name: 'lineage' }).click()
 
   await expect(page.getByText('Nothing upstream in 30 days.')).toBeVisible()
   await expect(page.getByText('Nothing depends on this table in 30 days.')).toBeVisible()
@@ -158,7 +158,7 @@ test('with no catalog open the card says so and asks for nothing', async ({ page
   await stub(page, { defaultCatalog: '' })
   await page.goto('/catalog?ns=sales&tbl=orders')
 
-  await page.getByRole('button', { name: 'lineage' }).click()
+  await page.getByRole('tab', { name: 'lineage' }).click()
   await expect(page.getByText('No catalog is open, so there is no lineage to read.')).toBeVisible()
   await page.waitForTimeout(300)
   expect(lineageRequests).toEqual([])
