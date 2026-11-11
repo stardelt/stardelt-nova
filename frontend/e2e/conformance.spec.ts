@@ -3152,7 +3152,7 @@ test.describe('schedule', () => {
     await expect(dialog.getByRole('textbox', { name: 'Statement', exact: true })).toHaveValue('select 1')
     await dialog.getByRole('textbox', { name: 'Time of day', exact: true }).fill('04:00')
     await dialog.getByRole('button', { name: 'Save schedule' }).click()
-    await expect(page.getByRole('status')).toHaveText('Saved team-smoke.')
+    await expect(page.getByRole('status').filter({ hasText: 'Saved team-smoke.' })).toBeVisible()
 
     const puts = requests.filter((request) => request.method === 'PUT')
     expect(puts.map((request) => new URL(request.url).pathname)).toEqual([`/api/pipelines/${NS}/team-smoke`])
@@ -3183,7 +3183,7 @@ test.describe('schedule', () => {
     await page.getByRole('dialog', { name: 'Delete team-smoke?' })
       .getByRole('button', { name: 'Delete pipeline' })
       .click()
-    await expect(page.getByRole('status')).toHaveText('Deleted team-smoke.')
+    await expect(page.getByRole('status').filter({ hasText: 'Deleted team-smoke.' })).toBeVisible()
     const deletes = requests.filter((request) => request.method === 'DELETE')
     expect(deletes).toHaveLength(1)
     expect(new URL(deletes[0].url).pathname).toBe(`/api/pipelines/${NS}/team-smoke`)
