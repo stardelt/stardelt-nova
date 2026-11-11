@@ -106,6 +106,7 @@ mod connections;
 mod data;
 mod db;
 mod demo;
+mod destinations;
 mod embed;
 mod jobs;
 mod lineage_api;
@@ -699,6 +700,12 @@ fn api_router() -> Router<Arc<AppState>> {
             "/saved-queries/{id}/share/{group}",
             delete(saved_queries::unshare),
         )
+        // The caller's groups' notification destinations (state store; 503 while it is not set).
+        .route(
+            "/destinations",
+            get(destinations::list).post(destinations::create),
+        )
+        .route("/destinations/{id}", delete(destinations::remove))
         // The query log: the caller's own queries, everybody's for administrators (state store).
         .route("/query-log", get(query_log_api::list))
         .route("/query-log/{id}", get(query_log_api::detail))
