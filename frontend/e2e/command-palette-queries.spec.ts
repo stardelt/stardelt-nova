@@ -99,7 +99,7 @@ test('the palette finds a saved query and opens it in the SQL editor', async ({ 
   await page.keyboard.press('Control+k')
   const dialog = page.getByRole('dialog')
   await expect(dialog).toBeVisible()
-  const input = page.getByRole('combobox', { name: 'Search pages, queries and tables' })
+  const input = page.getByRole('combobox', { name: 'Search pages, catalogs, schemas, tables and queries' })
 
   // An empty query shows no saved-query rows, even though the list is loaded.
   await expect(dialog.getByText('Saved queries')).toHaveCount(0)
@@ -132,7 +132,7 @@ test('the palette finds a recent query and opens it in the query log', async ({ 
   await page.keyboard.press('Control+k')
   const dialog = page.getByRole('dialog')
   await expect(dialog).toBeVisible()
-  const input = page.getByRole('combobox', { name: 'Search pages, queries and tables' })
+  const input = page.getByRole('combobox', { name: 'Search pages, catalogs, schemas, tables and queries' })
 
   // Nothing is asked of the query log for fewer than two characters.
   await expect(dialog.getByText('Queries', { exact: true })).toHaveCount(0)

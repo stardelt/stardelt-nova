@@ -41,7 +41,7 @@ test('Ctrl+K opens the palette, filters pages and navigates', async ({ page }) =
   await page.keyboard.press('Control+k')
   const dialog = page.getByRole('dialog')
   await expect(dialog).toBeVisible()
-  const input = page.getByRole('combobox', { name: 'Search pages, queries and tables' })
+  const input = page.getByRole('combobox', { name: 'Search pages, catalogs, schemas, tables and queries' })
   await expect(input).toBeFocused()
   await input.fill('streams')
   await expect(dialog.getByRole('option')).toHaveCount(1)

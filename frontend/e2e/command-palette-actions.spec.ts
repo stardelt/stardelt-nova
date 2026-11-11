@@ -41,7 +41,7 @@ test('an action opens the SQL editor', async ({ page }) => {
   // keydown listener is attached before the first key press.
   await expect(page).toHaveTitle('Overview · stardelt Nova')
   await page.keyboard.press('Control+k')
-  const input = page.getByRole('combobox', { name: 'Search pages, queries and tables' })
+  const input = page.getByRole('combobox', { name: 'Search pages, catalogs, schemas, tables and queries' })
   await input.fill('new q')
   const action = page.getByRole('dialog').getByRole('option', { name: /New query/ })
   await expect(action).toBeVisible()
@@ -57,7 +57,7 @@ test('Switch theme flips the paired theme and closes the palette', async ({ page
   // keydown listener is attached before the first key press.
   await expect(page).toHaveTitle('Overview · stardelt Nova')
   await page.keyboard.press('Control+k')
-  const input = page.getByRole('combobox', { name: 'Search pages, queries and tables' })
+  const input = page.getByRole('combobox', { name: 'Search pages, catalogs, schemas, tables and queries' })
   await input.fill('switch')
   await page.getByRole('dialog').getByRole('option', { name: /Switch theme/ }).click()
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'silver')

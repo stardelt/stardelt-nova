@@ -85,7 +85,7 @@ test('the palette finds a pipeline and opens its page', async ({ page }) => {
   await page.keyboard.press('Control+k')
   const dialog = page.getByRole('dialog')
   await expect(dialog).toBeVisible()
-  const input = page.getByRole('combobox', { name: 'Search pages, queries and tables' })
+  const input = page.getByRole('combobox', { name: 'Search pages, catalogs, schemas, tables and queries' })
   // "Pipelines" is also a navigation page, so the group heading is matched on the
   // presentation row that the group label renders as, not on any text in the dialog.
   const pipelineHeading = dialog.locator('li[role="presentation"]').filter({ hasText: /^Pipelines$/ })
