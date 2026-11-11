@@ -11,7 +11,7 @@ import { JobPill, LineageLists, lineageHref } from '../components/LineageLists'
 import SchemaOverview from '../components/SchemaOverview'
 import TableAbout, { type DocsState } from '../components/TableAbout'
 import TableHealth from '../components/TableHealth'
-import { formatCount, formatTime, relativeTime, sqlTableRef, rowsLabel, sqlIdent } from '../format'
+import { formatBytes, formatCount, formatTime, relativeTime, sqlTableRef, rowsLabel, sqlIdent } from '../format'
 import { isAdmin } from '../roles'
 
 type Sel = { ns: string; tbl: string; kind?: 'table' | 'view' }
@@ -20,6 +20,27 @@ type Sel = { ns: string; tbl: string; kind?: 'table' | 'view' }
 function forbidden(error: unknown): boolean {
   if (error instanceof ApiError) return error.status === 403
   return !!error && typeof error === 'object' && 'status' in error && (error as { status?: unknown }).status === 403
+}
+
+/**
+ * The current snapshot's exact rows and bytes, when the metadata carries them (nova#511).
+ * Iceberg writes the summary counters as strings; a missing, negative or unparsable counter is
+ * absent, never zero. A table with no snapshot (`current-snapshot-id` absent or -1) answers null.
+ */
+function snapshotNumbers(
+  metadata: TableMetadata['metadata'] | undefined,
+): { rows: number | null; bytes: number | null } | null {
+  const id = metadata?.['current-snapshot-id']
+  if (typeof id !== 'number' || id < 0) return null
+  const summary = metadata?.snapshots?.find((snapshot) => snapshot['snapshot-id'] === id)?.summary
+  if (!summary) return null
+  const count = (value: unknown): number | null => {
+    const n = Number(value)
+    return Number.isFinite(n) && n >= 0 ? n : null
+  }
+  const rows = count(summary['total-records'])
+  const bytes = count(summary['total-files-size'])
+  return rows == null && bytes == null ? null : { rows, bytes }
 }
 
 export default function Catalog() {
@@ -167,6 +188,7 @@ function TableDetail({ ns, tbl, catalog, kind }: Sel & { catalog?: string; kind?
   const m = meta.data?.metadata
   const updatedMs = m?.['last-updated-ms'] ?? 0
   const owner = docs.data?.owner ?? null
+  const numbers = snapshotNumbers(m)
   const schemaId = m?.['current-schema-id'] ?? m?.schemas[0]?.['schema-id'] ?? 0
   const schema = m?.schemas.find(s => s['schema-id'] === schemaId) ?? m?.schemas[0]
   const partSpec = m?.['partition-specs']?.[0]
@@ -191,6 +213,15 @@ function TableDetail({ ns, tbl, catalog, kind }: Sel & { catalog?: string; kind?
               {owner && <>Owner <span className="font-mono">{owner}</span></>}
               {owner && updatedMs > 0 && ' · '}
               {updatedMs > 0 && <>Last changed {relativeTime(updatedMs)}</>}
+            </div>
+          )}
+          {numbers && (
+            <div className="text-xs text-text-mute mt-1">
+              {numbers.rows != null && (
+                <>{formatCount(numbers.rows)} {numbers.rows === 1 ? 'row' : 'rows'}</>
+              )}
+              {numbers.rows != null && numbers.bytes != null && ' · '}
+              {numbers.bytes != null && formatBytes(numbers.bytes)}
             </div>
           )}
         </div>

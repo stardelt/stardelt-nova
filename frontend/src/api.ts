@@ -188,6 +188,13 @@ export type TableMetadata = {
     location: string
     'last-updated-ms': number
     'current-schema-id'?: number
+    'current-snapshot-id'?: number | null
+    /** The metadata's snapshots; only the current one's `summary` is read by the table page. */
+    snapshots?: Array<{
+      'snapshot-id': number
+      'timestamp-ms'?: number
+      summary?: Record<string, string | number>
+    }>
     schemas: IcebergSchema[]
     'partition-specs': Array<{
       'spec-id': number
