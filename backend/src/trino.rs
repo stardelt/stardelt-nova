@@ -425,6 +425,12 @@ fn scrub_internal(message: &str) -> String {
         .join(" ")
 }
 
+/// The statement without surrounding whitespace and trailing `;`: Trino refuses a
+/// trailing `;`, and people (and the CLI) send one.
+fn trim_statement(sql: &str) -> String {
+    sql.trim().trim_end_matches(';').trim_end().to_string()
+}
+
 #[utoipa::path(
     post,
     operation_id = "query_run",
@@ -444,7 +450,8 @@ pub async fn run_query(
     // The body extractor has to be last: axum consumes the request for it.
     ApiJson(req): ApiJson<QueryRequest>,
 ) -> Response {
-    let title = truncate(&req.sql, 90);
+    let sql = trim_statement(&req.sql);
+    let title = truncate(&sql, 90);
     let (user, owner) = caller
         .as_ref()
         .map(|c| (c.0.identity.display_name.clone(), c.0.identity.sub.clone()))
@@ -452,7 +459,7 @@ pub async fn run_query(
 
     if s.demo {
         let demo = s.demo_state.read().expect("demo state poisoned");
-        return match demo.run_query(&req.sql) {
+        return match demo.run_query(&sql) {
             Ok(r) => {
                 jobs::record(
                     &s.jobs,
@@ -482,14 +489,7 @@ pub async fn run_query(
         };
     }
 
-    match execute_from(
-        &s,
-        req.sql,
-        caller.as_ref().map(|c| &c.0),
-        "nova-sql-editor",
-    )
-    .await
-    {
+    match execute_from(&s, sql, caller.as_ref().map(|c| &c.0), "nova-sql-editor").await {
         Ok(r) => {
             jobs::record(
                 &s.jobs,
@@ -531,6 +531,13 @@ fn truncate(s: &str, n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trim_statement_drops_the_trailing_semicolon() {
+        assert_eq!(trim_statement("SELECT 1;"), "SELECT 1");
+        assert_eq!(trim_statement("  SELECT 1 ;  \n"), "SELECT 1");
+        assert_eq!(trim_statement("SELECT ';'"), "SELECT ';'");
+    }
 
     /// Shaped like a real Trino `TABLE_NOT_FOUND` answer, `failureInfo.stack` included.
     fn table_not_found() -> Value {

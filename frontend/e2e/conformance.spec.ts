@@ -3074,7 +3074,8 @@ test.describe('schedule', () => {
     })
     await first.page.getByLabel('SQL query').fill('  select 1  ')
     const dialog = await openDialog(first.page)
-    await expect(dialog.getByRole('textbox', { name: 'Statement', exact: true })).toHaveValue('  select 1  ')
+    // The dialog opens with the statement Run would run (#805): trimmed, no trailing `;`.
+    await expect(dialog.getByRole('textbox', { name: 'Statement', exact: true })).toHaveValue('select 1')
     await dialog.getByRole('textbox', { name: 'Name', exact: true }).fill('nightly-report')
     await dialog.getByRole('radio', { name: 'Every day at' }).check()
     await dialog.getByRole('textbox', { name: 'Time of day', exact: true }).fill('03:00')
