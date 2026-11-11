@@ -8,6 +8,7 @@ import ScheduleDialog from '../components/ScheduleDialog'
 import { formatBytes, formatTime, shortVersion } from '../format'
 import { diffNotebooks } from '../notebookDiff'
 import { renderNotebook } from '../notebookHtml'
+import { RunStateBadge, formatWhen, runDuration } from './Pipelines'
 
 /**
  * One published notebook (stardelt-nova#517): its versions, newest first, the parameters of the
@@ -38,6 +39,13 @@ export default function NotebookDetail() {
   const usage = useQuery({
     queryKey: ['notebook-usage', group, name],
     queryFn: () => api.notebookUsage(group, name),
+  })
+  // The runs of this notebook's schedules (#517, #756). Asked only once the caller may see the
+  // notebook: the versions route has answered, so a 403 here is a real problem.
+  const runs = useQuery({
+    queryKey: ['notebook-runs', group, name],
+    queryFn: () => api.runs({ notebook: `${group}/${name}`, limit: 10 }),
+    enabled: versions.data !== undefined,
   })
   const content = useQuery({
     queryKey: ['notebook-content', group, name, selected],
@@ -332,6 +340,63 @@ export default function NotebookDetail() {
                       )}
                     </td>
                     <td className="td px-2 text-xs font-mono">{row.runAs ?? '—'}</td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        )}
+      </section>
+
+      <section className="card p-5" data-testid="notebook-runs">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="min-w-0">
+            <h2 className="text-lg font-semibold">Runs</h2>
+            <p className="mt-1 text-sm text-text-mute">
+              The last runs of every schedule that runs this notebook, newest first.
+            </p>
+          </div>
+          <Link to="/runs?kind=notebook" className="btn-ghost py-1 text-xs">All runs</Link>
+        </div>
+        {runs.isLoading && <p className="mt-2 text-sm text-text-mute">Loading runs…</p>}
+        {runs.isError && (
+          <div className="mt-2"><ErrorBox error={runs.error} onRetry={() => void runs.refetch()} /></div>
+        )}
+        {runs.data && runs.data.runs.length === 0 && (
+          <p className="mt-2 text-sm text-text-mute">
+            No run of this notebook yet. A schedule appears above under “Where it is used”; a run
+            started from the pipeline page shows up here too.
+          </p>
+        )}
+        {runs.data && runs.data.runs.length > 0 && (
+          <table className="mt-3 w-full text-sm">
+            <caption className="sr-only">Runs of the schedules that run {name}, newest first.</caption>
+            <thead className="bg-bg-soft/50">
+              <tr>
+                <th scope="col" className="th px-2 py-2">State</th>
+                <th scope="col" className="th px-2 py-2">Started</th>
+                <th scope="col" className="th px-2 py-2">Took</th>
+                <th scope="col" className="th px-2 py-2">Trigger</th>
+                <th scope="col" className="th px-2 py-2">Schedule</th>
+              </tr>
+            </thead>
+            <tbody>
+              {runs.data.runs.map((row) => {
+                const started = formatWhen(row.startedAt)
+                return (
+                  <tr key={`${row.name}/${row.runId}`} className="border-t border-border/70">
+                    <td className="td px-2"><RunStateBadge state={row.state} /></td>
+                    <td className="td px-2 whitespace-nowrap" title={started.title}>{started.text}</td>
+                    <td className="td px-2 tabular-nums">{runDuration(row.durationSeconds)}</td>
+                    <td className="td px-2 text-xs">{row.triggeredBy ?? row.type}</td>
+                    <td className="td px-2">
+                      <Link
+                        to={`/pipelines/${encodeURIComponent(row.namespace)}/${encodeURIComponent(row.name)}`}
+                        className="font-mono text-xs underline break-all"
+                      >
+                        {row.name}
+                      </Link>
+                    </td>
                   </tr>
                 )
               })}

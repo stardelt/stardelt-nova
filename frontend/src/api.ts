@@ -1403,13 +1403,19 @@ export const api = {
   stopWorkspace:  ()                            => jpost<WorkspaceView>('/api/workspace/stop', {}),
   /** The caller's own groups and their principals (`Schedule`, #210). */
   pipelinePrincipals: ()                      => jget<{ groups: PipelinePrincipal[] }>('/api/pipelines/principals'),
-  /** Every run of the caller's pipelines, newest first; the server applies the filters. */
-  runs: (opts: { limit?: number; state?: string; kind?: string; group?: string } = {}) => {
+  /**
+   * Every run of the caller's pipelines, newest first; the server applies the filters.
+   * `notebook` is `<group>/<name>`: the runs of every schedule that runs that notebook (#756).
+   */
+  runs: (
+    opts: { limit?: number; state?: string; kind?: string; group?: string; notebook?: string } = {},
+  ) => {
     const qs = new URLSearchParams()
     if (opts.limit !== undefined) qs.set('limit', String(opts.limit))
     if (opts.state) qs.set('state', opts.state)
     if (opts.kind) qs.set('kind', opts.kind)
     if (opts.group) qs.set('group', opts.group)
+    if (opts.notebook) qs.set('notebook', opts.notebook)
     const query = qs.toString()
     return jget<RunsListResponse>(`/api/runs${query ? `?${query}` : ''}`)
   },
