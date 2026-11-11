@@ -62,6 +62,20 @@ export type SavedQuery = {
   shared_with: string[]
 }
 
+/** A named email or webhook endpoint owned by one group (`GET /api/destinations`, nova#273). */
+export type Destination = {
+  id: number
+  owner_group: string
+  name: string
+  kind: 'email' | 'webhook'
+  config: { url?: string; recipients?: string[] }
+  created_at: number
+  updated_at: number
+}
+
+/** What one test delivery did (`POST /api/destinations/{id}/test`). */
+export type DestinationTest = { ok: boolean; status?: number | null; detail: string }
+
 export type Warehouse = { name: string; id: string }
 
 /**
@@ -1366,6 +1380,11 @@ export const api = {
   deleteSavedQuery: (id: number)              => jdel(`/api/saved-queries/${id}`),
   shareSavedQuery:   (id: number, group: string) => jsendNoContent(`/api/saved-queries/${id}/share`, { group }),
   unshareSavedQuery: (id: number, group: string) => jdel(`/api/saved-queries/${id}/share/${seg(group)}`),
+  destinations: ()                            => jget<Destination[]>('/api/destinations'),
+  createDestination: (req: { owner_group: string; name: string; kind: string; config: unknown }) =>
+    jpost<Destination>('/api/destinations', req),
+  deleteDestination: (id: number)             => jdel(`/api/destinations/${id}`),
+  testDestination: (id: number)               => jpost<DestinationTest>(`/api/destinations/${id}/test`, {}),
   connections:  ()                            => jget<{ connections: Connection[] }>('/api/connections'),
   createConnection: (req: NewConnectionRequest) => jpost<Connection>('/api/connections', req),
   rotateConnection: (path: string, secret: Record<string, string>) => jput<Connection>(path, { secret }),

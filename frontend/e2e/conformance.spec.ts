@@ -208,8 +208,9 @@ test.describe('roles', () => {
     await page.goto('/')
     const group = (label: string) => page.locator('#primary-nav nav > div', { has: page.getByText(label, { exact: true }) })
     // Build: the order a data engineer works in, and no Deployments in it any more (#618).
+    // Destinations sits next to Connections, where a group's addresses are named (#789).
     expect(await group('Build').getByRole('link').allTextContents()).toEqual(
-      ['Notebooks', 'Pipelines', 'Runs', 'Streams', 'Compute', 'Connections', 'Load & transfer', 'Activity'])
+      ['Notebooks', 'Pipelines', 'Runs', 'Streams', 'Compute', 'Connections', 'Destinations', 'Load & transfer', 'Activity'])
     await expect(group('Admin').getByRole('link', { name: 'Deployments' })).toBeVisible()
     await page.context().close()
   })
