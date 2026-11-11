@@ -14,6 +14,7 @@ import ScheduleDialog from '../components/ScheduleDialog'
 import WarehouseNote from '../components/WarehouseNote'
 import { formatCount, sqlTableRef } from '../format'
 import { tokenizeSql, type SqlTokenKind } from '../sqlHighlight'
+import { splitStatements, statementToRun } from '../sqlStatements'
 
 /** The colour each token kind carries in the editor overlay (#501 slice 2). */
 const TOKEN_CLASS: Record<SqlTokenKind, string> = {
@@ -361,6 +362,7 @@ export default function Query() {
   const [history, setHistory] = useState<string[]>(loadHistory)
   const [scheduling, setScheduling] = useState(false)
   const [scheduled, setScheduled] = useState<{ name: string; namespace: string } | null>(null)
+  const [scheduleSql, setScheduleSql] = useState('')
   const saved = useQuery({ queryKey: ['saved-queries'], queryFn: () => api.savedQueries() })
   const me = useQuery({ queryKey: ['me'], queryFn: api.me })
   const [saving, setSaving] = useState(false)
@@ -391,13 +393,29 @@ export default function Query() {
 
   async function run() {
     if (running) return // Ctrl+Enter bypasses the disabled button
+    const area = taRef.current
+    const target = statementToRun(
+      sql,
+      area ? area.selectionStart : sql.length,
+      area ? area.selectionEnd : sql.length,
+    )
+    if ('error' in target) {
+      setResult(null); setElapsed(null); setError(target.error)
+      return
+    }
+    const stmt = target.statement.text
+    // Several statements in the editor: select the one that runs, so the person sees which.
+    if (area && splitStatements(sql).length > 1) {
+      area.focus()
+      area.setSelectionRange(target.statement.start, target.statement.end)
+    }
     setRunning(true); setError(null); setResult(null); setElapsed(null)
     const t0 = performance.now()
     try {
-      const r = await api.query(sql)
+      const r = await api.query(stmt)
       setResult(r)
       setElapsed(performance.now() - t0)
-      const next = [sql, ...history.filter(h => h !== sql)].slice(0, HISTORY_LIMIT)
+      const next = [stmt, ...history.filter(h => h !== stmt)].slice(0, HISTORY_LIMIT)
       setHistory(next); saveHistory(next)
     } catch (e: unknown) {
       setError(errorMessage(e))
@@ -555,7 +573,12 @@ export default function Query() {
             <button onClick={() => setTyped(null)} className="btn-ghost py-1.5">Sample</button>
             <button
               type="button"
-              onClick={() => setScheduling(true)}
+              onClick={() => {
+                const area = taRef.current
+                const t = statementToRun(sql, area ? area.selectionStart : sql.length, area ? area.selectionEnd : sql.length)
+                setScheduleSql('error' in t ? sql : t.statement.text)
+                setScheduling(true)
+              }}
               disabled={empty}
               title={empty ? 'Write a statement first' : undefined}
               aria-label="Schedule this statement"
@@ -564,7 +587,7 @@ export default function Query() {
               <Icon name="clock" className="w-4 h-4" />
               Schedule
             </button>
-            <div className="text-xs text-text-mute ml-auto">⌘/Ctrl+Enter to run</div>
+            <div className="text-xs text-text-mute ml-auto">⌘/Ctrl+Enter runs the statement at the cursor</div>
             {/* The class the engine will schedule this statement into (#236): the same
                 line the Profile page shows. Nothing while the answer is on its way or the
                 platform has no warehouse to name. */}
@@ -603,7 +626,7 @@ export default function Query() {
             <div>
               <p className="text-text-dim text-sm">Run a query to see results here.</p>
               <p className="text-xs text-text-mute mt-1">
-                ⌘/Ctrl+Enter runs the statement above. The row count, the timing and a CSV download appear in this panel.
+                ⌘/Ctrl+Enter runs the statement at the cursor, or the selected text. The row count, the timing and a CSV download appear in this panel.
               </p>
             </div>
           </div>
@@ -782,7 +805,7 @@ export default function Query() {
       {scheduling && (
         <ScheduleDialog
           mode="create"
-          sql={sql}
+          sql={scheduleSql}
           onClose={() => setScheduling(false)}
           onScheduled={(view) => {
             setScheduling(false)
