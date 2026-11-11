@@ -6,7 +6,9 @@ import { getTimeDisplay } from '../format'
 
 // "My workspace" (stardelt-nova#653): the state of the caller's own JupyterHub server, and
 // the two things a person may do about it — start it, stop it. Opening it is a plain link to
-// the hub: Nova has no `access:servers` scope and can never open a server itself.
+// the hub: Nova has no `access:servers` scope and can never open a server itself. Starting it
+// is the hub's `/hub/spawn` route for the same reason: only the hub can renew its own stored
+// sign-in for the person (nova#808).
 
 type State = WorkspaceView['state']
 
@@ -60,7 +62,7 @@ function secondsLabel(seconds: number): string {
   return `${Math.floor(seconds / 60)} min ${pad(seconds % 60)} s`
 }
 
-export default function WorkspaceCard({ open }: { open?: string }) {
+export default function WorkspaceCard({ open, spawn }: { open?: string; spawn?: string }) {
   const qc = useQueryClient()
   const workspace = useQuery({
     queryKey: ['workspace'],
@@ -154,9 +156,18 @@ export default function WorkspaceCard({ open }: { open?: string }) {
             </a>
           )}
           {state === 'stopped' && (
-            <button type="button" className="btn-primary py-1.5" disabled={pending} onClick={() => start.mutate()}>
-              Start
-            </button>
+            // The hub's own spawn route, not `POST /api/workspace/start`: only the hub's login
+            // can renew a stored OAuth token that has aged out, and the spawn route does that
+            // through the SSO session the visitor already has (nova#808).
+            spawn ? (
+              <a href={spawn} target="_blank" rel="noreferrer" className="btn-primary py-1.5">
+                Start
+              </a>
+            ) : (
+              <button type="button" className="btn-primary py-1.5" disabled={pending} onClick={() => start.mutate()}>
+                Start
+              </button>
+            )
           )}
           {(state === 'running' || state === 'starting') && (
             <button type="button" className="btn-ghost py-1.5 text-xs" disabled={pending} onClick={() => stop.mutate()}>
