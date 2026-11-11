@@ -2600,9 +2600,9 @@ async fn list_pipelines(
 }
 
 /// `GET /api/runs`: every run of the caller's visible pipelines, newest first, filtered by
-/// `state`, `kind`, `group` and `pipeline`, capped at `limit`. One DAG list, then one run-list
-/// call per loaded pipeline (at most eight at a time); a failing call skips that pipeline
-/// instead of failing the page. Nothing visible means no call to Airflow at all.
+/// `state`, `kind`, `group`, `pipeline` and `notebook`, capped at `limit`. One DAG list, then
+/// one run-list call per loaded pipeline (at most eight at a time); a failing call skips that
+/// pipeline instead of failing the page. Nothing visible means no call to Airflow at all.
 async fn runs_across_pipelines(
     resources: Option<&PipelineResources>,
     airflow: Option<&AirflowClient>,
@@ -2610,6 +2610,15 @@ async fn runs_across_pipelines(
     query: &BTreeMap<String, String>,
 ) -> Result<RunsListResponse, Fail> {
     let filter = RunsFilter::parse(query)?;
+
+    // The notebook page is owner-group scoped: an administrator gets no wider view (#517).
+    // Checked before the cluster and the list, like the usage route, so a caller outside the
+    // group is refused even when no pipeline of their own is visible.
+    if let Some((group, _)) = &filter.notebook
+        && !who.groups.iter().any(|g| g == group)
+    {
+        return Err(crate::notebooks::forbidden_group(group));
+    }
 
     let resources = resources.ok_or_else(no_cluster)?;
     let airflow = scheduler(airflow)?;
@@ -2635,6 +2644,10 @@ async fn runs_across_pipelines(
         .collect::<BTreeSet<String>>()
         .into_iter()
         .collect();
+
+    if let Some((group, notebook)) = &filter.notebook {
+        resources.retain(|resource| notebook_schedule(resource, group, notebook));
+    }
 
     let dags: BTreeMap<String, DagSummary> = airflow
         .list_dags("pipeline", true)
@@ -2697,7 +2710,7 @@ async fn runs_across_pipelines(
     Ok(filter.answer(rows, groups))
 }
 
-/// The query of `GET /api/runs`, parsed once: the four filters and the cap. Demo mode parses
+/// The query of `GET /api/runs`, parsed once: the five filters and the cap. Demo mode parses
 /// the same query, so a bad one refuses there too.
 struct RunsFilter<'a> {
     limit: usize,
@@ -2705,6 +2718,8 @@ struct RunsFilter<'a> {
     state: Option<&'a str>,
     group: Option<&'a str>,
     pipeline: Option<(String, String)>,
+    /// The notebook as `<group>/<name>`; narrowed at the source (the rows do not carry it).
+    notebook: Option<(String, String)>,
 }
 
 impl<'a> RunsFilter<'a> {
@@ -2715,6 +2730,7 @@ impl<'a> RunsFilter<'a> {
             state: query.get("state").map(String::as_str),
             group: query.get("group").map(String::as_str),
             pipeline: runs_pipeline(query)?,
+            notebook: runs_notebook(query)?,
         })
     }
 
@@ -2792,6 +2808,22 @@ fn runs_pipeline(query: &BTreeMap<String, String>) -> Result<Option<(String, Str
         _ => Err(Fail::new(
             StatusCode::BAD_REQUEST,
             "pipeline must be <namespace>/<name>",
+        )),
+    }
+}
+
+/// The `notebook` filter of `GET /api/runs`: `<group>/<name>` when given.
+fn runs_notebook(query: &BTreeMap<String, String>) -> Result<Option<(String, String)>, Fail> {
+    let Some(value) = query.get("notebook") else {
+        return Ok(None);
+    };
+    match value.split_once('/') {
+        Some((group, name)) if !group.is_empty() && !name.is_empty() && !name.contains('/') => {
+            Ok(Some((group.to_string(), name.to_string())))
+        }
+        _ => Err(Fail::new(
+            StatusCode::BAD_REQUEST,
+            "notebook must be <group>/<name>",
         )),
     }
 }
@@ -4465,18 +4497,20 @@ pub(crate) async fn list(caller: ReadCaller) -> Response {
     operation_id = "runs_list",
     path = "/api/runs",
     tag = "public",
-    description = "The runs of the caller's visible pipelines, newest first. A run carries the pipeline's `namespace`, `name` and `ownerGroup` and a `kind` of `sql`, `notebook` or `pipeline` (a multi-step pipeline). `limit` defaults to 50 and is at most 200. `state`, `kind`, `group` and `pipeline` (`<namespace>/<name>`) narrow the answer; an unknown state answers no rows rather than an error. A failed scheduler read for one pipeline is logged and skipped, not reported. Answers `Cache-Control: no-store`.",
+    description = "The runs of the caller's visible pipelines, newest first. A run carries the pipeline's `namespace`, `name` and `ownerGroup` and a `kind` of `sql`, `notebook` or `pipeline` (a multi-step pipeline). `limit` defaults to 50 and is at most 200. `state`, `kind`, `group`, `pipeline` (`<namespace>/<name>`) and `notebook` (`<group>/<name>`) narrow the answer; an unknown state answers no rows rather than an error. A `notebook` filter is owner-group scoped: a caller who is not a member of the group answers 403. A failed scheduler read for one pipeline is logged and skipped, not reported. Answers `Cache-Control: no-store`.",
     params(
         ("limit" = Option<usize>, Query, description = "Rows to answer; 50 when absent, at most 200"),
         ("state" = Option<String>, Query, description = "Exact match on the run's state; an unknown state answers no rows"),
         ("kind" = Option<String>, Query, description = "`sql`, `notebook` or `pipeline`"),
         ("group" = Option<String>, Query, description = "Exact match on the pipeline's `spec.ownerGroup`"),
         ("pipeline" = Option<String>, Query, description = "One pipeline as `<namespace>/<name>`"),
+        ("notebook" = Option<String>, Query, description = "One published notebook as `<group>/<name>`: only the runs of its schedules"),
     ),
     responses(
         (status = 200, description = "The visible runs, newest first", body = RunsListResponse),
-        (status = 400, description = "`limit`, `kind` or `pipeline` is invalid", body = crate::openapi::ErrorResponse),
+        (status = 400, description = "`limit`, `kind`, `pipeline` or `notebook` is invalid", body = crate::openapi::ErrorResponse),
         (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller is not a member of the notebook's group", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The scheduler or the cluster did not answer", body = crate::openapi::ErrorResponse),
         (status = 503, description = "No cluster connection, or the scheduler is not configured", body = crate::openapi::ErrorResponse),
     )
@@ -4488,16 +4522,7 @@ pub(crate) async fn list_runs(
     let signed = match caller {
         // Demo mode has no scheduler: the sample is filtered and capped like a real answer, so
         // the page's filters and its 400s behave the same way.
-        ReadCaller::Demo => {
-            let result: Result<RunsListResponse, Fail> = match RunsFilter::parse(&query) {
-                Ok(filter) => {
-                    let sample = crate::demo::runs();
-                    Ok(filter.answer(sample.runs, sample.groups))
-                }
-                Err(e) => Err(e),
-            };
-            return answer(result);
-        }
+        ReadCaller::Demo => return answer(demo_runs(&query)),
         ReadCaller::Signed(signed) => signed,
     };
     answer(
@@ -4509,6 +4534,44 @@ pub(crate) async fn list_runs(
         )
         .await,
     )
+}
+
+/// Demo mode's `GET /api/runs`: the sample is filtered and capped like a real answer, so the
+/// page's filters and its 400s behave the same way. There is no notebook schedule in demo mode,
+/// so a `notebook` filter answers no rows — the same empty list the notebook page's usage route
+/// answers there.
+fn demo_runs(query: &BTreeMap<String, String>) -> Result<RunsListResponse, Fail> {
+    let filter = RunsFilter::parse(query)?;
+    let sample = crate::demo::runs();
+    if filter.notebook.is_some() {
+        return Ok(RunsListResponse {
+            runs: Vec::new(),
+            groups: sample.groups,
+        });
+    }
+    Ok(filter.answer(sample.runs, sample.groups))
+}
+
+/// Whether this Pipeline is a Schedule of one published notebook: the owner group, the one-task
+/// shape a Schedule writes (#516), `kind: notebook` and `config.notebook == name`.
+fn notebook_schedule(resource: &Value, group: &str, notebook: &str) -> bool {
+    let spec = spec_of(resource);
+    if spec.get("ownerGroup").and_then(Value::as_str) != Some(group) {
+        return false;
+    }
+    let Some(task) = spec
+        .get("tasks")
+        .and_then(Value::as_array)
+        .and_then(|tasks| tasks.first())
+    else {
+        return false;
+    };
+    task.get("kind").and_then(Value::as_str) == Some("notebook")
+        && task
+            .get("config")
+            .and_then(|config| config.get("notebook"))
+            .and_then(Value::as_str)
+            == Some(notebook)
 }
 
 /// The visible pipelines whose single task is `kind: notebook` with `config.notebook == name`,
@@ -4523,19 +4586,10 @@ fn notebook_usage_rows(
     let mut rows: Vec<NotebookScheduleRow> = resources
         .iter()
         .filter(|resource| visible(who, spec_of(resource)))
+        .filter(|resource| notebook_schedule(resource, group, name))
         .filter_map(|resource| {
             let spec = spec_of(resource);
-            if spec.get("ownerGroup").and_then(Value::as_str) != Some(group) {
-                return None;
-            }
-            let task = spec.get("tasks")?.as_array()?.first()?;
-            if task.get("kind").and_then(Value::as_str) != Some("notebook") {
-                return None;
-            }
-            let config = task.get("config")?;
-            if config.get("notebook").and_then(Value::as_str) != Some(name) {
-                return None;
-            }
+            let config = spec.get("tasks")?.as_array()?.first()?.get("config")?;
             Some(NotebookScheduleRow {
                 namespace: crate::cluster::namespace(),
                 name: pipeline_name(resource).to_string(),
@@ -6704,6 +6758,139 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runs_filter_parses_a_notebook() {
+        let query = BTreeMap::from([("notebook".to_string(), "analytics/smoke.ipynb".to_string())]);
+        let filter = RunsFilter::parse(&query).expect("a group and a name parse");
+        assert_eq!(
+            filter.notebook,
+            Some(("analytics".to_string(), "smoke.ipynb".to_string()))
+        );
+        for value in ["smoke.ipynb", "analytics/", "/smoke.ipynb", "analytics/a/b"] {
+            let query = BTreeMap::from([("notebook".to_string(), value.to_string())]);
+            let error = match RunsFilter::parse(&query) {
+                Ok(_) => panic!("{value} must be refused"),
+                Err(error) => error,
+            };
+            assert_eq!(error.status(), StatusCode::BAD_REQUEST, "{value}");
+            assert_eq!(
+                error.message(),
+                "notebook must be <group>/<name>",
+                "{value}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_notebook_schedule_is_recognised_by_group_notebook_and_task_kind() {
+        let schedule = notebook_run_resource("smoke-daily", "analytics", "smoke.ipynb");
+        assert!(
+            notebook_schedule(&schedule, "analytics", "smoke.ipynb"),
+            "the schedule of that notebook"
+        );
+        assert!(
+            !notebook_schedule(&schedule, "analytics", "other.ipynb"),
+            "another notebook name"
+        );
+        assert!(
+            !notebook_schedule(&schedule, "finance", "smoke.ipynb"),
+            "another owner group"
+        );
+        let sql = run_task_resource("smoke-daily", Some("analytics"), "sql");
+        assert!(
+            !notebook_schedule(&sql, "analytics", "smoke.ipynb"),
+            "a sql task is no notebook schedule"
+        );
+        let no_config = run_task_resource("smoke-daily", Some("analytics"), "notebook");
+        assert!(
+            !notebook_schedule(&no_config, "analytics", "smoke.ipynb"),
+            "the notebook name is part of the shape"
+        );
+    }
+
+    #[tokio::test]
+    async fn runs_notebook_filter_answers_only_that_notebooks_runs() {
+        let resources = memory(&[
+            (
+                "smoke-daily",
+                notebook_run_resource("smoke-daily", "analytics", "smoke.ipynb"),
+            ),
+            (
+                "other-daily",
+                notebook_run_resource("other-daily", "analytics", "other.ipynb"),
+            ),
+        ]);
+        let (airflow, fake) = fake_airflow::start().await;
+        {
+            let mut fake = fake.lock().unwrap();
+            fake.dags = vec![dag("stardelt__smoke-daily"), dag("stardelt__other-daily")];
+            fake.runs.insert(
+                "stardelt__smoke-daily".into(),
+                vec![run_started(
+                    "scheduled__smoke",
+                    "success",
+                    "2026-10-20T07:00:00Z",
+                )],
+            );
+            fake.runs.insert(
+                "stardelt__other-daily".into(),
+                vec![run_started(
+                    "scheduled__other",
+                    "success",
+                    "2026-10-21T07:00:00Z",
+                )],
+            );
+        }
+        let ada = who("sub-ada", &["analytics"], false);
+
+        let answer = runs_across_pipelines(
+            Some(&resources),
+            Some(&airflow),
+            &ada,
+            &BTreeMap::from([("notebook".to_string(), "analytics/smoke.ipynb".to_string())]),
+        )
+        .await
+        .expect("a notebook filter succeeds");
+        assert_eq!(answer.runs.len(), 1, "{:?}", answer.runs);
+        assert_eq!(answer.runs[0].run.run_id, "scheduled__smoke");
+        assert_eq!(
+            answer.groups,
+            vec!["analytics".to_string()],
+            "every visible group, not only the notebook's"
+        );
+        let calls = fake.lock().unwrap().calls.clone();
+        assert!(
+            !calls.iter().any(|call| call.contains("other-daily")),
+            "the filter narrows the resources before any Airflow call: {calls:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn runs_notebook_filter_refuses_a_non_member() {
+        let resources = memory(&[(
+            "smoke-daily",
+            notebook_run_resource("smoke-daily", "analytics", "smoke.ipynb"),
+        )]);
+        let (airflow, fake) = fake_airflow::start().await;
+        let error = runs_across_pipelines(
+            Some(&resources),
+            Some(&airflow),
+            &who("sub-1", &["ops"], false),
+            &BTreeMap::from([("notebook".to_string(), "analytics/smoke.ipynb".to_string())]),
+        )
+        .await
+        .expect_err("a non-member is refused");
+        assert_eq!(error.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            error.message(),
+            "you are not a member of the group analytics"
+        );
+        assert!(
+            fake.lock().unwrap().calls.is_empty(),
+            "a refused query never reaches the scheduler"
+        );
+    }
+
+    #[tokio::test]
     async fn runs_in_demo_mode_answers_the_sample() {
         let sample = crate::demo::runs();
         assert!(!sample.runs.is_empty(), "the demo sample has runs");
@@ -6715,6 +6902,29 @@ mod tests {
         let mut newest_first = starts.clone();
         newest_first.sort_by(|a, b| b.cmp(a));
         assert_eq!(starts, newest_first, "the demo sample is newest first");
+
+        // Demo mode has no notebook schedule: the filter answers no rows, not an error.
+        let demo = demo_runs(&BTreeMap::from([(
+            "notebook".to_string(),
+            "analytics/smoke.ipynb".to_string(),
+        )]))
+        .expect("a notebook filter is accepted in demo mode");
+        assert!(demo.runs.is_empty(), "{:?}", demo.runs);
+        let unfiltered = demo_runs(&BTreeMap::new()).expect("the plain list succeeds");
+        assert_eq!(
+            unfiltered.runs.len(),
+            sample.runs.len(),
+            "the sample without a notebook filter"
+        );
+    }
+
+    /// One notebook schedule as the Schedule form writes it (#516): a single `run` task of
+    /// `kind: notebook` naming the file.
+    fn notebook_run_resource(name: &str, owner_group: &str, notebook: &str) -> Value {
+        let mut resource = run_task_resource(name, Some(owner_group), "notebook");
+        resource["spec"]["tasks"][0]["config"] =
+            json!({ "notebook": notebook, "objectVersion": "v1" });
+        resource
     }
 
     /// One `Pipeline` the Schedule form could have written: a single `run` task of `kind`.

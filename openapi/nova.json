@@ -5887,7 +5887,7 @@
         "tags": [
           "public"
         ],
-        "description": "The runs of the caller's visible pipelines, newest first. A run carries the pipeline's `namespace`, `name` and `ownerGroup` and a `kind` of `sql`, `notebook` or `pipeline` (a multi-step pipeline). `limit` defaults to 50 and is at most 200. `state`, `kind`, `group` and `pipeline` (`<namespace>/<name>`) narrow the answer; an unknown state answers no rows rather than an error. A failed scheduler read for one pipeline is logged and skipped, not reported. Answers `Cache-Control: no-store`.",
+        "description": "The runs of the caller's visible pipelines, newest first. A run carries the pipeline's `namespace`, `name` and `ownerGroup` and a `kind` of `sql`, `notebook` or `pipeline` (a multi-step pipeline). `limit` defaults to 50 and is at most 200. `state`, `kind`, `group`, `pipeline` (`<namespace>/<name>`) and `notebook` (`<group>/<name>`) narrow the answer; an unknown state answers no rows rather than an error. A `notebook` filter is owner-group scoped: a caller who is not a member of the group answers 403. A failed scheduler read for one pipeline is logged and skipped, not reported. Answers `Cache-Control: no-store`.",
         "operationId": "runs_list",
         "parameters": [
           {
@@ -5935,6 +5935,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "notebook",
+            "in": "query",
+            "description": "One published notebook as `<group>/<name>`: only the runs of its schedules",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -5949,7 +5958,7 @@
             }
           },
           "400": {
-            "description": "`limit`, `kind` or `pipeline` is invalid",
+            "description": "`limit`, `kind`, `pipeline` or `notebook` is invalid",
             "content": {
               "application/json": {
                 "schema": {
@@ -5960,6 +5969,16 @@
           },
           "401": {
             "description": "No token to sign in with",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not a member of the notebook's group",
             "content": {
               "application/json": {
                 "schema": {
