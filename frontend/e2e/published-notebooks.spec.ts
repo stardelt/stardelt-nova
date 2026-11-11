@@ -154,6 +154,9 @@ async function open(browser: Browser, {
       }
       return json(route, known ? known.parameters : { parameters: [], objectVersion: '' })
     }
+    // The notebook page's Runs card (#757): this spec is about published notebooks, so a
+    // notebook has no run unless a test stubs the answer itself.
+    if (path === '/api/runs') return json(route, { runs: [], groups: [] })
     return json(route, [])
   })
   await page.goto('/notebooks')
@@ -367,6 +370,29 @@ test.describe('published notebooks', () => {
     await expect(notice).toContainText('Scheduled')
     await expect(notice.getByRole('link', { name: 'Open it' }))
       .toHaveAttribute('href', new RegExp('^/pipelines/stardelt/'))
+    await context.close()
+  })
+
+  test('the notebook page lists the runs of its schedules', async ({ browser }) => {
+    const { context, page } = await open(browser)
+    const requests: string[] = []
+    await page.route('**/api/runs?**', (route) => {
+      requests.push(decodeURIComponent(new URL(route.request().url()).search))
+      return json(route, {
+        runs: [
+          { namespace: 'stardelt', name: 'smoke-daily', ownerGroup: 'analytics', kind: 'notebook',
+            runId: 'scheduled__1', state: 'success', type: 'scheduled', logicalDate: null,
+            startedAt: '2026-10-20T08:00:00Z', endedAt: '2026-10-20T08:02:00Z', durationSeconds: 120,
+            triggeredBy: null, note: null },
+        ],
+        groups: ['analytics'],
+      })
+    })
+    await page.goto('/notebooks/analytics/smoke.ipynb')
+    const card = page.getByTestId('notebook-runs')
+    await expect(card.getByRole('row', { name: /smoke-daily/ })).toBeVisible()
+    await expect(card).toContainText('2 m 00 s')
+    expect(requests.some((q) => q.includes('notebook=analytics/smoke.ipynb') && q.includes('limit=10'))).toBe(true)
     await context.close()
   })
 
