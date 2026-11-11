@@ -138,8 +138,17 @@ jobs:
           # `--with-deps` installs Chromium's shared libraries from the Ubuntu mirror; the
           # runner image does not carry them (nova#830). The mirror sometimes fails to resolve
           # and fails the job before any test runs, so retry. Do not drop `--with-deps`.
+          #
+          # A killed `timeout` leaves an orphan `apt-get` holding the dpkg frontend lock, so
+          # the next attempt would fail instantly on the lock instead of trying the network
+          # again (nova#834). Wait the lock out first, and give apt enough time for its own
+          # DNS retries: it spends minutes there before failing.
           for attempt in 1 2 3; do
-            if timeout 300 npx playwright install --with-deps chromium; then
+            for _ in $(seq 1 12); do
+              fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || break
+              sleep 5
+            done
+            if timeout 600 npx playwright install --with-deps chromium; then
               exit 0
             fi
             echo "playwright install attempt $attempt failed; retrying" >&2
