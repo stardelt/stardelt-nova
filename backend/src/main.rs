@@ -2342,6 +2342,85 @@ mod router_tests {
         }
     }
 
+    /// One `lineage_reads` row, as the collector writes it for a read-only query:
+    /// `job_namespace` is the app, `job_name` the engine's name for the person (nova#802).
+    async fn seed_read(
+        pool: &sqlx::PgPool,
+        job_name: &str,
+        dataset: (&str, &str),
+        queries: i32,
+        hours_ago: i32,
+    ) {
+        sqlx::query(
+            "INSERT INTO lineage_reads (dataset_namespace, dataset_name, day, job_namespace, job_name, queries, last_read) \
+             VALUES ($1, $2, (now() - make_interval(hours => $3::int))::date, 'sql-editor', $4, $5, \
+                     now() - make_interval(hours => $3::int))",
+        )
+        .bind(dataset.0)
+        .bind(dataset.1)
+        .bind(hours_ago)
+        .bind(job_name)
+        .bind(queries)
+        .execute(pool)
+        .await
+        .expect("store a read");
+    }
+
+    /// The Freshness card's data keyed on the engine's name for the caller (nova#802): rows
+    /// written before the platform forwarded identity carry the sign-in name, newer ones the
+    /// sub, and both belong to the same person. Somebody else's reads are not listed.
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn read_tables_finds_the_persons_reads_under_the_sub_and_the_sign_in_name() {
+        const ALICE_SUB: &str = "0b6b1f0e-4f0e-4d4e-8e3a-1f2a3b4c5d6e";
+        const BOB_SUB: &str = "1c7c2f1f-5a1f-4e5f-9f4b-2a3b4c5d6e7f";
+
+        let pool = db::test_support::migrated_pool().await;
+        // Alice read the same table as her sub (the engine principal now) and, older, as the
+        // sign-in name `alice` (a row from before identity forwarding).
+        seed_read(&pool, ALICE_SUB, ("bronze.shop", "customers"), 3, 2).await;
+        seed_read(&pool, "alice", ("bronze.shop", "customers"), 2, 3).await;
+        // Bob's read of another table in the same catalog is not hers.
+        seed_read(&pool, BOB_SUB, ("bronze.shop", "orders"), 7, 1).await;
+
+        let dir = StaticDir::new("read-tables");
+        // Not demo: the demo branch answers canned tables and never reads the store.
+        let state = build_test_state(
+            Some(pool.clone()),
+            "http://127.0.0.1:1",
+            "http://127.0.0.1:1",
+            false,
+            None,
+            None,
+        );
+        // Catalog visibility is the engine's answer; cached here so the test needs no Trino.
+        state.catalog_access.lock().unwrap().insert(
+            ALICE_SUB.into(),
+            (
+                std::time::Instant::now(),
+                BTreeSet::from(["bronze".to_string()]),
+            ),
+        );
+        let mut api = api_router();
+        api = api.layer(Extension(signed_in_as(ALICE_SUB, "alice")));
+        let app = app(state, api, dir.path());
+
+        let (status, body) = call(&app, "GET", "/api/lineage/read-tables", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let tables = body["tables"].as_array().expect("a tables array");
+        assert_eq!(tables.len(), 1, "one dataset from both rows: {body}");
+        assert_eq!(tables[0]["namespace"], "bronze.shop");
+        assert_eq!(tables[0]["name"], "customers");
+        assert_eq!(
+            tables[0]["queries"], 5,
+            "the sub row and the name row add up"
+        );
+        assert!(
+            !body.to_string().contains("orders"),
+            "somebody else's table is not listed: {body}"
+        );
+    }
+
     #[tokio::test]
     #[ignore = "needs NOVA_TEST_DATABASE_URL"]
     async fn in_dev_mode_the_one_user_is_the_operator_and_sees_all() {

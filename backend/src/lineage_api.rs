@@ -195,12 +195,13 @@ const READERS_SQL: &str = "SELECT dataset_namespace, dataset_name, job_namespace
      GROUP BY 1, 2, 3, 4";
 
 /// The datasets one person read most in the window, with the newest read (nova#510 slice 4a).
-/// `$1` is the Trino user, `$2` the window in days, `$3` the limit.
+/// `$1` is the engine's name for the caller, as `query_log_api` reads it: the person's sub once
+/// the platform forwards identity, and the sign-in name for older rows and in dev mode.
 const TOP_READS_SQL: &str = "SELECT dataset_namespace, dataset_name, sum(queries)::bigint, \
        to_char(max(last_read), 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') \
      FROM lineage_reads \
      WHERE job_namespace IN ('sql-editor','notebook') \
-       AND job_name = $1 \
+       AND job_name = ANY($1::text[]) \
        AND day > (now() - make_interval(days => $2::int))::date \
      GROUP BY 1, 2 \
      ORDER BY 3 DESC, 1, 2 \
@@ -772,9 +773,10 @@ pub async fn read_tables(
         Ok(a) => a,
         Err(_) => return error_response(StatusCode::BAD_GATEWAY, "could not resolve catalogs"),
     };
-    let reader = principal
-        .map(|p| p.identity.display_name)
-        .unwrap_or_else(|| state.dev_user.clone());
+    let keys: Vec<String> = match principal.as_ref() {
+        Some(p) => vec![p.identity.display_name.clone(), p.identity.sub.clone()],
+        None => vec![state.dev_user.clone()],
+    };
 
     let pool = match &state.db {
         Some(p) => p,
@@ -782,7 +784,7 @@ pub async fn read_tables(
     };
 
     let rows: Vec<(String, String, i64, String)> = sqlx::query_as(TOP_READS_SQL)
-        .bind(&reader)
+        .bind(&keys)
         .bind(days)
         .bind(i64::try_from(limit).unwrap_or(5))
         .fetch_all(pool)
