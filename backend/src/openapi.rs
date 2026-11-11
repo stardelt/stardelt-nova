@@ -128,6 +128,7 @@ pub struct ErrorResponse {
         crate::lineage_api::graph,
         crate::lineage_api::columns,
         crate::lineage_api::run_detail,
+        crate::lineage_api::read_tables,
         crate::user_settings::list,
         crate::user_settings::put,
         crate::user_settings::remove,
