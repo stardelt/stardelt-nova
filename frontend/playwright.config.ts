@@ -44,7 +44,7 @@ export default defineConfig({
   webServer: [server(port, false), server(demoPort, true)],
   projects: [
     // The Overview timeline reads the demo seed's runs (#761), so it joins the demo project.
-    { name: 'main', testIgnore: /(demo|overview-timeline)\.spec\.ts/, use: { baseURL: `http://127.0.0.1:${port}` } },
-    { name: 'demo', testMatch: /(demo|overview-timeline)\.spec\.ts/, use: { baseURL: `http://127.0.0.1:${demoPort}` } },
+    { name: 'main', testIgnore: /(demo|overview-timeline|overview-scope)\.spec\.ts/, use: { baseURL: `http://127.0.0.1:${port}` } },
+    { name: 'demo', testMatch: /(demo|overview-timeline|overview-scope)\.spec\.ts/, use: { baseURL: `http://127.0.0.1:${demoPort}` } },
   ],
 })

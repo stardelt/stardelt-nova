@@ -50,12 +50,14 @@ export default function Overview() {
       return Date.now() - pendingSince.current < 60_000 ? 5_000 : false
     },
   })
-  // The timeline is the caller's own activity: their runs, their queries and their loads
-  // (#761). Three reads, one merge in the browser; the endpoints keep their own rules.
+  // The timeline is one list over three sources with different rules (#761): runs are the
+  // runs of the caller's group-owned pipelines, queries follow the scope chosen here, and
+  // loads are always the caller's own. The endpoints keep enforcing their own visibility.
+  const [scope, setScope] = useState<'me' | 'groups'>('groups')
   const runs = useQuery({ queryKey: ['runs'], queryFn: () => api.runs(), refetchInterval: 10_000 })
   const queries = useQuery({
-    queryKey: ['query-log', 'overview'],
-    queryFn: () => api.queryLog({ scope: 'mine', limit: 20 }),
+    queryKey: ['query-log', 'overview', scope],
+    queryFn: () => api.queryLog({ scope: scope === 'me' ? 'mine' : 'team', limit: 20 }),
     refetchInterval: 10_000,
   })
   const jobs = useQuery({ queryKey: ['jobs'], queryFn: api.jobs, refetchInterval: 10_000 })
@@ -120,7 +122,7 @@ export default function Overview() {
   const metricsFailure = metrics.isError ? errorMessage(metrics.error) : ''
   const info = cluster.data as Record<string, unknown> | undefined
   const engineState = typeof info?.state === 'string' ? info.state : cluster.isError ? 'unreachable' : '…'
-  const recent = mergeActivity(runs.data?.runs, queries.data?.items, jobs.data)
+  const recent = mergeActivity(scope === 'groups' ? runs.data?.runs : undefined, queries.data?.items, jobs.data)
   // One unreadable source must not blank the other two: the list shows what arrived, and the
   // failed source keeps its own line with its own retry underneath.
   const sources = [
@@ -204,9 +206,24 @@ export default function Overview() {
 
       <section className="grid lg:grid-cols-3 gap-4">
         <div className={`card p-5 ${admin ? 'lg:col-span-2' : 'lg:col-span-3'}`}>
-          <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
             <h2 className="text-sm font-semibold">Recent activity</h2>
-            <Link to="/runs" className="text-xs text-text-dim hover:text-text">All runs →</Link>
+            <div className="flex items-center gap-2">
+              <div role="group" aria-label="Whose activity" className="flex rounded-[10px] border border-border overflow-hidden text-xs">
+                {(['me', 'groups'] as const).map(s => (
+                  <button
+                    key={s}
+                    type="button"
+                    aria-pressed={scope === s}
+                    onClick={() => setScope(s)}
+                    className={`px-2.5 py-1 ${scope === s ? 'bg-accent-solid text-white' : 'bg-bg-elev/60 text-text-dim hover:text-text'}`}
+                  >
+                    {s === 'me' ? 'Mine' : 'My groups'}
+                  </button>
+                ))}
+              </div>
+              <Link to="/runs" className="text-xs text-text-dim hover:text-text">All runs →</Link>
+            </div>
           </div>
           {allLoading && (
             <div className="space-y-2">
@@ -215,7 +232,9 @@ export default function Overview() {
           )}
           {allFailed && <ErrorBox error={runs.error} onRetry={() => { void runs.refetch(); void queries.refetch(); void jobs.refetch() }} />}
           {!allLoading && !allFailed && recent.length === 0 && (
-            <EmptyState icon="pulse" title="Nothing has happened yet">Run a query, start a pipeline, or load a file.</EmptyState>
+            <EmptyState icon="pulse" title={scope === 'me' ? 'Nothing of yours has happened yet' : 'Nothing has happened yet'}>
+              {scope === 'me' ? 'Run a query or load a file. Pipeline runs belong to a group — switch to My groups.' : 'Run a query, start a pipeline, or load a file.'}
+            </EmptyState>
           )}
           <div className="space-y-1">
             {recent.map(row => (
@@ -238,6 +257,9 @@ export default function Overview() {
               </Link>
             ))}
           </div>
+          <p className="text-xs text-text-dim mt-3">
+            Loads are always yours. Pipeline runs and their scheduled queries belong to their group.
+          </p>
           {failed.map(source => (
             <p key={source.key} className="text-xs text-text-dim mt-2 flex items-center gap-2">
               <span>Could not read {source.label}.</span>
