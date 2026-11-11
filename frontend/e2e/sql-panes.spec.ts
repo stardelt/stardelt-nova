@@ -30,6 +30,27 @@ async function open(page: Page) {
     if (path === '/api/catalog/namespaces/seed/tables') {
       return json(route, { identifiers: [{ namespace: ['seed'], name: 'nation' }] })
     }
+    if (path === '/api/catalog/tables/nyc_taxi/trips') {
+      return json(route, {
+        'metadata-location': 'x',
+        metadata: {
+          'table-uuid': 'u',
+          location: 'l',
+          'last-updated-ms': 0,
+          'current-schema-id': 0,
+          schemas: [
+            {
+              'schema-id': 0,
+              fields: [
+                { id: 1, name: 'trip_id', required: true, type: 'long' },
+                { id: 2, name: 'fare', required: false, type: 'double' },
+              ],
+            },
+          ],
+          'partition-specs': [],
+        },
+      })
+    }
     if (path === '/api/saved-queries') return json(route, [])
     if (path === '/api/warehouses') return json(route, [])
     if (path === '/api/query') return json(route, { columns: [], rows: [], row_count: 0, query_id: 'q1' })
@@ -73,6 +94,39 @@ test('the Tables pane inserts a table name at the cursor, and the catalog still 
   await expect(page).toHaveURL(/[?&]catalog=finance\b/)
   await page.getByRole('button', { name: 'Sample' }).click()
   await expect(editor).toHaveValue('SELECT * FROM finance.seed.nation LIMIT 100')
+})
+
+test('the disclosure lists a table’s columns and a column inserts only itself', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  const tableReads: string[] = []
+  page.on('request', (req) => {
+    if (new URL(req.url()).pathname.startsWith('/api/catalog/tables/')) tableReads.push(req.url())
+  })
+  await open(page)
+  await page.goto('/query')
+
+  const tree = page.getByRole('list', { name: 'Catalogs' })
+  await tree.getByRole('button', { name: 'nyc_taxi' }).click()
+  await expect(tree.getByRole('button', { name: 'trips', exact: true })).toBeVisible()
+
+  // Nothing about the columns is read, and nothing is listed, until the disclosure is opened.
+  expect(tableReads).toEqual([])
+  await expect(tree.getByRole('button', { name: 'trip_id' })).toHaveCount(0)
+  await expect(tree.getByRole('button', { name: 'fare' })).toHaveCount(0)
+
+  await tree.getByRole('button', { name: 'Show the columns of nyc_taxi.trips' }).click()
+  await expect(tree.getByRole('button', { name: 'trip_id' })).toBeVisible()
+  await expect(tree.getByRole('button', { name: 'fare' })).toBeVisible()
+  expect(tableReads).toHaveLength(1)
+
+  const editor = page.getByLabel('SQL query')
+  await editor.fill('')
+  await editor.click()
+  await page.keyboard.press('End')
+  await tree.getByRole('button', { name: 'fare' }).click()
+  // A column is just the column — not `warehouse.nyc_taxi.trips`.
+  await expect(editor).toBeFocused()
+  await expect(editor).toHaveValue('fare')
 })
 
 test('a collapsed pane widens the editor and the choice survives a reload', async ({ page }) => {

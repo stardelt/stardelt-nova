@@ -1,7 +1,14 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
-import { ApiError, api, type Catalog, type NamespaceList, type TableList } from '../api'
+import {
+  ApiError,
+  api,
+  type Catalog,
+  type NamespaceList,
+  type TableIdentifier,
+  type TableList,
+} from '../api'
 import { recall, remember } from '../catalogCache'
 import ErrorBox from './ErrorBox'
 import LayerBadge from './LayerBadge'
@@ -38,7 +45,7 @@ export default function CatalogTree({
   selected: CatalogTreeSelection | null
   onSelect: (sel: CatalogTreeSelection | null) => void
   mode?: 'explore' | 'pick'
-  onPick?: (ref: { catalog: string; ns: string; tbl: string }) => void
+  onPick?: (ref: { catalog: string; ns: string; tbl: string; column?: string }) => void
 }) {
   const [params, setParams] = useSearchParams()
   const urlCatalog = params.get('catalog')
@@ -84,7 +91,7 @@ function CatalogNode({
   selected: CatalogTreeSelection | null
   onSelect: (sel: CatalogTreeSelection | null) => void
   mode: 'explore' | 'pick'
-  onPick?: (ref: { catalog: string; ns: string; tbl: string }) => void
+  onPick?: (ref: { catalog: string; ns: string; tbl: string; column?: string }) => void
   params: URLSearchParams
   setParams: (next: URLSearchParams | ((prev: URLSearchParams) => URLSearchParams), opts?: { replace?: boolean }) => void
 }) {
@@ -326,7 +333,7 @@ function SchemaNode({
   selected: CatalogTreeSelection | null
   onSelect: (sel: CatalogTreeSelection | null) => void
   mode: 'explore' | 'pick'
-  onPick?: (ref: { catalog: string; ns: string; tbl: string }) => void
+  onPick?: (ref: { catalog: string; ns: string; tbl: string; column?: string }) => void
   params: URLSearchParams
   setParams: (next: URLSearchParams | ((prev: URLSearchParams) => URLSearchParams), opts?: { replace?: boolean }) => void
 }) {
@@ -428,44 +435,126 @@ function SchemaNode({
               />
             </li>
           )}
-          {visible.map((id) => {
-            const sel = selected?.ns === ns && selected?.tbl === id.name
-            const pick = () => onPick?.({ catalog: catalogName, ns, tbl: id.name })
-            return (
-              <li key={id.name} className="group flex items-center gap-1">
-                <button
-                  type="button"
-                  onClick={() =>
-                    picking
-                      ? pick()
-                      : onSelect({ ns, tbl: id.name, kind: id.kind ?? 'table' })
-                  }
-                  aria-current={sel ? 'true' : undefined}
-                  className={[
-                    'min-w-0 flex-1 text-left px-2 py-1.5 rounded-[8px] text-sm flex items-center gap-2',
-                    sel
-                      ? 'bg-accent/15 text-text border border-accent/30'
-                      : 'text-text-dim hover:text-text hover:bg-bg-soft/40 border border-transparent',
-                  ].join(' ')}
-                >
-                  <ObjectIcon kind={id.kind === 'view' ? 'view' : 'table'} />
-                  <span className="truncate">{id.name}</span>
-                </button>
-                {/* The same action, on a target of its own: a table row is one button, so the
-                    insert control cannot live inside it (stardelt-nova#586). */}
-                {picking && (
-                  <button
-                    type="button"
-                    onClick={pick}
-                    aria-label={`Insert ${ns}.${id.name}`}
-                    className="shrink-0 rounded-[8px] px-1.5 py-1 text-sm text-text-mute opacity-0 hover:text-text focus:opacity-100 group-hover:opacity-100"
-                  >
-                    <span aria-hidden="true">⊕</span>
-                  </button>
-                )}
-              </li>
-            )
-          })}
+          {visible.map((id) => (
+            <TableRow
+              key={id.name}
+              catalog={catalogName}
+              ns={ns}
+              id={id}
+              picking={picking}
+              selected={selected?.ns === ns && selected?.tbl === id.name}
+              onSelect={() => onSelect({ ns, tbl: id.name, kind: id.kind ?? 'table' })}
+              onPick={onPick}
+            />
+          ))}
+        </ul>
+      )}
+    </li>
+  )
+}
+
+/**
+ * One table in a schema. In pick mode it carries a disclosure for the table's columns
+ * (stardelt-nova#783): a click on a column hands the column name to `onPick`, so the SQL
+ * editor inserts just that identifier at the cursor. The rows are siblings, never nested,
+ * and the column request is lazy — nothing is read until the disclosure is opened.
+ */
+function TableRow({
+  catalog: catalogName,
+  ns,
+  id,
+  picking,
+  selected,
+  onSelect,
+  onPick,
+}: {
+  catalog: string
+  ns: string
+  id: TableIdentifier
+  picking: boolean
+  selected: boolean
+  onSelect: () => void
+  onPick?: (ref: { catalog: string; ns: string; tbl: string; column?: string }) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const pick = () => onPick?.({ catalog: catalogName, ns, tbl: id.name })
+
+  const meta = useQuery({
+    queryKey: ['catalog', 'table-columns', catalogName, ns, id.name],
+    queryFn: () => api.tableMeta(ns, id.name, catalogName),
+    enabled: open,
+    staleTime: 300_000,
+    retry: false,
+  })
+
+  const m = meta.data?.metadata
+  const schemaId = m?.['current-schema-id'] ?? m?.schemas[0]?.['schema-id'] ?? 0
+  const fields = useMemo(
+    () => m?.schemas.find((s) => s['schema-id'] === schemaId)?.fields ?? [],
+    [m, schemaId],
+  )
+  const showList = picking && open && (fields.length > 0 || meta.isLoading || meta.isError)
+
+  return (
+    <li className="group">
+      <div className="flex items-center gap-1">
+        {picking && (
+          <button
+            type="button"
+            aria-expanded={open}
+            aria-label={`Show the columns of ${ns}.${id.name}`}
+            onClick={() => setOpen((o) => !o)}
+            className="shrink-0 rounded-[6px] px-1 text-xs text-text-mute hover:text-text"
+          >
+            <span aria-hidden="true">{open ? '▾' : '▸'}</span>
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={picking ? pick : onSelect}
+          aria-current={selected ? 'true' : undefined}
+          className={[
+            'min-w-0 flex-1 text-left px-2 py-1.5 rounded-[8px] text-sm flex items-center gap-2',
+            selected
+              ? 'bg-accent/15 text-text border border-accent/30'
+              : 'text-text-dim hover:text-text hover:bg-bg-soft/40 border border-transparent',
+          ].join(' ')}
+        >
+          <ObjectIcon kind={id.kind === 'view' ? 'view' : 'table'} />
+          <span className="truncate">{id.name}</span>
+        </button>
+        {/* The same action, on a target of its own: a table row is one button, so the
+            insert control cannot live inside it (stardelt-nova#586). */}
+        {picking && (
+          <button
+            type="button"
+            onClick={pick}
+            aria-label={`Insert ${ns}.${id.name}`}
+            className="shrink-0 rounded-[8px] px-1.5 py-1 text-sm text-text-mute opacity-0 hover:text-text focus:opacity-100 group-hover:opacity-100"
+          >
+            <span aria-hidden="true">⊕</span>
+          </button>
+        )}
+      </div>
+      {showList && (
+        <ul aria-label={`Columns of ${ns}.${id.name}`} className="ml-6 mt-0.5 space-y-0.5">
+          {meta.isLoading && <li className="px-2 py-1 text-xs text-text-mute">loading…</li>}
+          {meta.isError && (
+            <li className="px-2 py-1 text-xs text-text-mute">Could not read the columns.</li>
+          )}
+          {fields.map((field) => (
+            <li key={field.id}>
+              <button
+                type="button"
+                onClick={() =>
+                  onPick?.({ catalog: catalogName, ns, tbl: id.name, column: field.name })
+                }
+                className="w-full text-left px-2 py-1 rounded-[8px] text-xs text-text-dim hover:text-text hover:bg-bg-soft/40"
+              >
+                {field.name}
+              </button>
+            </li>
+          ))}
         </ul>
       )}
     </li>
