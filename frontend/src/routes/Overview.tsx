@@ -7,6 +7,7 @@ import { dayStarts, queriesPerDay, runsPerDay, type RunBucket } from '../charts'
 import { formatBytes, formatCount, formatTime, relativeTime, statusLabel } from '../format'
 import ErrorBox from '../components/ErrorBox'
 import { EmptyState } from '../components/EmptyState'
+import FreshnessCard from '../components/FreshnessCard'
 import { QuerySparkline, RunBars } from '../components/PulseCharts'
 import { Skeleton, SkeletonTable } from '../components/Skeleton'
 import { Icon } from '../components/Icon'
@@ -184,6 +185,10 @@ export default function Overview() {
           runBuckets={runBuckets}
           runDays={runDays}
         />
+      </section>
+
+      <section>
+        <FreshnessCard />
       </section>
 
       <CatalogsCard

@@ -1262,6 +1262,21 @@ export type LineageEdgeView = {
   runs: number
 }
 
+/** One table the caller read most, with its newest write (`GET /api/lineage/read-tables`). */
+export type ReadTable = {
+  /** `<catalog>.<schema>`; demo data may carry the schema alone. */
+  namespace: string
+  name: string
+  /** Read-only queries against it in the window. */
+  queries: number
+  lastRead: string
+  /** Absent when nothing wrote the table in the window. */
+  lastWrite?: string
+}
+
+/** `GET /api/lineage/read-tables`: the person's most-read tables, newest read first. */
+export type ReadTables = { tables: ReadTable[] }
+
 export type LineageGraphView = {
   nodes: LineageNodeView[]
   edges: LineageEdgeView[]
@@ -1490,6 +1505,9 @@ export const api = {
   /** Where each column of one table comes from (stardelt-nova#650). */
   lineageColumns: (catalog: string, schema: string, table: string) =>
     jget<ColumnLineage>(`/api/lineage/columns?${new URLSearchParams({ catalog, schema, table }).toString()}`),
+  /** The tables this person read most in the window, with their newest write (nova#510). */
+  readTables: (days = 30) =>
+    jget<ReadTables>(`/api/lineage/read-tables?days=${encodeURIComponent(String(days))}`),
 }
 
 /**
