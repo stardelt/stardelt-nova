@@ -415,12 +415,23 @@ export default function Query() {
   }
 
   /**
-   * Insert a table name from the Tables pane at the cursor (stardelt-nova#586). The name is
-   * the fully qualified one the editor elsewhere generates (`catalog.schema.table`), and the
-   * caret lands after it, so the next keystroke continues the statement.
+   * Insert a name from the Tables pane at the cursor (stardelt-nova#586, nova#783). A table
+   * inserts the fully qualified name the editor elsewhere generates (`catalog.schema.table`);
+   * a column inserts just the column. The caret lands after it, so the next keystroke
+   * continues the statement.
    */
-  function insertTable({ catalog: inCatalog, ns, tbl }: { catalog: string; ns: string; tbl: string }) {
-    const text = sqlTableRef(ns, tbl, inCatalog)
+  function insertRef({
+    catalog: inCatalog,
+    ns,
+    tbl,
+    column,
+  }: {
+    catalog: string
+    ns: string
+    tbl: string
+    column?: string
+  }) {
+    const text = column ?? sqlTableRef(ns, tbl, inCatalog)
     const area = taRef.current
     const start = area ? area.selectionStart : sql.length
     const end = area ? area.selectionEnd : sql.length
@@ -483,7 +494,7 @@ export default function Query() {
               selected={null}
               onSelect={() => {}}
               mode="pick"
-              onPick={insertTable}
+              onPick={insertRef}
             />
           )}
         </div>
