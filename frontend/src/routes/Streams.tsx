@@ -48,7 +48,27 @@ export default function Streams() {
   const mutation = useMutation({
     mutationFn: ({ s, stopped }: { s: StreamView; stopped: boolean }) =>
       api.setStreamState(s.namespace, s.name, stopped),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['streams'] }),
+    onMutate: async ({ s, stopped }) => {
+      await qc.cancelQueries({ queryKey: ['streams'] })
+      const previous = qc.getQueryData<{ streams: StreamView[] }>(['streams'])
+      qc.setQueryData<{ streams: StreamView[] }>(['streams'], (old) =>
+        old
+          ? {
+              ...old,
+              streams: old.streams.map((row) =>
+                row.namespace === s.namespace && row.name === s.name
+                  ? { ...row, stopped, phase: stopped ? 'Stopped' : 'Running' }
+                  : row,
+              ),
+            }
+          : old,
+      )
+      return { previous }
+    },
+    onError: (_error, _vars, context) => {
+      if (context?.previous) qc.setQueryData(['streams'], context.previous)
+    },
+    onSettled: () => qc.invalidateQueries({ queryKey: ['streams'] }),
   })
 
   return (
