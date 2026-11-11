@@ -134,7 +134,18 @@ jobs:
 
       - name: Install the browser
         working-directory: frontend
-        run: npx playwright install --with-deps chromium
+        run: |
+          # `--with-deps` installs Chromium's shared libraries from the Ubuntu mirror; the
+          # runner image does not carry them (nova#830). The mirror sometimes fails to resolve
+          # and fails the job before any test runs, so retry. Do not drop `--with-deps`.
+          for attempt in 1 2 3; do
+            if timeout 300 npx playwright install --with-deps chromium; then
+              exit 0
+            fi
+            echo "playwright install attempt $attempt failed; retrying" >&2
+            sleep $((attempt * 20))
+          done
+          exit 1
 
       - name: Run the suite
         working-directory: frontend
