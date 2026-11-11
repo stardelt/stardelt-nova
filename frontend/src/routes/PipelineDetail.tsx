@@ -142,16 +142,26 @@ export default function PipelineDetail() {
         {!demo && (
           <div className="flex flex-wrap items-center gap-2">
             <PipelineActions pipeline={pipeline} pending={actions.pending} onAct={actions.act} />
-            <button type="button" className="btn-ghost py-1.5 text-xs" onClick={() => setEditing(true)}>
-              Edit schedule
-            </button>
-            <button
-              type="button"
-              className="btn-ghost py-1.5 text-xs text-bad"
-              onClick={() => setDeleting(true)}
-            >
-              Delete pipeline
-            </button>
+            {pipeline.canEdit && (
+              <button type="button" className="btn-ghost py-1.5 text-xs" onClick={() => setEditing(true)}>
+                Edit schedule
+              </button>
+            )}
+            {pipeline.canEdit && (
+              <button
+                type="button"
+                className="btn-ghost py-1.5 text-xs text-bad"
+                onClick={() => setDeleting(true)}
+              >
+                Delete pipeline
+              </button>
+            )}
+            {!pipeline.canEdit && (
+              <p className="text-text-dim text-sm">
+                Read-only: your group may run this pipeline;{' '}
+                {pipeline.ownerGroup ?? 'the owner group'} changes it.
+              </p>
+            )}
           </div>
         )}
       </header>

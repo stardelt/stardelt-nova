@@ -1769,6 +1769,8 @@ test.describe('pipelines', () => {
       name: 'team-smoke',
       namespace: NS,
       ownerGroup: 'analytics',
+      canRun: true,
+      canEdit: true,
       schedule: '0 3 * * * (Europe/Berlin)',
       paused: false,
       loaded: true,
@@ -2831,6 +2833,8 @@ test.describe('schedule', () => {
       name: 'team-smoke',
       namespace: NS,
       ownerGroup: 'analytics',
+      canRun: true,
+      canEdit: true,
       schedule: '0 3 * * * (Europe/Berlin)',
       paused: false,
       loaded: true,
@@ -3318,6 +3322,8 @@ test.describe('schedule options', () => {
       name: 'team-smoke',
       namespace: NS,
       ownerGroup: 'analytics',
+      canRun: true,
+      canEdit: true,
       schedule: '0 3 * * * (Europe/Berlin)',
       paused: false,
       loaded: true,
@@ -3880,7 +3886,8 @@ test.describe('schedule notebook', () => {
   /** What a create answers: only the name and namespace are used by the list it returns to. */
   function created(name: string) {
     return {
-      name, namespace: NS, ownerGroup: 'analytics', schedule: null, paused: false, loaded: false,
+      name, namespace: NS, ownerGroup: 'analytics', canRun: true, canEdit: true, schedule: null,
+      paused: false, loaded: false,
       nextRun: null, state: 'loading', lastRun: null, tasks: [], runAs: null, concurrency: 'Forbid',
       createdAt: null,
     }
@@ -3891,6 +3898,8 @@ test.describe('schedule notebook', () => {
       name: 'nightly',
       namespace: NS,
       ownerGroup: 'analytics',
+      canRun: true,
+      canEdit: true,
       schedule: '0 3 * * * (Europe/Berlin)',
       paused: false,
       loaded: true,
