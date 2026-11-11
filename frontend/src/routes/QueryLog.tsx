@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { api, errorMessage, type QueryLogItem } from '../api'
 import { EmptyState } from '../components/EmptyState'
 import { formatBytes, formatCount, formatDurationMs, formatTime, relativeTime, rowsLabel, sourceLabel } from '../format'
@@ -79,7 +79,8 @@ export default function QueryLog() {
   const [search, setSearch] = useState('')
   const q = useDebounced(search.trim(), 300)
   const [columns, setColumns] = useState<ColumnId[]>(loadColumns)
-  const [open, setOpen] = useState<string | null>(null)
+  const [params, setParams] = useSearchParams()
+  const [open, setOpen] = useState<string | null>(() => params.get('id'))
   const columnsMenu = useRef<HTMLDetailsElement>(null)
 
   // A click elsewhere on the page dismisses the menu, like the header's app switcher.
@@ -130,6 +131,16 @@ export default function QueryLog() {
     const next = columns.includes(id) ? columns.filter(c => c !== id) : [...columns, id]
     setColumns(next)
     saveColumns(next)
+  }
+
+  /** Open or close one query's details, and put the open one in the address (nova#509). */
+  function toggleOpen(id: string) {
+    const nextId = open === id ? null : id
+    setOpen(nextId)
+    const next = new URLSearchParams(params)
+    if (nextId) next.set('id', nextId)
+    else next.delete('id')
+    setParams(next, { replace: true })
   }
 
   return (
@@ -285,7 +296,7 @@ export default function QueryLog() {
                 shown={shown}
                 colCount={colCount}
                 expanded={open === item.id}
-                onToggle={() => setOpen(open === item.id ? null : item.id)}
+                onToggle={() => toggleOpen(item.id)}
               />
             ))}
           </tbody>
