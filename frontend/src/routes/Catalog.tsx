@@ -165,6 +165,8 @@ function TableDetail({ ns, tbl, catalog, kind }: Sel & { catalog?: string; kind?
     : ''
 
   const m = meta.data?.metadata
+  const updatedMs = m?.['last-updated-ms'] ?? 0
+  const owner = docs.data?.owner ?? null
   const schemaId = m?.['current-schema-id'] ?? m?.schemas[0]?.['schema-id'] ?? 0
   const schema = m?.schemas.find(s => s['schema-id'] === schemaId) ?? m?.schemas[0]
   const partSpec = m?.['partition-specs']?.[0]
@@ -184,6 +186,13 @@ function TableDetail({ ns, tbl, catalog, kind }: Sel & { catalog?: string; kind?
           {m && (
             <div className="text-xs text-text-mute mt-1 font-mono truncate max-w-[620px]">{m.location}</div>
           )}
+          {(owner || updatedMs > 0) && (
+            <div className="text-xs text-text-mute mt-1">
+              {owner && <>Owner <span className="font-mono">{owner}</span></>}
+              {owner && updatedMs > 0 && ' · '}
+              {updatedMs > 0 && <>Last changed {relativeTime(updatedMs)}</>}
+            </div>
+          )}
         </div>
         <div className="flex gap-2">
           <Link to={queryHref(`SELECT * FROM ${sqlTableRef(ns, tbl, catalog)} LIMIT 100`)} className="btn-primary">
@@ -192,6 +201,14 @@ function TableDetail({ ns, tbl, catalog, kind }: Sel & { catalog?: string; kind?
           {lineageHref && (
             <Link to={lineageHref} className="btn-ghost" title="Show this table's lineage">Show lineage</Link>
           )}
+          <CopyAction
+            label="Use in a notebook"
+            text={`import stardelt\nstardelt.sql("SELECT * FROM ${sqlTableRef(ns, tbl, catalog)} LIMIT 100")`}
+          />
+          <CopyAction
+            label="Copy for the CLI"
+            text={`stardelt sql "SELECT * FROM ${sqlTableRef(ns, tbl, catalog)} LIMIT 100"`}
+          />
           <Link to="/data" className="btn-ghost">Load data</Link>
         </div>
         {currentCatalog?.maintenance?.lastRun && (
@@ -248,6 +265,32 @@ function TableDetail({ ns, tbl, catalog, kind }: Sel & { catalog?: string; kind?
 
       {tab === 'lineage' && <LineageTab ns={ns} tbl={tbl} catalog={catalogName} />}
     </div>
+  )
+}
+
+/** One header button that copies its text; the clipboard may refuse, so failure is a sentence. */
+function CopyAction({ label, text }: { label: string; text: string }) {
+  const [copied, setCopied] = useState(false)
+  const [failed, setFailed] = useState(false)
+
+  async function copy() {
+    setCopied(false)
+    setFailed(false)
+    try {
+      if (!navigator.clipboard) throw new Error('no clipboard')
+      await navigator.clipboard.writeText(text)
+      setCopied(true)
+    } catch {
+      setFailed(true)
+    }
+  }
+
+  return (
+    <>
+      <button type="button" className="btn-ghost" onClick={() => void copy()}>{label}</button>
+      {copied && <span role="status" className="text-xs text-ok self-center">Copied</span>}
+      {failed && <span role="status" className="text-xs text-warn self-center">Could not copy.</span>}
+    </>
   )
 }
 
