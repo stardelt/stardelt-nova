@@ -7,6 +7,7 @@ export type IconName =
   | 'folder' | 'eye' | 'volume'      // ← the three new names
   | 'sun'
   | 'moon'
+  | 'mail'
   | 'alert'
   | 'panel-left-close'
   | 'panel-left-open'
@@ -167,6 +168,12 @@ const paths: Record<IconName, ReactNode> = {
     </>
   ),
   moon: <path d="M20.5 14.5A8.5 8.5 0 1 1 9.5 3.5a7 7 0 0 0 11 11z" />,
+  mail: (
+    <>
+      <rect x="3" y="5" width="18" height="14" rx="2" />
+      <path d="m3 7 9 6 9-6" />
+    </>
+  ),
   alert: (
     <>
       <circle cx="12" cy="12" r="9" />

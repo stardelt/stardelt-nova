@@ -28,6 +28,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { to: '/streams', label: 'Streams', icon: 'pulse' },
       { to: '/compute', label: 'Compute', icon: 'spark' },
       { to: '/connections', label: 'Connections', icon: 'key' },
+      { to: '/destinations', label: 'Destinations', icon: 'mail' },
       { to: '/data', label: 'Load & transfer', icon: 'upload' },
       { to: '/jobs', label: 'Activity', icon: 'clock' },
     ],

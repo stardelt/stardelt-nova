@@ -6,6 +6,7 @@ import Catalog from './routes/Catalog'
 import Query from './routes/Query'
 import Data from './routes/Data'
 import Connections from './routes/Connections'
+import Destinations from './routes/Destinations'
 import Jobs from './routes/Jobs'
 import Pipelines from './routes/Pipelines'
 import Runs from './routes/Runs'
@@ -37,6 +38,7 @@ export default function App() {
         <Route path="/query"      element={<Query      />} />
         <Route path="/data"       element={<Data       />} />
         <Route path="/connections" element={<Connections />} />
+        <Route path="/destinations" element={<Destinations />} />
         <Route path="/jobs"       element={<Jobs       />} />
         <Route path="/pipelines"  element={<Pipelines  />} />
         <Route path="/pipelines/:namespace/:name" element={<PipelineDetail />} />
