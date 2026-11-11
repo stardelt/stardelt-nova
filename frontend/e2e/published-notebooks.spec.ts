@@ -264,6 +264,17 @@ test.describe('published notebooks', () => {
     await context.close()
   })
 
+  test('the page compares the picked version with an older one', async ({ browser }) => {
+    const { context, page } = await open(browser)
+    await page.goto('/notebooks/analytics/smoke.ipynb')
+    await page.getByLabel('Compare with').selectOption(V2)
+    const diff = page.getByTestId('notebook-diff')
+    await expect(diff).toContainText('What changed')
+    await expect(diff.locator('[data-kind="del"]')).toContainText("print('older')")
+    await expect(diff.locator('[data-kind="add"]')).toContainText("print('newest')")
+    await context.close()
+  })
+
   test('the notebook page says where the notebook is used', async ({ browser }) => {
     const { context, page } = await open(browser)
     await page.goto('/notebooks/analytics/smoke.ipynb')
