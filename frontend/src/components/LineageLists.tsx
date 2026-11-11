@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import type { LineageEdgeView, LineageGraphView, LineageJobView, LineageNodeView } from '../api'
 import { formatTime } from '../format'
 import { Icon } from './Icon'
+import { runDot, type RunHealth } from './lineageHealth'
 
 /**
  * The two lists of a table's lineage (stardelt-nova#703): "Made from" on the left, "Used by" on
@@ -85,7 +86,17 @@ function tableLabel(n: LineageNodeView, catalog: string): string {
 
 type Direction = 'up' | 'down'
 
-export function LineageLists({ graph, days, catalog }: { graph: LineageGraphView; days: number; catalog: string }) {
+export function LineageLists({
+  graph,
+  days,
+  catalog,
+  health,
+}: {
+  graph: LineageGraphView
+  days: number
+  catalog: string
+  health?: Map<string, RunHealth>
+}) {
   const upstream = graph.nodes.filter(n => n.visible && (n.level ?? 0) < 0)
   const downstream = graph.nodes.filter(n => n.visible && (n.level ?? 0) > 0)
   // A node the person may not read is no row: its edge direction says which list it belongs to.
@@ -106,6 +117,7 @@ export function LineageLists({ graph, days, catalog }: { graph: LineageGraphView
         direction="up"
         graph={graph}
         catalog={catalog}
+        health={health}
       />
       <List
         title="Used by"
@@ -115,6 +127,7 @@ export function LineageLists({ graph, days, catalog }: { graph: LineageGraphView
         direction="down"
         graph={graph}
         catalog={catalog}
+        health={health}
         note={
           graph.impact.downstream > downstream.length
             ? {
@@ -136,6 +149,7 @@ function List({
   direction,
   graph,
   catalog,
+  health,
   note,
 }: {
   title: string
@@ -145,6 +159,7 @@ function List({
   direction: Direction
   graph: LineageGraphView
   catalog: string
+  health?: Map<string, RunHealth>
   /** A line under the heading, when the drawing shows fewer tables than exist. */
   note?: { testId: string; text: string }
 }) {
@@ -178,7 +193,7 @@ function List({
               {g.step > 1 && <div className="text-[11px] uppercase tracking-widest text-text-mute mb-1">{g.step} steps away</div>}
               <ul className="space-y-1">
                 {g.rows.map(n => (
-                  <Row key={n.id} node={n} direction={direction} graph={graph} catalog={catalog} muted={false} />
+                  <Row key={n.id} node={n} direction={direction} graph={graph} catalog={catalog} health={health} muted={false} />
                 ))}
               </ul>
             </div>
@@ -186,7 +201,7 @@ function List({
           {showHandMade && byHand.length > 0 && (
             <ul className="space-y-1">
               {byHand.map(n => (
-                <Row key={n.id} node={n} direction={direction} graph={graph} catalog={catalog} muted />
+                <Row key={n.id} node={n} direction={direction} graph={graph} catalog={catalog} health={health} muted />
               ))}
             </ul>
           )}
@@ -213,17 +228,21 @@ function Row({
   direction,
   graph,
   catalog,
+  health,
   muted,
 }: {
   node: LineageNodeView
   direction: Direction
   graph: LineageGraphView
   catalog: string
+  health?: Map<string, RunHealth>
   muted: boolean
 }) {
   const edges = graph.edges.filter(e => (direction === 'up' ? e.from === node.id : e.to === node.id))
   const edge = newestOf(edges)
   const job = edge ? jobOf(edge, graph.jobs) : undefined
+  const run = health && edge?.jobNamespace === 'pipeline' ? health.get(edge.jobName) : undefined
+  const dot = runDot(run)
   return (
     <li
       className={['flex flex-wrap items-center gap-x-2 gap-y-1 min-w-0 py-0.5', muted ? 'opacity-60' : ''].join(' ')}
@@ -239,6 +258,14 @@ function Row({
         {tableLabel(node, catalog)}
       </Link>
       {job && <JobPill job={job} label={pillLabel(job, node.namespace)} />}
+      {dot && (
+        <span
+          data-testid="list-health"
+          aria-label={dot.title}
+          title={dot.title}
+          className={`inline-block h-2 w-2 shrink-0 rounded-full ${dot.paint}`}
+        />
+      )}
     </li>
   )
 }
