@@ -153,26 +153,26 @@ pub async fn list(client: &Client, namespace: &str) -> anyhow::Result<Vec<Worklo
         out.push(Workload {
             name: d.metadata.name.clone().unwrap_or_default(),
             kind: "Deployment".into(),
-            image: container_image(d.spec.as_ref().map(|s| &s.template)),
+            image: container_image(Some(&d.spec.template)),
             ready: d
                 .status
                 .as_ref()
                 .and_then(|s| s.ready_replicas)
                 .unwrap_or(0),
-            desired: d.spec.as_ref().and_then(|s| s.replicas).unwrap_or(0),
+            desired: d.spec.replicas.unwrap_or(0),
         });
     }
     for s in statefulsets.list(&ListParams::default()).await?.items {
         out.push(Workload {
             name: s.metadata.name.clone().unwrap_or_default(),
             kind: "StatefulSet".into(),
-            image: container_image(s.spec.as_ref().map(|s| &s.template)),
+            image: container_image(Some(&s.spec.template)),
             ready: s
                 .status
                 .as_ref()
                 .and_then(|s| s.ready_replicas)
                 .unwrap_or(0),
-            desired: s.spec.as_ref().and_then(|s| s.replicas).unwrap_or(0),
+            desired: s.spec.replicas.unwrap_or(0),
         });
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
