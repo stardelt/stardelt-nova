@@ -341,7 +341,7 @@ export default function CommandPalette({
                 >
                   <Icon name={row.icon} className="w-4 h-4 shrink-0" />
                   <span className="truncate">{row.label}</span>
-                  <span className="ml-auto font-mono text-[11px] text-text-mute">{row.hint}</span>
+                  <span className="ml-auto text-xs text-text-mute">{row.hint}</span>
                 </li>
               </Fragment>
             ))}
