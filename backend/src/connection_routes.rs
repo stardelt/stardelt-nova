@@ -251,8 +251,8 @@ impl Fail {
         }
     }
 
-    /// The status, for a test that inspects a refusal without serialising it.
-    #[cfg(test)]
+    /// The status, for a caller that inspects a refusal without serialising it (the pipeline
+    /// loader tells a hidden pipeline's 404 from a viewer's 403 in the audit line).
     pub(crate) fn status(&self) -> StatusCode {
         self.status
     }

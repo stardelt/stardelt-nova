@@ -4942,7 +4942,7 @@
         "tags": [
           "public"
         ],
-        "description": "Change a pipeline Nova created (`app.kubernetes.io/managed-by: stardelt-nova`) and nothing else. A statement pipeline's body carries `sql`; a notebook pipeline's carries `notebook` (`{ name, objectVersion, params }`), and an update never changes which of the two it is: `sql` on a notebook pipeline is 400 `this pipeline runs a notebook`, a notebook on a statement pipeline 400 `this pipeline runs a statement`, and both or neither 400 `give a statement or a notebook`. The body describes the whole editable state: an omitted `schedule` removes it, an omitted `params` removes the table, an omitted option keeps its default, and a notebook body's file name, version and parameters replace the task's `config`. Refusals: a pipeline the caller may not act on 404; a pipeline Nova did not write, or one whose task shape is not exactly one `run` task of kind `sql` or `notebook` 409; the statement, a parameter, a placeholder, a notebook name, a parameter value or count, or a version that is not in the store (503 without `NOVA_S3_*`, 502 when S3 does not answer), an option, the cron or the timezone as on create 400; the group's principal no longer ready 409 with the `principals` route's message; a concurrent change to the resource 409 `the pipeline changed while you edited it: reload`. A body may carry `resourceVersion` (the one `pipelines_spec` answered): when it is not the stored one, the answer is that same 409 and nothing is written; omitted, the update behaves as before. The audit line carries the statement's length, the cron and, for a notebook, the group, the file name and the pinned version — never the statement and never a parameter value. Answers `Cache-Control: no-store`.",
+        "description": "Change a pipeline Nova created (`app.kubernetes.io/managed-by: stardelt-nova`) and nothing else. A statement pipeline's body carries `sql`; a notebook pipeline's carries `notebook` (`{ name, objectVersion, params }`), and an update never changes which of the two it is: `sql` on a notebook pipeline is 400 `this pipeline runs a notebook`, a notebook on a statement pipeline 400 `this pipeline runs a statement`, and both or neither 400 `give a statement or a notebook`. The body describes the whole editable state: an omitted `schedule` removes it, an omitted `params` removes the table, an omitted option keeps its default, and a notebook body's file name, version and parameters replace the task's `config`. Refusals: a pipeline the caller cannot see 404, and one it can see but may not change — a viewer (`spec.viewers`) — 403 `only the owner group may change this pipeline`; a pipeline Nova did not write, or one whose task shape is not exactly one `run` task of kind `sql` or `notebook` 409; the statement, a parameter, a placeholder, a notebook name, a parameter value or count, or a version that is not in the store (503 without `NOVA_S3_*`, 502 when S3 does not answer), an option, the cron or the timezone as on create 400; the group's principal no longer ready 409 with the `principals` route's message; a concurrent change to the resource 409 `the pipeline changed while you edited it: reload`. A body may carry `resourceVersion` (the one `pipelines_spec` answered): when it is not the stored one, the answer is that same 409 and nothing is written; omitted, the update behaves as before. The audit line carries the statement's length, the cron and, for a notebook, the group, the file name and the pinned version — never the statement and never a parameter value. Answers `Cache-Control: no-store`.",
         "operationId": "pipelines_update",
         "parameters": [
           {
@@ -5005,6 +5005,16 @@
               }
             }
           },
+          "403": {
+            "description": "The caller may see but not change this pipeline",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "404": {
             "description": "No such pipeline for this caller",
             "content": {
@@ -5051,7 +5061,7 @@
         "tags": [
           "public"
         ],
-        "description": "Delete a pipeline Nova created. Only a pipeline the caller may act on and that carries `app.kubernetes.io/managed-by: stardelt-nova` may be deleted: a `kubectl` or GitOps pipeline answers 409 instead. Airflow is not called — the resource is the source of truth; the DAG leaves the scheduler's default list after about 90 seconds while its history stays readable. Answers 204 with `Cache-Control: no-store`; the attempt is audited.",
+        "description": "Delete a pipeline Nova created. Only the owner group and administrators may delete: a viewer (`spec.viewers`) answers 403 `only the owner group may change this pipeline`, and a pipeline the caller cannot see 404. A pipeline that carries `app.kubernetes.io/managed-by: stardelt-nova` may be deleted: a `kubectl` or GitOps pipeline answers 409 instead. Airflow is not called — the resource is the source of truth; the DAG leaves the scheduler's default list after about 90 seconds while its history stays readable. Answers 204 with `Cache-Control: no-store`; the attempt is audited.",
         "operationId": "pipelines_delete",
         "parameters": [
           {
@@ -5079,6 +5089,16 @@
           },
           "401": {
             "description": "No token to sign in with",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may see but not change this pipeline",
             "content": {
               "application/json": {
                 "schema": {
@@ -5135,7 +5155,7 @@
         "tags": [
           "public"
         ],
-        "description": "Pause a pipeline. Idempotent: pausing a paused pipeline answers 200. A pipeline the scheduler has not loaded answers 409. Answers the fresh `PipelineView` — the DAG as Airflow returned it after the patch — and `Cache-Control: no-store`. The attempt is audited, including a refusal.",
+        "description": "Pause a pipeline. Idempotent: pausing a paused pipeline answers 200. Changing a pipeline is the owner group's and administrators' verb: a viewer (`spec.viewers`) may read and run it but not pause it, and answers 403 `only the owner group may change this pipeline` — a pipeline the caller cannot see stays 404. A pipeline the scheduler has not loaded answers 409. Answers the fresh `PipelineView` — the DAG as Airflow returned it after the patch — and `Cache-Control: no-store`. The attempt is audited, including a refusal.",
         "operationId": "pipelines_pause",
         "parameters": [
           {
@@ -5170,6 +5190,16 @@
           },
           "401": {
             "description": "No token to sign in with",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may see but not change this pipeline",
             "content": {
               "application/json": {
                 "schema": {
@@ -5226,7 +5256,7 @@
         "tags": [
           "public"
         ],
-        "description": "Resume a pipeline. Idempotent: resuming a running pipeline answers 200. A pipeline the scheduler has not loaded answers 409. Answers the fresh `PipelineView` — the DAG as Airflow returned it after the patch — and `Cache-Control: no-store`. The attempt is audited, including a refusal.",
+        "description": "Resume a pipeline. Idempotent: resuming a running pipeline answers 200. Changing a pipeline is the owner group's and administrators' verb: a viewer (`spec.viewers`) may read and run it but not resume it, and answers 403 `only the owner group may change this pipeline` — a pipeline the caller cannot see stays 404. A pipeline the scheduler has not loaded answers 409. Answers the fresh `PipelineView` — the DAG as Airflow returned it after the patch — and `Cache-Control: no-store`. The attempt is audited, including a refusal.",
         "operationId": "pipelines_resume",
         "parameters": [
           {
@@ -5261,6 +5291,16 @@
           },
           "401": {
             "description": "No token to sign in with",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller may see but not change this pipeline",
             "content": {
               "application/json": {
                 "schema": {
@@ -5317,7 +5357,7 @@
         "tags": [
           "public"
         ],
-        "description": "Start a run now. Nova refuses instead of passing Airflow's silent behaviour on: a pipeline the scheduler has not loaded yet answers 409, a paused pipeline 409 (Airflow would create a run that waits `queued` until someone resumes), more than ten starts per user per minute 429, and a `Forbid` or `Replace` pipeline whose latest five runs include a queued or running one 409 (`Allow` skips that check). `logicalDate` is always now, UTC, whole seconds, so the run has tasks; the note is `Started from Nova by <display name>`. Every attempt, including a refusal, writes one audit line without note text. Answers `Cache-Control: no-store`.",
+        "description": "Start a run now. A viewer (`spec.viewers`) may run the owner's statement and stop its runs: running cannot change what the pipeline does. Nova refuses instead of passing Airflow's silent behaviour on: a pipeline the scheduler has not loaded yet answers 409, a paused pipeline 409 (Airflow would create a run that waits `queued` until someone resumes), more than ten starts per user per minute 429, and a `Forbid` or `Replace` pipeline whose latest five runs include a queued or running one 409 (`Allow` skips that check). `logicalDate` is always now, UTC, whole seconds, so the run has tasks; the note is `Started from Nova by <display name>`. Every attempt, including a refusal, writes one audit line without note text. Answers `Cache-Control: no-store`.",
         "operationId": "pipelines_run_trigger",
         "parameters": [
           {
@@ -5508,7 +5548,7 @@
         "tags": [
           "public"
         ],
-        "description": "Stop a run: mark it failed. This is **not a cancel** — work already in flight can finish and commit its side effects (stardelt-nova#255), so the answer promises only that the run is marked failed. The run id is looked up through this pipeline's DAG id first: a run id of another pipeline answers 404 and is never patched. A run that is not `queued` or `running` answers 409 and is not patched. Answers the fresh `RunView` and `Cache-Control: no-store`. The attempt is audited, including a refusal.",
+        "description": "Stop a run: mark it failed. A viewer (`spec.viewers`) may stop a run, as it may start one. This is **not a cancel** — work already in flight can finish and commit its side effects (stardelt-nova#255), so the answer promises only that the run is marked failed. The run id is looked up through this pipeline's DAG id first: a run id of another pipeline answers 404 and is never patched. A run that is not `queued` or `running` answers 409 and is not patched. Answers the fresh `RunView` and `Cache-Control: no-store`. The attempt is audited, including a refusal.",
         "operationId": "pipelines_run_stop",
         "parameters": [
           {
@@ -10716,6 +10756,7 @@
           "name",
           "namespace",
           "canRun",
+          "canEdit",
           "paused",
           "loaded",
           "state",
@@ -10723,9 +10764,13 @@
           "concurrency"
         ],
         "properties": {
+          "canEdit": {
+            "type": "boolean",
+            "description": "Whether the caller may also pause, resume, change or delete it — the owner group and\nadministrators only (epic#895 decision 12)."
+          },
           "canRun": {
             "type": "boolean",
-            "description": "Whether the caller may run, pause, resume, change or delete this pipeline. `false` for a\nviewer (`spec.viewers`), which is a read-only row."
+            "description": "Whether the caller may run it and stop its runs."
           },
           "concurrency": {
             "type": "string",

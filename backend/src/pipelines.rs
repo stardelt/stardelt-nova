@@ -374,7 +374,7 @@ fn spec_of(resource: &Value) -> &Value {
 
 /// Who may see a pipeline. Administrators see all; everybody else sees a pipeline whose
 /// `spec.ownerGroup` names one of their groups, or whose `spec.viewers` lists one of them —
-/// a viewer reads (list, detail, runs, spec) and nothing else (epic#895 decision 12).
+/// a viewer reads (list, detail, runs, spec) and runs it (epic#895 decision 12).
 pub fn visible(identity: &Identity, spec: &Value) -> bool {
     if identity.is_admin {
         return true;
@@ -392,10 +392,12 @@ pub fn visible(identity: &Identity, spec: &Value) -> bool {
         .is_some_and(|viewers| viewers.iter().filter_map(Value::as_str).any(mine))
 }
 
-/// Who may act on a pipeline: run it now, pause it, resume it, stop one of its runs, change its
-/// spec or delete it. The owner group and administrators only — `spec.viewers` is read-only
-/// (epic#895 decision 12). Written out rather than as a call to [`visible`], because the two
-/// rules differ on purpose now; an outsider gets the same 404 as for a read.
+/// Who may change a pipeline: pause it, resume it, change its spec or delete it. The owner group
+/// and administrators only — `spec.viewers` may not (epic#895 decision 12). Running is
+/// deliberately not here: a viewer runs the owner's statement, which cannot change what the
+/// pipeline does; that verb is [`visible`]. Written out rather than as a call to [`visible`],
+/// because the two rules differ on purpose; a caller who may see the pipeline but not change it
+/// gets 403.
 pub fn may_act(identity: &Identity, spec: &Value) -> bool {
     if identity.is_admin {
         return true;
@@ -1990,9 +1992,11 @@ pub struct PipelineView {
     pub namespace: String,
     /// `spec.ownerGroup`; `None` means administrators only.
     pub owner_group: Option<String>,
-    /// Whether the caller may run, pause, resume, change or delete this pipeline. `false` for a
-    /// viewer (`spec.viewers`), which is a read-only row.
+    /// Whether the caller may run it and stop its runs.
     pub can_run: bool,
+    /// Whether the caller may also pause, resume, change or delete it — the owner group and
+    /// administrators only (epic#895 decision 12).
+    pub can_edit: bool,
     /// The cron schedule, with the time zone in parentheses when there is one.
     pub schedule: Option<String>,
     pub paused: bool,
@@ -2198,7 +2202,8 @@ fn view_of(
             .get("ownerGroup")
             .and_then(Value::as_str)
             .map(str::to_string),
-        can_run: may_act(who, spec),
+        can_run: visible(who, spec),
+        can_edit: may_act(who, spec),
         schedule: schedule_of(spec),
         paused,
         loaded,
@@ -2502,7 +2507,9 @@ const RUNS_MAX_LIMIT: usize = 200;
 const RUNS_KINDS: [&str; 3] = ["sql", "notebook", "pipeline"];
 
 /// Find the resource, check the namespace and the caller in that order, and only then answer
-/// the DAG id. A hidden pipeline is indistinguishable from an absent one.
+/// the DAG id. A pipeline the caller cannot see is indistinguishable from an absent one: that
+/// stays 404. A pipeline the caller can see but whose `allow` rule refuses answers 403 with the
+/// reason, so the page does not say "no such pipeline" about itself.
 async fn load_allowed(
     resources: &PipelineResources,
     who: &Identity,
@@ -2517,6 +2524,12 @@ async fn load_allowed(
         return Err(no_such_pipeline());
     };
     if !allow(who, spec_of(&resource)) {
+        if visible(who, spec_of(&resource)) {
+            return Err(Fail::new(
+                StatusCode::FORBIDDEN,
+                "only the owner group may change this pipeline",
+            ));
+        }
         return Err(no_such_pipeline());
     }
     Ok((dag_id_for(namespace, name), resource))
@@ -2532,7 +2545,17 @@ async fn load_visible(
     load_allowed(resources, who, namespace, name, visible).await
 }
 
-/// An action: who may act on the pipeline (a viewer may not, via [`may_act`]).
+/// A run or a stop: a viewer may run the owner's statement and stop one of its runs.
+async fn load_runnable(
+    resources: &PipelineResources,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+) -> Result<(String, Value), Fail> {
+    load_allowed(resources, who, namespace, name, visible).await
+}
+
+/// A change: who may pause, resume, change or delete the pipeline (a viewer may not).
 async fn load_actionable(
     resources: &PipelineResources,
     who: &Identity,
@@ -3165,6 +3188,17 @@ impl ActionError {
         }
     }
 
+    /// A refusal from a resource load: a pipeline the caller cannot see is `not-found`; one it
+    /// can see but may not change is `forbidden` — the audit line says which, as the answer does.
+    fn load_refusal(fail: Fail) -> Self {
+        let why = if fail.status() == StatusCode::FORBIDDEN {
+            "forbidden"
+        } else {
+            "not-found"
+        };
+        Self::refused(why, fail)
+    }
+
     fn error(fail: Fail) -> Self {
         Self {
             fail,
@@ -3213,9 +3247,9 @@ async fn run_now_inner(
         .ok_or_else(no_cluster)
         .map_err(ActionError::error)?;
     let airflow = scheduler(airflow).map_err(ActionError::error)?;
-    let (dag_id, resource) = load_actionable(resources, who, namespace, name)
+    let (dag_id, resource) = load_runnable(resources, who, namespace, name)
         .await
-        .map_err(|fail| ActionError::refused("not-found", fail))?;
+        .map_err(ActionError::load_refusal)?;
 
     let dag = match airflow.dag(&dag_id).await {
         Ok(dag) => dag,
@@ -3314,7 +3348,7 @@ async fn set_paused_inner(
     let airflow = scheduler(airflow).map_err(ActionError::error)?;
     let (dag_id, resource) = load_actionable(resources, who, namespace, name)
         .await
-        .map_err(|fail| ActionError::refused("not-found", fail))?;
+        .map_err(ActionError::load_refusal)?;
 
     // The patch answers the DAG as Airflow now has it, which is the fresh view the caller gets;
     // `404` is a pipeline the loader has not created yet.
@@ -3376,9 +3410,9 @@ async fn stop_run_inner(
         .ok_or_else(no_cluster)
         .map_err(ActionError::error)?;
     let airflow = scheduler(airflow).map_err(ActionError::error)?;
-    let (dag_id, _) = load_actionable(resources, who, namespace, name)
+    let (dag_id, _) = load_runnable(resources, who, namespace, name)
         .await
-        .map_err(|fail| ActionError::refused("not-found", fail))?;
+        .map_err(ActionError::load_refusal)?;
 
     // Read the run through this pipeline's DAG id first: a run id of another pipeline never
     // resolves, and the PATCH below only ever sees an id found here.
@@ -4058,7 +4092,7 @@ async fn update_pipeline_inner(
         .map_err(ActionError::error)?;
     let (_, resource) = load_actionable(resources, who, namespace, name)
         .await
-        .map_err(|fail| ActionError::refused("not-found", fail))?;
+        .map_err(ActionError::load_refusal)?;
 
     // Only what Nova wrote may be rewritten; a manifest stays its author's.
     if !nova_managed(&resource) {
@@ -4209,7 +4243,7 @@ async fn delete_pipeline_inner(
         .map_err(ActionError::error)?;
     let (_, resource) = load_actionable(resources, who, namespace, name)
         .await
-        .map_err(|fail| ActionError::refused("not-found", fail))?;
+        .map_err(ActionError::load_refusal)?;
     if !nova_managed(&resource) {
         return Err(ActionError::refused("not-nova", managed_outside()));
     }
@@ -4852,7 +4886,7 @@ pub(crate) async fn validate(
     operation_id = "pipelines_update",
     path = "/api/pipelines/{namespace}/{name}",
     tag = "public",
-    description = "Change a pipeline Nova created (`app.kubernetes.io/managed-by: stardelt-nova`) and nothing else. A statement pipeline's body carries `sql`; a notebook pipeline's carries `notebook` (`{ name, objectVersion, params }`), and an update never changes which of the two it is: `sql` on a notebook pipeline is 400 `this pipeline runs a notebook`, a notebook on a statement pipeline 400 `this pipeline runs a statement`, and both or neither 400 `give a statement or a notebook`. The body describes the whole editable state: an omitted `schedule` removes it, an omitted `params` removes the table, an omitted option keeps its default, and a notebook body's file name, version and parameters replace the task's `config`. Refusals: a pipeline the caller may not act on 404; a pipeline Nova did not write, or one whose task shape is not exactly one `run` task of kind `sql` or `notebook` 409; the statement, a parameter, a placeholder, a notebook name, a parameter value or count, or a version that is not in the store (503 without `NOVA_S3_*`, 502 when S3 does not answer), an option, the cron or the timezone as on create 400; the group's principal no longer ready 409 with the `principals` route's message; a concurrent change to the resource 409 `the pipeline changed while you edited it: reload`. A body may carry `resourceVersion` (the one `pipelines_spec` answered): when it is not the stored one, the answer is that same 409 and nothing is written; omitted, the update behaves as before. The audit line carries the statement's length, the cron and, for a notebook, the group, the file name and the pinned version — never the statement and never a parameter value. Answers `Cache-Control: no-store`.",
+    description = "Change a pipeline Nova created (`app.kubernetes.io/managed-by: stardelt-nova`) and nothing else. A statement pipeline's body carries `sql`; a notebook pipeline's carries `notebook` (`{ name, objectVersion, params }`), and an update never changes which of the two it is: `sql` on a notebook pipeline is 400 `this pipeline runs a notebook`, a notebook on a statement pipeline 400 `this pipeline runs a statement`, and both or neither 400 `give a statement or a notebook`. The body describes the whole editable state: an omitted `schedule` removes it, an omitted `params` removes the table, an omitted option keeps its default, and a notebook body's file name, version and parameters replace the task's `config`. Refusals: a pipeline the caller cannot see 404, and one it can see but may not change — a viewer (`spec.viewers`) — 403 `only the owner group may change this pipeline`; a pipeline Nova did not write, or one whose task shape is not exactly one `run` task of kind `sql` or `notebook` 409; the statement, a parameter, a placeholder, a notebook name, a parameter value or count, or a version that is not in the store (503 without `NOVA_S3_*`, 502 when S3 does not answer), an option, the cron or the timezone as on create 400; the group's principal no longer ready 409 with the `principals` route's message; a concurrent change to the resource 409 `the pipeline changed while you edited it: reload`. A body may carry `resourceVersion` (the one `pipelines_spec` answered): when it is not the stored one, the answer is that same 409 and nothing is written; omitted, the update behaves as before. The audit line carries the statement's length, the cron and, for a notebook, the group, the file name and the pinned version — never the statement and never a parameter value. Answers `Cache-Control: no-store`.",
     params(
         ("namespace" = String, Path, description = "The Pipeline's namespace (Nova's own)"),
         ("name" = String, Path, description = "Pipeline name"),
@@ -4862,6 +4896,7 @@ pub(crate) async fn validate(
         (status = 200, description = "The resource as written", body = PipelineView),
         (status = 400, description = "The statement, the cron or the timezone is invalid", body = crate::openapi::ErrorResponse),
         (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller may see but not change this pipeline", body = crate::openapi::ErrorResponse),
         (status = 404, description = "No such pipeline for this caller", body = crate::openapi::ErrorResponse),
         (status = 409, description = "Managed outside Nova, an uneditable shape, no ready principal, or a conflict", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The cluster did not answer", body = crate::openapi::ErrorResponse),
@@ -4892,7 +4927,7 @@ pub(crate) async fn update(
     operation_id = "pipelines_delete",
     path = "/api/pipelines/{namespace}/{name}",
     tag = "public",
-    description = "Delete a pipeline Nova created. Only a pipeline the caller may act on and that carries `app.kubernetes.io/managed-by: stardelt-nova` may be deleted: a `kubectl` or GitOps pipeline answers 409 instead. Airflow is not called — the resource is the source of truth; the DAG leaves the scheduler's default list after about 90 seconds while its history stays readable. Answers 204 with `Cache-Control: no-store`; the attempt is audited.",
+    description = "Delete a pipeline Nova created. Only the owner group and administrators may delete: a viewer (`spec.viewers`) answers 403 `only the owner group may change this pipeline`, and a pipeline the caller cannot see 404. A pipeline that carries `app.kubernetes.io/managed-by: stardelt-nova` may be deleted: a `kubectl` or GitOps pipeline answers 409 instead. Airflow is not called — the resource is the source of truth; the DAG leaves the scheduler's default list after about 90 seconds while its history stays readable. Answers 204 with `Cache-Control: no-store`; the attempt is audited.",
     params(
         ("namespace" = String, Path, description = "The Pipeline's namespace (Nova's own)"),
         ("name" = String, Path, description = "Pipeline name"),
@@ -4900,6 +4935,7 @@ pub(crate) async fn update(
     responses(
         (status = 204, description = "Deleted (or already gone)"),
         (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller may see but not change this pipeline", body = crate::openapi::ErrorResponse),
         (status = 404, description = "No such pipeline for this caller", body = crate::openapi::ErrorResponse),
         (status = 409, description = "The pipeline is managed outside Nova", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The cluster did not answer", body = crate::openapi::ErrorResponse),
@@ -5145,7 +5181,7 @@ pub(crate) async fn run_notebook(
     operation_id = "pipelines_run_trigger",
     path = "/api/pipelines/{namespace}/{name}/runs",
     tag = "public",
-    description = "Start a run now. Nova refuses instead of passing Airflow's silent behaviour on: a pipeline the scheduler has not loaded yet answers 409, a paused pipeline 409 (Airflow would create a run that waits `queued` until someone resumes), more than ten starts per user per minute 429, and a `Forbid` or `Replace` pipeline whose latest five runs include a queued or running one 409 (`Allow` skips that check). `logicalDate` is always now, UTC, whole seconds, so the run has tasks; the note is `Started from Nova by <display name>`. Every attempt, including a refusal, writes one audit line without note text. Answers `Cache-Control: no-store`.",
+    description = "Start a run now. A viewer (`spec.viewers`) may run the owner's statement and stop its runs: running cannot change what the pipeline does. Nova refuses instead of passing Airflow's silent behaviour on: a pipeline the scheduler has not loaded yet answers 409, a paused pipeline 409 (Airflow would create a run that waits `queued` until someone resumes), more than ten starts per user per minute 429, and a `Forbid` or `Replace` pipeline whose latest five runs include a queued or running one 409 (`Allow` skips that check). `logicalDate` is always now, UTC, whole seconds, so the run has tasks; the note is `Started from Nova by <display name>`. Every attempt, including a refusal, writes one audit line without note text. Answers `Cache-Control: no-store`.",
     params(
         ("namespace" = String, Path, description = "The Pipeline's namespace (Nova's own)"),
         ("name" = String, Path, description = "Pipeline name"),
@@ -5183,7 +5219,7 @@ pub(crate) async fn trigger_run(
     operation_id = "pipelines_pause",
     path = "/api/pipelines/{namespace}/{name}/pause",
     tag = "public",
-    description = "Pause a pipeline. Idempotent: pausing a paused pipeline answers 200. A pipeline the scheduler has not loaded answers 409. Answers the fresh `PipelineView` — the DAG as Airflow returned it after the patch — and `Cache-Control: no-store`. The attempt is audited, including a refusal.",
+    description = "Pause a pipeline. Idempotent: pausing a paused pipeline answers 200. Changing a pipeline is the owner group's and administrators' verb: a viewer (`spec.viewers`) may read and run it but not pause it, and answers 403 `only the owner group may change this pipeline` — a pipeline the caller cannot see stays 404. A pipeline the scheduler has not loaded answers 409. Answers the fresh `PipelineView` — the DAG as Airflow returned it after the patch — and `Cache-Control: no-store`. The attempt is audited, including a refusal.",
     params(
         ("namespace" = String, Path, description = "The Pipeline's namespace (Nova's own)"),
         ("name" = String, Path, description = "Pipeline name"),
@@ -5191,6 +5227,7 @@ pub(crate) async fn trigger_run(
     responses(
         (status = 200, description = "The pipeline, now paused", body = PipelineView),
         (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller may see but not change this pipeline", body = crate::openapi::ErrorResponse),
         (status = 404, description = "No such pipeline for this caller", body = crate::openapi::ErrorResponse),
         (status = 409, description = "The scheduler has not loaded this pipeline yet", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The scheduler or the cluster did not answer", body = crate::openapi::ErrorResponse),
@@ -5218,7 +5255,7 @@ pub(crate) async fn pause(
     operation_id = "pipelines_resume",
     path = "/api/pipelines/{namespace}/{name}/resume",
     tag = "public",
-    description = "Resume a pipeline. Idempotent: resuming a running pipeline answers 200. A pipeline the scheduler has not loaded answers 409. Answers the fresh `PipelineView` — the DAG as Airflow returned it after the patch — and `Cache-Control: no-store`. The attempt is audited, including a refusal.",
+    description = "Resume a pipeline. Idempotent: resuming a running pipeline answers 200. Changing a pipeline is the owner group's and administrators' verb: a viewer (`spec.viewers`) may read and run it but not resume it, and answers 403 `only the owner group may change this pipeline` — a pipeline the caller cannot see stays 404. A pipeline the scheduler has not loaded answers 409. Answers the fresh `PipelineView` — the DAG as Airflow returned it after the patch — and `Cache-Control: no-store`. The attempt is audited, including a refusal.",
     params(
         ("namespace" = String, Path, description = "The Pipeline's namespace (Nova's own)"),
         ("name" = String, Path, description = "Pipeline name"),
@@ -5226,6 +5263,7 @@ pub(crate) async fn pause(
     responses(
         (status = 200, description = "The pipeline, now unpaused", body = PipelineView),
         (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 403, description = "The caller may see but not change this pipeline", body = crate::openapi::ErrorResponse),
         (status = 404, description = "No such pipeline for this caller", body = crate::openapi::ErrorResponse),
         (status = 409, description = "The scheduler has not loaded this pipeline yet", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The scheduler or the cluster did not answer", body = crate::openapi::ErrorResponse),
@@ -5253,7 +5291,7 @@ pub(crate) async fn resume(
     operation_id = "pipelines_run_stop",
     path = "/api/pipelines/{namespace}/{name}/runs/{run_id}/stop",
     tag = "public",
-    description = "Stop a run: mark it failed. This is **not a cancel** — work already in flight can finish and commit its side effects (stardelt-nova#255), so the answer promises only that the run is marked failed. The run id is looked up through this pipeline's DAG id first: a run id of another pipeline answers 404 and is never patched. A run that is not `queued` or `running` answers 409 and is not patched. Answers the fresh `RunView` and `Cache-Control: no-store`. The attempt is audited, including a refusal.",
+    description = "Stop a run: mark it failed. A viewer (`spec.viewers`) may stop a run, as it may start one. This is **not a cancel** — work already in flight can finish and commit its side effects (stardelt-nova#255), so the answer promises only that the run is marked failed. The run id is looked up through this pipeline's DAG id first: a run id of another pipeline answers 404 and is never patched. A run that is not `queued` or `running` answers 409 and is not patched. Answers the fresh `RunView` and `Cache-Control: no-store`. The attempt is audited, including a refusal.",
     params(
         ("namespace" = String, Path, description = "The Pipeline's namespace (Nova's own)"),
         ("name" = String, Path, description = "Pipeline name"),
@@ -7419,6 +7457,7 @@ mod tests {
                 "namespace",
                 "ownerGroup",
                 "canRun",
+                "canEdit",
                 "schedule",
                 "paused",
                 "loaded",
@@ -7753,7 +7792,8 @@ mod tests {
         assert!(!may_act(&outsider, spec));
     }
 
-    /// A shared pipeline (epic#895 decision 12): `spec.viewers` may read, never act.
+    /// A shared pipeline (epic#895 decision 12): `spec.viewers` may read it and run it; changing
+    /// it stays the owner group's.
     fn shared() -> Value {
         with_viewers(resource("shop", Some("demo")), &["visitors"])
     }
@@ -7780,16 +7820,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_viewer_reads_the_list_and_the_detail_but_a_run_is_404() {
+    async fn a_viewer_runs_the_shared_pipeline_and_the_run_is_audited_as_the_viewer() {
         let resources = memory(&[
             ("shop", shared()),
             ("smoke", resource("smoke", Some("analytics"))),
         ]);
         let (airflow, fake) = fake_airflow::start().await;
-        let viewer = who("sub-vera", &["visitors"], false);
+        // The loader has created the shared pipeline's DAG, with no run yet.
+        {
+            let mut fake = fake.lock().unwrap();
+            fake.dags.push(dag("stardelt__shop"));
+            fake.runs.insert("stardelt__shop".into(), Vec::new());
+        }
+        let viewer = who("sub-vera-807", &["visitors"], false);
         let namespace = crate::cluster::namespace();
+        let _ = audit::test_sink::take_for("sub-vera-807");
 
-        // The list the caller sees, with a read-only row.
+        // The list and the detail show a pipeline the viewer may run.
         let answer = list_pipelines(Some(&resources), Some(&airflow), &viewer)
             .await
             .expect("the list succeeds");
@@ -7799,9 +7846,12 @@ mod tests {
             .map(|pipeline| pipeline.name.as_str())
             .collect();
         assert_eq!(names, ["shop"], "the viewer's list has the shared pipeline");
-        assert!(!answer.pipelines[0].can_run, "the row is read-only");
+        assert!(answer.pipelines[0].can_run, "the viewer may run it");
+        assert!(
+            !answer.pipelines[0].can_edit,
+            "the viewer may not change it"
+        );
 
-        // The detail and the spec are reads: they answer.
         let detail = pipeline_detail(
             Some(&resources),
             Some(&airflow),
@@ -7811,14 +7861,17 @@ mod tests {
         )
         .await
         .expect("the viewer reads the detail");
-        assert!(!detail.pipeline.can_run, "a viewer's detail is read-only");
+        assert!(detail.pipeline.can_run, "a viewer's detail may run");
+        assert!(
+            !detail.pipeline.can_edit,
+            "a viewer's detail may not change"
+        );
         pipeline_spec(Some(&resources), &viewer, &namespace, "shop")
             .await
             .expect("the viewer reads the spec");
 
-        // Every action is the same 404 as for a hidden pipeline, before Airflow is asked.
-        let calls_before = fake.lock().unwrap().calls.clone();
-        let error = run_now(
+        // Run now: a viewer starts the owner's statement, as the viewer.
+        let run = run_now(
             Some(&resources),
             Some(&airflow),
             &limiter(),
@@ -7827,9 +7880,54 @@ mod tests {
             "shop",
         )
         .await
-        .expect_err("a viewer may not run");
-        assert_eq!(error.status(), StatusCode::NOT_FOUND);
-        assert_eq!(error.message(), "no such pipeline");
+        .expect("a viewer may run the shared pipeline");
+        assert_eq!(run.state, "queued");
+        assert_eq!(
+            run.note.as_deref(),
+            Some("Started from Nova by sub-vera-807")
+        );
+        {
+            let fake = fake.lock().unwrap();
+            assert_eq!(
+                fake.trigger_bodies.len(),
+                1,
+                "Airflow was asked to trigger: {:?}",
+                fake.calls
+            );
+            assert_eq!(
+                fake.trigger_bodies[0]["note"],
+                "Started from Nova by sub-vera-807"
+            );
+            assert!(
+                fake.calls
+                    .iter()
+                    .any(|call| call == "POST /api/v2/dags/stardelt__shop/dagRuns"),
+                "the trigger names the shared pipeline: {:?}",
+                fake.calls
+            );
+        }
+
+        let records = audit::test_sink::take_for("sub-vera-807");
+        assert_eq!(
+            records.len(),
+            1,
+            "one audit record for the run: {records:?}"
+        );
+        assert_eq!(records[0].action, "run");
+        assert_eq!(records[0].outcome, "ok");
+        assert_eq!(records[0].sub, "sub-vera-807", "the viewer is the actor");
+        assert_eq!(records[0].pipeline, "shop");
+        assert_eq!(records[0].run.as_deref(), Some(run.run_id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn a_viewer_who_changes_the_shared_pipeline_gets_403_and_the_reason() {
+        let resources = memory(&[("shop", shared())]);
+        let (airflow, fake) = fake_airflow::start().await;
+        let viewer = who("sub-vera", &["visitors"], false);
+        let namespace = crate::cluster::namespace();
+        let calls_before = fake.lock().unwrap().calls.clone();
+
         let error = pause_pipeline(
             Some(&resources),
             Some(&airflow),
@@ -7839,20 +7937,120 @@ mod tests {
         )
         .await
         .expect_err("a viewer may not pause");
-        assert_eq!(error.status(), StatusCode::NOT_FOUND);
+        assert_eq!(error.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            error.message(),
+            "only the owner group may change this pipeline"
+        );
+
+        let error = update_pipeline(
+            Some(&resources),
+            None,
+            Some(&airflow),
+            &viewer,
+            &namespace,
+            "shop",
+            update_body("select 2;"),
+        )
+        .await
+        .expect_err("a viewer may not change the spec");
+        assert_eq!(error.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            error.message(),
+            "only the owner group may change this pipeline"
+        );
+
         assert_eq!(
             fake.lock().unwrap().calls,
             calls_before,
-            "no action of a viewer reaches Airflow"
+            "a refused change never reaches Airflow"
         );
-
-        // The owner group's row says it may act.
-        let owner = who("sub-dana", &["demo"], false);
-        let answer = list_pipelines(Some(&resources), Some(&airflow), &owner)
+        let stored = resources
+            .get("shop")
             .await
-            .expect("the owner's list succeeds");
-        assert_eq!(answer.pipelines.len(), 1);
-        assert!(answer.pipelines[0].can_run, "the owner's row may act");
+            .expect("the store answers")
+            .expect("the pipeline is still there");
+        assert_eq!(
+            stored["spec"]["tasks"][0]["name"], "schema",
+            "the refused update wrote nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_hidden_pipeline_still_answers_404_for_a_run_and_a_change() {
+        let resources = memory(&[("hidden", resource("hidden", Some("other-team")))]);
+        let (airflow, fake) = fake_airflow::start().await;
+        let outsider = who("sub-vera", &["visitors"], false);
+        let namespace = crate::cluster::namespace();
+
+        for (action, error) in [
+            (
+                "run",
+                run_now(
+                    Some(&resources),
+                    Some(&airflow),
+                    &limiter(),
+                    &outsider,
+                    &namespace,
+                    "hidden",
+                )
+                .await
+                .expect_err("an outsider may not run"),
+            ),
+            (
+                "pause",
+                pause_pipeline(
+                    Some(&resources),
+                    Some(&airflow),
+                    &outsider,
+                    &namespace,
+                    "hidden",
+                )
+                .await
+                .expect_err("an outsider may not pause"),
+            ),
+            (
+                "update",
+                update_pipeline(
+                    Some(&resources),
+                    None,
+                    Some(&airflow),
+                    &outsider,
+                    &namespace,
+                    "hidden",
+                    update_body("select 2;"),
+                )
+                .await
+                .expect_err("an outsider may not change"),
+            ),
+        ] {
+            assert_eq!(error.status(), StatusCode::NOT_FOUND, "{action}");
+            assert_eq!(error.message(), "no such pipeline", "{action}");
+        }
+        assert!(
+            fake.lock().unwrap().calls.is_empty(),
+            "a hidden pipeline never reaches Airflow: {:?}",
+            fake.lock().unwrap().calls
+        );
+    }
+
+    #[test]
+    fn can_run_and_can_edit_differ_for_a_viewer_an_owner_and_an_admin() {
+        let shared = shared();
+        let viewer = who("sub-vera", &["visitors"], false);
+        let owner = who("sub-dana", &["demo"], false);
+
+        let view = view_of("stardelt", "shop", &shared, None, None, &viewer);
+        assert!(view.can_run, "a viewer may run");
+        assert!(!view.can_edit, "a viewer may not change");
+
+        let view = view_of("stardelt", "shop", &shared, None, None, &owner);
+        assert!(view.can_run, "the owner may run");
+        assert!(view.can_edit, "the owner may change");
+
+        let view = view_of("stardelt", "shop", &shared, None, None, &admin());
+        assert!(view.can_run, "an administrator may run");
+        assert!(view.can_edit, "an administrator may change");
     }
 
     #[tokio::test]
