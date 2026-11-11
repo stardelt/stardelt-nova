@@ -5492,14 +5492,15 @@ test.describe('warehouses', () => {
 
   test('the class in use is named next to Run and on the Profile', async ({ browser }) => {
     const { context, page } = await open(browser, '/query', [SMALL, LARGE])
-    // The `yours` row, not the default one; the title carries the three numbers.
-    const note = page.getByTitle('6 running, 70 queued, 70% memory')
+    // The `yours` row, not the default one; the title carries the three numbers. Scoped to
+    // the page: the navigation's stage card carries the same hint (nova#795).
+    const note = page.locator('main').getByTitle('6 running, 70 queued, 70% memory')
     await expect(note).toHaveText('Warehouse: Large (large)')
-    await expect(page.getByTitle('10 running, 100 queued, 20% memory')).toHaveCount(0)
+    await expect(page.locator('main').getByTitle('10 running, 100 queued, 20% memory')).toHaveCount(0)
 
     await page.goto('/profile')
     await expect(page.getByText('SQL warehouse', { exact: true })).toBeVisible()
-    await expect(page.getByTitle('6 running, 70 queued, 70% memory')).toHaveText('Warehouse: Large (large)')
+    await expect(page.locator('main').getByTitle('6 running, 70 queued, 70% memory')).toHaveText('Warehouse: Large (large)')
     await context.close()
   })
 
@@ -5509,7 +5510,7 @@ test.describe('warehouses', () => {
       memoryShare: '100%', default: false, canUse: true, yours: true,
     }
     const { context, page } = await open(browser, '/profile', [admin])
-    await expect(page.getByTitle('50 running, 100 queued, 100% memory')).toHaveText('Warehouse: Administrators')
+    await expect(page.locator('main').getByTitle('50 running, 100 queued, 100% memory')).toHaveText('Warehouse: Administrators')
     await expect(page.locator('body')).not.toContainText('(null)')
     await context.close()
 
