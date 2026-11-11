@@ -6,6 +6,7 @@ import ErrorBox from '../components/ErrorBox'
 import NotebookFrame from '../components/NotebookFrame'
 import ScheduleDialog from '../components/ScheduleDialog'
 import { formatBytes, formatTime, shortVersion } from '../format'
+import { diffNotebooks } from '../notebookDiff'
 import { renderNotebook } from '../notebookHtml'
 
 /**
@@ -25,6 +26,8 @@ export default function NotebookDetail() {
     queryFn: () => api.notebookVersions(group, name),
   })
   const [picked, setPicked] = useState<string | null>(null)
+  // The version the picked one is compared with (#755); `null` means the page is as before.
+  const [compare, setCompare] = useState<string | null>(null)
   const latest = versions.data?.[0]
   const selected: string | undefined = picked ?? latest?.objectVersion
   const parameters = useQuery({
@@ -41,6 +44,12 @@ export default function NotebookDetail() {
     queryFn: () => api.notebookContent(group, name, selected),
     enabled: selected !== undefined,
   })
+  // The other side of the comparison (#755): asked only once a version is chosen.
+  const compareContent = useQuery({
+    queryKey: ['notebook-content', group, name, compare],
+    queryFn: () => api.notebookContent(group, name, compare ?? undefined),
+    enabled: compare !== null,
+  })
   const [scheduling, setScheduling] = useState<{ objectVersion: string } | null>(null)
   const [scheduled, setScheduled] = useState<PipelineView | null>(null)
 
@@ -49,6 +58,12 @@ export default function NotebookDetail() {
   // a Retry could fix.
   const storeMissing = failed && versions.error instanceof ApiError && versions.error.status === 503
   const rows = versions.data ?? []
+  // The versions this one can be compared with: every other one, never itself.
+  const comparable = rows.filter((version) => version.objectVersion !== selected)
+  const diff =
+    compare && content.data && compareContent.data
+      ? diffNotebooks(compareContent.data, content.data)
+      : null
 
   return (
     <div className="max-w-6xl space-y-5">
@@ -130,7 +145,11 @@ export default function NotebookDetail() {
                         type="button"
                         className="font-mono text-xs underline"
                         title={version.objectVersion}
-                        onClick={() => setPicked(version.objectVersion)}
+                        onClick={() => {
+                          setPicked(version.objectVersion)
+                          // A newly picked version starts without a comparison.
+                          setCompare(null)
+                        }}
                       >
                         {shortVersion(version.objectVersion)}
                       </button>
@@ -146,6 +165,7 @@ export default function NotebookDetail() {
                         onClick={() => {
                           // Scheduling a version also shows it, so the page and the dialog agree.
                           setPicked(version.objectVersion)
+                          setCompare(null)
                           setScheduling({ objectVersion: version.objectVersion })
                         }}
                       >
@@ -194,10 +214,32 @@ export default function NotebookDetail() {
           <p className="mt-1 text-sm text-text-mute">
             What this version holds: its cells, without outputs — publishing strips them.
           </p>
+          {comparable.length > 0 && (
+            <label className="mt-2 flex flex-wrap items-center gap-2 text-sm">
+              <span className="text-text-dim">Compare with</span>
+              <select
+                className="input py-1"
+                value={compare ?? ''}
+                onChange={(event) => setCompare(event.target.value || null)}
+              >
+                <option value="">No comparison</option>
+                {comparable.map((version) => (
+                  <option key={version.objectVersion} value={version.objectVersion}>
+                    {shortVersion(version.objectVersion)} · {formatTime(version.uploadedAt)}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
           {content.isLoading && <p className="mt-2 text-sm text-text-mute">Loading the notebook…</p>}
           {content.isError && (
             <div className="mt-2">
               <ErrorBox error={content.error} onRetry={() => void content.refetch()} />
+            </div>
+          )}
+          {compareContent.isError && (
+            <div className="mt-2">
+              <ErrorBox error={compareContent.error} onRetry={() => void compareContent.refetch()} />
             </div>
           )}
           {content.data && (
@@ -205,6 +247,41 @@ export default function NotebookDetail() {
               <NotebookFrame title={`Preview of ${shortVersion(selected)}`} html={renderNotebook(content.data).html} />
             </div>
           )}
+        </section>
+      )}
+
+      {diff && (
+        <section className="card p-5" data-testid="notebook-diff">
+          <h2 className="text-lg font-semibold break-words">
+            What changed: {shortVersion(compare)} → {shortVersion(selected)}
+          </h2>
+          <p className="mt-1 text-sm text-text-dim">
+            {diff.changed} changed · {diff.added} added · {diff.removed} removed
+          </p>
+          {diff.cells.length === 0 && (
+            <p className="mt-2 text-sm text-text-mute">The two versions hold the same cells.</p>
+          )}
+          {diff.cells.map((cell) => (
+            <div key={cell.index} className="mt-3">
+              <p className="text-xs text-text-mute">
+                Cell {cell.index + 1} · {cell.kind}
+              </p>
+              <pre className="mt-1 overflow-x-auto rounded-lg bg-bg-soft px-3 py-2 font-mono text-xs whitespace-pre-wrap break-words">
+                {cell.lines.map((line, i) => (
+                  <div
+                    key={i}
+                    data-kind={line.kind}
+                    className={
+                      line.kind === 'add' ? 'text-ok' : line.kind === 'del' ? 'text-bad' : 'text-text-mute'
+                    }
+                  >
+                    {line.kind === 'add' ? '+ ' : line.kind === 'del' ? '- ' : '  '}
+                    {line.text}
+                  </div>
+                ))}
+              </pre>
+            </div>
+          ))}
         </section>
       )}
 
