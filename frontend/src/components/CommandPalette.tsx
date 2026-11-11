@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
+import { useQueries, useQuery } from '@tanstack/react-query'
 import { Icon, type IconName } from './Icon'
 import { api } from '../api'
 import { formatTime } from '../format'
@@ -34,6 +34,7 @@ function firstWords(sql: string, n: number): string {
  * come from `GET /api/query-log?scope=mine`
  * and open the query log with that query expanded. The last group is the five actions a person
  * does from the palette: four of them navigate, and "Switch theme" runs the header's own toggle.
+ * Catalogs and schemas come from the same lists as the Catalog explorer; a schema opens its schema page.
  */
 export default function CommandPalette({
   open,
@@ -111,6 +112,65 @@ export default function CommandPalette({
       })),
     [tables.data],
   )
+
+  // Catalogs and their schemas (nova: palette catalogs + schemas). The API already hides a
+  // catalog the person may not browse. Fetched once per dialog opening; at most 20 catalogs.
+  const catalogs = useQuery({
+    queryKey: ['palette-catalogs'],
+    queryFn: () => api.catalogs(),
+    enabled: open,
+    staleTime: 60_000,
+    retry: false,
+  })
+  const catalogNames = (catalogs.data?.catalogs ?? []).map(c => c.name).slice(0, 20)
+  const schemaLists = useQueries({
+    queries: catalogNames.map(name => ({
+      queryKey: ['palette-namespaces', name],
+      queryFn: () => api.namespaces(name),
+      enabled: open && query.trim().length >= 1,
+      staleTime: 60_000,
+      retry: false,
+    })),
+  })
+
+  const catalogRows = useMemo<Row[]>(() => {
+    const q = query.trim().toLowerCase()
+    if (!q) return []
+    const fallback = catalogs.data?.default
+    return catalogNames
+      .filter(name => name.toLowerCase().includes(q))
+      .slice(0, 5)
+      .map(name => ({
+        key: `catalog:${name}`,
+        group: 'Catalogs',
+        label: name,
+        hint: name === fallback ? 'Default catalog' : 'Catalog',
+        icon: 'database' as const,
+        to: `/catalog?catalog=${encodeURIComponent(name)}`,
+      }))
+  }, [query, catalogs.data])
+
+  const schemaRows = useMemo<Row[]>(() => {
+    const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean)
+    if (words.length === 0) return []
+    const out: Row[] = []
+    catalogNames.forEach((name, i) => {
+      for (const parts of schemaLists[i]?.data?.namespaces ?? []) {
+        const ns = parts.join('.')
+        const full = `${name}.${ns}`.toLowerCase()
+        if (!words.every(w => full.includes(w))) continue
+        out.push({
+          key: `schema:${name}:${ns}`,
+          group: 'Schemas',
+          label: `${name}.${ns}`,
+          hint: 'Schema',
+          icon: 'folder',
+          to: `/catalog?catalog=${encodeURIComponent(name)}&ns=${encodeURIComponent(ns)}`,
+        })
+      }
+    })
+    return out.slice(0, 8)
+  }, [query, catalogs.data, schemaLists])
 
   const saved = useQuery({
     queryKey: ['saved-queries'],
@@ -201,8 +261,8 @@ export default function CommandPalette({
   }, [query, onSwitchTheme])
 
   const rows = useMemo(
-    () => [...pages, ...tableRows, ...pipelineRows, ...queryRows, ...savedRows, ...actions],
-    [pages, tableRows, pipelineRows, queryRows, savedRows, actions],
+    () => [...pages, ...catalogRows, ...schemaRows, ...tableRows, ...pipelineRows, ...queryRows, ...savedRows, ...actions],
+    [pages, catalogRows, schemaRows, tableRows, pipelineRows, queryRows, savedRows, actions],
   )
 
   if (!open) return null
@@ -244,13 +304,13 @@ export default function CommandPalette({
         <div className="border-b border-border p-3">
           <input
             role="combobox"
-            aria-label="Search pages, queries and tables"
+            aria-label="Search pages, catalogs, schemas, tables and queries"
             aria-expanded="true"
             aria-controls={`${id}-list`}
             aria-activedescendant={activeId}
             autoFocus
             value={query}
-            placeholder="Search pages, queries and tables…"
+            placeholder="Search catalogs, schemas, tables, pages…"
             className="input w-full"
             onChange={(e) => {
               setQuery(e.target.value)
