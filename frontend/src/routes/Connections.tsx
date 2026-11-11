@@ -9,6 +9,7 @@ import {
 } from '../components/ConnectionDialogs'
 import ErrorBox from '../components/ErrorBox'
 import { Icon } from '../components/Icon'
+import { SkeletonTable } from '../components/Skeleton'
 import { connectionTypeLabel } from '../connectionTypes'
 import { formatTime, relativeTime } from '../format'
 import { isAdmin } from '../roles'
@@ -118,7 +119,9 @@ export default function Connections() {
       {notice && <p role="status" className="text-sm text-ok break-words">{notice}</p>}
 
       <Section title="Personal" note={PERSONAL_NOTE}>
-        {list.isLoading && <p className="px-5 pb-5 text-sm text-text-mute">Loading connections…</p>}
+        {list.isLoading && (
+          <div className="px-5 pb-5"><SkeletonTable rows={5} label="Loading connections" /></div>
+        )}
         {failed && (
           <div className="px-5 pb-5 space-y-2">
             <ErrorBox error={list.error} onRetry={storeMissing ? undefined : () => void list.refetch()} />

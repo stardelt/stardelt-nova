@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { api, type PipelineView, type StageRow } from '../api'
 import ErrorBox from '../components/ErrorBox'
+import { SkeletonTable } from '../components/Skeleton'
 import { shortRevision } from '../format'
 import { PipelineStateBadge, formatWhen } from './Pipelines'
 
@@ -216,7 +217,9 @@ export default function Deployments() {
       )}
       {peer && <StageCompare peer={peer} keep401={me.data?.auth_mode !== 'oidc'} />}
 
-      {list.isLoading && <p className="text-sm text-text-mute">Reading deployments…</p>}
+      {list.isLoading && (
+        <div className="card p-5"><SkeletonTable rows={5} label="Reading deployments" /></div>
+      )}
       {failed && (
         <div className="card px-5 py-5">
           <ErrorBox error={list.error} onRetry={() => void list.refetch()} />
