@@ -20,8 +20,9 @@ test('a visitor sees the demo catalogs, can query and write, and is closed out o
   await page.click('#kc-login')
   await expect(page.getByText('Overview').first()).toBeVisible({ timeout: 60_000 })
 
-  // banner: the shell says the account is shared and its data is deleted nightly.
-  await expect(page.getByText(/Public demo/i)).toBeVisible()
+  // banner: the shell says the account is shared and its data is deleted nightly. `role="note"`
+  // is the banner itself: "Public demo" also appears in the query scope chip (`SQL: Public demo`).
+  await expect(page.getByRole('note')).toContainText('Public demo: everyone signs in as this account')
 
   // catalogs: the four demo catalogs are listed; the other catalogs of this cluster are not.
   await page.goto('/catalog')
@@ -62,10 +63,17 @@ test('a visitor sees the demo catalogs, can query and write, and is closed out o
   await page.goto('/notebooks')
   const workspace = page.getByRole('region', { name: 'My workspace' })
   await expect(workspace.getByText('stopped', { exact: true })).toBeVisible({ timeout: 30_000 })
-  await workspace.getByRole('button', { name: 'Start' }).click()
-  await expect(page.getByRole('alert')).toHaveText('Open JupyterLab once to create your workspace.')
+  // Start is the hub's own spawn route, a link that opens in a new tab (nova#808, nova#829).
+  // Nova's API start is never offered while the app list is unanswered, so there is no button
+  // to click and no alert to read: the spawn lands on the hub's login and the card stays
+  // `stopped`.
+  const start = workspace.getByRole('link', { name: 'Start' })
+  await expect(start).toHaveAttribute('href', /\/hub\/spawn$/)
+  const [spawned] = await Promise.all([page.waitForEvent('popup'), start.click()])
+  await spawned.close()
   await expect(workspace.getByText('starting', { exact: true })).toHaveCount(0)
   await expect(workspace.getByText('stopped', { exact: true })).toBeVisible()
+  await expect(page.getByRole('alert')).toHaveCount(0)
 
   // closed apps: Superset — Nova renders the embed and lists no dashboard of its own. The
   // cross-origin dashboard list behind the IdP is not asserted here (see stardelt-nova#787).

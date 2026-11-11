@@ -57,8 +57,11 @@ export default function Notebooks() {
         </div>
       </header>
 
-      {/* The caller's own server: state, idle stop, Start and Stop, and the way in (#653). */}
-      <WorkspaceCard open={open} spawn={spawn} />
+      {/* The caller's own server: state, idle stop, Start and Stop, and the way in (#653).
+          `hubUnknown` while `/api/embeds` is unanswered: the card must not offer Nova's API
+          start in that window, because it cannot know yet whether the hub's spawn route is the
+          way to start a server (nova#829). */}
+      <WorkspaceCard open={open} spawn={spawn} hubUnknown={apps.isPending} />
 
       {up && base ? (
         <div className="flex flex-wrap items-center gap-2 text-sm">

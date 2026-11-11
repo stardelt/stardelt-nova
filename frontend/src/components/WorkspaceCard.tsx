@@ -62,7 +62,21 @@ function secondsLabel(seconds: number): string {
   return `${Math.floor(seconds / 60)} min ${pad(seconds % 60)} s`
 }
 
-export default function WorkspaceCard({ open, spawn }: { open?: string; spawn?: string }) {
+export default function WorkspaceCard({
+  open,
+  spawn,
+  hubUnknown = false,
+}: {
+  open?: string
+  spawn?: string
+  /**
+   * The app list (`/api/embeds`) has not answered yet, so this page does not know whether a hub
+   * is deployed at all. Until it does, no Start is offered: the API button is only for installs
+   * whose app list has no JupyterHub row, and offering it in this window is how a visitor reached
+   * the hub's API with a stored sign-in that had aged out (nova#829).
+   */
+  hubUnknown?: boolean
+}) {
   const qc = useQueryClient()
   const workspace = useQuery({
     queryKey: ['workspace'],
@@ -155,10 +169,11 @@ export default function WorkspaceCard({ open, spawn }: { open?: string; spawn?: 
               Open JupyterLab ↗
             </a>
           )}
-          {state === 'stopped' && (
+          {state === 'stopped' && !hubUnknown && (
             // The hub's own spawn route, not `POST /api/workspace/start`: only the hub's login
             // can renew a stored OAuth token that has aged out, and the spawn route does that
-            // through the SSO session the visitor already has (nova#808).
+            // through the SSO session the visitor already has (nova#808). Without a hub in the
+            // app list there is no spawn route, so the API's Start stays as the fallback.
             spawn ? (
               <a href={spawn} target="_blank" rel="noreferrer" className="btn-primary py-1.5">
                 Start

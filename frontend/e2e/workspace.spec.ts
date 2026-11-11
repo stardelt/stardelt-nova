@@ -23,6 +23,8 @@ type Stub = {
   views: unknown[]
   /** What `/api/embeds` answers, when the hub should be down or absent. */
   embeds?: unknown
+  /** Milliseconds `/api/embeds` takes to answer, to hold the card in its "not known yet" state. */
+  embedsDelay?: number
   /** What `POST /api/workspace/start` answers, when it should answer at all. */
   startAnswer?: unknown
   startStatus?: number
@@ -38,12 +40,15 @@ async function open(page: import('@playwright/test').Page, stub: Stub) {
       localStorage.setItem('stardelt-nova:time', 'utc')
     } catch { /* ignore */ }
   })
-  await page.route('**/api/**', (route) => {
+  await page.route('**/api/**', async (route) => {
     const url = new URL(route.request().url())
     const path = url.pathname
     const method = route.request().method()
     if (path === '/api/me') return json(route, ME)
-    if (path === '/api/embeds') return json(route, stub.embeds ?? [JUPYTER])
+    if (path === '/api/embeds') {
+      if (stub.embedsDelay) await new Promise(resolve => setTimeout(resolve, stub.embedsDelay))
+      return json(route, stub.embeds ?? [JUPYTER])
+    }
     if (path === '/api/notebooks') return json(route, [])
     if (path === '/api/pipelines/principals') return json(route, { groups: [] })
     if (path === '/api/pipelines') return json(route, { pipelines: [] })
@@ -137,6 +142,29 @@ test('an installation without hub credentials keeps only the way in', async ({ p
   await expect(workspace.getByRole('button', { name: 'Start' })).toHaveCount(0)
   await expect(workspace.getByRole('button', { name: 'Stop' })).toHaveCount(0)
   await expect(workspace).not.toContainText('running')
+})
+
+test('before the app list answers the card offers no Start at all (nova#829)', async ({ page }) => {
+  // `/api/workspace` answers first: the card knows the server is stopped, but not yet whether a
+  // hub is deployed. Nova's API start must not be offered in that window — on the public demo it
+  // reached the hub with a stored sign-in that had aged out, and the visitor saw a 403 relayed
+  // as an alert they could not act on.
+  const { calls } = await open(page, {
+    views: [{ state: 'stopped', startedAt: null, lastActivity: null, idleStopAt: null }],
+    embedsDelay: 1_500,
+  })
+  const workspace = card(page)
+  await expect(workspace).toContainText('stopped')
+  // Sample the card while the app list is still unanswered: no button in it, so no API start.
+  for (let i = 0; i < 8; i++) {
+    expect(await page.locator('[aria-label="My workspace"] button').count()).toBe(0)
+    expect(await page.locator('button:has-text("Start")').count()).toBe(0)
+    await page.waitForTimeout(100)
+  }
+  // Once it answers, the hub's spawn route is the Start — a link, never a button.
+  await expect(workspace.getByRole('link', { name: 'Start' }))
+    .toHaveAttribute('href', 'https://jupyter.example.test/hub/spawn')
+  expect(calls).not.toContain('POST /api/workspace/start')
 })
 
 test('a refused Start says why in the card', async ({ page }) => {
