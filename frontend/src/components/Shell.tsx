@@ -10,6 +10,7 @@ import { NAV_GROUPS } from '../nav'
 import CommandPalette from './CommandPalette'
 import ErrorBoundary from './ErrorBoundary'
 import StageBadge from './StageBadge'
+import StageCard from './StageCard'
 import UserMenu from './UserMenu'
 
 const titles: Record<string, string> = {
@@ -268,29 +269,7 @@ export default function Shell() {
         </div>
 
         <div className="px-3 pb-3">
-          <div className={['card flex items-center gap-2', collapsed ? 'md:justify-center px-2 py-2' : 'px-3 py-2'].join(' ')}>
-            {collapsed ? (
-              // The rail shows the icon alone; the `demo` badge shrinks to a dot on it.
-              <span className="relative inline-flex shrink-0">
-                <Icon name="database" className="w-4 h-4 text-accent" />
-                {me.data?.demo && (
-                  <span
-                    title="demo warehouse"
-                    className="hidden md:block absolute -top-1 -right-1 h-1.5 w-1.5 rounded-full bg-warn"
-                  />
-                )}
-              </span>
-            ) : (
-              <Icon name="database" className="w-4 h-4 text-accent" />
-            )}
-            <div className={collapsed ? 'min-w-0 md:hidden' : 'min-w-0'}>
-              <div className="text-[10px] uppercase tracking-widest text-text-mute">Warehouse</div>
-              <div className="text-sm truncate">{me.data?.warehouse ?? 'warehouse'}</div>
-            </div>
-            {me.data?.demo && (
-              <span className={['badge border-amber-400/40 bg-amber-400/10 text-warn', collapsed ? 'ml-auto md:hidden' : 'ml-auto'].join(' ')}>demo</span>
-            )}
-          </div>
+          <StageCard me={me.data} collapsed={collapsed} />
         </div>
 
         <nav className="px-3 pb-4 flex-1 min-h-0 overflow-y-auto">
@@ -384,7 +363,7 @@ export default function Shell() {
               className="input pl-9 w-40 lg:w-64 py-1.5"
             />
           </form>
-          <StageBadge me={me.data} />
+          <span className="md:hidden"><StageBadge me={me.data} /></span>
           <AppSwitcher />
           <UserMenu me={me.data} />
           <button

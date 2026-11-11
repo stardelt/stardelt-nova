@@ -25,12 +25,13 @@ export function warehouseHint(warehouse: SqlWarehouse): string {
 
 /**
  * The class this person lands in: the `yours` row of `GET /api/warehouses`. `undefined`
- * while the answer is on its way, when the list is empty, and when no row is `yours` —
- * callers render nothing then.
+ * while the answer is on its way, when the list is empty, when no row is `yours`, and when
+ * the answer is not a list at all (a proxy or a test stub can return anything) — callers
+ * render nothing then. The navigation card shows it on every page, so it must not throw.
  */
 export function useYourWarehouse(): SqlWarehouse | undefined {
   const { data } = useQuery({ queryKey: ['warehouses'], queryFn: api.warehouses })
-  return data?.find(warehouse => warehouse.yours)
+  return Array.isArray(data) ? data.find(warehouse => warehouse.yours) : undefined
 }
 
 /** `Warehouse: Small (small)`, next to the Run button. Nothing while the list is empty. */

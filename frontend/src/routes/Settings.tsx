@@ -72,7 +72,7 @@ export default function Settings() {
         <div className="card p-5">
           <div className="label mb-3">Platform</div>
           <dl className="text-sm space-y-2">
-            <Row label="Warehouse" value={me.data?.warehouse ?? '—'} />
+            <Row label="Default catalog" value={me.data?.warehouse ?? '—'} />
             <Row
               label="Workloads running"
               value={workloadCount}
