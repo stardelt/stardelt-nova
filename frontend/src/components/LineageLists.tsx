@@ -241,7 +241,11 @@ function Row({
   const edges = graph.edges.filter(e => (direction === 'up' ? e.from === node.id : e.to === node.id))
   const edge = newestOf(edges)
   const job = edge ? jobOf(edge, graph.jobs) : undefined
-  const run = health && edge?.jobNamespace === 'pipeline' ? health.get(edge.jobName) : undefined
+  // The dot is the writer's run, not the pill's: an upstream row's pill names the job that
+  // read the table, while the health answer is the newest pipeline edge *into* it — the
+  // same join `LineageGraph`'s `newestWriter` makes (nova#646 L6b).
+  const writer = newestOf(graph.edges.filter(e => e.to === node.id && e.jobNamespace === 'pipeline'))
+  const run = health && writer ? health.get(writer.jobName) : undefined
   const dot = runDot(run)
   return (
     <li

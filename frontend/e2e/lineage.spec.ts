@@ -360,19 +360,30 @@ test('the panel reserves its width, so the consumer cards are not under it', asy
   expect(wide.width).toBeGreaterThan(flow.width + 300)
 })
 
-test('the lists mark each table with the state of its last run', async ({ page }) => {
+test('the lists mark each table with the state of the run that wrote it', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 })
   const runs = {
     runs: [
-      { namespace: 'taxi', name: 'load-trips', state: 'success', startedAt: LAST },
-      { namespace: 'marts', name: 'revenue', state: 'failed', startedAt: LAST },
+      { namespace: 'marts', name: 'revenue', state: 'success', startedAt: LAST },
+      { namespace: 'marts', name: 'mix', state: 'failed', startedAt: LAST },
     ],
   }
-  await stub(page, graph(), runs)
+  // A local copy: the shared `graph()` counts are asserted by the graph tests.
+  const g = graph()
+  g.nodes.push({ id: 'mix', namespace: 'lakehouse.marts', name: 'payment_mix', visible: true, level: 1, handMade: false, lastWrite: LAST })
+  g.edges.push({ from: 'clean', to: 'mix', jobNamespace: 'pipeline', jobName: 'marts/mix', runId: 'r5', eventTime: LAST, runs: 1 })
+  g.impact.downstream += 1
+  await stub(page, g, runs)
   await page.goto('/lineage?catalog=lakehouse&schema=staging&table=trips_clean')
 
+  // A downstream table is written by `marts/revenue`, which succeeded: green.
+  const revenue = page.locator('li').filter({ hasText: 'daily_revenue' })
+  await expect(revenue.getByTestId('list-health')).toHaveAttribute('title', /Last run: succeeded/)
+  // A failed writer paints red.
+  const mix = page.locator('li').filter({ hasText: 'payment_mix' })
+  await expect(mix.getByTestId('list-health')).toHaveAttribute('title', /Last run: failed/)
+  // `trips_raw` has no incoming pipeline edge, so it has no dot — even though its pill names
+  // the job that read it (`taxi/load-trips`).
   const upstream = page.locator('li').filter({ hasText: 'trips_raw' })
-  await expect(upstream.getByTestId('list-health')).toHaveAttribute('title', /Last run: succeeded/)
-  const downstream = page.locator('li').filter({ hasText: 'daily_revenue' })
-  await expect(downstream.getByTestId('list-health')).toHaveAttribute('title', /Last run: failed/)
+  await expect(upstream.getByTestId('list-health')).toHaveCount(0)
 })
