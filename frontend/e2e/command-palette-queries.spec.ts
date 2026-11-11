@@ -22,6 +22,55 @@ const SAVED = [
   { id: 1, title: 'trip revenue', sql: 'SELECT 1', warehouse: 'warehouse', created_at: 0, updated_at: 0, owner_sub: 'alice', shared_with: [] },
 ]
 
+const QUERIES = {
+  items: [
+    {
+      id: 'q1',
+      state: 'FINISHED',
+      user: 'alice',
+      source: 'sql-editor',
+      warehouse: 'default',
+      queryType: 'SELECT',
+      sql: 'select * from mobility.gold.kpis',
+      createdAt: 1762700000000,
+      wallMs: 12,
+      outputRows: 3,
+      errorCode: null,
+    },
+  ],
+  nextCursor: null,
+}
+
+const QUERY_DETAIL = {
+  id: 'q1',
+  state: 'FINISHED',
+  user: 'alice',
+  source: 'sql-editor',
+  clientTags: [],
+  warehouse: 'default',
+  catalog: 'mobility',
+  schema: 'gold',
+  queryType: 'SELECT',
+  sql: 'select * from mobility.gold.kpis',
+  sqlHash: 'abc',
+  createdAt: 1762700000000,
+  startedAt: 1762700000000,
+  endedAt: 1762700000012,
+  timing: { queuedMs: 0, planningMs: 2, executionMs: 10, wallMs: 12, cpuMs: 5 },
+  data: {
+    inputRows: 3,
+    inputBytes: 24,
+    outputRows: 3,
+    outputBytes: 24,
+    writtenRows: null,
+    writtenBytes: null,
+    peakMemoryBytes: 1024,
+  },
+  tablesRead: ['mobility.gold.kpis'],
+  tablesWritten: [],
+  error: null,
+}
+
 /** Every API call the shell and the SQL editor make, plus the saved queries the palette reads. */
 async function stubApi(page: import('@playwright/test').Page) {
   await page.route('**/api/**', (route) => {
@@ -37,6 +86,8 @@ async function stubApi(page: import('@playwright/test').Page) {
     // catch-all `{}` made the route throw in CI and the page render as an error (#614).
     if (path === '/api/warehouses') return json(route, [])
     if (path === '/api/saved-queries') return json(route, SAVED)
+    if (path === '/api/query-log') return json(route, QUERIES)
+    if (path === '/api/query-log/q1') return json(route, QUERY_DETAIL)
     return json(route, {})
   })
 }
@@ -68,4 +119,38 @@ test('the palette finds a saved query and opens it in the SQL editor', async ({ 
   await expect(page).toHaveURL(/\/query\?sql=SELECT%201$/)
   await expect(page.getByRole('textbox', { name: 'SQL query' })).toHaveValue('SELECT 1')
   await expect(dialog).toHaveCount(0)
+})
+
+test('the palette finds a recent query and opens it in the query log', async ({ page }) => {
+  let detailHits = 0
+  page.on('request', request => {
+    if (new URL(request.url()).pathname === '/api/query-log/q1') detailHits++
+  })
+  await stubApi(page)
+  await page.goto('/')
+  await expect(page).toHaveTitle('Overview · stardelt Nova')
+  await page.keyboard.press('Control+k')
+  const dialog = page.getByRole('dialog')
+  await expect(dialog).toBeVisible()
+  const input = page.getByRole('combobox', { name: 'Search pages, queries and tables' })
+
+  // Nothing is asked of the query log for fewer than two characters.
+  await expect(dialog.getByText('Queries', { exact: true })).toHaveCount(0)
+
+  await input.fill('kpis')
+  await expect(dialog.getByText('Queries', { exact: true })).toBeVisible()
+  const row = dialog.getByRole('option', { name: /select \* from mobility\.gold\.kpis/ })
+  await expect(row).toBeVisible()
+
+  await row.click()
+  await expect(page).toHaveURL(/\/queries\?id=q1$/)
+  await expect(dialog).toHaveCount(0)
+  // The page opens that query's details: the detail route was asked for it.
+  await expect(page.locator('pre').filter({ hasText: 'select * from mobility.gold.kpis' })).toBeVisible()
+  expect(detailHits).toBeGreaterThan(0)
+
+  // The address survives a reload, so a link to one query can be shared.
+  await page.reload()
+  await expect(page).toHaveURL(/\/queries\?id=q1$/)
+  await expect(page.locator('pre').filter({ hasText: 'select * from mobility.gold.kpis' })).toBeVisible()
 })

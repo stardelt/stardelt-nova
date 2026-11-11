@@ -3,10 +3,20 @@ import { useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { Icon, type IconName } from './Icon'
 import { api } from '../api'
+import { formatTime } from '../format'
 import { NAV_GROUPS } from '../nav'
 
 /** One row of the palette: a page, a table the catalog search found, or an action. */
 type Row = { key: string; group: string; label: string; hint: string; icon: IconName; to: string; run?: () => void }
+
+/**
+ * A statement short enough for one palette row: whitespace collapsed to single spaces,
+ * cut at `n` characters with an ellipsis when it is longer.
+ */
+function firstWords(sql: string, n: number): string {
+  const flat = sql.replace(/\s+/g, ' ').trim()
+  return flat.length > n ? `${flat.slice(0, n)}…` : flat
+}
 
 /**
  * ⌘K / Ctrl+K: a keyboard-first way to reach a page or a table.
@@ -19,8 +29,9 @@ type Row = { key: string; group: string; label: string; hint: string; icon: Icon
  * empty on every open.
  *
  * Saved queries come from `GET /api/saved-queries`, matched on their title or their SQL, and
- * open the SQL editor with that SQL. The last group is the five actions a person does from the
- * palette: four of them navigate, and "Switch theme" runs the header's own toggle.
+ * open the SQL editor with that SQL. Recent queries come from `GET /api/query-log?scope=mine`
+ * and open the query log with that query expanded. The last group is the five actions a person
+ * does from the palette: four of them navigate, and "Switch theme" runs the header's own toggle.
  */
 export default function CommandPalette({
   open,
@@ -123,6 +134,32 @@ export default function CommandPalette({
       }))
   }, [query, saved.data])
 
+  // The queries this person ran, newest first. Fetched only once the query is two
+  // characters long, so a single keystroke does not hit the engine's log.
+  const recent = useQuery({
+    queryKey: ['palette-recent-queries'],
+    queryFn: () => api.queryLog({ scope: 'mine', limit: 20 }),
+    enabled: open && query.trim().length >= 2,
+    staleTime: 30_000,
+    retry: false,
+  })
+
+  const queryRows = useMemo<Row[]>(() => {
+    const q = query.trim().toLowerCase()
+    if (!q) return []
+    return (recent.data?.items ?? [])
+      .filter(item => item.sql.toLowerCase().includes(q) || (item.queryType ?? '').toLowerCase().includes(q))
+      .slice(0, 8)
+      .map(item => ({
+        key: `query:${item.id}`,
+        group: 'Queries',
+        label: firstWords(item.sql, 60),
+        hint: formatTime(item.createdAt),
+        icon: 'clock' as const,
+        to: `/queries?id=${encodeURIComponent(item.id)}`,
+      }))
+  }, [query, recent.data])
+
   const actions = useMemo<Row[]>(() => {
     const q = query.trim().toLowerCase()
     const all: Row[] = [
@@ -135,7 +172,10 @@ export default function CommandPalette({
     return all.filter(a => !q || a.label.toLowerCase().includes(q) || a.hint.toLowerCase().includes(q))
   }, [query, onSwitchTheme])
 
-  const rows = useMemo(() => [...pages, ...savedRows, ...tableRows, ...actions], [pages, savedRows, tableRows, actions])
+  const rows = useMemo(
+    () => [...pages, ...tableRows, ...queryRows, ...savedRows, ...actions],
+    [pages, tableRows, queryRows, savedRows, actions],
+  )
 
   if (!open) return null
 
