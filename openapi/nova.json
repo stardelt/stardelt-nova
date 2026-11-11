@@ -7661,7 +7661,7 @@
           "public"
         ],
         "summary": "`POST /api/workspace/start`: ask the hub to spawn the caller's server.",
-        "description": "Spawn the caller's own JupyterHub server: `POST /hub/api/users/{name}/server` with Nova's service token. Answers `202 {\"state\":\"starting\"}` when the hub accepted the spawn, `200 {\"state\":\"running\"}` when a server was already running, and `409` when the hub has never seen this person (they must open JupyterHub once to create their workspace). `503` when Nova has no hub credentials, `502` when the hub does not answer or refuses another way.",
+        "description": "Spawn the caller's own JupyterHub server: `POST /hub/api/users/{name}/server` with Nova's service token. Answers `202 {\"state\":\"starting\"}` when the hub accepted the spawn, `200 {\"state\":\"running\"}` when a server was already running, and `409` when the hub has never seen this person (they must open JupyterHub once to create their workspace) or when the hub's stored sign-in for them has expired (only the hub's login can renew it: open JupyterLab once). `503` when Nova has no hub credentials, `502` when the hub does not answer or refuses another way.",
         "operationId": "workspace_start",
         "responses": {
           "200": {
@@ -7695,7 +7695,7 @@
             }
           },
           "409": {
-            "description": "The hub has no such user",
+            "description": "The hub has no such user, or their hub sign-in has expired",
             "content": {
               "application/json": {
                 "schema": {
