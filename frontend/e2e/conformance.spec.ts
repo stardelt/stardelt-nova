@@ -2943,6 +2943,25 @@ test.describe('schedule', () => {
     await context.close()
   })
 
+  test('Schedule refuses a two-statement selection exactly like Run', async ({ browser }) => {
+    const { context, page } = await open(browser)
+    const editor = page.getByLabel('SQL query')
+    await editor.fill('select 1 as a;\nselect 2 as b;')
+    await editor.evaluate((element) => {
+      const field = element as HTMLTextAreaElement
+      field.focus()
+      field.setSelectionRange(0, field.value.length)
+    })
+    const refusal = 'Nova runs one statement at a time. Select one, or put the cursor in it.'
+    await page.getByRole('button', { name: 'Schedule this statement' }).click()
+    await expect(page.getByRole('dialog')).toHaveCount(0)
+    await expect(page.getByText(refusal)).toBeVisible()
+    await page.getByRole('button', { name: /^Run/ }).click()
+    await expect(page.getByRole('dialog')).toHaveCount(0)
+    await expect(page.getByText(refusal)).toBeVisible()
+    await context.close()
+  })
+
   test('groups without a principal are disabled and say why', async ({ browser }) => {
     const first = await open(browser)
     let dialog = await openDialog(first.page)

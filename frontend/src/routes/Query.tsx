@@ -578,7 +578,12 @@ export default function Query() {
               onClick={() => {
                 const area = taRef.current
                 const t = statementToRun(sql, area ? area.selectionStart : sql.length, area ? area.selectionEnd : sql.length)
-                setScheduleSql('error' in t ? sql : t.statement.text)
+                if ('error' in t) {
+                  setResult(null); setElapsed(null); setError(null); setHint(t.error)
+                  area?.focus() // the same refusal as Run, and the person's selection stays visible
+                  return
+                }
+                setScheduleSql(t.statement.text)
                 setScheduling(true)
               }}
               disabled={empty}
