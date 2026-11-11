@@ -1,11 +1,13 @@
-import { useQuery } from '@tanstack/react-query'
-import { useRef, useState, type ReactNode } from 'react'
+import { useQuery, type UseQueryResult } from '@tanstack/react-query'
+import { useMemo, useRef, useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
-import { ApiError, api, errorMessage, type CatalogStat } from '../api'
+import { ApiError, api, errorMessage, type CatalogStat, type QueryLogPage, type RunsListResponse } from '../api'
 import { mergeActivity, type ActivityRow } from '../activity'
+import { dayStarts, queriesPerDay, runsPerDay, type RunBucket } from '../charts'
 import { formatBytes, formatCount, formatTime, relativeTime, statusLabel } from '../format'
 import ErrorBox from '../components/ErrorBox'
 import { EmptyState } from '../components/EmptyState'
+import { QuerySparkline, RunBars } from '../components/PulseCharts'
 import { Skeleton, SkeletonTable } from '../components/Skeleton'
 import { Icon } from '../components/Icon'
 import LayerBadge from '../components/LayerBadge'
@@ -56,6 +58,20 @@ export default function Overview() {
     refetchInterval: 10_000,
   })
   const jobs = useQuery({ queryKey: ['jobs'], queryFn: api.jobs, refetchInterval: 10_000 })
+  // The two small charts (#767): the same list endpoints, one read per chart, capped at 200
+  // rows each. `pulseFrom` is the first midnight of the 14-day chart, so the query log is
+  // asked only for the window the chart draws.
+  const pulseFrom = useMemo(() => dayStarts(14, Date.now())[0], [])
+  const pulseQueries = useQuery({
+    queryKey: ['query-log', 'pulse'],
+    queryFn: () => api.queryLog({ scope: 'mine', from: pulseFrom, limit: 200 }),
+    refetchInterval: 60_000,
+  })
+  const pulseRuns = useQuery({
+    queryKey: ['runs', 'pulse'],
+    queryFn: () => api.runs({ limit: 200 }),
+    refetchInterval: 60_000,
+  })
   // The engine and app cards are operator views: their endpoints answer 403 to everyone else,
   // so they are not fetched at all for a non-admin (an `enabled: false` query stays pending —
   // it must never be rendered as "loading…" or as an error).
@@ -114,6 +130,13 @@ export default function Overview() {
   const allLoading = sources.every(source => source.query.isLoading)
   const allFailed = sources.every(source => source.query.isError)
   const failed = allFailed ? [] : sources.filter(source => source.query.isError)
+  // The charts' windows (#767). The counts are derived here, once per render, and the card
+  // only draws them.
+  const now = Date.now()
+  const queryDays = dayStarts(14, now)
+  const runDays = dayStarts(7, now)
+  const queryCounts = queriesPerDay((pulseQueries.data?.items ?? []).map(q => q.createdAt), 14, now)
+  const runBuckets = runsPerDay(pulseRuns.data?.runs ?? [], 7, now)
 
   return (
     <div className="space-y-6 max-w-6xl">
@@ -150,6 +173,17 @@ export default function Overview() {
           <Stat label="Engine" value={String(engineState)} hint="Trino" icon="spark" tone={engineState === 'ACTIVE' ? 'ok' : undefined} />
         )}
         <Stat label="Activity" value={jobs.data ? String(jobs.data.length) : jobs.isError ? '—' : '…'} hint="recent queries, loads and transfers" icon="clock" />
+      </section>
+
+      <section className="grid md:grid-cols-2 gap-4">
+        <PulseCard
+          queries={pulseQueries}
+          runs={pulseRuns}
+          queryCounts={queryCounts}
+          queryDays={queryDays}
+          runBuckets={runBuckets}
+          runDays={runDays}
+        />
       </section>
 
       <CatalogsCard
@@ -239,6 +273,88 @@ export default function Overview() {
           <Action to="/apps" icon="grid" title="Platform apps" body="Every service, live status and deep links." />
         )}
       </section>
+    </div>
+  )
+}
+
+/**
+ * "The last two weeks" (#767): how many queries the person ran per day, and how their runs
+ * ended. Two reads of the existing list endpoints, capped at 200 rows each; a full answer
+ * says so instead of pretending the window is complete. A failing source hides only its own
+ * chart, and a source still loading reserves its height instead of flashing a spinner.
+ */
+function PulseCard({ queries, runs, queryCounts, queryDays, runBuckets, runDays }: {
+  queries: UseQueryResult<QueryLogPage>
+  runs: UseQueryResult<RunsListResponse>
+  queryCounts: number[]
+  queryDays: number[]
+  runBuckets: RunBucket[]
+  runDays: number[]
+}) {
+  const queryItems = queries.data?.items ?? []
+  const runItems = runs.data?.runs ?? []
+  const queryTotal = queryCounts.reduce((sum, c) => sum + c, 0)
+  const runTotal = runBuckets.reduce((sum, b) => sum + b.ok + b.failed + b.running + b.other, 0)
+  const bothFailed = queries.isError && runs.isError
+  // "No rows in the window" is a claim about both answers: nothing while one is still out.
+  const empty = queries.data !== undefined && runs.data !== undefined && queryTotal === 0 && runTotal === 0
+  return (
+    <div className="card p-5 md:col-span-2 min-w-0">
+      <h2 className="text-sm font-semibold">The last two weeks</h2>
+      {bothFailed && (
+        <div className="mt-3">
+          <ErrorBox error={queries.error} onRetry={() => { void queries.refetch(); void runs.refetch() }} />
+        </div>
+      )}
+      {!bothFailed && empty && (
+        <EmptyState icon="pulse" title="No queries or runs yet">Run a query or start a pipeline and the shape of your week shows up here.</EmptyState>
+      )}
+      {!bothFailed && !empty && (
+        <div className="grid md:grid-cols-2 gap-6 mt-3">
+          <div className="min-w-0">
+            <div className="flex items-baseline justify-between gap-2">
+              <span className="label">Queries per day</span>
+              <span className="text-xs text-text-mute">14 days · {formatCount(queryTotal)} queries</span>
+            </div>
+            {queries.isError ? (
+              <p className="text-xs text-text-dim mt-2 flex items-center gap-2">
+                <span>Could not read queries.</span>
+                <button type="button" className="btn-ghost px-2 py-0.5 text-xs" onClick={() => void queries.refetch()}>
+                  Retry
+                </button>
+              </p>
+            ) : queries.data === undefined ? (
+              <div className="mt-2"><SkeletonTable rows={2} /></div>
+            ) : (
+              <QuerySparkline counts={queryCounts} days={queryDays} />
+            )}
+            {queryItems.length === 200 && (
+              <p className="text-xs text-text-mute mt-1">Showing the latest 200 queries.</p>
+            )}
+          </div>
+          <div className="min-w-0">
+            <div className="flex items-baseline justify-between gap-2">
+              <span className="label">Runs per day</span>
+              <span className="text-xs text-text-mute">7 days · {formatCount(runTotal)} runs</span>
+            </div>
+            {runs.isError ? (
+              <p className="text-xs text-text-dim mt-2 flex items-center gap-2">
+                <span>Could not read runs.</span>
+                <button type="button" className="btn-ghost px-2 py-0.5 text-xs" onClick={() => void runs.refetch()}>
+                  Retry
+                </button>
+              </p>
+            ) : runs.data === undefined ? (
+              <div className="mt-2"><SkeletonTable rows={2} /></div>
+            ) : (
+              <RunBars buckets={runBuckets} days={runDays} />
+            )}
+            {runItems.length === 200 && (
+              <p className="text-xs text-text-mute mt-1">Showing the latest 200 runs.</p>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
