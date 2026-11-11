@@ -2,10 +2,11 @@ import { useQuery } from '@tanstack/react-query'
 import { useRef, useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { ApiError, api, errorMessage, type CatalogStat } from '../api'
-import { formatBytes, formatCount, formatTime, relativeTime, rowsLabel, statusLabel } from '../format'
+import { mergeActivity, type ActivityRow } from '../activity'
+import { formatBytes, formatCount, formatTime, relativeTime, statusLabel } from '../format'
 import ErrorBox from '../components/ErrorBox'
 import { EmptyState } from '../components/EmptyState'
-import { SkeletonTable } from '../components/Skeleton'
+import { Skeleton, SkeletonTable } from '../components/Skeleton'
 import { Icon } from '../components/Icon'
 import LayerBadge from '../components/LayerBadge'
 import { isAdmin } from '../roles'
@@ -45,6 +46,14 @@ export default function Overview() {
       pendingSince.current ??= Date.now()
       return Date.now() - pendingSince.current < 60_000 ? 5_000 : false
     },
+  })
+  // The timeline is the caller's own activity: their runs, their queries and their loads
+  // (#761). Three reads, one merge in the browser; the endpoints keep their own rules.
+  const runs = useQuery({ queryKey: ['runs'], queryFn: () => api.runs(), refetchInterval: 10_000 })
+  const queries = useQuery({
+    queryKey: ['query-log', 'overview'],
+    queryFn: () => api.queryLog({ scope: 'mine', limit: 20 }),
+    refetchInterval: 10_000,
   })
   const jobs = useQuery({ queryKey: ['jobs'], queryFn: api.jobs, refetchInterval: 10_000 })
   // The engine and app cards are operator views: their endpoints answer 403 to everyone else,
@@ -94,7 +103,17 @@ export default function Overview() {
   const metricsFailure = metrics.isError ? errorMessage(metrics.error) : ''
   const info = cluster.data as Record<string, unknown> | undefined
   const engineState = typeof info?.state === 'string' ? info.state : cluster.isError ? 'unreachable' : '…'
-  const recent = (jobs.data ?? []).slice(0, 6)
+  const recent = mergeActivity(runs.data?.runs, queries.data?.items, jobs.data)
+  // One unreadable source must not blank the other two: the list shows what arrived, and the
+  // failed source keeps its own line with its own retry underneath.
+  const sources = [
+    { key: 'runs' as const, label: 'runs', query: runs },
+    { key: 'queries' as const, label: 'queries', query: queries },
+    { key: 'loads' as const, label: 'loads', query: jobs },
+  ]
+  const allLoading = sources.every(source => source.query.isLoading)
+  const allFailed = sources.every(source => source.query.isError)
+  const failed = allFailed ? [] : sources.filter(source => source.query.isError)
 
   return (
     <div className="space-y-6 max-w-6xl">
@@ -148,23 +167,46 @@ export default function Overview() {
         <div className={`card p-5 ${admin ? 'lg:col-span-2' : 'lg:col-span-3'}`}>
           <div className="flex items-center justify-between mb-3">
             <h2 className="text-sm font-semibold">Recent activity</h2>
-            <Link to="/jobs" className="text-xs text-text-dim hover:text-text">View all →</Link>
+            <Link to="/runs" className="text-xs text-text-dim hover:text-text">All runs →</Link>
           </div>
-          {jobs.isLoading && <div className="text-text-mute text-sm">loading…</div>}
-          {jobs.isError && !jobs.data && <ErrorBox error={jobs.error} onRetry={() => jobs.refetch()} />}
-          {jobs.data && recent.length === 0 && (
-            <EmptyState icon="pulse" title="Nothing has happened yet">Run a query or load a file.</EmptyState>
+          {allLoading && (
+            <div className="space-y-2">
+              {[0, 1, 2].map(i => <Skeleton key={i} className="h-8" />)}
+            </div>
+          )}
+          {allFailed && <ErrorBox error={runs.error} onRetry={() => { void runs.refetch(); void queries.refetch(); void jobs.refetch() }} />}
+          {!allLoading && !allFailed && recent.length === 0 && (
+            <EmptyState icon="pulse" title="Nothing has happened yet">Run a query, start a pipeline, or load a file.</EmptyState>
           )}
           <div className="space-y-1">
-            {recent.map(j => (
-              <div key={j.id} className="flex items-center gap-3 py-2 border-b border-border/60 last:border-0">
-                <span className={kindBadge(j.kind)}>{j.kind}</span>
-                <span className="text-sm truncate flex-1">{j.title}</span>
-                <span className="text-xs text-text-mute">{j.rows != null ? rowsLabel(j.rows) : ''}</span>
-                <span className="text-xs text-text-mute w-36 text-right">{formatTime(j.started_at)}</span>
-              </div>
+            {recent.map(row => (
+              <Link
+                key={row.id}
+                to={row.href}
+                data-at={row.at}
+                aria-label={row.detail ? `${row.title} — ${row.detail}` : row.title}
+                className="flex items-center gap-3 py-2 border-b border-border/60 last:border-0 hover:bg-bg-soft/40 rounded px-2 -mx-2"
+              >
+                <span className={kindBadge(row.kind)}>{row.kind}</span>
+                <span className="text-sm truncate flex-1">{row.title}</span>
+                {row.detail && <span className="text-xs text-text-mute">{row.detail}</span>}
+                <time
+                  dateTime={new Date(row.at).toISOString()}
+                  className="text-xs text-text-mute w-36 text-right"
+                >
+                  {relativeTime(row.at)}
+                </time>
+              </Link>
             ))}
           </div>
+          {failed.map(source => (
+            <p key={source.key} className="text-xs text-text-dim mt-2 flex items-center gap-2">
+              <span>Could not read {source.label}.</span>
+              <button type="button" className="btn-ghost px-2 py-0.5 text-xs" onClick={() => void source.query.refetch()}>
+                Retry
+              </button>
+            </p>
+          ))}
         </div>
 
         {admin && (
@@ -397,11 +439,12 @@ function Action({ to, icon, title, body }: { to: string; icon: 'database' | 'upl
   )
 }
 
-function kindBadge(kind: string) {
-  const map: Record<string, string> = {
+function kindBadge(kind: ActivityRow['kind']) {
+  const map: Record<ActivityRow['kind'], string> = {
+    pipeline: 'badge border-violet-400/40 bg-violet-400/10 text-xfer',
+    notebook: 'badge border-amber-400/40 bg-amber-400/10 text-warn',
     query: 'badge border-sky-400/40 bg-sky-400/10 text-info',
     load: 'badge border-emerald-400/40 bg-emerald-400/10 text-ok',
-    transfer: 'badge border-violet-400/40 bg-violet-400/10 text-xfer',
   }
   return map[kind] ?? 'badge border-border bg-bg-soft text-text-dim'
 }
