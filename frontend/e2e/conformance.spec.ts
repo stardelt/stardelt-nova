@@ -5495,12 +5495,13 @@ test.describe('warehouses', () => {
     // The `yours` row, not the default one; the title carries the three numbers. Scoped to
     // the page: the navigation's stage card carries the same hint (nova#795).
     const note = page.locator('main').getByTitle('6 running, 70 queued, 70% memory')
-    await expect(note).toHaveText('Warehouse: Large (large)')
+    // The size is not repeated when it is the name's word (nova#813).
+    await expect(note).toHaveText('Warehouse: Large')
     await expect(page.locator('main').getByTitle('10 running, 100 queued, 20% memory')).toHaveCount(0)
 
     await page.goto('/profile')
     await expect(page.getByText('SQL warehouse', { exact: true })).toBeVisible()
-    await expect(page.locator('main').getByTitle('6 running, 70 queued, 70% memory')).toHaveText('Warehouse: Large (large)')
+    await expect(page.locator('main').getByTitle('6 running, 70 queued, 70% memory')).toHaveText('Warehouse: Large')
     await context.close()
   })
 
@@ -5517,6 +5518,16 @@ test.describe('warehouses', () => {
     const empty = await open(browser, '/query', [])
     await expect(empty.page.getByText(/^Warehouse:/)).toHaveCount(0)
     await empty.context.close()
+
+    // A display name that is not the size word keeps the size in brackets (nova#813).
+    const named = {
+      name: 'xs', displayName: 'Public demo', size: 'xs', running: 1, queued: 0,
+      memoryShare: '10%', default: true, canUse: true, yours: true,
+    }
+    const shown = await open(browser, '/query', [named])
+    await expect(shown.page.locator('main').getByTitle('1 running, 0 queued, 10% memory'))
+      .toHaveText('Warehouse: Public demo (xs)')
+    await shown.context.close()
   })
 })
 
