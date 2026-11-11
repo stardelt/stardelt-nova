@@ -29,7 +29,9 @@ function firstWords(sql: string, n: number): string {
  * empty on every open.
  *
  * Saved queries come from `GET /api/saved-queries`, matched on their title or their SQL, and
- * open the SQL editor with that SQL. Recent queries come from `GET /api/query-log?scope=mine`
+ * open the SQL editor with that SQL. Pipelines come from `GET /api/pipelines` and open the
+ * pipeline's page; the API already hides a pipeline the person may not see. Recent queries
+ * come from `GET /api/query-log?scope=mine`
  * and open the query log with that query expanded. The last group is the five actions a person
  * does from the palette: four of them navigate, and "Switch theme" runs the header's own toggle.
  */
@@ -160,6 +162,32 @@ export default function CommandPalette({
       }))
   }, [query, recent.data])
 
+  // The person's pipelines. The API already hides a pipeline they may not see, so this adds
+  // no visibility rule of its own. The list is short; it is fetched once per dialog opening.
+  const pipelines = useQuery({
+    queryKey: ['palette-pipelines'],
+    queryFn: () => api.pipelines(),
+    enabled: open,
+    staleTime: 30_000,
+    retry: false,
+  })
+
+  const pipelineRows = useMemo<Row[]>(() => {
+    const q = query.trim().toLowerCase()
+    if (!q) return []
+    return (pipelines.data?.pipelines ?? [])
+      .filter(p => `${p.namespace}/${p.name}`.toLowerCase().includes(q))
+      .slice(0, 8)
+      .map(p => ({
+        key: `pipeline:${p.namespace}:${p.name}`,
+        group: 'Pipelines',
+        label: `${p.namespace}/${p.name}`,
+        hint: p.paused ? 'Paused' : (p.schedule ?? 'On demand'),
+        icon: 'play' as const,
+        to: `/pipelines/${encodeURIComponent(p.namespace)}/${encodeURIComponent(p.name)}`,
+      }))
+  }, [query, pipelines.data])
+
   const actions = useMemo<Row[]>(() => {
     const q = query.trim().toLowerCase()
     const all: Row[] = [
@@ -173,8 +201,8 @@ export default function CommandPalette({
   }, [query, onSwitchTheme])
 
   const rows = useMemo(
-    () => [...pages, ...tableRows, ...queryRows, ...savedRows, ...actions],
-    [pages, tableRows, queryRows, savedRows, actions],
+    () => [...pages, ...tableRows, ...pipelineRows, ...queryRows, ...savedRows, ...actions],
+    [pages, tableRows, pipelineRows, queryRows, savedRows, actions],
   )
 
   if (!open) return null
