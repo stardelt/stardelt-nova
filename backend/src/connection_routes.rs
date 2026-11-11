@@ -56,7 +56,8 @@ pub type BreakGlassLimiter = Mutex<HashMap<String, VecDeque<Instant>>>;
 
 /// The `Connection` resources of the platform namespace: the cluster, or memory in tests.
 pub enum Resources {
-    Kube(Api<DynamicObject>),
+    /// Boxed: `Api` carries a whole client config, and the enum is built per request.
+    Kube(Box<Api<DynamicObject>>),
     #[cfg(test)]
     Memory {
         items: Arc<std::sync::Mutex<BTreeMap<String, Value>>>,
@@ -83,11 +84,11 @@ impl Resources {
             "v1alpha1",
             "Connection",
         ));
-        Self::Kube(Api::namespaced_with(
+        Self::Kube(Box::new(Api::namespaced_with(
             client,
             &crate::cluster::namespace(),
             &ar,
-        ))
+        )))
     }
 
     /// A real create, not an apply: a name that already exists is [`ResourceError::Exists`], so a
