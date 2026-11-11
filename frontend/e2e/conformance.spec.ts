@@ -782,6 +782,12 @@ test.describe('connections', () => {
         { name: 'platform-s3', scope: 'managed', type: 's3', config: { bucket: 'b' }, secretKeys: ['secretAccessKey'], version: 1, sync: { ready: true, reason: 'Synced' } },
       ],
     })
+    // The sentences belong to sections that only exist once their rows do: the personal
+    // section is always there, the group and managed ones are not. Wait for one row of each
+    // before reading the page once (nova#842).
+    await expect(page.locator('main')).not.toContainText('Loading connections')
+    await expect(page.getByRole('row').filter({ hasText: 'crm-db' })).toBeVisible()
+    await expect(page.getByRole('row').filter({ hasText: 'platform-s3' })).toBeVisible()
     const text = await page.locator('main').innerText()
     expect(text).toContain('Only you can see and use these, from a Python notebook. They are never used by pipelines or SQL.')
     expect(text).toContain('Every member of the group can use and rotate these from a Python notebook.')
