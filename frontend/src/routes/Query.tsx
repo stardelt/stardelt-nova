@@ -357,6 +357,7 @@ export default function Query() {
   const sql = typed ?? sample
   const [running, setRunning] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [hint, setHint] = useState<string | null>(null)
   const [result, setResult] = useState<QueryResult | null>(null)
   const [elapsed, setElapsed] = useState<number | null>(null)
   const [history, setHistory] = useState<string[]>(loadHistory)
@@ -400,7 +401,8 @@ export default function Query() {
       area ? area.selectionEnd : sql.length,
     )
     if ('error' in target) {
-      setResult(null); setElapsed(null); setError(target.error)
+      setResult(null); setElapsed(null); setError(null); setHint(target.error)
+      area?.focus() // keep the person's selection visible next to the advice
       return
     }
     const stmt = target.statement.text
@@ -409,7 +411,7 @@ export default function Query() {
       area.focus()
       area.setSelectionRange(target.statement.start, target.statement.end)
     }
-    setRunning(true); setError(null); setResult(null); setElapsed(null)
+    setRunning(true); setError(null); setHint(null); setResult(null); setElapsed(null)
     const t0 = performance.now()
     try {
       const r = await api.query(stmt)
@@ -615,13 +617,19 @@ export default function Query() {
           >{notice.text}</p>
         )}
 
+        {hint && (
+          <p role="status" className="rounded-[14px] border border-border bg-bg-elev p-4 text-sm text-text-dim">
+            {hint}
+          </p>
+        )}
+
         {error && (
           <div className="rounded-[14px] border border-red-500/40 bg-red-500/10 p-4 text-sm text-bad font-mono whitespace-pre-wrap break-words">
             {error}
           </div>
         )}
 
-        {!result && !error && !running && (
+        {!result && !error && !hint && !running && (
           <div className="card flex-1 min-h-0 grid place-items-center p-6 text-center">
             <div>
               <p className="text-text-dim text-sm">Run a query to see results here.</p>

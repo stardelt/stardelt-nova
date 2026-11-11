@@ -14,8 +14,10 @@ import { api, type SqlWarehouse } from '../api'
 /** `Warehouse: <displayName or name> (<size>)` — the one line both pages show. */
 export function warehouseText(warehouse: SqlWarehouse): string {
   const label = warehouse.displayName || warehouse.name
-  // The administrator row has no size (it is the `admin` root group, not a class).
-  return warehouse.size ? `${label} (${warehouse.size})` : label
+  // The administrator row has no size (it is the `admin` root group, not a class). A class
+  // without a display name would otherwise read twice: "small (small)".
+  if (!warehouse.size || warehouse.size.toLowerCase() === label.toLowerCase()) return label
+  return `${label} (${warehouse.size})`
 }
 
 /** What the class allows, for the `title` tooltip: the numbers the resource group renders with. */
@@ -34,7 +36,7 @@ export function useYourWarehouse(): SqlWarehouse | undefined {
   return Array.isArray(data) ? data.find(warehouse => warehouse.yours) : undefined
 }
 
-/** `Warehouse: Small (small)`, next to the Run button. Nothing while the list is empty. */
+/** `Warehouse: Small`, next to the Run button. Nothing while the list is empty. */
 export default function WarehouseNote({ className }: { className?: string }) {
   const warehouse = useYourWarehouse()
   if (!warehouse) return null
