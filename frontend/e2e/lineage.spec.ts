@@ -359,3 +359,20 @@ test('the panel reserves its width, so the consumer cards are not under it', asy
   const wide = (await page.locator('.react-flow').boundingBox())!
   expect(wide.width).toBeGreaterThan(flow.width + 300)
 })
+
+test('the lists mark each table with the state of its last run', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  const runs = {
+    runs: [
+      { namespace: 'taxi', name: 'load-trips', state: 'success', startedAt: LAST },
+      { namespace: 'marts', name: 'revenue', state: 'failed', startedAt: LAST },
+    ],
+  }
+  await stub(page, graph(), runs)
+  await page.goto('/lineage?catalog=lakehouse&schema=staging&table=trips_clean')
+
+  const upstream = page.locator('li').filter({ hasText: 'trips_raw' })
+  await expect(upstream.getByTestId('list-health')).toHaveAttribute('title', /Last run: succeeded/)
+  const downstream = page.locator('li').filter({ hasText: 'daily_revenue' })
+  await expect(downstream.getByTestId('list-health')).toHaveAttribute('title', /Last run: failed/)
+})

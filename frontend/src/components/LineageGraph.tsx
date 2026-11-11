@@ -21,6 +21,7 @@ import '@xyflow/react/dist/style.css'
 import type { LineageEdgeView, LineageGraphView, LineageNodeView } from '../api'
 import { formatCount, relativeTime } from '../format'
 import { JobPill } from './LineageLists'
+import { runDot, type RunHealth } from './lineageHealth'
 
 /**
  * The lineage graph (stardelt-nova#704). React Flow draws one column per step away from the
@@ -36,9 +37,6 @@ import { JobPill } from './LineageLists'
 
 /** One job on a line between two tables. */
 type EdgeJob = { kind: string; name: string; runs: number }
-
-/** The state of the newest run of a table's writer, from `/api/runs`. */
-export type RunHealth = { state: string; startedAt: string | null }
 
 export type TableFlowNode = Node<
   {
@@ -237,25 +235,6 @@ function tableName(n: LineageNodeView): string {
 function lastWrite(n: LineageNodeView): string {
   const ms = Date.parse(n.lastWrite ?? '')
   return Number.isFinite(ms) ? relativeTime(ms) : ''
-}
-
-/**
- * The dot on a table: the newest run of the pipeline that wrote it. A state a person cannot
- * act on (`skipped`, an unknown word) is no dot at all, so the table reads as it always did.
- */
-function runDot(run: RunHealth | undefined): { paint: string; title: string } | null {
-  if (!run) return null
-  const ms = Date.parse(run.startedAt ?? '')
-  const when = Number.isFinite(ms) ? relativeTime(ms) : ''
-  const suffix = when ? ` · ${when}` : ''
-  if (run.state === 'success') return { paint: 'bg-ok', title: `Last run: succeeded${suffix}` }
-  if (run.state === 'failed' || run.state === 'upstream_failed') {
-    return { paint: 'bg-bad', title: `Last run: failed${suffix}` }
-  }
-  if (run.state === 'running' || run.state === 'queued') {
-    return { paint: 'bg-accent animate-pulse', title: 'Running now' }
-  }
-  return null
 }
 
 /* ---------- the nodes ---------- */

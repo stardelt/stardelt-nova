@@ -215,7 +215,7 @@ export default function Lineage() {
         ) : phone ? (
           <div className="space-y-3">
             <p className="text-xs text-text-mute">The graph needs a wider screen.</p>
-            <LineageLists graph={data} days={days} catalog={catalog} />
+            <LineageLists graph={data} days={days} catalog={catalog} health={health} />
           </div>
         ) : (
           <div className="card p-3">
