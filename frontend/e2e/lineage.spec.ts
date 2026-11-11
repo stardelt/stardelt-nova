@@ -38,12 +38,13 @@ const graph = () => ({
 const me = { user: 'alice', auth_mode: 'oidc', demo: false, warehouse: 'warehouse', is_admin: true, groups: ['admins'] }
 
 /** Every request of the page: `/api/lineage` answers the fixture, everything else is empty. */
-async function stub(page: import('@playwright/test').Page, lineage: unknown = graph()) {
+async function stub(page: import('@playwright/test').Page, lineage: unknown = graph(), runs: unknown = []) {
   await page.route('**/api/**', (r) => {
     const path = new URL(r.request().url()).pathname
     if (path === '/api/me') return json(r, me)
     if (path === '/api/catalogs') return json(r, [])
     if (path === '/api/lineage') return json(r, lineage)
+    if (path === '/api/runs') return json(r, runs)
     return json(r, [])
   })
 }
@@ -303,6 +304,30 @@ test('the table header links to its lineage', async ({ page }) => {
   await page.locator('main').getByRole('link', { name: 'Lineage' }).click()
   await expect(page).toHaveURL(/\/lineage\?catalog=warehouse&schema=sales&table=orders/)
   await expect.poll(() => lineageRequests.length).toBeGreaterThan(0)
+})
+
+test('a table carries the state of the run that last wrote it', async ({ page }) => {
+  const runs = {
+    runs: [{ namespace: 'taxi', name: 'load-trips', state: 'failed', startedAt: LAST }],
+  }
+  await stub(page, graph(), runs)
+  await page.goto('/lineage?catalog=lakehouse&schema=staging&table=trips_clean')
+
+  // `trips_clean` is written by `taxi/load-trips`, which failed.
+  const dot = page.locator('main').getByRole('button', { name: /trips_clean/ }).getByTestId('node-health')
+  await expect(dot).toHaveCount(1)
+  await expect(dot).toHaveAttribute('aria-label', /^Last run: failed/)
+  // `daily_revenue` is written by `marts/revenue`, which has no run in the list: no dot.
+  await expect(
+    page.locator('main').getByRole('button', { name: /daily_revenue/ }).getByTestId('node-health'),
+  ).toHaveCount(0)
+
+  // No runs at all: the graph reads exactly as it did before the dot existed.
+  await page.unrouteAll()
+  await stub(page, graph(), { runs: [] })
+  await page.goto('/lineage?catalog=lakehouse&schema=staging&table=trips_clean')
+  await expect(page.locator('main').getByRole('button', { name: /trips_clean/ })).toBeVisible()
+  await expect(page.getByTestId('node-health')).toHaveCount(0)
 })
 
 test('the selected table opens in the catalog', async ({ page }) => {

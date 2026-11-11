@@ -37,12 +37,17 @@ import { JobPill } from './LineageLists'
 /** One job on a line between two tables. */
 type EdgeJob = { kind: string; name: string; runs: number }
 
+/** The state of the newest run of a table's writer, from `/api/runs`. */
+export type RunHealth = { state: string; startedAt: string | null }
+
 export type TableFlowNode = Node<
   {
     node: LineageNodeView
     /** The table the page is about: level 0, the accent border. */
     focus: boolean
     dimmed: boolean
+    /** The newest run of the pipeline that last wrote this table; absent for a person's write. */
+    run?: RunHealth
     onSelect?: () => void
   },
   'table'
@@ -234,6 +239,25 @@ function lastWrite(n: LineageNodeView): string {
   return Number.isFinite(ms) ? relativeTime(ms) : ''
 }
 
+/**
+ * The dot on a table: the newest run of the pipeline that wrote it. A state a person cannot
+ * act on (`skipped`, an unknown word) is no dot at all, so the table reads as it always did.
+ */
+function runDot(run: RunHealth | undefined): { paint: string; title: string } | null {
+  if (!run) return null
+  const ms = Date.parse(run.startedAt ?? '')
+  const when = Number.isFinite(ms) ? relativeTime(ms) : ''
+  const suffix = when ? ` · ${when}` : ''
+  if (run.state === 'success') return { paint: 'bg-ok', title: `Last run: succeeded${suffix}` }
+  if (run.state === 'failed' || run.state === 'upstream_failed') {
+    return { paint: 'bg-bad', title: `Last run: failed${suffix}` }
+  }
+  if (run.state === 'running' || run.state === 'queued') {
+    return { paint: 'bg-accent animate-pulse', title: 'Running now' }
+  }
+  return null
+}
+
 /* ---------- the nodes ---------- */
 
 function TableView({ data }: NodeProps<TableFlowNode>) {
@@ -242,12 +266,21 @@ function TableView({ data }: NodeProps<TableFlowNode>) {
   const written = lastWrite(n)
   const sub = [schema, written].filter(Boolean).join(' · ')
   const interactive = n.visible && Boolean(data.onSelect)
+  const dot = runDot(data.run)
 
   const body = (
     <>
       <div className={`truncate text-sm font-semibold ${n.visible ? 'text-text' : 'text-text-mute'}`}>
         {n.visible ? n.name : 'A table you cannot see'}
       </div>
+      {dot && (
+        <span
+          data-testid="node-health"
+          aria-label={dot.title}
+          title={dot.title}
+          className={`inline-block h-2 w-2 rounded-full ${dot.paint}`}
+        />
+      )}
       {n.visible && sub && <div className="truncate text-xs text-text-mute">{sub}</div>}
       <Handle
         type="target"
@@ -408,6 +441,8 @@ export type LineageGraphProps = {
   showHandMade: boolean
   /** Bumped by the page's Fit button: the graph fits itself again. */
   fitKey: number
+  /** `<namespace>/<name>` → the newest run of that pipeline, from `/api/runs`. */
+  health: Map<string, RunHealth>
   /** Follow a table: the page sets its URL parameters. */
   onPick: (catalog: string, schema: string, table: string) => void
 }
@@ -420,7 +455,7 @@ export default function LineageGraph(props: LineageGraphProps) {
   )
 }
 
-function Graph({ graph, days, catalog, showHandMade, fitKey, onPick }: LineageGraphProps) {
+function Graph({ graph, days, catalog, showHandMade, fitKey, health, onPick }: LineageGraphProps) {
   const { fitView } = useReactFlow()
   const [hovered, setHovered] = useState<string | null>(null)
   const [selected, setSelected] = useState<string | null>(null)
@@ -452,8 +487,19 @@ function Graph({ graph, days, catalog, showHandMade, fitKey, onPick }: LineageGr
   }, [laid, lit])
 
   const nodes = useMemo<LineageFlowNode[]>(
-    () =>
-      laid.nodes.map(n => {
+    () => {
+      // The run that last wrote this table: the newest edge that ends in it. Only pipelines have
+      // a run: a SQL-editor or notebook write is a person, not a schedule.
+      const newestWriter = (id: string): string | null => {
+        let best: LineageEdgeView | undefined
+        for (const e of graph.edges) {
+          if (e.to !== id || e.jobNamespace !== 'pipeline') continue
+          if (!best || (e.eventTime ?? '') > (best.eventTime ?? '')) best = e
+        }
+        return best ? best.jobName : null
+      }
+
+      return laid.nodes.map(n => {
         const dimmed = near != null && !near.has(n.id)
         if (n.type === 'more') {
           const level = n.data.level
@@ -475,11 +521,13 @@ function Graph({ graph, days, catalog, showHandMade, fitKey, onPick }: LineageGr
           data: {
             ...n.data,
             dimmed,
+            run: health.get(newestWriter(id) ?? ''),
             onSelect: selectable ? () => setSelected(id) : undefined,
           },
         }
-      }),
-    [laid, near, lit],
+      })
+    },
+    [laid, near, lit, graph.edges, health],
   )
 
   const edges = useMemo(
