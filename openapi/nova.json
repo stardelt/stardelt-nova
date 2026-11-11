@@ -3457,6 +3457,51 @@
         }
       }
     },
+    "/api/lineage/read-tables": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "operationId": "lineage_read_tables",
+        "parameters": [
+          {
+            "name": "days",
+            "in": "query",
+            "description": "Time window in days, 1–365, default 30",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Tables to answer, 1–20, default 5",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The tables the caller read most, newest read first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadTables"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No state store"
+          }
+        }
+      }
+    },
     "/api/lineage/runs/{run_id}": {
       "get": {
         "tags": [
@@ -11455,6 +11500,55 @@
               "null"
             ],
             "format": "int64"
+          }
+        }
+      },
+      "ReadTable": {
+        "type": "object",
+        "description": "One table a person read most, with its newest write.",
+        "required": [
+          "namespace",
+          "name",
+          "queries",
+          "lastRead"
+        ],
+        "properties": {
+          "lastRead": {
+            "type": "string"
+          },
+          "lastWrite": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The newest write in the window; absent when nothing wrote it."
+          },
+          "name": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string",
+            "description": "`<catalog>.<schema>` (demo data may carry the schema alone)."
+          },
+          "queries": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Read-only queries against it in the window."
+          }
+        }
+      },
+      "ReadTables": {
+        "type": "object",
+        "description": "`GET /api/lineage/read-tables`.",
+        "required": [
+          "tables"
+        ],
+        "properties": {
+          "tables": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReadTable"
+            }
           }
         }
       },

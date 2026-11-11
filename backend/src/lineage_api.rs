@@ -128,6 +128,27 @@ pub struct LineageImpact {
     pub downstream_jobs: i64,
 }
 
+/// One table a person read most, with its newest write.
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadTable {
+    /// `<catalog>.<schema>` (demo data may carry the schema alone).
+    pub namespace: String,
+    pub name: String,
+    /// Read-only queries against it in the window.
+    pub queries: i64,
+    pub last_read: String,
+    /// The newest write in the window; absent when nothing wrote it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_write: Option<String>,
+}
+
+/// `GET /api/lineage/read-tables`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ReadTables {
+    pub tables: Vec<ReadTable>,
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Serialize, ToSchema)]
 pub struct RunDetail {
@@ -172,6 +193,26 @@ const READERS_SQL: &str = "SELECT dataset_namespace, dataset_name, job_namespace
        AND job_namespace IN ('sql-editor','query','notebook') \
        AND (dataset_namespace, dataset_name) IN (SELECT * FROM unnest($2::text[], $3::text[])) \
      GROUP BY 1, 2, 3, 4";
+
+/// The datasets one person read most in the window, with the newest read (nova#510 slice 4a).
+/// `$1` is the Trino user, `$2` the window in days, `$3` the limit.
+const TOP_READS_SQL: &str = "SELECT dataset_namespace, dataset_name, sum(queries)::bigint, \
+       to_char(max(last_read), 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') \
+     FROM lineage_reads \
+     WHERE job_namespace IN ('sql-editor','notebook') \
+       AND job_name = $1 \
+       AND day > (now() - make_interval(days => $2::int))::date \
+     GROUP BY 1, 2 \
+     ORDER BY 3 DESC, 1, 2 \
+     LIMIT $3";
+
+/// The newest write of the given datasets in the window. `$1`/`$2` are the namespace/name arrays.
+const LAST_WRITES_SQL: &str = "SELECT dataset_namespace, dataset_name, \
+       to_char(max(event_time), 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') \
+     FROM lineage_edges \
+     WHERE direction = 'output' \
+       AND (dataset_namespace, dataset_name) IN (SELECT * FROM unnest($1::text[], $2::text[])) \
+     GROUP BY 1, 2";
 
 /// One `lineage_edges` row: a dataset of one run, in or out.
 #[derive(Debug, Clone)]
@@ -690,6 +731,121 @@ pub async fn graph(
     }
 
     (StatusCode::OK, Json(graph)).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReadTablesQuery {
+    /// Time window in days, 1–365, default 30.
+    pub days: Option<i32>,
+    /// How many tables to answer, 1–20, default 5.
+    pub limit: Option<usize>,
+}
+
+#[utoipa::path(
+    get,
+    operation_id = "lineage_read_tables",
+    path = "/api/lineage/read-tables",
+    tag = "public",
+    params(
+        ("days" = Option<i32>, Query, description = "Time window in days, 1–365, default 30"),
+        ("limit" = Option<usize>, Query, description = "Tables to answer, 1–20, default 5")
+    ),
+    responses(
+        (status = 200, description = "The tables the caller read most, newest read first", body = ReadTables),
+        (status = 503, description = "No state store")
+    )
+)]
+pub async fn read_tables(
+    State(state): State<Arc<AppState>>,
+    principal: Option<Extension<Principal>>,
+    Query(q): Query<ReadTablesQuery>,
+) -> Response {
+    let principal = principal.map(|Extension(p)| p);
+    let days = q.days.unwrap_or(30).clamp(1, 365);
+    let limit = q.limit.unwrap_or(5).clamp(1, 20);
+
+    if state.demo {
+        return demo_read_tables();
+    }
+
+    let allowed = match catalog::allowed_catalogs(&state, principal.as_ref()).await {
+        Ok(a) => a,
+        Err(_) => return error_response(StatusCode::BAD_GATEWAY, "could not resolve catalogs"),
+    };
+    let reader = principal
+        .map(|p| p.identity.display_name)
+        .unwrap_or_else(|| state.dev_user.clone());
+
+    let pool = match &state.db {
+        Some(p) => p,
+        None => return error_response(StatusCode::SERVICE_UNAVAILABLE, "state store unavailable"),
+    };
+
+    let rows: Vec<(String, String, i64, String)> = sqlx::query_as(TOP_READS_SQL)
+        .bind(&reader)
+        .bind(days)
+        .bind(i64::try_from(limit).unwrap_or(5))
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+
+    // The caller's own visibility rule, the same one the graph uses: a namespace's first
+    // segment is the catalog name.
+    let visible = |ns: &str| -> bool {
+        allowed.is_empty() || allowed.contains(ns.split('.').next().unwrap_or(""))
+    };
+    let mut tables: Vec<ReadTable> = rows
+        .into_iter()
+        .filter(|(ns, _, _, _)| visible(ns))
+        .map(|(namespace, name, queries, last_read)| ReadTable {
+            namespace,
+            name,
+            queries,
+            last_read,
+            last_write: None,
+        })
+        .collect();
+
+    let namespaces: Vec<String> = tables.iter().map(|t| t.namespace.clone()).collect();
+    let names: Vec<String> = tables.iter().map(|t| t.name.clone()).collect();
+    if !namespaces.is_empty() {
+        let writes: Vec<(String, String, String)> = sqlx::query_as(LAST_WRITES_SQL)
+            .bind(&namespaces)
+            .bind(&names)
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default();
+        for (namespace, name, last_write) in writes {
+            if let Some(table) = tables
+                .iter_mut()
+                .find(|t| t.namespace == namespace && t.name == name)
+            {
+                table.last_write = Some(last_write);
+            }
+        }
+    }
+
+    (StatusCode::OK, Json(ReadTables { tables })).into_response()
+}
+
+fn demo_read_tables() -> Response {
+    let table = |namespace: &str, name: &str, queries: i64| ReadTable {
+        namespace: namespace.to_string(),
+        name: name.to_string(),
+        queries,
+        last_read: "2026-01-01T00:00:00Z".to_string(),
+        last_write: Some("2026-01-01T00:00:00Z".to_string()),
+    };
+    (
+        StatusCode::OK,
+        Json(ReadTables {
+            tables: vec![
+                table("nyc_taxi", "yellow_trips", 42),
+                table("analytics", "trips_by_borough", 18),
+            ],
+        }),
+    )
+        .into_response()
 }
 
 fn demo_graph_response(_start_ns: &str, _start_name: &str) -> Response {

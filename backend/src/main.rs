@@ -715,6 +715,7 @@ fn api_router() -> Router<Arc<AppState>> {
         .route("/lineage", get(lineage_api::graph))
         // Where each column of one table comes from, from the write events' ioMetadata.
         .route("/lineage/columns", get(lineage_api::columns))
+        .route("/lineage/read-tables", get(lineage_api::read_tables))
         .route("/lineage/runs/{run_id}", get(lineage_api::run_detail))
         // The caller's own settings: one JSON value per key (state store).
         .route("/settings", get(user_settings::list))
@@ -1404,6 +1405,7 @@ mod router_tests {
         let (app, _dir) = test_app("lineage-registered");
         for uri in [
             "/api/lineage",
+            "/api/lineage/read-tables",
             "/api/lineage/runs/00000000-0000-0000-0000-000000000000",
         ] {
             let response = get(app.clone(), uri).await;
