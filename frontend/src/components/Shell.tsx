@@ -378,9 +378,25 @@ export default function Shell() {
 
         <main id="main" tabIndex={-1} className="flex-1 min-h-0 overflow-auto p-3 sm:p-6 outline-none">
           {me.data?.shared_account && (
-            <div role="note" className="mb-3 rounded-lg border border-amber-400/40 bg-amber-400/10 px-3 py-2 text-sm text-warn">
-              Public demo: everyone signs in as this account and can see what you type and save. Everything is deleted every night at 03:00 UTC. Please do not enter personal data.
-            </div>
+            <>
+              <div role="note" className="mb-3 rounded-lg border border-amber-400/40 bg-amber-400/10 px-3 py-2 text-sm text-warn">
+                Public demo: everyone signs in as this account and can see what you type and save. Everything is deleted every night at 03:00 UTC. Please do not enter personal data.
+              </div>
+              <p className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-text-dim">
+                <span>Like what you see? stardelt is free and open source.</span>
+                <a
+                  href="https://github.com/stardelt/stardelt"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-0.5 text-text hover:border-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+                >
+                  <span aria-hidden="true">★</span> Star it on GitHub
+                </a>
+                <a href="https://stardelt.io/docs/getting-started/quickstart" target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">
+                  Install it yourself →
+                </a>
+              </p>
+            </>
           )}
           <ErrorBoundary key={location.pathname}>
             <Outlet />
