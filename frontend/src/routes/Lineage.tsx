@@ -62,6 +62,26 @@ export default function Lineage() {
     retry: false,
   })
 
+  // The runs of the caller's pipelines: the graph marks a table with the state of the run
+  // that last wrote it. One request for the whole page, and only once a table is picked.
+  const runs = useQuery({
+    queryKey: ['runs', 'lineage-health'],
+    queryFn: () => api.runs({ limit: 200 }),
+    enabled: hasSelection,
+    staleTime: 60_000,
+    retry: false,
+  })
+
+  /** `<namespace>/<name>` → the newest run's state, for the writers the graph draws. */
+  const health = useMemo(() => {
+    const map = new Map<string, { state: string; startedAt: string | null }>()
+    for (const r of runs.data?.runs ?? []) {
+      const key = `${r.namespace}/${r.name}`
+      if (!map.has(key)) map.set(key, { state: r.state, startedAt: r.startedAt })
+    }
+    return map
+  }, [runs.data])
+
   const setParam = (key: string, value: string | null) => {
     const next = new URLSearchParams(params)
     if (value === null) next.delete(key)
@@ -205,6 +225,7 @@ export default function Lineage() {
               catalog={catalog}
               showHandMade={handmade}
               fitKey={fitKey}
+              health={health}
               onPick={pick}
             />
           </div>
