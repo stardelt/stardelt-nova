@@ -41,6 +41,9 @@ export default function Notebooks() {
   const base = (safeHttpUrl(jupyter?.external_url) ?? safeHttpUrl(FALLBACK))?.replace(/\/+$/, '')
   const at = (path: string) => (up && base ? `${base}${path}` : undefined)
   const open = at('/hub/')
+  // Start goes to the hub's own spawn route: it renews an aged-out sign-in through the SSO
+  // session, which Nova's API-based start cannot (nova#808).
+  const spawn = at('/hub/spawn')
 
   return (
     <div className="space-y-5">
@@ -55,7 +58,7 @@ export default function Notebooks() {
       </header>
 
       {/* The caller's own server: state, idle stop, Start and Stop, and the way in (#653). */}
-      <WorkspaceCard open={open} />
+      <WorkspaceCard open={open} spawn={spawn} />
 
       {up && base ? (
         <div className="flex flex-wrap items-center gap-2 text-sm">

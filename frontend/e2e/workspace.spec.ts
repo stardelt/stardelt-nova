@@ -21,6 +21,8 @@ const inMinute = (minutes: number) => new Date(Date.now() + minutes * 60_000).to
 type Stub = {
   /** What each `GET /api/workspace` answers, in order; the last one repeats. */
   views: unknown[]
+  /** What `/api/embeds` answers, when the hub should be down or absent. */
+  embeds?: unknown
   /** What `POST /api/workspace/start` answers, when it should answer at all. */
   startAnswer?: unknown
   startStatus?: number
@@ -41,7 +43,7 @@ async function open(page: import('@playwright/test').Page, stub: Stub) {
     const path = url.pathname
     const method = route.request().method()
     if (path === '/api/me') return json(route, ME)
-    if (path === '/api/embeds') return json(route, [JUPYTER])
+    if (path === '/api/embeds') return json(route, stub.embeds ?? [JUPYTER])
     if (path === '/api/notebooks') return json(route, [])
     if (path === '/api/pipelines/principals') return json(route, { groups: [] })
     if (path === '/api/pipelines') return json(route, { pipelines: [] })
@@ -87,16 +89,19 @@ test('a running workspace shows its idle stop and start time, with Open and Stop
   await expect(workspace.getByRole('button', { name: 'Start' })).toHaveCount(0)
 })
 
-test('a stopped workspace offers Start, and Start shows the spawn', async ({ page }) => {
+test('a stopped workspace offers Start as a link to the hub spawn route', async ({ page }) => {
   const { calls } = await open(page, {
     views: [{ state: 'stopped', startedAt: null, lastActivity: null, idleStopAt: null }],
   })
   const workspace = card(page)
   await expect(workspace).toContainText('stopped')
   await expect(workspace.getByRole('button', { name: 'Stop' })).toHaveCount(0)
-  await workspace.getByRole('button', { name: 'Start' }).click()
-  expect(calls).toContain('POST /api/workspace/start')
-  await expect(workspace).toContainText('starting')
+  // The hub's own spawn route, not `POST /api/workspace/start`: only the hub can renew a
+  // stored sign-in that has aged out (nova#808).
+  const start = workspace.getByRole('link', { name: 'Start' })
+  await expect(start).toHaveAttribute('href', 'https://jupyter.example.test/hub/spawn')
+  await expect(start).toHaveAttribute('target', '_blank')
+  expect(calls).not.toContain('POST /api/workspace/start')
 })
 
 test('while starting the card polls every three seconds and then shows the running server', async ({ page }) => {
@@ -135,12 +140,16 @@ test('an installation without hub credentials keeps only the way in', async ({ p
 })
 
 test('a refused Start says why in the card', async ({ page }) => {
+  // With the hub not up there is no spawn route to link to, so the card falls back to the
+  // API's Start — and must show its reason, e.g. this 409 (nova#808).
   await open(page, {
     views: [{ state: 'stopped', startedAt: null, lastActivity: null, idleStopAt: null }],
+    embeds: [{ ...JUPYTER, status: 'down' }],
     startStatus: 409,
-    startAnswer: { error: 'Open JupyterLab once to create your workspace.' },
+    startAnswer: { error: 'JupyterHub needs you to sign in again: open JupyterLab once, then Start' },
   })
   const workspace = card(page)
   await workspace.getByRole('button', { name: 'Start' }).click()
-  await expect(workspace.getByRole('alert')).toHaveText('Open JupyterLab once to create your workspace.')
+  await expect(workspace.getByRole('alert'))
+    .toHaveText('JupyterHub needs you to sign in again: open JupyterLab once, then Start')
 })

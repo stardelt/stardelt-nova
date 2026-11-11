@@ -325,12 +325,12 @@ pub(crate) async fn get(
     operation_id = "workspace_start",
     path = "/api/workspace/start",
     tag = "public",
-    description = "Spawn the caller's own JupyterHub server: `POST /hub/api/users/{name}/server` with Nova's service token. Answers `202 {\"state\":\"starting\"}` when the hub accepted the spawn, `200 {\"state\":\"running\"}` when a server was already running, and `409` when the hub has never seen this person (they must open JupyterHub once to create their workspace). `503` when Nova has no hub credentials, `502` when the hub does not answer or refuses another way.",
+    description = "Spawn the caller's own JupyterHub server: `POST /hub/api/users/{name}/server` with Nova's service token. Answers `202 {\"state\":\"starting\"}` when the hub accepted the spawn, `200 {\"state\":\"running\"}` when a server was already running, and `409` when the hub has never seen this person (they must open JupyterHub once to create their workspace) or when the hub's stored sign-in for them has expired (only the hub's login can renew it: open JupyterLab once). `503` when Nova has no hub credentials, `502` when the hub does not answer or refuses another way.",
     responses(
         (status = 202, description = "The hub is spawning the server", body = WorkspaceView),
         (status = 200, description = "A server was already running", body = WorkspaceView),
         (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
-        (status = 409, description = "The hub has no such user", body = crate::openapi::ErrorResponse),
+        (status = 409, description = "The hub has no such user, or their hub sign-in has expired", body = crate::openapi::ErrorResponse),
         (status = 502, description = "The hub did not answer or refused", body = crate::openapi::ErrorResponse),
         (status = 503, description = "No hub credentials", body = crate::openapi::ErrorResponse),
     )
@@ -355,6 +355,13 @@ pub(crate) async fn start(
             answer(StatusCode::OK, WorkspaceView::state("running"))
         }
         Some(hub) if hub.status == StatusCode::NOT_FOUND => no_hub_user().into_response(),
+        // The hub's own words: its stored OAuth token for this person has aged out, and only the
+        // hub's login page can refresh it (the spawn route does it through the SSO session).
+        Some(hub) if hub.status == StatusCode::FORBIDDEN => Fail::new(
+            StatusCode::CONFLICT,
+            "JupyterHub needs you to sign in again: open JupyterLab once, then Start",
+        )
+        .into_response(),
         Some(_) | None => Fail::new(
             StatusCode::BAD_GATEWAY,
             "the hub did not start your workspace",
@@ -820,6 +827,36 @@ mod tests {
             body["error"],
             "Open JupyterLab once to create your workspace."
         );
+    }
+
+    #[tokio::test]
+    async fn start_with_an_expired_hub_sign_in_says_to_open_jupyterlab_once() {
+        let (api, _) = fake_hub::start(fake_hub::Fake {
+            spawn: fake_hub::body(
+                StatusCode::FORBIDDEN,
+                json!({"status": 403, "message": "auth has expired for alice@example.com, login again"}),
+            ),
+            ..fake_hub::Fake::default()
+        })
+        .await;
+        let (status, body) = act(&api, "/workspace/start", Some(alice())).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(
+            body["error"],
+            "JupyterHub needs you to sign in again: open JupyterLab once, then Start"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_with_a_broken_hub_is_a_bad_gateway() {
+        let (api, _) = fake_hub::start(fake_hub::Fake {
+            spawn: fake_hub::body(StatusCode::INTERNAL_SERVER_ERROR, json!({})),
+            ..fake_hub::Fake::default()
+        })
+        .await;
+        let (status, body) = act(&api, "/workspace/start", Some(alice())).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(body["error"], "the hub did not start your workspace");
     }
 
     #[tokio::test]
