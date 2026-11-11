@@ -706,6 +706,7 @@ fn api_router() -> Router<Arc<AppState>> {
             get(destinations::list).post(destinations::create),
         )
         .route("/destinations/{id}", delete(destinations::remove))
+        .route("/destinations/{id}/test", post(destinations::test))
         // The query log: the caller's own queries, everybody's for administrators (state store).
         .route("/query-log", get(query_log_api::list))
         .route("/query-log/{id}", get(query_log_api::detail))
