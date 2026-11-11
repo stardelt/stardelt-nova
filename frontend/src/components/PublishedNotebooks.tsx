@@ -23,21 +23,24 @@ export default function PublishedNotebooks() {
   const principals = useQuery({ queryKey: ['pipeline-principals'], queryFn: api.pipelinePrincipals })
   const queryClient = useQueryClient()
   const [group, setGroup] = useState('')
+  const [search, setSearch] = useState('')
   const [scheduling, setScheduling] = useState<PublishedNotebook | null>(null)
   const [scheduled, setScheduled] = useState<PipelineView | null>(null)
   const rows = useMemo(() => (Array.isArray(list.data) ? list.data : []), [list.data])
   const groups = useMemo(() => [...new Set(rows.map((row) => row.group))].sort(), [rows])
-  const shown = useMemo(
-    () => rows
+  const shown = useMemo(() => {
+    const needle = search.trim().toLowerCase()
+    return rows
       .filter((row) => group === '' || row.group === group)
-      .sort((a, b) => a.group.localeCompare(b.group) || a.name.localeCompare(b.name)),
-    [rows, group],
-  )
+      .filter((row) => needle === '' || `${row.group}/${row.name}`.toLowerCase().includes(needle))
+      .sort((a, b) => a.group.localeCompare(b.group) || a.name.localeCompare(b.name))
+  }, [rows, group, search])
   const failed = list.isError && !list.data
   // Without a notebook store the route answers 503: a fact about the installation, not a failure
   // a Retry could fix.
   const storeMissing = failed && list.error instanceof ApiError && list.error.status === 503
   const filterId = useId()
+  const searchId = useId()
 
   return (
     <>
@@ -51,18 +54,31 @@ export default function PublishedNotebooks() {
             who published the notebook, and reads only what the catalogs grant to that principal.
           </p>
         </div>
-        {groups.length > 1 && (
-          <div className="flex items-center gap-2 text-sm">
-            <label htmlFor={filterId} className="text-text-dim">Group</label>
-            <select
-              id={filterId}
+        {rows.length > 0 && (
+          <div className="flex flex-wrap items-center gap-2 text-sm">
+            <label htmlFor={searchId} className="text-text-dim">Search</label>
+            <input
+              id={searchId}
+              type="search"
               className="input py-1"
-              value={group}
-              onChange={(event) => setGroup(event.target.value)}
-            >
-              <option value="">All groups</option>
-              {groups.map((name) => <option key={name} value={name}>{name}</option>)}
-            </select>
+              placeholder="Notebook or group"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+            />
+            {groups.length > 1 && (
+              <>
+                <label htmlFor={filterId} className="text-text-dim">Group</label>
+                <select
+                  id={filterId}
+                  className="input py-1"
+                  value={group}
+                  onChange={(event) => setGroup(event.target.value)}
+                >
+                  <option value="">All groups</option>
+                  {groups.map((name) => <option key={name} value={name}>{name}</option>)}
+                </select>
+              </>
+            )}
           </div>
         )}
       </div>
@@ -86,6 +102,18 @@ export default function PublishedNotebooks() {
       {list.data && rows.length === 0 && (
         <EmptyState icon="notebook" title="No published notebooks yet">
           {EMPTY}
+        </EmptyState>
+      )}
+      {rows.length > 0 && shown.length === 0 && (
+        <EmptyState icon="notebook" title="No notebook matches">
+          Nothing in your groups matches that search.{' '}
+          <button
+            type="button"
+            className="btn-ghost px-2 py-1 text-xs"
+            onClick={() => { setSearch(''); setGroup('') }}
+          >
+            Clear
+          </button>
         </EmptyState>
       )}
       {shown.length > 0 && (
