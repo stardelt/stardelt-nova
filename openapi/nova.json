@@ -2912,6 +2912,189 @@
         }
       }
     },
+    "/api/destinations": {
+      "get": {
+        "tags": [
+          "internal"
+        ],
+        "summary": "`GET /api/destinations` — the caller's groups' destinations, newest first.",
+        "description": "The notification destinations of the caller's groups, newest first. `?group=<group>` narrows to one group the caller belongs to. Times are epoch milliseconds.",
+        "operationId": "destinations_list",
+        "parameters": [
+          {
+            "name": "group",
+            "in": "query",
+            "description": "Only this group's destinations",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The caller's groups' destinations",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Destination"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not a member of the requested group",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The state store is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "internal"
+        ],
+        "summary": "`POST /api/destinations` — `201` with the stored row.",
+        "description": "Create a notification destination for one of the caller's groups. An `email` destination carries `config.recipients` (1 to 20 addresses); a `webhook` destination carries `config.url` (http or https). Nothing here sends anything.",
+        "operationId": "destinations_create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewDestination"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The stored row",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Destination"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The kind, the address, the name or the group is not valid",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The caller is not a member of the owner group",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A destination with this name already exists in the group",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The state store is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/destinations/{id}": {
+      "delete": {
+        "tags": [
+          "internal"
+        ],
+        "summary": "`DELETE /api/destinations/{id}` — `204`; `404` for another group's id or none.",
+        "description": "Delete one of the caller's groups' notification destinations.",
+        "operationId": "destinations_remove",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The destination's id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "400": {
+            "description": "The id is not a number",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such destination, or it is not the caller's",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The state store is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/embeds": {
       "get": {
         "tags": [
@@ -8926,6 +9109,48 @@
           }
         }
       },
+      "Destination": {
+        "type": "object",
+        "description": "A named email or webhook endpoint owned by one group (`GET /api/destinations`).",
+        "required": [
+          "id",
+          "owner_group",
+          "name",
+          "kind",
+          "config",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "config": {
+            "description": "The kind's address: `{\"recipients\": [...]}` or `{\"url\": \"https://…\"}`."
+          },
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Epoch milliseconds, like `Job.started_at`."
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "kind": {
+            "type": "string",
+            "description": "`email` or `webhook`."
+          },
+          "name": {
+            "type": "string"
+          },
+          "owner_group": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Epoch milliseconds, like `Job.started_at`."
+          }
+        }
+      },
       "DocumentationUpdate": {
         "type": "object",
         "description": "`PUT /api/catalog/tables/{ns}/{tbl}/documentation` body.\n\nEvery key is optional. Absent changes nothing; `null` removes the property; an empty tag\nlist and a blank description also remove. A field whose value equals what the table\nalready stores is not a change.",
@@ -9682,6 +9907,31 @@
             }
           }
         }
+      },
+      "NewDestination": {
+        "type": "object",
+        "description": "`POST /api/destinations` body.",
+        "required": [
+          "owner_group",
+          "name",
+          "kind",
+          "config"
+        ],
+        "properties": {
+          "config": {
+            "description": "The kind's address: `{\"recipients\": [...]}` or `{\"url\": \"https://…\"}`."
+          },
+          "kind": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "owner_group": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
       },
       "NewSavedQuery": {
         "type": "object",

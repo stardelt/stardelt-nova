@@ -59,7 +59,7 @@ pub struct NewShare {
 /// The group rule the Catalog CRD uses (`CatalogDomainSpec::validate`): 1 to 64
 /// characters, letters, digits, dot, underscore or dash, starting and ending with a
 /// letter or a digit.
-fn validate_group(raw: &str) -> Result<String, String> {
+pub(crate) fn validate_group(raw: &str) -> Result<String, String> {
     let group = raw.trim().to_string();
     let bytes = group.as_bytes();
     let alnum = |b: &u8| b.is_ascii_alphanumeric();
