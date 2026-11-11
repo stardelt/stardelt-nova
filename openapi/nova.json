@@ -10715,6 +10715,7 @@
         "required": [
           "name",
           "namespace",
+          "canRun",
           "paused",
           "loaded",
           "state",
@@ -10722,6 +10723,10 @@
           "concurrency"
         ],
         "properties": {
+          "canRun": {
+            "type": "boolean",
+            "description": "Whether the caller may run, pause, resume, change or delete this pipeline. `false` for a\nviewer (`spec.viewers`), which is a read-only row."
+          },
           "concurrency": {
             "type": "string",
             "description": "`spec.concurrency` as the resource carries it (`Allow`, `Forbid`, `Replace`)."

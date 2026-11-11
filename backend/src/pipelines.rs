@@ -10,9 +10,10 @@
 //! exist — a refusal that distinguishes "hidden" from "absent" would leak the hidden one.
 //!
 //! - **Visibility** ([`visible`]): administrators see everything; everybody else sees a pipeline
-//!   whose `spec.ownerGroup` is one of their groups. A pipeline without an `ownerGroup` is
-//!   administrators-only. Acting uses the same rule ([`may_act`]): v1 has no read-only role, so
-//!   whoever may see a pipeline may act on it, and everybody else gets the same 404.
+//!   whose `spec.ownerGroup` is one of their groups, or whose `spec.viewers` lists one of them.
+//!   A pipeline without an `ownerGroup` is administrators-only. Acting ([`may_act`]) stays with
+//!   the owner group and administrators: a `viewers` entry is read-only — list, detail, runs and
+//!   spec — and everybody else gets the same 404.
 //! - **Airflow's naming**: `Pipeline <namespace>/<name>` has the DAG id `<namespace>__<name>`
 //!   ([`airflow::dag_id_for`]). Every Airflow path is built from that id, never from a browser
 //!   value, so a run id of another pipeline cannot resolve.
@@ -372,23 +373,36 @@ fn spec_of(resource: &Value) -> &Value {
 // ---------------------------------------------------------------------------
 
 /// Who may see a pipeline. Administrators see all; everybody else sees a pipeline whose
-/// `spec.ownerGroup` names one of their groups. No `ownerGroup` means administrators only.
+/// `spec.ownerGroup` names one of their groups, or whose `spec.viewers` lists one of them —
+/// a viewer reads (list, detail, runs, spec) and nothing else (epic#895 decision 12).
 pub fn visible(identity: &Identity, spec: &Value) -> bool {
     if identity.is_admin {
         return true;
     }
-    let Some(group) = spec.get("ownerGroup").and_then(Value::as_str) else {
-        return false;
-    };
-    identity.groups.iter().any(|g| g == group)
+    let mine = |group: &str| identity.groups.iter().any(|g| g == group);
+    if spec
+        .get("ownerGroup")
+        .and_then(Value::as_str)
+        .is_some_and(mine)
+    {
+        return true;
+    }
+    spec.get("viewers")
+        .and_then(Value::as_array)
+        .is_some_and(|viewers| viewers.iter().filter_map(Value::as_str).any(mine))
 }
 
-/// Who may act on a pipeline: run it now, pause it, resume it, stop one of its runs.
-///
-/// Exactly who may see it — v1 has no read-only role. Written as a call to [`visible`] on
-/// purpose, so the two rules cannot drift; an outsider gets the same 404 as for a read.
+/// Who may act on a pipeline: run it now, pause it, resume it, stop one of its runs, change its
+/// spec or delete it. The owner group and administrators only — `spec.viewers` is read-only
+/// (epic#895 decision 12). Written out rather than as a call to [`visible`], because the two
+/// rules differ on purpose now; an outsider gets the same 404 as for a read.
 pub fn may_act(identity: &Identity, spec: &Value) -> bool {
-    visible(identity, spec)
+    if identity.is_admin {
+        return true;
+    }
+    spec.get("ownerGroup")
+        .and_then(Value::as_str)
+        .is_some_and(|group| identity.groups.iter().any(|g| g == group))
 }
 
 /// How long a resource may exist without a DAG before the view calls it `not-loaded`. The loader
@@ -1976,6 +1990,9 @@ pub struct PipelineView {
     pub namespace: String,
     /// `spec.ownerGroup`; `None` means administrators only.
     pub owner_group: Option<String>,
+    /// Whether the caller may run, pause, resume, change or delete this pipeline. `false` for a
+    /// viewer (`spec.viewers`), which is a read-only row.
+    pub can_run: bool,
     /// The cron schedule, with the time zone in parentheses when there is one.
     pub schedule: Option<String>,
     pub paused: bool,
@@ -2163,6 +2180,7 @@ fn view_of(
     resource: &Value,
     dag: Option<&DagSummary>,
     last_run: Option<&DagRun>,
+    who: &Identity,
 ) -> PipelineView {
     let spec = spec_of(resource);
     let loaded = dag.is_some();
@@ -2180,6 +2198,7 @@ fn view_of(
             .get("ownerGroup")
             .and_then(Value::as_str)
             .map(str::to_string),
+        can_run: may_act(who, spec),
         schedule: schedule_of(spec),
         paused,
         loaded,
@@ -2513,7 +2532,7 @@ async fn load_visible(
     load_allowed(resources, who, namespace, name, visible).await
 }
 
-/// An action: who may act on the pipeline (the same rule as seeing it, via [`may_act`]).
+/// An action: who may act on the pipeline (a viewer may not, via [`may_act`]).
 async fn load_actionable(
     resources: &PipelineResources,
     who: &Identity,
@@ -2593,7 +2612,7 @@ async fn list_pipelines(
             let name = pipeline_name(resource);
             let dag = dags.get(&dag_id_for(&namespace, name));
             let last_run = last_runs.get(name).and_then(Option::as_ref);
-            view_of(&namespace, name, resource, dag, last_run)
+            view_of(&namespace, name, resource, dag, last_run, who)
         })
         .collect();
     Ok(PipelineListResponse { pipelines })
@@ -2856,7 +2875,7 @@ async fn pipeline_detail(
         },
         None => Vec::new(),
     };
-    let mut view = view_of(namespace, name, &resource, dag.as_ref(), runs.first());
+    let mut view = view_of(namespace, name, &resource, dag.as_ref(), runs.first(), who);
     let spec = spec_of(&resource);
     // The statement goes only on the detail route: the list stays small, and the caller has
     // already passed the same visibility rule that `load_visible` applies to an edit.
@@ -3319,6 +3338,7 @@ async fn set_paused_inner(
         &resource,
         Some(&dag),
         last_run.as_ref(),
+        who,
     ))
 }
 
@@ -3843,6 +3863,7 @@ async fn create_pipeline_inner(
         &written,
         None,
         None,
+        who,
     );
     // The answer is the resource as written: the loader has not seen it yet, whatever the
     // cluster's clock says about its age.
@@ -3946,9 +3967,10 @@ async fn view_after_write(
     namespace: &str,
     name: &str,
     resource: &Value,
+    who: &Identity,
 ) -> PipelineView {
     let Some(airflow) = airflow else {
-        return view_of(namespace, name, resource, None, None);
+        return view_of(namespace, name, resource, None, None, who);
     };
     let dag_id = dag_id_for(namespace, name);
     let dag = match airflow.dag(&dag_id).await {
@@ -3967,7 +3989,14 @@ async fn view_after_write(
             .and_then(|runs| runs.into_iter().next()),
         None => None,
     };
-    view_of(namespace, name, resource, dag.as_ref(), last_run.as_ref())
+    view_of(
+        namespace,
+        name,
+        resource,
+        dag.as_ref(),
+        last_run.as_ref(),
+        who,
+    )
 }
 
 /// `PUT /api/pipelines/{namespace}/{name}`: change the statement and the schedule of a statement
@@ -4150,7 +4179,7 @@ async fn update_pipeline_inner(
             ResourceError::Conflict => ActionError::refused("conflict", pipeline_changed()),
             other => ActionError::error(resource_write_fail(other)),
         })?;
-    Ok(view_after_write(airflow, namespace, name, &written).await)
+    Ok(view_after_write(airflow, namespace, name, &written, who).await)
 }
 
 /// `DELETE /api/pipelines/{namespace}/{name}`: remove a pipeline Nova wrote. Airflow is not
@@ -5331,6 +5360,13 @@ mod tests {
     /// The same resource with another `spec.concurrency`.
     fn with_concurrency(mut resource: Value, concurrency: &str) -> Value {
         resource["spec"]["concurrency"] = json!(concurrency);
+        resource
+    }
+
+    /// The same resource with `spec.viewers`: groups that may read it but not act (epic#895
+    /// decision 12).
+    fn with_viewers(mut resource: Value, viewers: &[&str]) -> Value {
+        resource["spec"]["viewers"] = json!(viewers);
         resource
     }
 
@@ -7360,7 +7396,14 @@ mod tests {
         }))
         .unwrap();
         let run: DagRun = serde_json::from_value(run(SMOKE_RUN, "success")).unwrap();
-        let view = view_of("stardelt", "smoke", &resource, Some(&dag), Some(&run));
+        let view = view_of(
+            "stardelt",
+            "smoke",
+            &resource,
+            Some(&dag),
+            Some(&run),
+            &who("sub-ada", &["analytics"], false),
+        );
 
         let value = serde_json::to_value(&view).expect("serialises");
         let keys: BTreeSet<&str> = value
@@ -7375,6 +7418,7 @@ mod tests {
                 "name",
                 "namespace",
                 "ownerGroup",
+                "canRun",
                 "schedule",
                 "paused",
                 "loaded",
@@ -7707,6 +7751,108 @@ mod tests {
         assert!(may_act(&who("sub-ada", &["analytics"], false), spec));
         assert!(may_act(&admin(), spec));
         assert!(!may_act(&outsider, spec));
+    }
+
+    /// A shared pipeline (epic#895 decision 12): `spec.viewers` may read, never act.
+    fn shared() -> Value {
+        with_viewers(resource("shop", Some("demo")), &["visitors"])
+    }
+
+    #[test]
+    fn visible_admits_a_viewer_while_may_act_refuses_it() {
+        let shared = shared();
+        let spec = spec_of(&shared);
+
+        let viewer = who("sub-vera", &["visitors"], false);
+        assert!(visible(&viewer, spec), "a viewer sees the pipeline");
+        assert!(!may_act(&viewer, spec), "a viewer may not act on it");
+
+        let owner = who("sub-dana", &["demo"], false);
+        assert!(visible(&owner, spec), "the owner group sees it");
+        assert!(may_act(&owner, spec), "the owner group acts on it");
+
+        assert!(visible(&admin(), spec), "an administrator sees it");
+        assert!(may_act(&admin(), spec), "an administrator acts on it");
+
+        let outsider = who("sub-bob", &["finance"], false);
+        assert!(!visible(&outsider, spec));
+        assert!(!may_act(&outsider, spec));
+    }
+
+    #[tokio::test]
+    async fn a_viewer_reads_the_list_and_the_detail_but_a_run_is_404() {
+        let resources = memory(&[
+            ("shop", shared()),
+            ("smoke", resource("smoke", Some("analytics"))),
+        ]);
+        let (airflow, fake) = fake_airflow::start().await;
+        let viewer = who("sub-vera", &["visitors"], false);
+        let namespace = crate::cluster::namespace();
+
+        // The list the caller sees, with a read-only row.
+        let answer = list_pipelines(Some(&resources), Some(&airflow), &viewer)
+            .await
+            .expect("the list succeeds");
+        let names: Vec<&str> = answer
+            .pipelines
+            .iter()
+            .map(|pipeline| pipeline.name.as_str())
+            .collect();
+        assert_eq!(names, ["shop"], "the viewer's list has the shared pipeline");
+        assert!(!answer.pipelines[0].can_run, "the row is read-only");
+
+        // The detail and the spec are reads: they answer.
+        let detail = pipeline_detail(
+            Some(&resources),
+            Some(&airflow),
+            &viewer,
+            &namespace,
+            "shop",
+        )
+        .await
+        .expect("the viewer reads the detail");
+        assert!(!detail.pipeline.can_run, "a viewer's detail is read-only");
+        pipeline_spec(Some(&resources), &viewer, &namespace, "shop")
+            .await
+            .expect("the viewer reads the spec");
+
+        // Every action is the same 404 as for a hidden pipeline, before Airflow is asked.
+        let calls_before = fake.lock().unwrap().calls.clone();
+        let error = run_now(
+            Some(&resources),
+            Some(&airflow),
+            &limiter(),
+            &viewer,
+            &namespace,
+            "shop",
+        )
+        .await
+        .expect_err("a viewer may not run");
+        assert_eq!(error.status(), StatusCode::NOT_FOUND);
+        assert_eq!(error.message(), "no such pipeline");
+        let error = pause_pipeline(
+            Some(&resources),
+            Some(&airflow),
+            &viewer,
+            &namespace,
+            "shop",
+        )
+        .await
+        .expect_err("a viewer may not pause");
+        assert_eq!(error.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            fake.lock().unwrap().calls,
+            calls_before,
+            "no action of a viewer reaches Airflow"
+        );
+
+        // The owner group's row says it may act.
+        let owner = who("sub-dana", &["demo"], false);
+        let answer = list_pipelines(Some(&resources), Some(&airflow), &owner)
+            .await
+            .expect("the owner's list succeeds");
+        assert_eq!(answer.pipelines.len(), 1);
+        assert!(answer.pipelines[0].can_run, "the owner's row may act");
     }
 
     #[tokio::test]
