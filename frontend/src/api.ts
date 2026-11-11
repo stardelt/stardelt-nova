@@ -815,6 +815,10 @@ export type PipelineView = {
   namespace: string
   /** The owning group; null means administrators only. */
   ownerGroup: string | null
+  /** Whether the caller may run it and stop its runs; a viewer of a shared pipeline may run. */
+  canRun: boolean
+  /** Whether the caller may also pause, resume, change or delete it — owner group and admins. */
+  canEdit: boolean
   /** The cron, with the time zone in parentheses when the resource has one. */
   schedule: string | null
   paused: boolean

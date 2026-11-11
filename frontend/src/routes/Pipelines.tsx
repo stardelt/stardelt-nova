@@ -185,6 +185,7 @@ export function PipelineActions({
   onAct: (pipeline: PipelineView, action: PipelineAction) => void | Promise<void>
 }) {
   const disabled = pending !== null
+  if (!pipeline.canRun && !pipeline.canEdit) return null
   return (
     <div className="flex flex-wrap items-center gap-2">
       <button
@@ -198,7 +199,7 @@ export function PipelineActions({
         <Icon name="play" className="w-3.5 h-3.5" />
         Run now
       </button>
-      {pipeline.paused ? (
+      {pipeline.canEdit && (pipeline.paused ? (
         <button
           type="button"
           className="btn-ghost py-1.5 text-xs"
@@ -218,7 +219,7 @@ export function PipelineActions({
         >
           Pause
         </button>
-      )}
+      ))}
     </div>
   )
 }
