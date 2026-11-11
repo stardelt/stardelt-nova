@@ -6,6 +6,7 @@ import { EmptyState } from '../components/EmptyState'
 import ErrorBox from '../components/ErrorBox'
 import { Icon } from '../components/Icon'
 import ScheduleDialog from '../components/ScheduleDialog'
+import { SkeletonTable } from '../components/Skeleton'
 import { formatDurationMs, formatTime, relativeTime } from '../format'
 
 /**
@@ -315,7 +316,9 @@ export default function Pipelines() {
       </div>
 
       <div className="card relative overflow-x-auto">
-        {list.isLoading && <p className="px-5 py-5 text-sm text-text-mute">Loading pipelines…</p>}
+        {list.isLoading && (
+          <div className="px-5 py-5"><SkeletonTable rows={5} label="Loading pipelines" /></div>
+        )}
         {failed && (
           <div className="px-5 py-5 space-y-2">
             <ErrorBox

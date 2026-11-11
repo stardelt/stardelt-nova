@@ -2674,7 +2674,7 @@ test.describe('pipelines', () => {
         return true
       },
     })
-    await expect(loading.page.getByText('Loading pipelines…')).toBeVisible()
+    await expect(loading.page.getByRole('status', { name: 'Loading pipelines' })).toBeVisible()
     await expect(loading.page.getByText('No pipelines yet')).toBeVisible()
     await loading.context.close()
 
