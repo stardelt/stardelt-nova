@@ -3095,6 +3095,70 @@
         }
       }
     },
+    "/api/destinations/{id}/test": {
+      "post": {
+        "tags": [
+          "internal"
+        ],
+        "summary": "`POST /api/destinations/{id}/test` — send one test message to a webhook destination\nand record the attempt.",
+        "description": "Send one test message to a webhook destination and record the attempt. An email destination answers 400 until the platform's SMTP relay exists. The answer never contains the webhook's URL.",
+        "operationId": "destinations_test",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The destination's id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "What the attempt did",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DestinationTest"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "An email destination, or a config without a usable url",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such destination, or it is not the caller's",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The state store is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/embeds": {
       "get": {
         "tags": [
@@ -9148,6 +9212,33 @@
             "type": "integer",
             "format": "int64",
             "description": "Epoch milliseconds, like `Job.started_at`."
+          }
+        }
+      },
+      "DestinationTest": {
+        "type": "object",
+        "description": "`POST /api/destinations/{id}/test` answer: what the attempt did.",
+        "required": [
+          "ok",
+          "detail"
+        ],
+        "properties": {
+          "detail": {
+            "type": "string",
+            "description": "One sentence; never the URL or a header value."
+          },
+          "ok": {
+            "type": "boolean",
+            "description": "True only for `delivered`."
+          },
+          "status": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The webhook's HTTP status, when it answered.",
+            "minimum": 0
           }
         }
       },

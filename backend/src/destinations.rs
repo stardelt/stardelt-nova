@@ -2,8 +2,10 @@
 //! (design ticket stardelt-nova#273, slice a).
 //!
 //! A destination is an *address* other parts of Nova point at — an alert rule, a
-//! pipeline failure notice, an access request. Slice a is the resource and its CRUD
-//! only: nothing here sends mail or calls a webhook.
+//! pipeline failure notice, an access request. Slice a is the resource and its CRUD;
+//! slice b adds one test message (`POST /api/destinations/{id}/test`), sent to a
+//! webhook and recorded in `destination_delivery`. Mail waits for the platform's SMTP
+//! relay, so an email destination answers `400` there rather than pretending to send.
 //!
 //! The owner group decides who sees a destination, the same rule the rest of Nova uses
 //! for group-facing resources: a member of the group, or an administrator; another
@@ -13,7 +15,7 @@
 //! No secret is stored here. A webhook's header secrets wait for the service-identity
 //! decision (slice c).
 //!
-//! Without a state store (`NOVA_DATABASE_URL` unset) all three routes answer
+//! Without a state store (`NOVA_DATABASE_URL` unset) all four routes answer
 //! `503 {"error":"the state store is not configured"}`.
 
 use std::collections::HashMap;
@@ -304,6 +306,170 @@ pub async fn remove(
     }
 }
 
+/// What one webhook attempt did; `detail` must never contain the URL or a header value.
+#[derive(Debug, PartialEq)]
+pub(crate) struct DeliveryOutcome {
+    /// `delivered` or `failed`, the values the table's CHECK allows.
+    pub status: &'static str,
+    /// The webhook's answer, when there was one.
+    pub http_status: Option<u16>,
+    /// One sentence for the person who asked; never `reqwest::Error::to_string()`, which
+    /// embeds the URL.
+    pub detail: String,
+}
+
+/// The fixed sentence a test message carries, so a receiver can recognise it.
+const TEST_MESSAGE: &str = "stardelt test message";
+/// How long a webhook has to answer before the attempt counts as failed.
+const DELIVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// POST the fixed test message to `url`, with a 5-second bound. The sentence in `detail`
+/// is Nova's own; `reqwest::Error::to_string()` is not used because it embeds the URL.
+///
+/// No retry and no backoff: the alert sender owns that loop (slice c and later).
+pub(crate) async fn deliver_webhook(
+    client: &reqwest::Client,
+    url: &str,
+    destination: &str,
+) -> DeliveryOutcome {
+    let body = serde_json::json!({ "text": TEST_MESSAGE, "destination": destination });
+    let sent = client
+        .post(url)
+        .timeout(DELIVERY_TIMEOUT)
+        .json(&body)
+        .send()
+        .await;
+    match sent {
+        Ok(response) => {
+            let status = response.status();
+            DeliveryOutcome {
+                status: if status.is_success() {
+                    "delivered"
+                } else {
+                    "failed"
+                },
+                http_status: Some(status.as_u16()),
+                detail: format!("HTTP {status}"),
+            }
+        }
+        Err(e) if e.is_timeout() => DeliveryOutcome {
+            status: "failed",
+            http_status: None,
+            detail: "the webhook did not answer within 5 seconds".into(),
+        },
+        Err(e) if e.is_connect() => DeliveryOutcome {
+            status: "failed",
+            http_status: None,
+            detail: "the webhook was unreachable".into(),
+        },
+        Err(_) => DeliveryOutcome {
+            status: "failed",
+            http_status: None,
+            detail: "the webhook request failed".into(),
+        },
+    }
+}
+
+/// Whether an attempt counts as delivered. `DestinationTest::ok` is exactly this.
+fn is_delivered(outcome: &DeliveryOutcome) -> bool {
+    outcome.status == "delivered"
+}
+
+/// `POST /api/destinations/{id}/test` answer: what the attempt did.
+#[derive(Serialize, Debug, PartialEq, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DestinationTest {
+    /// True only for `delivered`.
+    pub ok: bool,
+    /// The webhook's HTTP status, when it answered.
+    pub status: Option<u16>,
+    /// One sentence; never the URL or a header value.
+    pub detail: String,
+}
+
+/// The one delivery record this module writes; `subject_kind` is always `test` here.
+const INSERT_DELIVERY: &str = "INSERT INTO destination_delivery \
+     (destination_id, subject_kind, status, http_status, detail, attempted_at) \
+     VALUES ($1, 'test', $2, $3, $4, $5)";
+
+/// `POST /api/destinations/{id}/test` — send one test message to a webhook destination
+/// and record the attempt.
+///
+/// An email destination answers `400` until the platform's SMTP relay is configured; an
+/// id that does not exist, or one the caller may not see, answers the module's `404`
+/// rather than a `403` that would confirm the id. A failed delivery record is logged and
+/// the delivery result still answered: the message was already sent.
+#[utoipa::path(
+    post,
+    operation_id = "destinations_test",
+    path = "/api/destinations/{id}/test",
+    tag = "internal",
+    description = "Send one test message to a webhook destination and record the attempt. An email destination answers 400 until the platform's SMTP relay exists. The answer never contains the webhook's URL.",
+    params(("id" = i64, Path, description = "The destination's id")),
+    responses(
+        (status = 200, description = "What the attempt did", body = DestinationTest),
+        (status = 400, description = "An email destination, or a config without a usable url", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such destination, or it is not the caller's", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub async fn test(
+    State(s): State<Arc<AppState>>,
+    caller: Option<Extension<Principal>>,
+    Path(id): Path<i64>,
+) -> Response {
+    let Some(pool) = s.db.as_ref() else {
+        return unavailable();
+    };
+    let found = sqlx::query_as::<_, Destination>(
+        "SELECT id, owner_group, name, kind, config, created_at, updated_at \
+         FROM destination WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await;
+    let row = match found {
+        Ok(Some(row)) => row,
+        Ok(None) => return not_found(),
+        Err(e) => return store_failed(e),
+    };
+    if !may_see(&row, caller.as_ref().map(|c| &c.0), &s.dev_user) {
+        return not_found();
+    }
+    if row.kind == "email" {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "email delivery needs the platform's SMTP relay, which is not configured",
+        );
+    }
+    let Some(url) = row.config.get("url").and_then(|v| v.as_str()) else {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "a webhook destination needs config.url with an http or https address",
+        );
+    };
+    let outcome = deliver_webhook(&s.http, url, &format!("{}/{}", row.owner_group, row.name)).await;
+    // Epoch milliseconds, like `create` (`chrono` has no `clock` feature here).
+    let attempted_at = crate::jobs::now_ms() as i64;
+    if let Err(e) = sqlx::query(INSERT_DELIVERY)
+        .bind(row.id)
+        .bind(outcome.status)
+        .bind(outcome.http_status.map(i32::from))
+        .bind(&outcome.detail)
+        .bind(attempted_at)
+        .execute(pool)
+        .await
+    {
+        tracing::warn!(error = %e, "destination delivery record failed");
+    }
+    Json(DestinationTest {
+        ok: is_delivered(&outcome),
+        status: outcome.http_status,
+        detail: outcome.detail,
+    })
+    .into_response()
+}
+
 /// PostgreSQL's `unique_violation`.
 fn is_unique_violation(e: &sqlx::Error) -> bool {
     e.as_database_error()
@@ -472,5 +638,134 @@ mod tests {
         assert!(!may_see(&owner, Some(&outsider), "stardelt-dev"));
         assert!(may_see(&owner, Some(&admin), "stardelt-dev"));
         assert!(may_see(&owner, None, "stardelt-dev"));
+    }
+
+    // --- the test message (slice b) -------------------------------------------------
+    // A local mock receiver on `127.0.0.1:0`, the pattern `airflow.rs` uses for its fake.
+    // The URL carries a canary so a test can prove `detail` never repeats it.
+
+    /// The unique string every mock URL below carries; no `detail` may contain it.
+    const CANARY: &str = "canary-destination-url";
+    const DESTINATION: &str = "analytics/revenue";
+
+    /// One mock receiver answering `status` after `delay`; returns its base URL.
+    async fn mock(status: StatusCode, delay: std::time::Duration) -> String {
+        let app = axum::Router::new().route(
+            "/{*rest}",
+            axum::routing::any(move |body: String| async move {
+                tokio::time::sleep(delay).await;
+                (status, body)
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}/{CANARY}")
+    }
+
+    fn assert_no_canary(outcome: &DeliveryOutcome) {
+        assert!(
+            !outcome.detail.contains(CANARY),
+            "detail names the URL: {}",
+            outcome.detail
+        );
+    }
+
+    #[tokio::test]
+    async fn deliver_webhook_posts_the_fixed_test_message() {
+        // Record what the receiver really got: method, path and body.
+        type Seen = Arc<std::sync::Mutex<Option<(String, String, serde_json::Value)>>>;
+        let seen: Seen = Arc::new(std::sync::Mutex::new(None));
+        let recorder = Arc::clone(&seen);
+        let app = axum::Router::new().route(
+            "/{*rest}",
+            axum::routing::post(
+                move |method: axum::http::Method,
+                      uri: axum::http::Uri,
+                      axum::Json(body): axum::Json<serde_json::Value>| {
+                    let recorder = Arc::clone(&recorder);
+                    async move {
+                        *recorder.lock().unwrap() =
+                            Some((method.to_string(), uri.path().to_string(), body));
+                        StatusCode::NO_CONTENT
+                    }
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let url = format!("http://{addr}/{CANARY}");
+        let outcome = deliver_webhook(&reqwest::Client::new(), &url, DESTINATION).await;
+        assert_eq!(outcome.status, "delivered");
+        assert_eq!(outcome.http_status, Some(204));
+        assert!(outcome.detail.starts_with("HTTP 204"), "{}", outcome.detail);
+        assert_no_canary(&outcome);
+        let (method, path, body) = seen
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the receiver was called");
+        assert_eq!(method, "POST");
+        assert_eq!(path, format!("/{CANARY}"));
+        assert_eq!(
+            body,
+            serde_json::json!({ "text": "stardelt test message", "destination": DESTINATION })
+        );
+    }
+
+    #[tokio::test]
+    async fn deliver_webhook_reports_a_failed_response() {
+        let url = mock(StatusCode::INTERNAL_SERVER_ERROR, std::time::Duration::ZERO).await;
+        let outcome = deliver_webhook(&reqwest::Client::new(), &url, DESTINATION).await;
+        assert_eq!(outcome.status, "failed");
+        assert_eq!(outcome.http_status, Some(500));
+        assert!(outcome.detail.starts_with("HTTP 500"), "{}", outcome.detail);
+        assert_no_canary(&outcome);
+    }
+
+    #[tokio::test]
+    async fn deliver_webhook_gives_up_after_the_bound() {
+        let url = mock(StatusCode::NO_CONTENT, std::time::Duration::from_secs(6)).await;
+        let outcome = deliver_webhook(&reqwest::Client::new(), &url, DESTINATION).await;
+        assert_eq!(outcome.status, "failed");
+        assert_eq!(outcome.http_status, None);
+        assert_eq!(
+            outcome.detail,
+            "the webhook did not answer within 5 seconds"
+        );
+        assert_no_canary(&outcome);
+    }
+
+    #[tokio::test]
+    async fn a_connect_error_names_no_url() {
+        // The canary sits in the host part and does not resolve, so this is the
+        // unreachable branch and the error that carries the URL is not echoed.
+        let url = format!("http://{CANARY}.invalid/hook");
+        let outcome = deliver_webhook(&reqwest::Client::new(), &url, DESTINATION).await;
+        assert_eq!(outcome.status, "failed");
+        assert_eq!(outcome.http_status, None);
+        assert_eq!(outcome.detail, "the webhook was unreachable");
+        assert_no_canary(&outcome);
+    }
+
+    #[test]
+    fn ok_is_true_only_for_a_delivered_attempt() {
+        let delivered = DeliveryOutcome {
+            status: "delivered",
+            http_status: Some(204),
+            detail: "HTTP 204 No Content".into(),
+        };
+        let failed = DeliveryOutcome {
+            status: "failed",
+            http_status: None,
+            detail: "the webhook was unreachable".into(),
+        };
+        assert!(is_delivered(&delivered));
+        assert!(!is_delivered(&failed));
     }
 }
