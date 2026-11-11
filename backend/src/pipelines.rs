@@ -2614,10 +2614,10 @@ async fn runs_across_pipelines(
     // The notebook page is owner-group scoped: an administrator gets no wider view (#517).
     // Checked before the cluster and the list, like the usage route, so a caller outside the
     // group is refused even when no pipeline of their own is visible.
-    if let Some((group, _)) = &filter.notebook {
-        if !who.groups.iter().any(|g| g == group) {
-            return Err(crate::notebooks::forbidden_group(group));
-        }
+    if let Some((group, _)) = &filter.notebook
+        && !who.groups.iter().any(|g| g == group)
+    {
+        return Err(crate::notebooks::forbidden_group(group));
     }
 
     let resources = resources.ok_or_else(no_cluster)?;
