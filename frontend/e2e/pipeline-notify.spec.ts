@@ -1,8 +1,9 @@
 import { test, expect, type Page, type Route } from '@playwright/test'
 
-// "Tell … when a run fails" in the schedule dialog and on the pipeline page (stardelt-nova#815
-// slice d): the group's destinations are the checkboxes, the dialog sends `notify.onFailure` in
-// every create and update, and the page names the destinations when the list is not empty.
+// "Tell … when a run ends" in the schedule dialog and on the pipeline page (stardelt-nova#815
+// slices d and c2c): the group's destinations are the checkboxes, one group per ending, the
+// dialog sends all three `notify` lists in every create and update, and the page names each
+// list that is not empty.
 
 const ME = { user: 'e2e', auth_mode: 'static-dev', demo: false, warehouse: '', groups: ['sales'] }
 
@@ -96,12 +97,15 @@ test('a ticked destination is sent as notify.onFailure with the rest of the sche
   await expect(dialog.getByRole('checkbox')).toHaveCount(0)
   await dialog.getByText('Advanced', { exact: true }).click()
 
+  // One group of checkboxes per ending, so the same destination name appears three times.
+  const fails = dialog.getByRole('group', { name: 'When it fails' })
+  await expect(dialog.getByRole('checkbox')).toHaveCount(6)
   // Only the pipeline's own group is listed.
-  await expect(dialog.getByLabel('on-call (webhook)')).toBeVisible()
-  await expect(dialog.getByLabel('data-team (email)')).toBeVisible()
+  await expect(fails.getByLabel('on-call (webhook)')).toBeVisible()
+  await expect(fails.getByLabel('data-team (email)')).toBeVisible()
   await expect(dialog.getByText('finance-page')).toHaveCount(0)
 
-  await dialog.getByLabel('on-call (webhook)').check()
+  await fails.getByLabel('on-call (webhook)').check()
   await dialog.getByRole('button', { name: 'Save schedule' }).click()
 
   await expect.poll(() => puts()).not.toBeNull()
@@ -110,21 +114,55 @@ test('a ticked destination is sent as notify.onFailure with the rest of the sche
     schedule: { cron: '0 2 * * *', timezone: 'Europe/Berlin' },
     params: {},
     options: { retries: 1, backoffMinutes: 5, timeoutMinutes: 120, concurrency: 'Forbid' },
-    notify: { onFailure: ['on-call'] },
+    notify: { onFailure: ['on-call'], onSuccess: [], onRecovered: [] },
   })
 })
 
-test('a stored notification starts ticked and the page names it', async ({ page }) => {
-  await open(page, detail({ onFailure: ['on-call'] }), DESTINATIONS)
-
-  await expect(page.getByText('Tells on failure')).toBeVisible()
-  await expect(page.getByText('on-call', { exact: true })).toBeVisible()
+test('a destination ticked for successes is sent as notify.onSuccess', async ({ page }) => {
+  const { puts } = await open(page, detail({ onFailure: [] }), DESTINATIONS)
 
   await page.getByRole('button', { name: 'Edit schedule' }).click()
   const dialog = page.getByRole('dialog', { name: 'Edit the schedule' })
   await dialog.getByText('Advanced', { exact: true }).click()
-  await expect(dialog.getByLabel('on-call (webhook)')).toBeChecked()
-  await expect(dialog.getByLabel('data-team (email)')).not.toBeChecked()
+
+  await dialog.getByRole('group', { name: 'When it succeeds' }).getByLabel('on-call (webhook)').check()
+  await dialog.getByRole('button', { name: 'Save schedule' }).click()
+
+  await expect.poll(() => puts()).not.toBeNull()
+  expect(puts()).toEqual({
+    sql: 'select 1',
+    schedule: { cron: '0 2 * * *', timezone: 'Europe/Berlin' },
+    params: {},
+    options: { retries: 1, backoffMinutes: 5, timeoutMinutes: 120, concurrency: 'Forbid' },
+    notify: { onFailure: [], onSuccess: ['on-call'], onRecovered: [] },
+  })
+})
+
+test('a stored notification starts ticked and the page names it', async ({ page }) => {
+  await open(
+    page,
+    detail({ onFailure: ['on-call'], onSuccess: ['data-team'], onRecovered: ['on-call'] }),
+    DESTINATIONS,
+  )
+
+  await expect(page.getByText('Tells on failure')).toBeVisible()
+  await expect(page.getByText('Tells on success')).toBeVisible()
+  await expect(page.getByText('Tells on recovery')).toBeVisible()
+  await expect(page.getByText('data-team', { exact: true })).toBeVisible()
+  await expect(page.getByText('on-call', { exact: true })).toHaveCount(2)
+
+  await page.getByRole('button', { name: 'Edit schedule' }).click()
+  const dialog = page.getByRole('dialog', { name: 'Edit the schedule' })
+  await dialog.getByText('Advanced', { exact: true }).click()
+  const fails = dialog.getByRole('group', { name: 'When it fails' })
+  const succeeds = dialog.getByRole('group', { name: 'When it succeeds' })
+  const recovers = dialog.getByRole('group', { name: 'When it recovers' })
+  await expect(fails.getByLabel('on-call (webhook)')).toBeChecked()
+  await expect(fails.getByLabel('data-team (email)')).not.toBeChecked()
+  await expect(succeeds.getByLabel('data-team (email)')).toBeChecked()
+  await expect(succeeds.getByLabel('on-call (webhook)')).not.toBeChecked()
+  await expect(recovers.getByLabel('on-call (webhook)')).toBeChecked()
+  await expect(recovers.getByLabel('data-team (email)')).not.toBeChecked()
 })
 
 test('an empty group says so and links to the Destinations page', async ({ page }) => {
