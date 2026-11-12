@@ -30,7 +30,9 @@
 //!   lines and 512 KiB and say `truncated: true` beyond that.
 //! - **Unreachable upstreams are 502, never 500** (rule U12 of `design/ui-conformance.md`):
 //!   without a cluster client or an Airflow client the routes answer 503 and say which one is
-//!   missing; an Airflow that refuses or fails answers 502 `the scheduler did not answer`.
+//!   missing; an Airflow that refuses Nova's service user answers 502 `the scheduler refused
+//!   Nova's service user`, and one that is unreachable answers 502 `the scheduler did not
+//!   answer`.
 //! - **Audit**: every action writes one `audit` line, including a refusal that never reaches
 //!   Airflow; no field can hold a note or log text.
 //! - **Writes** (#210): *Schedule* creates a `Pipeline` for one of the caller's **own** groups
@@ -2498,11 +2500,19 @@ fn shape_not_editable() -> Fail {
     )
 }
 
-/// An Airflow that refused or failed is an unreachable upstream: 502, never 500. The detail
-/// goes to the log; the sentence stays one line (and carries no token — the client scrubs).
+/// An Airflow that refused Nova's service user is a configuration problem, not an
+/// unreachable scheduler: say which one it is (stardelt-platform#1047). The detail goes to
+/// the log; the sentence stays one line and carries no credential.
 fn scheduler_fail(e: AirflowError) -> Fail {
     match e {
         AirflowError::NotConfigured => scheduler_not_configured(),
+        AirflowError::Refused(m) => {
+            tracing::warn!(error = %m, "Airflow refused Nova's service user");
+            Fail::new(
+                StatusCode::BAD_GATEWAY,
+                "the scheduler refused Nova's service user",
+            )
+        }
         other => {
             tracing::warn!(error = %other, "Airflow request failed");
             Fail::new(StatusCode::BAD_GATEWAY, "the scheduler did not answer")
@@ -5675,7 +5685,7 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
-    use crate::airflow::{AirflowConfig, DagRun, DagSummary};
+    use crate::airflow::{AirflowConfig, AirflowError, DagRun, DagSummary};
     use crate::auth::{Principal, Secret};
     use crate::notebooks::NotebookStore;
     use crate::notebooks::fake::{FakeS3, notebook_store};
@@ -7691,6 +7701,20 @@ mod tests {
             assert_eq!(error.status(), StatusCode::BAD_GATEWAY, "{action}");
             assert_eq!(error.message(), "the scheduler did not answer", "{action}");
         }
+    }
+
+    #[test]
+    fn a_refused_sign_in_is_not_reported_as_an_unanswered_scheduler() {
+        let fail = scheduler_fail(AirflowError::Refused("401".into()));
+        assert_eq!(fail.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(fail.message(), "the scheduler refused Nova's service user");
+    }
+
+    #[test]
+    fn an_unreachable_airflow_still_says_it_did_not_answer() {
+        let fail = scheduler_fail(AirflowError::Unavailable("connect refused".into()));
+        assert_eq!(fail.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(fail.message(), "the scheduler did not answer");
     }
 
     #[tokio::test]
