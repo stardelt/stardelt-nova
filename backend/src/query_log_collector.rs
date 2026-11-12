@@ -14,7 +14,7 @@ use axum::{
     extract::{DefaultBodyLimit, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
-    routing::post,
+    routing::{get, post},
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -278,6 +278,10 @@ pub fn router(
             "/api/v1/lineage",
             post(ingest_lineage).layer(DefaultBodyLimit::max(MAX_LINEAGE_BODY_BYTES)),
         )
+        // Prometheus text (stardelt-operator#607 item 6). Unauthenticated on purpose: a
+        // scraper has no events token, and this listener is cluster-internal — the
+        // ingress exposes 8080 only.
+        .route("/metrics", get(crate::metrics::endpoint))
         .with_state(state)
 }
 
@@ -287,6 +291,9 @@ fn env_nonempty(name: &str) -> Option<String> {
 
 /// Start the collector when `NOVA_INTERNAL_ADDR` and `NOVA_EVENTS_TOKEN` are both set;
 /// otherwise do nothing (the default: no second port is opened).
+///
+/// The same listener also serves `/metrics`, so a deployment without `NOVA_EVENTS_TOKEN`
+/// has no scrape target either.
 pub async fn start(db: Option<sqlx::PgPool>) -> anyhow::Result<()> {
     let Some(addr) = env_nonempty("NOVA_INTERNAL_ADDR") else {
         return Ok(());
@@ -805,5 +812,34 @@ mod tests {
         assert_eq!(ev.inputs.len(), 1);
         assert_eq!(ev.inputs[0].namespace, "hive.tpch");
         assert_eq!(ev.inputs[0].name, "ok");
+    }
+
+    #[tokio::test]
+    async fn metrics_needs_no_token_and_is_prometheus_text() {
+        let (tx, _rx) = mpsc::channel(4);
+        let (ltx, _lrx) = mpsc::channel(4);
+        let app = router("s3cret", tx, ltx);
+        let req = Request::builder()
+            .method("GET")
+            .uri("/metrics")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let content_type = resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            content_type.starts_with("text/plain"),
+            "content-type was {content_type}"
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8_lossy(&bytes);
+        assert!(body.contains("nova_build_info"), "{body}");
     }
 }

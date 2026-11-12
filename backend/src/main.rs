@@ -114,6 +114,7 @@ mod jobs;
 mod lineage_api;
 mod lineage_event;
 mod lineage_store;
+mod metrics;
 mod migrations;
 mod notebooks;
 mod openapi;
@@ -843,6 +844,7 @@ fn admin_router() -> Router<Arc<AppState>> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    metrics::init();
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
@@ -1153,7 +1155,9 @@ async fn main() -> anyhow::Result<()> {
             .nest("/auth", auth::dev_router()),
     };
 
-    let app = app(state.clone(), api, &static_dir);
+    // Every public response is counted for /metrics (stardelt-operator#607).
+    let app = app(state.clone(), api, &static_dir)
+        .layer(axum::middleware::from_fn(metrics::count_requests));
 
     let bind = std::env::var("NOVA_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
     info!(
