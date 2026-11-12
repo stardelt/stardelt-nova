@@ -176,9 +176,9 @@ export default function Overview() {
     <div className="space-y-6 max-w-6xl">
       <header className="flex items-end justify-between gap-4 flex-wrap">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">Lakehouse overview</h1>
+          <h1 className="text-2xl font-bold tracking-tight">Overview</h1>
           <p className="text-text-dim text-sm mt-1">
-            Your catalogs, one engine, one place to load and move data.
+            Your catalogs, how fresh they are, and the last two weeks of queries and runs.
             {me.data?.demo && <span className="text-warn"> Demo data is in memory.</span>}
           </p>
         </div>

@@ -51,8 +51,7 @@ export default function Notebooks() {
         <div className="min-w-0">
           <h1 className="text-2xl font-bold tracking-tight">Notebooks</h1>
           <p className="text-text-dim text-sm mt-1">
-            Published notebooks from your groups. Write and run them in JupyterHub — same Keycloak
-            account, same catalog.
+            Published notebooks from your groups. Write and run them in JupyterHub, with the same sign-in and the same catalogs.
           </p>
         </div>
       </header>

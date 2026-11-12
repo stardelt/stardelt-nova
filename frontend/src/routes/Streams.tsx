@@ -76,8 +76,7 @@ export default function Streams() {
       <div>
         <h1 className="text-2xl font-bold tracking-tight">Streams</h1>
         <p className="text-sm text-text-dim">
-          Jobs that read a topic from the streaming bus and write an Iceberg table. The operator runs them; this page
-          reports what it sees.
+          Jobs that read a stream topic and write it into a table, without stopping.
         </p>
       </div>
 

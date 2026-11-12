@@ -5090,7 +5090,7 @@ test.describe('overview metrics', () => {
   test('tiles_show_totals_and_no_format_tile', async ({ browser }) => {
     const { context, page } = await open(browser)
     await page.goto('/')
-    await expect(page.getByRole('heading', { level: 1, name: 'Lakehouse overview' })).toBeVisible()
+    await expect(page.getByRole('heading', { level: 1, name: 'Overview' })).toBeVisible()
 
     // The tiles read the totals: catalogs, schemas, tables, size and rows.
     await expect(tile(page, 'Catalogs')).toContainText('3')
@@ -5426,7 +5426,7 @@ test.describe('overview metrics', () => {
     // The next visit reads the stored setting and never shows the card.
     const again = await openFirstRun(browser, { settings: { 'first-run-card-dismissed': true } })
     await again.page.goto('/')
-    await expect(again.page.getByRole('heading', { name: 'Lakehouse overview' })).toBeVisible()
+    await expect(again.page.getByRole('heading', { level: 1, name: 'Overview' })).toBeVisible()
     await again.page.waitForTimeout(1000)
     await expect(firstRunCard(again.page)).toHaveCount(0)
     expect(again.puts).toEqual([])
