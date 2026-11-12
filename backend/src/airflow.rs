@@ -660,6 +660,33 @@ impl AirflowClient {
             .await?;
         Self::parse(body)
     }
+
+    /// Clear only the failed task instances of one run, in place: the run keeps its id, date
+    /// and parameters, and the tasks that succeeded are not repeated. This is Airflow's
+    /// run-scoped `clear`; the DAG-level `clearTaskInstances` is 403 for
+    /// `stardelt-nova-operator` (measured on 3.2.2 — nova#816). Answers the task instances the
+    /// clear selected; an empty list means there was nothing failed to retry.
+    pub async fn clear_failed_tasks(
+        &self,
+        dag_id: &str,
+        run_id: &str,
+    ) -> Result<Vec<TaskInstance>, AirflowError> {
+        let url = self.url(&format!(
+            "{API}/dags/{}/dagRuns/{}/clear",
+            encode_segment(dag_id),
+            encode_segment(run_id)
+        ));
+        let body = self
+            .send(|token| {
+                self.http
+                    .post(&url)
+                    .bearer_auth(token)
+                    .json(&json!({ "dry_run": false, "only_failed": true }))
+            })
+            .await?;
+        let page: TasksPage = Self::parse(body)?;
+        Ok(page.task_instances)
+    }
 }
 
 /// The DAG list envelope: `{"dags":[…],"total_entries":N}`.
@@ -1015,6 +1042,25 @@ mod fake {
         Ok(Json(run))
     }
 
+    /// The run-scoped clear (nova#816): only failed tasks are selected, so the answer carries
+    /// one `failed` and one `upstream_failed` entry.
+    async fn clear_run(
+        State(s): State<Shared>,
+        OriginalUri(uri): OriginalUri,
+        headers: HeaderMap,
+        Json(body): Json<Value>,
+    ) -> Result<Json<Value>, Refusal> {
+        let mut state = s.lock().unwrap();
+        remember(&mut state, "POST", &uri, Some(body.clone()));
+        authorize(&mut state, &headers)?;
+        Ok(Json(json!({
+            "task_instances": [
+                { "task_id": "insert", "state": "failed", "try_number": 2 },
+                { "task_id": "schema", "state": "upstream_failed", "try_number": 1 }
+            ]
+        })))
+    }
+
     /// Start the fake and a client signed in against it.
     pub(super) async fn start() -> (AirflowClient, AirflowConfig, Shared) {
         let shared: Shared = Arc::new(Mutex::new(seeded()));
@@ -1024,6 +1070,10 @@ mod fake {
             .route("/api/v2/dags/{dag_id}", get(one_dag).patch(pause))
             .route("/api/v2/dags/{dag_id}/dagRuns", get(runs).post(trigger))
             .route("/api/v2/dags/{dag_id}/dagRuns/{run_id}", patch(fail_run))
+            .route(
+                "/api/v2/dags/{dag_id}/dagRuns/{run_id}/clear",
+                post(clear_run),
+            )
             .route(
                 "/api/v2/dags/{dag_id}/dagRuns/{run_id}/taskInstances",
                 get(tasks),
@@ -1341,6 +1391,42 @@ mod tests {
             "PATCH /api/v2/dags/stardelt__spike-j1/dagRuns/manual__2026-10-20T07%3A23%3A50.608876%2B00%3A00"
         );
         assert_eq!(body.as_ref(), Some(&json!({ "state": "failed" })));
+    }
+
+    #[tokio::test]
+    async fn clear_failed_tasks_posts_only_failed() {
+        let (client, _cfg, fake) = fake::start().await;
+        let tasks = client
+            .clear_failed_tasks(
+                "stardelt__spike-j1",
+                "manual__2026-10-20T07:23:50.608876+00:00",
+            )
+            .await
+            .unwrap();
+        let ids: Vec<(&str, Option<&str>)> = tasks
+            .iter()
+            .map(|task| (task.task_id.as_str(), task.state.as_deref()))
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                ("insert", Some("failed")),
+                ("schema", Some("upstream_failed"))
+            ]
+        );
+        let state = fake.lock().unwrap();
+        let (line, body) = state
+            .calls
+            .iter()
+            .rev()
+            .find(|(line, _)| line.contains("/clear"))
+            .expect("a clear call");
+        assert_eq!(
+            line,
+            "POST /api/v2/dags/stardelt__spike-j1/dagRuns/manual__2026-10-20T07%3A23%3A50.608876%2B00%3A00/clear"
+        );
+        assert_eq!(body.as_ref().unwrap()["only_failed"], json!(true));
+        assert_eq!(body.as_ref().unwrap()["dry_run"], json!(false));
     }
 
     #[tokio::test]

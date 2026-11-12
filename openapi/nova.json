@@ -5543,6 +5543,106 @@
         }
       }
     },
+    "/api/pipelines/{namespace}/{name}/runs/{run_id}/retry": {
+      "post": {
+        "tags": [
+          "public"
+        ],
+        "description": "Retry the failed tasks of a run, **in the same run**: the run keeps its id, date and parameters, and the tasks that already succeeded are not repeated (Airflow's run-scoped clear). A viewer (`spec.viewers`) may retry, as it may run and stop. A paused pipeline, a run that is not `failed`, and a run with no failed tasks are refused with 409. The run id is looked up through this pipeline's DAG id first: a run id of another pipeline answers 404 and nothing is cleared. Answers the fresh `RunView` and `Cache-Control: no-store`. Every attempt is audited, including a refusal.",
+        "operationId": "pipelines_run_retry",
+        "parameters": [
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "The Pipeline's namespace (Nova's own)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Pipeline name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "run_id",
+            "in": "path",
+            "description": "Airflow's run id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The run, with its failed tasks cleared for another attempt",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunView"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token to sign in with",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such pipeline for this caller, or no such run",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The run is not failed, the pipeline is paused, or there is nothing to retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The scheduler or the cluster did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No cluster connection, or the scheduler is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/pipelines/{namespace}/{name}/runs/{run_id}/stop": {
       "post": {
         "tags": [
