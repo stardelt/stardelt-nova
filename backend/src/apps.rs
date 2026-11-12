@@ -378,8 +378,9 @@ fn links_for(base: &str, admin: bool) -> Vec<AppLink> {
     SPECS
         .iter()
         .filter(|spec| spec.id != "nova" && browsable(spec))
-        // The engine's own UI lists cluster-wide activity: administrators only.
-        .filter(|spec| admin || spec.id != "trino")
+        // The engine's own UI lists cluster-wide activity, and a realm user's Airflow
+        // role carries no global DAG read (FAB answers 403): administrators only.
+        .filter(|spec| admin || (spec.id != "trino" && spec.id != "airflow"))
         .filter_map(|spec| {
             let external_url = public_url(base, spec);
             if external_url.is_empty() {
@@ -405,7 +406,7 @@ fn links_for(base: &str, admin: bool) -> Vec<AppLink> {
     operation_id = "apps_links",
     path = "/api/apps/links",
     tag = "internal",
-    description = "The apps the caller may open from the header's app switcher: `id`, `name`, `category` and the address a browser opens (`external_url`). For every signed-in user. No status and no workload data: liveness is operator information (`GET /api/apps`). Left out: Nova itself, apps with no browsable surface, apps whose address cannot be built because no base domain is configured, and the engine's own UI for everybody who is not an administrator. Field names are snake_case.",
+    description = "The apps the caller may open from the header's app switcher: `id`, `name`, `category` and the address a browser opens (`external_url`). For every signed-in user. No status and no workload data: liveness is operator information (`GET /api/apps`). Left out: Nova itself, apps with no browsable surface, apps whose address cannot be built because no base domain is configured, and the engine's own UI and Airflow for everybody who is not an administrator. Field names are snake_case.",
     responses(
         (status = 200, description = "One entry per app the caller may open, in the order the service catalog declares them", body = [AppLink]),
         (status = 401, description = "Not signed in", body = crate::openapi::ErrorResponse),
@@ -1076,12 +1077,11 @@ mod tests {
         // No base domain (demo mode, local run): no links, rather than empty hrefs.
         assert!(links_for("", true).is_empty());
 
-        // Both calls return the same list: the engine has no browsable surface
-        // (stardelt-platform#194), so there is nothing left to restrict from
-        // non-admins (platform#181).
+        // A plain realm user's Airflow role carries no global DAG read (FAB answers
+        // 403), so the switcher offers only what the caller can open.
         let user_links = links_for("alpha.dev.stardelt.io", false);
         let ids: Vec<&str> = user_links.iter().map(|l| l.id.as_str()).collect();
-        assert_eq!(ids, ["superset", "airflow", "jupyterhub"]);
+        assert_eq!(ids, ["superset", "jupyterhub"]);
     }
 
     #[test]
