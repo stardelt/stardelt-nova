@@ -130,6 +130,9 @@ mod query_log_collector;
 mod query_log_event;
 mod query_log_store;
 mod saved_queries;
+// Wired into the session store by stardelt-nova#103 slice c.
+#[allow(dead_code)]
+mod seal;
 mod secret_store;
 mod shared_accounts;
 mod stages;
