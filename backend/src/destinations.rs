@@ -333,10 +333,20 @@ pub(crate) async fn deliver_webhook(
     destination: &str,
 ) -> DeliveryOutcome {
     let body = serde_json::json!({ "text": TEST_MESSAGE, "destination": destination });
+    post_webhook(client, url, &body).await
+}
+
+/// POST any body to `url`, with the same 5-second bound and the same sentences as the test
+/// message. The pipeline failure notice (`pipeline_notice.rs`) brings its own document.
+pub(crate) async fn post_webhook(
+    client: &reqwest::Client,
+    url: &str,
+    body: &serde_json::Value,
+) -> DeliveryOutcome {
     let sent = client
         .post(url)
         .timeout(DELIVERY_TIMEOUT)
-        .json(&body)
+        .json(body)
         .send()
         .await;
     match sent {
