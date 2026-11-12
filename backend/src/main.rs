@@ -134,6 +134,9 @@ mod saved_queries;
 #[allow(dead_code)]
 mod seal;
 mod secret_store;
+// Wired into the session store by stardelt-nova#103 slice c.
+#[allow(dead_code)]
+mod session_store;
 mod shared_accounts;
 mod stages;
 mod statements;
