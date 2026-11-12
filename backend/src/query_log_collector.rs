@@ -121,6 +121,15 @@ fn job_of(record: &QueryLogRecord) -> (String, String, String) {
             format!("pipeline:{pipeline}:{run}"),
         );
     }
+    // The tag is sent by the notebook helper's `_connect` (stardelt-python#106).
+    // The `source` branch below stays as the fallback for an image that predates the tag.
+    if let Some(notebook) = tag_value("notebook=") {
+        return (
+            "notebook".to_string(),
+            notebook.to_string(),
+            record.query_id.clone(),
+        );
+    }
     if record.source.as_deref() == Some("stardelt-notebook-helper") {
         return (
             "notebook".to_string(),
@@ -676,6 +685,30 @@ mod tests {
         let (namespace, name, _) = job_of(&record);
         assert_eq!(namespace, "notebook");
         assert_eq!(name, "alice");
+    }
+
+    #[test]
+    fn a_notebook_tag_names_the_notebook() {
+        let mut record = query_record("q7", "alice");
+        record.source = Some("stardelt-notebook-helper".to_string());
+        record.client_tags = vec!["notebook=mobility/trips.ipynb".to_string()];
+        let (namespace, name, run_key) = job_of(&record);
+        assert_eq!(
+            (namespace.as_str(), name.as_str(), run_key.as_str()),
+            ("notebook", "mobility/trips.ipynb", "q7")
+        );
+
+        // the pipeline tag still wins over the notebook tag
+        let mut both = query_record("q8", "alice");
+        both.client_tags = vec![
+            "pipeline=shop/orders".to_string(),
+            "notebook=other.ipynb".to_string(),
+        ];
+        let (namespace, name, _) = job_of(&both);
+        assert_eq!(
+            (namespace.as_str(), name.as_str()),
+            ("pipeline", "shop/orders")
+        );
     }
 
     #[test]
