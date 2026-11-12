@@ -7,9 +7,13 @@
 //! today it accepts everything (`allowall`), so this changes nothing observable until
 //! then, and unset variables leave every call exactly as it was.
 //!
-//! - All three variables (`NOVA_CATALOG_TOKEN_URL`, `NOVA_CATALOG_CLIENT_ID`,
-//!   `NOVA_CATALOG_CLIENT_SECRET`) or none. A partial configuration is a startup error,
-//!   not a silent fallback to calling the catalog unauthenticated.
+//! - `NOVA_CATALOG_CLIENT_ID` and `NOVA_CATALOG_CLIENT_SECRET` (both or neither) name the
+//!   client. A partial configuration is a startup error, not a silent fallback to calling
+//!   the catalog unauthenticated.
+//! - The endpoint is `NOVA_CATALOG_TOKEN_URL` when it is set; otherwise it is the
+//!   `token_endpoint` of the identity provider's discovery document
+//!   (stardelt-platform#611), so an install on any OIDC provider needs no URL. With
+//!   neither, there is no service token and the catalog is called as before.
 //! - One token in memory, reused until 60 s before `exp`; a caller that arrives while a
 //!   fetch is running waits for that fetch instead of starting a second one.
 //! - Neither the client secret nor a token is ever logged, returned or part of an error.
@@ -44,12 +48,25 @@ pub struct CatalogTokenConfig {
     pub client_secret: Secret,
 }
 
-impl CatalogTokenConfig {
-    /// The three `NOVA_CATALOG_*` variables, all or none.
+/// The `NOVA_CATALOG_*` variables, before the token endpoint is known.
+///
+/// The URL is optional here: [`CatalogTokenEnv::resolve`] takes the endpoint from the
+/// identity provider's discovery document when the variable is not set
+/// (stardelt-platform#611).
+#[derive(Clone, Debug)]
+pub struct CatalogTokenEnv {
+    client_id: String,
+    client_secret: Secret,
+    token_url: Option<String>,
+}
+
+impl CatalogTokenEnv {
+    /// The client variables, both or neither, and the URL if it is set.
     ///
     /// Empty values count as unset, so a chart that renders an empty string leaves the
     /// feature off exactly as an unset variable does. The secret is taken byte for byte —
-    /// a leading or trailing space can be part of it.
+    /// a leading or trailing space can be part of it. Some-but-not-both client variables
+    /// is still a startup error.
     pub fn from_env_with(get: impl Fn(&str) -> Option<String>) -> Result<Option<Self>, String> {
         let word = |key: &str| {
             get(key)
@@ -60,20 +77,13 @@ impl CatalogTokenConfig {
         let token_url = word("NOVA_CATALOG_TOKEN_URL");
         let client_secret = get("NOVA_CATALOG_CLIENT_SECRET").filter(|v| !v.is_empty());
 
-        match (client_id, client_secret, token_url) {
-            (None, None, None) => Ok(None),
-            (Some(client_id), Some(client_secret), Some(token_url)) => {
-                let parsed = url::Url::parse(&token_url)
-                    .map_err(|_| "NOVA_CATALOG_TOKEN_URL is not a URL".to_string())?;
-                if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
-                    return Err("NOVA_CATALOG_TOKEN_URL must be an http(s) URL".into());
-                }
-                Ok(Some(Self {
-                    token_url,
-                    client_id,
-                    client_secret: Secret::new(client_secret),
-                }))
-            }
+        match (client_id, client_secret) {
+            (None, None) if token_url.is_none() => Ok(None),
+            (Some(client_id), Some(client_secret)) => Ok(Some(Self {
+                client_id,
+                client_secret: Secret::new(client_secret),
+                token_url,
+            })),
             _ => Err("NOVA_CATALOG_CLIENT_ID, NOVA_CATALOG_CLIENT_SECRET and \
                       NOVA_CATALOG_TOKEN_URL must be set together"
                 .into()),
@@ -82,6 +92,46 @@ impl CatalogTokenConfig {
 
     pub fn from_env() -> Result<Option<Self>, String> {
         Self::from_env_with(|k| std::env::var(k).ok())
+    }
+
+    /// Whether an explicit `NOVA_CATALOG_TOKEN_URL` is part of this configuration.
+    pub fn has_token_url(&self) -> bool {
+        self.token_url.is_some()
+    }
+
+    /// The finished client: the explicit URL wins; otherwise the discovery
+    /// `token_endpoint`; otherwise there is no service token and the catalog keeps
+    /// being called as before.
+    ///
+    /// Either URL goes through the same `http(s)` + host check, so a provider that
+    /// advertises something else is a startup error rather than a silent outage.
+    pub fn resolve(
+        self,
+        discovery_token_endpoint: Option<String>,
+    ) -> Result<Option<CatalogTokenConfig>, String> {
+        let (token_url, source) = match self.token_url {
+            Some(url) => (url, "NOVA_CATALOG_TOKEN_URL"),
+            None => {
+                let Some(url) = discovery_token_endpoint
+                    .map(|v| v.trim().to_string())
+                    .filter(|v| !v.is_empty())
+                else {
+                    return Ok(None);
+                };
+                (url, "the OIDC discovery token_endpoint")
+            }
+        };
+
+        let parsed = url::Url::parse(&token_url).map_err(|_| format!("{source} is not a URL"))?;
+        if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+            return Err(format!("{source} must be an http(s) URL"));
+        }
+
+        Ok(Some(CatalogTokenConfig {
+            token_url,
+            client_id: self.client_id,
+            client_secret: self.client_secret,
+        }))
     }
 }
 
@@ -247,7 +297,7 @@ mod tests {
     use axum::{Json, Router};
     use serde_json::{Value, json};
 
-    use super::{CatalogToken, CatalogTokenConfig, TokenError};
+    use super::{CatalogToken, CatalogTokenConfig, CatalogTokenEnv, TokenError};
     use crate::catalog;
 
     const CLIENT: &str = "svc-catalog-nova";
@@ -469,13 +519,13 @@ mod tests {
     async fn no_header_when_unconfigured() {
         // None of the three variables: no client at all.
         assert!(
-            CatalogTokenConfig::from_env_with(env(&[]))
+            CatalogTokenEnv::from_env_with(env(&[]))
                 .expect("no configuration is not an error")
                 .is_none()
         );
         // Empty values count as unset, so a chart rendering "" changes nothing.
         assert!(
-            CatalogTokenConfig::from_env_with(env(&[
+            CatalogTokenEnv::from_env_with(env(&[
                 ("NOVA_CATALOG_CLIENT_ID", ""),
                 ("NOVA_CATALOG_CLIENT_SECRET", ""),
                 ("NOVA_CATALOG_TOKEN_URL", "  "),
@@ -504,6 +554,135 @@ mod tests {
         for (path, header) in seen {
             assert_eq!(header, None, "{path} must carry no Authorization");
         }
+    }
+
+    // -------------------------------------------------------------------
+    // The endpoint: explicit URL, discovery, or off (stardelt-platform#611)
+    // -------------------------------------------------------------------
+
+    const REALM_TOKEN: &str =
+        "https://id.example.test/realms/stardelt/protocol/openid-connect/token";
+    const DISCOVERED_TOKEN: &str = "https://login.example.test/oauth2/v2.0/token";
+
+    fn client_vars() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("NOVA_CATALOG_CLIENT_ID", CLIENT),
+            ("NOVA_CATALOG_CLIENT_SECRET", SECRET_CANARY),
+        ]
+    }
+
+    #[test]
+    fn explicit_token_url_is_used_unchanged() {
+        let mut pairs = client_vars();
+        pairs.push(("NOVA_CATALOG_TOKEN_URL", REALM_TOKEN));
+        let config = CatalogTokenEnv::from_env_with(env(&pairs))
+            .expect("a full configuration is accepted")
+            .expect("a client")
+            .resolve(Some(DISCOVERED_TOKEN.into()))
+            .expect("a valid endpoint")
+            .expect("a token client");
+
+        assert_eq!(config.token_url, REALM_TOKEN, "byte for byte");
+        assert_eq!(config.client_id, CLIENT);
+        assert_eq!(config.client_secret.expose(), SECRET_CANARY);
+    }
+
+    #[test]
+    fn discovery_endpoint_used_when_url_unset() {
+        let config = CatalogTokenEnv::from_env_with(env(&client_vars()))
+            .expect("id and secret without a URL are accepted")
+            .expect("a client")
+            .resolve(Some(DISCOVERED_TOKEN.into()))
+            .expect("the discovered endpoint is valid")
+            .expect("a token client");
+
+        assert_eq!(
+            config.token_url, DISCOVERED_TOKEN,
+            "the provider's token endpoint stands in for the missing variable"
+        );
+        assert_eq!(config.client_id, CLIENT);
+    }
+
+    #[test]
+    fn no_token_when_discovery_has_no_endpoint() {
+        // No URL and no discovery document: the feature is off, not an error — exactly
+        // as when nothing was configured before this ticket.
+        assert!(
+            CatalogTokenEnv::from_env_with(env(&client_vars()))
+                .expect("a client")
+                .expect("some configuration")
+                .resolve(None)
+                .expect("absence is not an error")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn discovered_endpoint_must_be_http() {
+        // The same two sentences as the explicit path, with the source named.
+        for (bad, expected) in [
+            (
+                "id.example.test/token",
+                "the OIDC discovery token_endpoint is not a URL",
+            ),
+            (
+                "ftp://id.example.test/token",
+                "the OIDC discovery token_endpoint must be an http(s) URL",
+            ),
+        ] {
+            let error = CatalogTokenEnv::from_env_with(env(&client_vars()))
+                .expect("a client")
+                .expect("some configuration")
+                .resolve(Some(bad.into()))
+                .expect_err("a non-http(s) endpoint is refused");
+            assert_eq!(error, expected, "{bad}");
+        }
+
+        // The explicit variable keeps its own sentence, unchanged.
+        let mut pairs = client_vars();
+        pairs.push(("NOVA_CATALOG_TOKEN_URL", "id.example.test/token"));
+        let error = CatalogTokenEnv::from_env_with(env(&pairs))
+            .expect("a client")
+            .expect("some configuration")
+            .resolve(None)
+            .expect_err("a non-URL is refused");
+        assert_eq!(error, "NOVA_CATALOG_TOKEN_URL is not a URL");
+    }
+
+    #[test]
+    fn client_id_without_secret_is_refused() {
+        let error = CatalogTokenEnv::from_env_with(env(&[("NOVA_CATALOG_CLIENT_ID", CLIENT)]))
+            .expect_err("half a client is a startup error");
+        assert_eq!(
+            error,
+            "NOVA_CATALOG_CLIENT_ID, NOVA_CATALOG_CLIENT_SECRET and NOVA_CATALOG_TOKEN_URL \
+             must be set together"
+        );
+        // The same holds with a URL that the pair would otherwise resolve: a client
+        // without its secret is never used.
+        let error = CatalogTokenEnv::from_env_with(env(&[
+            ("NOVA_CATALOG_CLIENT_ID", CLIENT),
+            ("NOVA_CATALOG_TOKEN_URL", REALM_TOKEN),
+        ]))
+        .expect_err("half a client is a startup error");
+        assert!(error.contains("must be set together"), "{error}");
+    }
+
+    #[test]
+    fn explicit_token_url_beats_discovery() {
+        let mut pairs = client_vars();
+        pairs.push(("NOVA_CATALOG_TOKEN_URL", REALM_TOKEN));
+        let config = CatalogTokenEnv::from_env_with(env(&pairs))
+            .expect("a client")
+            .expect("some configuration")
+            .resolve(Some(DISCOVERED_TOKEN.into()))
+            .expect("a valid endpoint")
+            .expect("a token client");
+
+        assert_eq!(
+            config.token_url, REALM_TOKEN,
+            "an operator's explicit URL wins over the provider's"
+        );
     }
 
     #[tokio::test]
@@ -569,12 +748,10 @@ mod tests {
         let rendered = format!("{error}\n{error:?}");
         assert!(!rendered.contains(SECRET_CANARY), "{rendered}");
 
-        // A half-configured client is a startup error that names variables, not values.
-        let error = CatalogTokenConfig::from_env_with(env(&[
-            ("NOVA_CATALOG_CLIENT_ID", CLIENT),
-            ("NOVA_CATALOG_CLIENT_SECRET", SECRET_CANARY),
-        ]))
-        .expect_err("a partial configuration is refused");
+        // A half-configured client (the secret missing) is a startup error that names
+        // variables, not values.
+        let error = CatalogTokenEnv::from_env_with(env(&[("NOVA_CATALOG_CLIENT_ID", CLIENT)]))
+            .expect_err("a partial configuration is refused");
         assert!(!error.contains(SECRET_CANARY), "{error}");
     }
 
