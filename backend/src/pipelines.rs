@@ -3438,6 +3438,120 @@ async fn stop_run_inner(
     }
 }
 
+/// `POST …/runs/{run_id}/retry`: clear only the failed task instances of a failed run, in
+/// place. The run keeps its id, date and parameters; the tasks that already succeeded are not
+/// repeated (nova#816).
+async fn retry_run(
+    resources: Option<&PipelineResources>,
+    airflow: Option<&AirflowClient>,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+    run_id: &str,
+) -> Result<RunView, Fail> {
+    let result = retry_run_inner(resources, airflow, who, namespace, name, run_id).await;
+    match &result {
+        Ok(run) => {
+            audit::pipeline_event("retry", who, namespace, name, Some(&run.run_id), "ok", None)
+        }
+        Err(e) => audit::pipeline_event(
+            "retry",
+            who,
+            namespace,
+            name,
+            Some(run_id),
+            &e.outcome,
+            None,
+        ),
+    }
+    result.map_err(|e| e.fail)
+}
+
+async fn retry_run_inner(
+    resources: Option<&PipelineResources>,
+    airflow: Option<&AirflowClient>,
+    who: &Identity,
+    namespace: &str,
+    name: &str,
+    run_id: &str,
+) -> Result<RunView, ActionError> {
+    let resources = resources
+        .ok_or_else(no_cluster)
+        .map_err(ActionError::error)?;
+    let airflow = scheduler(airflow).map_err(ActionError::error)?;
+    // A viewer (`spec.viewers`) may retry, exactly as it may run and stop (#816 decision 1).
+    let (dag_id, _) = load_runnable(resources, who, namespace, name)
+        .await
+        .map_err(ActionError::load_refusal)?;
+
+    // Read the run through this pipeline's DAG id first: a run id of another pipeline never
+    // resolves, and the clear below only ever sees an id found here.
+    let runs = match airflow.runs(&dag_id, LATEST_RUNS).await {
+        Ok(runs) => runs,
+        Err(AirflowError::NotFound) => {
+            return Err(ActionError::refused("not-found", no_such_run()));
+        }
+        Err(e) => return Err(ActionError::error(scheduler_fail(e))),
+    };
+    let run = runs
+        .iter()
+        .find(|run| run.dag_run_id == run_id)
+        .cloned()
+        .ok_or_else(|| ActionError::refused("not-found", no_such_run()))?;
+    if run.state.as_deref() != Some("failed") {
+        return Err(ActionError::refused(
+            "not-failed",
+            Fail::new(StatusCode::CONFLICT, "only a failed run can be retried"),
+        ));
+    }
+
+    match airflow.dag(&dag_id).await {
+        Ok(dag) if dag.is_paused == Some(true) => {
+            return Err(ActionError::refused(
+                "paused",
+                Fail::new(
+                    StatusCode::CONFLICT,
+                    "the pipeline is paused: resume it, then retry",
+                ),
+            ));
+        }
+        Ok(_) => {}
+        Err(AirflowError::NotFound) => {
+            return Err(ActionError::refused("not-found", no_such_run()));
+        }
+        Err(e) => return Err(ActionError::error(scheduler_fail(e))),
+    }
+
+    let cleared = match airflow.clear_failed_tasks(&dag_id, run_id).await {
+        Ok(cleared) => cleared,
+        Err(AirflowError::NotFound) => {
+            return Err(ActionError::refused("not-found", no_such_run()));
+        }
+        Err(e) => return Err(ActionError::error(scheduler_fail(e))),
+    };
+    if cleared.is_empty() {
+        return Err(ActionError::refused(
+            "nothing-to-retry",
+            Fail::new(
+                StatusCode::CONFLICT,
+                "this run has no failed tasks to retry",
+            ),
+        ));
+    }
+
+    // The clear re-queues the tasks; answer the run as Airflow now reports it.
+    let runs = match airflow.runs(&dag_id, LATEST_RUNS).await {
+        Ok(runs) => runs,
+        Err(e) => return Err(ActionError::error(scheduler_fail(e))),
+    };
+    match runs.iter().find(|fresh| fresh.dag_run_id == run_id) {
+        Some(fresh) => Ok(run_view(fresh)),
+        None => Err(ActionError::error(scheduler_fail(
+            AirflowError::Unavailable("the run vanished from the latest runs".into()),
+        ))),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Writes: the principals route, create, update and delete. Every write is audited.
 // ---------------------------------------------------------------------------
@@ -4482,6 +4596,10 @@ pub(crate) fn router() -> Router<Arc<AppState>> {
             post(stop),
         )
         .route(
+            "/pipelines/{namespace}/{name}/runs/{run_id}/retry",
+            post(retry),
+        )
+        .route(
             "/pipelines/{namespace}/{name}/runs/{run_id}/tasks/{task_id}/logs",
             get(logs),
         )
@@ -5323,6 +5441,43 @@ pub(crate) async fn stop(
     )
 }
 
+#[utoipa::path(
+    post,
+    operation_id = "pipelines_run_retry",
+    path = "/api/pipelines/{namespace}/{name}/runs/{run_id}/retry",
+    tag = "public",
+    description = "Retry the failed tasks of a run, **in the same run**: the run keeps its id, date and parameters, and the tasks that already succeeded are not repeated (Airflow's run-scoped clear). A viewer (`spec.viewers`) may retry, as it may run and stop. A paused pipeline, a run that is not `failed`, and a run with no failed tasks are refused with 409. The run id is looked up through this pipeline's DAG id first: a run id of another pipeline answers 404 and nothing is cleared. Answers the fresh `RunView` and `Cache-Control: no-store`. Every attempt is audited, including a refusal.",
+    params(
+        ("namespace" = String, Path, description = "The Pipeline's namespace (Nova's own)"),
+        ("name" = String, Path, description = "Pipeline name"),
+        ("run_id" = String, Path, description = "Airflow's run id"),
+    ),
+    responses(
+        (status = 200, description = "The run, with its failed tasks cleared for another attempt", body = RunView),
+        (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such pipeline for this caller, or no such run", body = crate::openapi::ErrorResponse),
+        (status = 409, description = "The run is not failed, the pipeline is paused, or there is nothing to retry", body = crate::openapi::ErrorResponse),
+        (status = 502, description = "The scheduler or the cluster did not answer", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No cluster connection, or the scheduler is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn retry(
+    signed: SignedIn,
+    Path((namespace, name, run_id)): Path<(String, String, String)>,
+) -> Response {
+    answer(
+        retry_run(
+            resources(signed.state()).as_ref(),
+            signed.state().airflow.as_ref(),
+            signed.identity(),
+            &namespace,
+            &name,
+            &run_id,
+        )
+        .await,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
@@ -5546,6 +5701,10 @@ mod tests {
             /// Every trigger's JSON body, in order, so a test can read the `logical_date` and
             /// the note Nova sent.
             pub trigger_bodies: Vec<Value>,
+            /// Every run-scoped clear's JSON body, in order (nova#816).
+            pub clear_bodies: Vec<Value>,
+            /// When set, the clear selects nothing: a run with no failed task.
+            pub clear_empty: bool,
         }
 
         pub type Shared = Arc<Mutex<Fake>>;
@@ -5818,6 +5977,34 @@ mod tests {
             Ok(Json(run.clone()))
         }
 
+        /// The run-scoped clear (nova#816): only the failed tasks are selected.
+        async fn clear_run(
+            State(state): State<Shared>,
+            OriginalUri(uri): OriginalUri,
+            Path((dag_id, run_id)): Path<(String, String)>,
+            headers: HeaderMap,
+            Json(body): Json<Value>,
+        ) -> Result<Json<Value>, Refusal> {
+            let mut state = state.lock().unwrap();
+            remember(&mut state, "POST", &uri);
+            authorize(&headers)?;
+            if !run_belongs(&state, &dag_id, &run_id) {
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    Json(json!({ "detail": "DagRun not found" })),
+                ));
+            }
+            state.clear_bodies.push(body);
+            if state.clear_empty {
+                return Ok(Json(json!({ "task_instances": [] })));
+            }
+            Ok(Json(json!({
+                "task_instances": [
+                    { "task_id": "load", "state": "upstream_failed", "try_number": 1 }
+                ]
+            })))
+        }
+
         pub async fn start() -> (AirflowClient, Shared) {
             let shared: Shared = Arc::new(Mutex::new(seeded()));
             let app = Router::new()
@@ -5828,6 +6015,10 @@ mod tests {
                 .route(
                     "/api/v2/dags/{dag_id}/dagRuns/{run_id}",
                     patch(patch_run),
+                )
+                .route(
+                    "/api/v2/dags/{dag_id}/dagRuns/{run_id}/clear",
+                    post(clear_run),
                 )
                 .route(
                     "/api/v2/dags/{dag_id}/dagRuns/{run_id}/taskInstances",
@@ -8427,6 +8618,145 @@ mod tests {
                 .expect("the run")["state"],
             "failed"
         );
+    }
+
+    #[tokio::test]
+    async fn retry_clears_only_a_failed_run() {
+        let resources = memory(&[("smoke", resource("smoke", Some("analytics")))]);
+        let (airflow, fake) = fake_airflow::start().await;
+        fake.lock().unwrap().runs.insert(
+            "stardelt__smoke".into(),
+            vec![run(SMOKE_RUN, "failed"), run(OTHER_RUN, "success")],
+        );
+        let namespace = crate::cluster::namespace();
+        let member = who("sub-ada", &["analytics"], false);
+
+        let retried = retry_run(
+            Some(&resources),
+            Some(&airflow),
+            &member,
+            &namespace,
+            "smoke",
+            SMOKE_RUN,
+        )
+        .await
+        .expect("a failed run retries");
+        assert_eq!(retried.run_id, SMOKE_RUN);
+        assert_eq!(retried.state, "failed", "the same run, not a new one");
+
+        let fake = fake.lock().unwrap();
+        let clears: Vec<&str> = fake
+            .calls
+            .iter()
+            .map(String::as_str)
+            .filter(|call| call.contains("/clear"))
+            .collect();
+        assert_eq!(
+            clears,
+            vec![
+                "POST /api/v2/dags/stardelt__smoke/dagRuns/manual__2026-10-20T07%3A23%3A50.608876%2B00%3A00/clear"
+            ],
+            "exactly one clear, on this run: {:?}",
+            fake.calls
+        );
+        assert_eq!(fake.clear_bodies.len(), 1);
+        assert_eq!(fake.clear_bodies[0]["only_failed"], json!(true));
+        assert_eq!(fake.clear_bodies[0]["dry_run"], json!(false));
+    }
+
+    #[tokio::test]
+    async fn retry_refuses_a_running_run() {
+        const ACTIVE_RUN: &str = "manual__2026-10-20T09:30:00Z";
+        let resources = memory(&[("smoke", resource("smoke", Some("analytics")))]);
+        let (airflow, fake) = fake_airflow::start().await;
+        fake.lock()
+            .unwrap()
+            .runs
+            .insert("stardelt__smoke".into(), vec![run(ACTIVE_RUN, "running")]);
+
+        let error = retry_run(
+            Some(&resources),
+            Some(&airflow),
+            &who("sub-ada", &["analytics"], false),
+            &crate::cluster::namespace(),
+            "smoke",
+            ACTIVE_RUN,
+        )
+        .await
+        .expect_err("a running run cannot be retried");
+        assert_eq!(error.status(), StatusCode::CONFLICT);
+        assert_eq!(error.message(), "only a failed run can be retried");
+        let fake = fake.lock().unwrap();
+        assert!(
+            !fake.calls.iter().any(|call| call.contains("/clear")),
+            "nothing is cleared: {:?}",
+            fake.calls
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_refuses_a_paused_pipeline() {
+        let resources = memory(&[("smoke", resource("smoke", Some("analytics")))]);
+        let (airflow, fake) = fake_airflow::start().await;
+        {
+            let mut fake = fake.lock().unwrap();
+            fake.runs
+                .insert("stardelt__smoke".into(), vec![run(SMOKE_RUN, "failed")]);
+            let dag = fake
+                .dags
+                .iter_mut()
+                .find(|dag| dag["dag_id"] == "stardelt__smoke")
+                .expect("the smoke DAG");
+            dag["is_paused"] = json!(true);
+        }
+
+        let error = retry_run(
+            Some(&resources),
+            Some(&airflow),
+            &who("sub-ada", &["analytics"], false),
+            &crate::cluster::namespace(),
+            "smoke",
+            SMOKE_RUN,
+        )
+        .await
+        .expect_err("a paused pipeline cannot retry");
+        assert_eq!(error.status(), StatusCode::CONFLICT);
+        assert!(
+            error.message().starts_with("the pipeline is paused"),
+            "{}",
+            error.message()
+        );
+        let fake = fake.lock().unwrap();
+        assert!(
+            !fake.calls.iter().any(|call| call.contains("/clear")),
+            "nothing is cleared: {:?}",
+            fake.calls
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_refuses_an_empty_clear() {
+        let resources = memory(&[("smoke", resource("smoke", Some("analytics")))]);
+        let (airflow, fake) = fake_airflow::start().await;
+        {
+            let mut fake = fake.lock().unwrap();
+            fake.runs
+                .insert("stardelt__smoke".into(), vec![run(SMOKE_RUN, "failed")]);
+            fake.clear_empty = true;
+        }
+
+        let error = retry_run(
+            Some(&resources),
+            Some(&airflow),
+            &who("sub-ada", &["analytics"], false),
+            &crate::cluster::namespace(),
+            "smoke",
+            SMOKE_RUN,
+        )
+        .await
+        .expect_err("nothing selected is a refusal");
+        assert_eq!(error.status(), StatusCode::CONFLICT);
+        assert_eq!(error.message(), "this run has no failed tasks to retry");
     }
 
     #[tokio::test]

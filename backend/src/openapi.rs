@@ -111,6 +111,7 @@ pub struct ErrorResponse {
         crate::pipelines::resume,
         crate::pipelines::run,
         crate::pipelines::stop,
+        crate::pipelines::retry,
         crate::pipelines::logs,
         crate::pipelines::run_notebook,
         crate::trino::run_query,
