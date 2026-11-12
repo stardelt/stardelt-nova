@@ -13,6 +13,10 @@
 //! announced; its claim records `stopped`, so the success after it is a plain success and
 //! not a recovery.
 //!
+//! A failure notice may also carry `failedTask` (the `taskId` of the lowest failed task and its
+//! `tryNumber`) and `error` (the first 2,000 characters of that task's first log page, `…` when
+//! cut). Both are omitted when the engine cannot answer, and the message is sent either way.
+//!
 //! Without a state store, an engine or a cluster client the collector stays off.
 
 use std::sync::Arc;
@@ -23,7 +27,7 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 
 use crate::AppState;
-use crate::airflow::{DagRun, dag_id_for};
+use crate::airflow::{DagRun, LogEvent, TaskInstance, dag_id_for};
 use crate::destinations::{DeliveryOutcome, post_webhook};
 use crate::pipelines::{PipelineResources, duration_seconds};
 
@@ -143,6 +147,40 @@ pub(crate) async fn run_once(state: &AppState) -> Result<usize, String> {
         ) else {
             continue;
         };
+        let mut ending = ending;
+        if ending.body["state"] == "failed" {
+            match airflow.task_instances(&dag_id, &run.dag_run_id).await {
+                Ok(tasks) => {
+                    let page = match failed_task(&tasks) {
+                        Some(task) => airflow
+                            .logs(
+                                &dag_id,
+                                &run.dag_run_id,
+                                &task.task_id,
+                                task.try_number.unwrap_or(1),
+                                None,
+                            )
+                            .await
+                            .ok()
+                            .map(|page| page.content),
+                        None => None,
+                    };
+                    if let Some((task_value, excerpt)) = failure_detail(&tasks, page.as_deref()) {
+                        ending.body["failedTask"] = task_value;
+                        if let Some(excerpt) = excerpt {
+                            ending.body["error"] = Value::String(excerpt);
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        pipeline = %name,
+                        error = %e,
+                        "the run's task instances did not answer"
+                    );
+                }
+            }
+        }
         let mut delivered = false;
         for destination in &ending.destinations {
             let found = sqlx::query_as::<_, (i64, String, Value)>(
@@ -290,6 +328,57 @@ fn ending_for(
         ));
     }
     Some(Ending { destinations, body })
+}
+
+/// The first failed task of a run: the lowest `task_id` whose state is `failed`. Airflow returns
+/// task instances in no guaranteed order; the lowest id is stable across ticks and attempts.
+fn failed_task(tasks: &[TaskInstance]) -> Option<&TaskInstance> {
+    tasks
+        .iter()
+        .filter(|task| task.state.as_deref() == Some("failed"))
+        .min_by(|left, right| left.task_id.cmp(&right.task_id))
+}
+
+/// The text to quote from one log page: its `ERROR` lines, else every line with text, capped at
+/// 2,000 characters from the start (design decision 3) with `…` when cut. `None` when the page
+/// has no text.
+fn error_excerpt(events: &[LogEvent]) -> Option<String> {
+    const MAX_ERROR_CHARS: usize = 2_000;
+    let mut lines: Vec<&str> = events
+        .iter()
+        .filter(|event| event.level.as_deref() == Some("ERROR"))
+        .filter_map(|event| event.event.as_deref())
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty())
+        .collect();
+    if lines.is_empty() {
+        lines = events
+            .iter()
+            .filter_map(|event| event.event.as_deref())
+            .map(str::trim_end)
+            .filter(|line| !line.is_empty())
+            .collect();
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    let all = lines.join("\n");
+    let cut = all.chars().count() > MAX_ERROR_CHARS;
+    let text: String = all.chars().take(MAX_ERROR_CHARS).collect();
+    Some(if cut { format!("{text}…") } else { text })
+}
+
+/// The `failedTask` object and, when the log page has text, the `error` excerpt of a failed run.
+fn failure_detail(
+    tasks: &[TaskInstance],
+    page: Option<&[LogEvent]>,
+) -> Option<(Value, Option<String>)> {
+    let task = failed_task(tasks)?;
+    let task_value = json!({
+        "taskId": task.task_id,
+        "tryNumber": task.try_number.unwrap_or(1),
+    });
+    Some((task_value, page.and_then(error_excerpt)))
 }
 
 /// The names of both lists, in order, each once (a name may be in both).
@@ -550,6 +639,93 @@ mod tests {
         assert_eq!(
             linked["runUrl"],
             "https://nova.dev.example.io/pipelines/stardelt/daily"
+        );
+    }
+
+    fn task(id: &str, state: &str, try_number: u32) -> TaskInstance {
+        TaskInstance {
+            task_id: id.into(),
+            state: Some(state.into()),
+            try_number: Some(try_number),
+            start_date: None,
+            end_date: None,
+            duration: None,
+            operator: None,
+            map_index: None,
+        }
+    }
+
+    fn log(level: &str, text: &str) -> LogEvent {
+        LogEvent {
+            timestamp: None,
+            level: Some(level.into()),
+            event: Some(text.into()),
+            sources: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_lowest_failed_task_is_named() {
+        let tasks = [
+            task("b", "failed", 2),
+            task("a", "failed", 1),
+            task("c", "success", 1),
+        ];
+        let (value, excerpt) =
+            failure_detail(&tasks, None).expect("a failed task names itself in the notice");
+        assert_eq!(value["taskId"], "a");
+        assert_eq!(value["tryNumber"], 1);
+        assert!(excerpt.is_none(), "no log page, no excerpt");
+    }
+
+    #[test]
+    fn a_removed_task_is_not_a_failure() {
+        assert!(
+            failure_detail(&[task("a", "removed", 0)], None).is_none(),
+            "a removed task is not the reason the run failed"
+        );
+    }
+
+    #[test]
+    fn error_lines_are_preferred_to_other_lines() {
+        let page = [
+            log("INFO", "starting"),
+            log("ERROR", "ZeroDivisionError: division by zero"),
+        ];
+        assert_eq!(
+            error_excerpt(&page),
+            Some("ZeroDivisionError: division by zero".to_string())
+        );
+    }
+
+    #[test]
+    fn the_error_keeps_the_first_two_thousand_characters() {
+        let text = "é".repeat(2_500);
+        let page = [log("ERROR", &text)];
+        let excerpt = error_excerpt(&page).expect("a page with text has an excerpt");
+        assert_eq!(
+            excerpt.chars().count(),
+            2_001,
+            "2,000 characters plus the ellipsis"
+        );
+        assert!(excerpt.ends_with('…'), "a cut excerpt says so");
+        assert!(excerpt.starts_with('é'), "the start is kept");
+    }
+
+    #[test]
+    fn a_task_without_a_log_still_names_the_task() {
+        let detail = failure_detail(&[task("a", "failed", 3)], None);
+        let (value, excerpt) = detail.expect("the task is named even without a log");
+        assert_eq!(value["taskId"], "a");
+        assert_eq!(value["tryNumber"], 3);
+        assert!(excerpt.is_none());
+    }
+
+    #[test]
+    fn a_successful_run_has_no_detail() {
+        assert!(
+            failure_detail(&[task("a", "success", 1)], Some(&[])).is_none(),
+            "a run without a failed task carries no detail"
         );
     }
 
