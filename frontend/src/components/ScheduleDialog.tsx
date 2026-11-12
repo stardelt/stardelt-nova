@@ -1,9 +1,11 @@
 import { useEffect, useId, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { Link } from 'react-router-dom'
 import {
   api,
   errorMessage,
   type CheckStatementView,
+  type Destination,
   type NotebookVersion,
   type PipelineDetail,
   type PipelineOptions,
@@ -346,6 +348,7 @@ export default function ScheduleDialog({
     parameterRows(pipeline).map((row) => ({ ...row, key: nextKey.current++ })),
   )
   const [options, setOptions] = useState<OptionState>(() => optionsFrom(pipeline))
+  const [notify, setNotify] = useState<string[]>(() => pipeline?.notify?.onFailure ?? [])
   const [check, setCheck] = useState<CheckOutcome>({ kind: 'idle' })
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -359,6 +362,18 @@ export default function ScheduleDialog({
     staleTime: 30_000,
   })
   const groups = useMemo(() => principalsQuery.data?.groups ?? [], [principalsQuery.data])
+
+  // The destinations the group may be told through (`spec.notify`, nova#815). The route answers
+  // the caller's groups; the pipeline's own group is the only list that means anything here.
+  const destinationsQuery = useQuery({
+    queryKey: ['destinations'],
+    queryFn: api.destinations,
+    staleTime: 30_000,
+  })
+  const groupDestinations: Destination[] = useMemo(
+    () => (Array.isArray(destinationsQuery.data) ? destinationsQuery.data : []).filter((row) => row.owner_group === group),
+    [destinationsQuery.data, group],
+  )
 
   // The published notebooks of every group the caller may use; the dialog shows the chosen
   // group's ones. Only asked for in Notebook mode, so the statement dialog is unchanged.
@@ -451,6 +466,17 @@ export default function ScheduleDialog({
       paramsAnswer.parameters.map((parameter) => [parameter.name, stored[parameter.name] ?? parameter.default]),
     ))
   }, [editing, paramsAnswer, paramsKey, storedNotebook])
+
+  // A group change leaves behind only the names the new group owns. Before the destinations
+  // answer arrives there is nothing to compare against, so the chosen names stay as they are.
+  useEffect(() => {
+    if (!destinationsQuery.isSuccess) return
+    const names = groupDestinations.map((destination) => destination.name)
+    setNotify((current) => {
+      const kept = current.filter((name) => names.includes(name))
+      return kept.length === current.length ? current : kept
+    })
+  }, [destinationsQuery.isSuccess, groupDestinations])
 
   // While the name is untouched it follows the statement's first words, or the notebook's name.
   const suggested = useMemo(
@@ -654,14 +680,23 @@ export default function ScheduleDialog({
       objectVersion: pinnedVersion,
       params: notebookParamTable,
     }
+    // The checked names in the order the list answers them (newest first). A name the list does
+    // not hold — the destinations route failed — keeps its place after them rather than being
+    // dropped, and an empty list is sent on purpose: "present and empty" removes the notice.
+    const notifyBody = [
+      ...groupDestinations
+        .filter((destination) => notify.includes(destination.name))
+        .map((destination) => destination.name),
+      ...notify.filter((name) => !groupDestinations.some((destination) => destination.name === name)),
+    ]
     try {
       const view = editing && pipeline
         ? await api.updatePipeline(pipeline.namespace, pipeline.name, notebookMode
-            ? { notebook: notebookBody, schedule, options: optionsBody }
-            : { sql: statementText, schedule, params: table, options: optionsBody })
+            ? { notebook: notebookBody, schedule, options: optionsBody, notify: { onFailure: notifyBody } }
+            : { sql: statementText, schedule, params: table, options: optionsBody, notify: { onFailure: notifyBody } })
         : await api.createPipeline(notebookMode
-            ? { name, ownerGroup: group, notebook: notebookBody, schedule, options: optionsBody }
-            : { name, ownerGroup: group, sql: statementText, schedule, params: table, options: optionsBody })
+            ? { name, ownerGroup: group, notebook: notebookBody, schedule, options: optionsBody, notify: { onFailure: notifyBody } }
+            : { name, ownerGroup: group, sql: statementText, schedule, params: table, options: optionsBody, notify: { onFailure: notifyBody } })
       onScheduled(view)
     } catch (e: unknown) {
       // The API's own sentence, kept beside the fields it is about.
@@ -1258,6 +1293,33 @@ export default function ScheduleDialog({
                   <span>Allow runs in parallel</span>
                 </label>
               </div>
+            </fieldset>
+            <fieldset>
+              <legend className="label mb-1.5">Tell … when a run fails</legend>
+              {groupDestinations.length === 0 ? (
+                <p className="text-sm text-text-dim">
+                  No destination in this group yet. <Link className="underline" to="/destinations">Add one</Link>.
+                </p>
+              ) : (
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {groupDestinations.map((destination) => (
+                    <label key={destination.id} className="flex items-center gap-2 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={notify.includes(destination.name)}
+                        onChange={(event) =>
+                          setNotify((current) =>
+                            event.target.checked
+                              ? [...current, destination.name]
+                              : current.filter((name) => name !== destination.name),
+                          )
+                        }
+                      />
+                      <span>{destination.name} <span className="text-text-mute">({destination.kind})</span></span>
+                    </label>
+                  ))}
+                </div>
+              )}
             </fieldset>
             <p className="text-xs text-text-mute">
               A failed attempt is tried again after the wait. The time limit stops a run that takes too long.

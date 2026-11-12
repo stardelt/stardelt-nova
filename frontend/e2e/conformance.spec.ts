@@ -3123,6 +3123,8 @@ test.describe('schedule', () => {
       schedule: { cron: '0 3 * * *', timezone: 'Europe/Berlin' },
       params: {},
       options: { retries: 1, backoffMinutes: 5, timeoutMinutes: 120, concurrency: 'Forbid' },
+      // The dialog always sends the notification: an empty list removes it (#815).
+      notify: { onFailure: [] },
     })
     expect(await first.page.getByRole('dialog').count()).toBe(0)
     await first.context.close()
@@ -3182,12 +3184,13 @@ test.describe('schedule', () => {
     const puts = requests.filter((request) => request.method === 'PUT')
     expect(puts.map((request) => new URL(request.url).pathname)).toEqual([`/api/pipelines/${NS}/team-smoke`])
     const putBody = JSON.parse(puts[0].body ?? '{}') as Record<string, unknown>
-    expect(Object.keys(putBody).sort()).toEqual(['options', 'params', 'schedule', 'sql'])
+    expect(Object.keys(putBody).sort()).toEqual(['notify', 'options', 'params', 'schedule', 'sql'])
     expect(putBody).toEqual({
       sql: 'select 1',
       schedule: { cron: '0 4 * * *', timezone: 'Europe/Berlin' },
       params: {},
       options: { retries: 1, backoffMinutes: 5, timeoutMinutes: 120, concurrency: 'Forbid' },
+      notify: { onFailure: [] },
     })
 
     const opener = page.getByRole('button', { name: 'Delete pipeline' })
@@ -3496,6 +3499,7 @@ test.describe('schedule options', () => {
       schedule: { cron: '0 3 * * *', timezone: 'Europe/Berlin' },
       params: { days: '2026-10-20' },
       options: { retries: 1, backoffMinutes: 5, timeoutMinutes: 120, concurrency: 'Forbid' },
+      notify: { onFailure: [] },
     })
     await context.close()
   })
@@ -3724,6 +3728,7 @@ test.describe('schedule options', () => {
       schedule: { cron: '0 3 * * *', timezone: 'Europe/Berlin' },
       params: { days: '1', region: 'us' },
       options: { retries: 2, backoffMinutes: 10, timeoutMinutes: 360, concurrency: 'Allow' },
+      notify: { onFailure: [] },
     }])
     await context.close()
   })
@@ -4063,10 +4068,11 @@ test.describe('schedule notebook', () => {
       notebook: { name: 'smoke.ipynb', objectVersion: V3, params: { days: '2026-10-20', region: 'us' } },
       schedule: { cron: '0 3 * * *', timezone: 'Europe/Berlin' },
       options: { retries: 1, backoffMinutes: 5, timeoutMinutes: 120, concurrency: 'Forbid' },
+      notify: { onFailure: [] },
     })
     // Exactly one of the two: the notebook, and no statement at all.
     expect(Object.keys(posted as Record<string, unknown>).sort())
-      .toEqual(['name', 'notebook', 'options', 'ownerGroup', 'schedule'])
+      .toEqual(['name', 'notebook', 'notify', 'options', 'ownerGroup', 'schedule'])
     await context.close()
   })
 
@@ -4102,6 +4108,7 @@ test.describe('schedule notebook', () => {
       notebook: { name: 'smoke.ipynb', objectVersion: V2, params: { days: '9' } },
       schedule: { cron: '0 3 * * *', timezone: 'Europe/Berlin' },
       options: { retries: 1, backoffMinutes: 5, timeoutMinutes: 120, concurrency: 'Forbid' },
+      notify: { onFailure: [] },
     }])
     expect(first[0]).not.toHaveProperty('sql')
 

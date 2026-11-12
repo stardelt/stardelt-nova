@@ -642,6 +642,13 @@ export type PipelineOptions = {
   concurrency?: 'Allow' | 'Forbid'
 }
 
+/** Who is told when a run ends (`spec.notify`, nova#815). Names of the group's destinations. */
+export type PipelineNotify = {
+  onFailure?: string[]
+  onSuccess?: string[]
+  onRecovered?: string[]
+}
+
 /** The options as the pipeline detail carries them, defaults filled in — what edit mode prefills. */
 export type PipelineOptionsView = {
   retries: number
@@ -686,6 +693,11 @@ export type CreatePipelineRequest = {
   params?: Record<string, string>
   /** Retries, the wait between them, the time limit and the run mode. */
   options?: PipelineOptions
+  /**
+   * Who is told when a run ends. Absent keeps the stored value on an update; a present object
+   * with every list empty removes it. The dialog always sends `onFailure`.
+   */
+  notify?: PipelineNotify
 }
 
 /**
@@ -700,6 +712,11 @@ export type UpdatePipelineRequest = {
   schedule: ScheduleSpec | null
   params?: Record<string, string>
   options?: PipelineOptions
+  /**
+   * Who is told when a run ends. Absent keeps the stored value on an update; a present object
+   * with every list empty removes it. The dialog always sends `onFailure`.
+   */
+  notify?: PipelineNotify
   /**
    * The `resourceVersion` the editor read (`pipelines_spec`): when it is not the stored one the
    * update answers 409 and writes nothing (stardelt-nova#387).
@@ -920,6 +937,8 @@ export type PipelineDetail = PipelineView & {
    * sends nothing; the dialog then starts from the defaults.
    */
   options?: PipelineOptionsView | null
+  /** Who is told when a run ends; absent when the resource carries no `spec.notify`. */
+  notify?: PipelineNotify | null
   airflowUrl?: string | null
 }
 
@@ -948,6 +967,8 @@ export type PipelineDocument = {
   schedule?: ScheduleSpec
   params?: Record<string, string>
   options: PipelineOptionsView
+  /** Who is told when a run ends; absent when the resource carries no `spec.notify`. */
+  notify?: PipelineNotify | null
 }
 
 export type PipelineSpec = {
