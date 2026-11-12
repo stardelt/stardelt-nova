@@ -120,7 +120,7 @@ export default function Connections() {
 
       <Section title="Personal" note={PERSONAL_NOTE}>
         {list.isLoading && (
-          <div className="px-5 pb-5"><SkeletonTable rows={5} label="Loading connections" /></div>
+          <div className="px-5 pb-5"><SkeletonTable rows={5} label="Loading connections" rowHeight={50} /></div>
         )}
         {failed && (
           <div className="px-5 pb-5 space-y-2">
