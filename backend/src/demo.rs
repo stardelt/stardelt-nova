@@ -625,6 +625,7 @@ pub fn pipeline_detail(namespace: &str, name: &str) -> Option<crate::pipelines::
             concurrency: "Forbid".into(),
         },
         airflow_url: None,
+        notify: None,
     })
 }
 

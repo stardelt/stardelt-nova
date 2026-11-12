@@ -9229,6 +9229,17 @@
               }
             ]
           },
+          "notify": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PipelineNotify",
+                "description": "Who is told when a run ends (`spec.notify`). Omitted writes none; every name must be a\ndestination of `ownerGroup`."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "options": {
             "oneOf": [
               {
@@ -10646,6 +10657,17 @@
                 ],
                 "description": "The public Airflow DAG URL, `None` when `NOVA_BASE_DOMAIN` is unset; the route is already visibility-gated, so no second permission check."
               },
+              "notify": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/PipelineNotify",
+                    "description": "Who is told when a run ends; left out when the resource has none."
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "options": {
                 "$ref": "#/components/schemas/PipelineOptionsView",
                 "description": "Retries, the wait between them, the time limit and the run mode as the resource carries\nthem, with the defaults filled in when a field is absent."
@@ -10696,6 +10718,17 @@
               {
                 "$ref": "#/components/schemas/NotebookRequest",
                 "description": "The pinned notebook of a notebook pipeline."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "notify": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PipelineNotify",
+                "description": "Who is told when a run ends; left out when the resource has none."
               },
               {
                 "type": "null"
@@ -10754,6 +10787,33 @@
             "items": {
               "$ref": "#/components/schemas/PipelineView"
             }
+          }
+        }
+      },
+      "PipelineNotify": {
+        "type": "object",
+        "description": "Who is told when a run of this pipeline ends (`spec.notify`, operator#582 / nova#815).\nEach list names at most five destinations owned by the pipeline's `ownerGroup`.",
+        "properties": {
+          "onFailure": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Destinations told when the run fails, after the last retry."
+          },
+          "onRecovered": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Destinations told on the first success after a failure."
+          },
+          "onSuccess": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Destinations told when the run succeeds."
           }
         }
       },
@@ -12992,6 +13052,17 @@
               {
                 "$ref": "#/components/schemas/NotebookRequest",
                 "description": "The notebook, its version and its parameters for a notebook pipeline; a statement\npipeline refuses it."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "notify": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PipelineNotify",
+                "description": "Who is told when a run ends (`spec.notify`). Omitted keeps the stored `spec.notify`;\ngiven with all three lists empty, it removes it — a form save must not wipe a\nnotification a bundle deployed until the form edits it."
               },
               {
                 "type": "null"
