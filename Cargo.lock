@@ -3151,6 +3151,7 @@ dependencies = [
  "kube",
  "percent-encoding",
  "reqwest",
+ "ring",
  "rusty-s3",
  "serde",
  "serde_json",

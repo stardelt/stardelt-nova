@@ -59,6 +59,9 @@ jiff = "0.2"
 # presigned form of that one S3 action, so Nova signs the request headers itself. The
 # same 0.13 build rusty-s3's `rustcrypto` signing already pulls in. MIT OR Apache-2.0.
 hmac = "0.13"
+# AES-256-GCM and HKDF for sealed session tokens (stardelt-nova#103). Already in the
+# build through rustls. Apache-2.0 AND ISC.
+ring = "0.17"
 # State store (ticket stardelt-nova#103): PostgreSQL through sqlx. MIT OR Apache-2.0.
 # No `default` features: no sqlite/mysql drivers, no native-tls; rustls with `ring`
 # (the provider reqwest already uses) and the bundled WebPKI roots.
