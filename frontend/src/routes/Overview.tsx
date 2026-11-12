@@ -374,7 +374,8 @@ function PulseCard({ queries, runs, queryCounts, queryDays, runBuckets, runDays 
   // "No rows in the window" is a claim about both answers: nothing while one is still out.
   const empty = queries.data !== undefined && runs.data !== undefined && queryTotal === 0 && runTotal === 0
   // 326 px = the empty state at 1280×720 (#860, measured 2026-11-12); the loading state
-  // (two 2-row skeletons) is 171 px and must not be shorter, or the cards below move.
+  // (two 2-row skeletons) is 171 px and must not be shorter, or the cards below move. The
+  // chart's axis and legend (#881) leave the drawn card under that, so the minimum stays.
   return (
     <div className="card p-5 md:col-span-2 min-w-0 min-h-[326px]">
       <h2 className="text-sm font-semibold">The last two weeks</h2>
@@ -403,7 +404,7 @@ function PulseCard({ queries, runs, queryCounts, queryDays, runBuckets, runDays 
             ) : queries.data === undefined ? (
               <div className="mt-2"><SkeletonTable rows={2} /></div>
             ) : (
-              <QuerySparkline counts={queryCounts} days={queryDays} />
+              <QuerySparkline counts={queryCounts} days={queryDays} scope="last 14 days" />
             )}
             {queries.data?.truncated && (
               <p className="text-xs text-text-mute mt-1">Showing the newest 4,000 queries.</p>
@@ -424,7 +425,7 @@ function PulseCard({ queries, runs, queryCounts, queryDays, runBuckets, runDays 
             ) : runs.data === undefined ? (
               <div className="mt-2"><SkeletonTable rows={2} /></div>
             ) : (
-              <RunBars buckets={runBuckets} days={runDays} />
+              <RunBars buckets={runBuckets} days={runDays} scope="last 7 days" />
             )}
             {runItems.length === 200 && (
               <p className="text-xs text-text-mute mt-1">Showing the latest 200 runs.</p>
