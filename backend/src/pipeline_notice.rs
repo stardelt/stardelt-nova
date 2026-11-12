@@ -661,6 +661,7 @@ mod tests {
             level: Some(level.into()),
             event: Some(text.into()),
             sources: Vec::new(),
+            error_detail: Vec::new(),
         }
     }
 

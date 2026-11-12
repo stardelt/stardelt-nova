@@ -228,6 +228,29 @@ pub struct LogEvent {
     pub event: Option<String>,
     #[serde(default)]
     pub sources: Vec<String>,
+    /// The task runner's own exception, present on the `Task failed with exception` event and
+    /// nowhere else. It is the only copy of the reason a task failed.
+    #[serde(default)]
+    pub error_detail: Vec<LogError>,
+}
+
+/// One exception of Airflow's structured log, as the task runner reported it.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct LogError {
+    pub exc_type: String,
+    pub exc_value: String,
+    #[serde(default)]
+    pub is_cause: bool,
+    #[serde(default)]
+    pub frames: Vec<LogFrame>,
+}
+
+/// One stack frame of a [`LogError`]; the filename is cut to its last segment by the caller.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct LogFrame {
+    pub filename: String,
+    pub lineno: i64,
+    pub name: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -1288,6 +1311,87 @@ mod tests {
                 .contains("task probe finished")
         );
         assert!(page.content[1].sources.is_empty());
+        assert!(
+            page.content[1].error_detail.is_empty(),
+            "an ordinary message carries no exception"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_tasks_log_keeps_the_error_detail() {
+        let (client, _cfg, fake) = fake::start().await;
+        fake.lock().unwrap().log_page = json!({
+            "content": [
+                {
+                    "timestamp": "2026-11-11T06:07:40.133090Z",
+                    "event": "Task failed with exception",
+                    "level": "error",
+                    "logger": "task",
+                    "filename": "task_runner.py",
+                    "lineno": 1347,
+                    "error_detail": [
+                        {
+                            "exc_type": "TrinoError",
+                            "exc_value": "CATALOG_NOT_FOUND: line 1:1: Catalog 'bronze' not found",
+                            "exc_notes": [],
+                            "syntax_error": null,
+                            "is_cause": false,
+                            "frames": [
+                                {
+                                    "filename": "/home/airflow/.local/lib/python3.12/site-packages/airflow/task/task_runner.py",
+                                    "lineno": 1263,
+                                    "name": "run"
+                                },
+                                {
+                                    "filename": "/home/airflow/.local/lib/python3.12/site-packages/airflow/task/task_runner.py",
+                                    "lineno": 1678,
+                                    "name": "_execute_task"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ],
+            "continuation_token": null
+        });
+
+        let page = client
+            .logs(
+                "stardelt__shop-01-bronze",
+                "manual__2026-11-11T06:02:22.325090+00:00",
+                "run",
+                2,
+                None,
+            )
+            .await
+            .unwrap();
+        let event = page.content.first().expect("one event");
+        assert_eq!(event.event.as_deref(), Some("Task failed with exception"));
+        assert_eq!(event.error_detail.len(), 1);
+        let detail = &event.error_detail[0];
+        assert_eq!(detail.exc_type, "TrinoError");
+        assert_eq!(
+            detail.exc_value,
+            "CATALOG_NOT_FOUND: line 1:1: Catalog 'bronze' not found"
+        );
+        assert!(!detail.is_cause);
+        assert_eq!(detail.frames.len(), 2);
+        assert_eq!(detail.frames[0].name, "run");
+        assert_eq!(detail.frames[0].lineno, 1263);
+        assert!(detail.frames[0].filename.ends_with("task_runner.py"));
+
+        let plain = LogEvent {
+            timestamp: None,
+            level: None,
+            event: Some("line".to_string()),
+            sources: Vec::new(),
+            error_detail: Vec::new(),
+        };
+        assert_eq!(
+            serde_json::from_value::<LogEvent>(json!({ "event": "line" })).unwrap(),
+            plain,
+            "an event without error_detail parses to an empty list"
+        );
     }
 
     fn body_of<'a>(state: &'a fake::Fake, prefix: &str) -> &'a Value {
