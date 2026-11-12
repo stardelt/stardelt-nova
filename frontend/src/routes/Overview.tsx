@@ -194,19 +194,21 @@ export default function Overview() {
         <Stat
           label="Catalogs"
           value={totals ? formatCount(totals.catalogs) : metrics.isError ? '—' : '…'}
+          count={totals?.catalogs}
           hint={totals ? `${formatCount(totals.schemas)} schemas` : metrics.isError ? metricsFailure : 'catalogs you can see'}
           icon="database"
         />
         <Stat
           label="Tables"
           value={totals ? formatCount(totals.tables) : metrics.isError ? '—' : '…'}
+          count={totals?.tables}
           hint={totals ? `${formatBytes(totals.sizeBytes)} · ${countRows(totals.records)}` : metrics.isError ? metricsFailure : 'across your catalogs'}
           icon="table"
         />
         {admin && (
           <Stat label="Engine" value={String(engineState)} hint="Trino" icon="spark" tone={engineState === 'ACTIVE' ? 'ok' : undefined} />
         )}
-        <Stat label="Activity" value={jobs.data ? String(jobs.data.length) : jobs.isError ? '—' : '…'} hint="recent queries, loads and transfers" icon="clock" />
+        <Stat label="Activity" value={jobs.data ? String(jobs.data.length) : jobs.isError ? '—' : '…'} count={jobs.data?.length} hint="recent queries, loads and transfers" icon="clock" />
       </section>
 
       <section className="grid md:grid-cols-2 gap-4">
@@ -588,13 +590,46 @@ function FirstRunCard({ group, onDismiss }: { group: string; onDismiss: () => vo
   )
 }
 
-function Stat({ label, value, hint, icon, tone }: {
+/** The number a count tile shows: 0 → target over 400 ms, once per mount (#512 item 4).
+ *  A later answer (the 10 s refresh) is shown at once; reduced motion is shown at once. */
+function useCountUp(target: number | undefined): number | undefined {
+  const [shown, setShown] = useState<number | undefined>(undefined)
+  const started = useRef(false)
+  useEffect(() => {
+    if (target === undefined) {
+      setShown(undefined)
+      return
+    }
+    if (started.current || window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      started.current = true
+      setShown(target)
+      return
+    }
+    started.current = true
+    const began = performance.now()
+    let frame = 0
+    const tick = (now: number) => {
+      const done = Math.min(1, (now - began) / 400)
+      setShown(Math.round(target * done))
+      if (done < 1) frame = requestAnimationFrame(tick)
+    }
+    frame = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(frame)
+  }, [target])
+  return shown
+}
+
+function Stat({ label, value, count, hint, icon, tone }: {
   label: string
   value: string
+  /** When given, the tile counts 0 → this number once (#512 item 4). */
+  count?: number
   hint: string
   icon: 'table' | 'spark' | 'clock' | 'database'
   tone?: 'ok'
 }) {
+  const shown = useCountUp(count)
+  const text = count === undefined ? value : formatCount(shown ?? 0)
   return (
     <div className="card p-4">
       <div className="flex items-center justify-between">
@@ -603,7 +638,7 @@ function Stat({ label, value, hint, icon, tone }: {
       </div>
       <div className={`text-2xl font-semibold mt-2 flex items-center gap-2 lowercase first-letter:uppercase ${tone === 'ok' ? 'text-text' : ''}`}>
         {tone === 'ok' && <span className="w-2 h-2 rounded-full bg-success shrink-0" aria-hidden="true" />}
-        {value}
+        {text}
       </div>
       <div className="text-xs text-text-mute mt-0.5 break-words">{hint}</div>
     </div>
