@@ -187,6 +187,11 @@ export default function PipelineDetail() {
         <Fact label="Concurrency">
           <span className="break-words">{pipeline.concurrency || '—'}</span>
         </Fact>
+        {pipeline.notify?.onFailure?.length ? (
+          <Fact label="Tells on failure">
+            <span className="font-mono">{pipeline.notify.onFailure.join(', ')}</span>
+          </Fact>
+        ) : null}
         {pipeline.deployment && (
           <Fact label="Deployed from">
             <span className="font-mono text-xs break-words" title={pipeline.deployment.revision}>
