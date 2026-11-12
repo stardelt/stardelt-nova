@@ -254,6 +254,16 @@ function parameterRows(pipeline: PipelineDetail | undefined): ParameterRow[] {
 /** One row of the dialog, with a key that survives edits and removals. */
 type ParamRow = ParameterRow & { key: number }
 
+/** The three endings a pipeline can tell its group about (`spec.notify`, nova#815). */
+type NotifyKind = 'onFailure' | 'onSuccess' | 'onRecovered'
+
+/** One labelled checkbox group per ending; only the legend text differs. */
+const NOTIFY_KINDS = [
+  { kind: 'onFailure', label: 'When it fails', hint: 'One message per failed run.' },
+  { kind: 'onSuccess', label: 'When it succeeds', hint: 'One message per successful run.' },
+  { kind: 'onRecovered', label: 'When it recovers', hint: 'The first success after a failure.' },
+] as const
+
 /** What the engine said about the statement; a change to either input drops it. */
 type CheckOutcome =
   | { kind: 'idle' }
@@ -348,7 +358,11 @@ export default function ScheduleDialog({
     parameterRows(pipeline).map((row) => ({ ...row, key: nextKey.current++ })),
   )
   const [options, setOptions] = useState<OptionState>(() => optionsFrom(pipeline))
-  const [notify, setNotify] = useState<string[]>(() => pipeline?.notify?.onFailure ?? [])
+  const [notify, setNotify] = useState<Record<NotifyKind, string[]>>(() => ({
+    onFailure: pipeline?.notify?.onFailure ?? [],
+    onSuccess: pipeline?.notify?.onSuccess ?? [],
+    onRecovered: pipeline?.notify?.onRecovered ?? [],
+  }))
   const [check, setCheck] = useState<CheckOutcome>({ kind: 'idle' })
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -473,8 +487,14 @@ export default function ScheduleDialog({
     if (!destinationsQuery.isSuccess) return
     const names = groupDestinations.map((destination) => destination.name)
     setNotify((current) => {
-      const kept = current.filter((name) => names.includes(name))
-      return kept.length === current.length ? current : kept
+      const pruned = (list: string[]) => list.filter((name) => names.includes(name))
+      const next = {
+        onFailure: pruned(current.onFailure),
+        onSuccess: pruned(current.onSuccess),
+        onRecovered: pruned(current.onRecovered),
+      }
+      const unchanged = NOTIFY_KINDS.every(({ kind }) => next[kind].length === current[kind].length)
+      return unchanged ? current : next
     })
   }, [destinationsQuery.isSuccess, groupDestinations])
 
@@ -682,21 +702,26 @@ export default function ScheduleDialog({
     }
     // The checked names in the order the list answers them (newest first). A name the list does
     // not hold — the destinations route failed — keeps its place after them rather than being
-    // dropped, and an empty list is sent on purpose: "present and empty" removes the notice.
-    const notifyBody = [
+    // dropped, and an empty list is sent on purpose: "present and empty" removes that kind of notice.
+    const notifyBody = (kind: NotifyKind) => [
       ...groupDestinations
-        .filter((destination) => notify.includes(destination.name))
+        .filter((destination) => notify[kind].includes(destination.name))
         .map((destination) => destination.name),
-      ...notify.filter((name) => !groupDestinations.some((destination) => destination.name === name)),
+      ...notify[kind].filter((name) => !groupDestinations.some((destination) => destination.name === name)),
     ]
+    const notifyResource = {
+      onFailure: notifyBody('onFailure'),
+      onSuccess: notifyBody('onSuccess'),
+      onRecovered: notifyBody('onRecovered'),
+    }
     try {
       const view = editing && pipeline
         ? await api.updatePipeline(pipeline.namespace, pipeline.name, notebookMode
-            ? { notebook: notebookBody, schedule, options: optionsBody, notify: { onFailure: notifyBody } }
-            : { sql: statementText, schedule, params: table, options: optionsBody, notify: { onFailure: notifyBody } })
+            ? { notebook: notebookBody, schedule, options: optionsBody, notify: notifyResource }
+            : { sql: statementText, schedule, params: table, options: optionsBody, notify: notifyResource })
         : await api.createPipeline(notebookMode
-            ? { name, ownerGroup: group, notebook: notebookBody, schedule, options: optionsBody, notify: { onFailure: notifyBody } }
-            : { name, ownerGroup: group, sql: statementText, schedule, params: table, options: optionsBody, notify: { onFailure: notifyBody } })
+            ? { name, ownerGroup: group, notebook: notebookBody, schedule, options: optionsBody, notify: notifyResource }
+            : { name, ownerGroup: group, sql: statementText, schedule, params: table, options: optionsBody, notify: notifyResource })
       onScheduled(view)
     } catch (e: unknown) {
       // The API's own sentence, kept beside the fields it is about.
@@ -1295,28 +1320,34 @@ export default function ScheduleDialog({
               </div>
             </fieldset>
             <fieldset>
-              <legend className="label mb-1.5">Tell … when a run fails</legend>
+              <legend className="label mb-1.5">Tell … when a run ends</legend>
               {groupDestinations.length === 0 ? (
                 <p className="text-sm text-text-dim">
                   No destination in this group yet. <Link className="underline" to="/destinations">Add one</Link>.
                 </p>
               ) : (
-                <div className="grid gap-2 sm:grid-cols-2">
-                  {groupDestinations.map((destination) => (
-                    <label key={destination.id} className="flex items-center gap-2 text-sm">
-                      <input
-                        type="checkbox"
-                        checked={notify.includes(destination.name)}
-                        onChange={(event) =>
-                          setNotify((current) =>
-                            event.target.checked
-                              ? [...current, destination.name]
-                              : current.filter((name) => name !== destination.name),
-                          )
-                        }
-                      />
-                      <span>{destination.name} <span className="text-text-mute">({destination.kind})</span></span>
-                    </label>
+                <div className="space-y-3">
+                  {NOTIFY_KINDS.map(({ kind, label, hint }) => (
+                    <div key={kind} role="group" aria-label={label} className="grid gap-2 sm:grid-cols-2">
+                      <p className="text-xs text-text-mute sm:col-span-2">{hint}</p>
+                      {groupDestinations.map((destination) => (
+                        <label key={destination.id} className="flex items-center gap-2 text-sm">
+                          <input
+                            type="checkbox"
+                            checked={notify[kind].includes(destination.name)}
+                            onChange={(event) =>
+                              setNotify((current) => ({
+                                ...current,
+                                [kind]: event.target.checked
+                                  ? [...current[kind], destination.name]
+                                  : current[kind].filter((name) => name !== destination.name),
+                              }))
+                            }
+                          />
+                          <span>{destination.name} <span className="text-text-mute">({destination.kind})</span></span>
+                        </label>
+                      ))}
+                    </div>
                   ))}
                 </div>
               )}

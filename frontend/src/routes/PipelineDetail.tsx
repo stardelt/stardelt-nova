@@ -187,11 +187,17 @@ export default function PipelineDetail() {
         <Fact label="Concurrency">
           <span className="break-words">{pipeline.concurrency || '—'}</span>
         </Fact>
-        {pipeline.notify?.onFailure?.length ? (
-          <Fact label="Tells on failure">
-            <span className="font-mono">{pipeline.notify.onFailure.join(', ')}</span>
-          </Fact>
-        ) : null}
+        {([
+          ['Tells on failure', pipeline.notify?.onFailure],
+          ['Tells on success', pipeline.notify?.onSuccess],
+          ['Tells on recovery', pipeline.notify?.onRecovered],
+        ] as const)
+          .filter(([, names]) => names?.length)
+          .map(([label, names]) => (
+            <Fact key={label} label={label}>
+              <span className="font-mono">{names!.join(', ')}</span>
+            </Fact>
+          ))}
         {pipeline.deployment && (
           <Fact label="Deployed from">
             <span className="font-mono text-xs break-words" title={pipeline.deployment.revision}>
