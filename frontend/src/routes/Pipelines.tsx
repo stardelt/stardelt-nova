@@ -152,11 +152,31 @@ export function usePipelineActions(refetch: () => Promise<unknown> | void) {
     }
   }
 
+  /** Retry only the failed tasks of one run; the API's refusal sentence is shown as it is. */
+  async function retry(pipeline: PipelineView, runId: string) {
+    if (inFlight.current) return
+    inFlight.current = true
+    setPending(`retry:${runId}`)
+    setError(null)
+    setNotice(null)
+    try {
+      await api.retryPipelineRun(pipeline.namespace, pipeline.name, runId)
+      setNotice(`Retried the failed tasks of run ${runId}.`)
+      await refetch()
+    } catch (e: unknown) {
+      setError(errorMessage(e))
+    } finally {
+      inFlight.current = false
+      setPending(null)
+    }
+  }
+
   return {
     notice,
     error,
     pending,
     act,
+    retry,
     /** Say something a control outside `act` did (the stop dialog). */
     announce: setNotice,
     clearError: () => setError(null),

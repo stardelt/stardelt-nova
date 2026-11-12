@@ -370,6 +370,8 @@ export default function PipelineDetail() {
                   active={active}
                   onToggle={() => setOpenRun(open ? null : run.runId)}
                   onStop={() => setStopping(run)}
+                  onRetry={() => void actions.retry(pipeline, run.runId)}
+                  retrying={actions.pending === `retry:${run.runId}`}
                 />
               )
             })}
@@ -440,6 +442,8 @@ function RunRow({
   active,
   onToggle,
   onStop,
+  onRetry,
+  retrying,
 }: {
   pipeline: PipelineDetailView
   run: RunView
@@ -449,6 +453,8 @@ function RunRow({
   active: boolean
   onToggle: () => void
   onStop: () => void
+  onRetry: () => void
+  retrying: boolean
 }) {
   return (
     <>
@@ -485,6 +491,17 @@ function RunRow({
               onClick={onStop}
             >
               Stop run
+            </button>
+          )}
+          {run.state === 'failed' && pipeline.canRun && (
+            <button
+              type="button"
+              className="btn-ghost py-1 px-2 text-xs whitespace-nowrap"
+              aria-label={`Retry failed tasks of run ${run.runId}`}
+              disabled={retrying}
+              onClick={onRetry}
+            >
+              {retrying ? 'Retrying…' : 'Retry failed tasks'}
             </button>
           )}
         </td>
