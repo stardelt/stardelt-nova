@@ -368,6 +368,12 @@ fn spec_of(resource: &Value) -> &Value {
     resource.get("spec").unwrap_or(resource)
 }
 
+/// `spec.notify` as the shape the document and the detail page carry; `None` when the key is
+/// absent or does not parse (the operator's lists may be left out, `serde(default)` fills them).
+fn notify_of(spec: &Value) -> Option<PipelineNotify> {
+    serde_json::from_value(spec.get("notify")?.clone()).ok()
+}
+
 // ---------------------------------------------------------------------------
 // Pure rules
 // ---------------------------------------------------------------------------
@@ -1458,7 +1464,9 @@ fn run_task_kind(resource: &Value) -> Option<&str> {
 }
 
 /// The `Pipeline` *Schedule* writes: the ticket's shape (#210), the caller's parameters and
-/// options (#223), a statement or a pinned notebook version (#237), nothing else.
+/// options (#223), a statement or a pinned notebook version (#237), the notifications it names
+/// (nova#815), nothing else.
+#[allow(clippy::too_many_arguments)]
 fn pipeline_resource(
     name: &str,
     group: &str,
@@ -1467,6 +1475,7 @@ fn pipeline_resource(
     params: &BTreeMap<String, String>,
     options: &PipelineOptionsView,
     created_by: &str,
+    notify: Option<&PipelineNotify>,
 ) -> Value {
     let task = match statement {
         Statement::Sql(sql) => json!({ "name": "run", "kind": "sql", "sql": sql }),
@@ -1494,6 +1503,11 @@ fn pipeline_resource(
     if let Some((cron, timezone)) = schedule {
         spec["schedule"] = json!({ "cron": cron, "timezone": timezone });
     }
+    // Never an empty object: the CRD refuses `notify` without an owner group, and an empty
+    // object says nothing a reader can use.
+    if let Some(notify) = notify.filter(|notify| !notify.is_empty()) {
+        spec["notify"] = serde_json::to_value(notify).unwrap_or(Value::Null);
+    }
     let mut labels = serde_json::Map::new();
     labels.insert(MANAGED_BY_LABEL.to_string(), json!(MANAGED_BY_NOVA));
     labels.insert("stardelt.io/owner-group".to_string(), json!(group));
@@ -1520,6 +1534,7 @@ fn updated_resource(
     options: &PipelineOptionsView,
     params: &BTreeMap<String, String>,
     schedule: Option<&(String, String)>,
+    notify: Option<&PipelineNotify>,
 ) -> Value {
     let mut updated = resource.clone();
     match statement {
@@ -1558,6 +1573,19 @@ fn updated_resource(
                 spec.remove("schedule");
             }
         }
+    }
+    // `None` leaves what the resource carries: until the form edits notifications, a save must
+    // not wipe one a bundle deployed. All three lists empty removes the key.
+    match notify {
+        Some(notify) if !notify.is_empty() => {
+            updated["spec"]["notify"] = serde_json::to_value(notify).unwrap_or(Value::Null);
+        }
+        Some(_) => {
+            if let Some(spec) = updated.get_mut("spec").and_then(Value::as_object_mut) {
+                spec.remove("notify");
+            }
+        }
+        None => {}
     }
     updated
 }
@@ -1630,6 +1658,61 @@ fn take_create_slot(limiter: &CreateLimiter, sub: &str) -> bool {
 pub struct ScheduleRequest {
     pub cron: String,
     pub timezone: String,
+}
+
+/// Who is told when a run of this pipeline ends (`spec.notify`, operator#582 / nova#815).
+/// Each list names at most five destinations owned by the pipeline's `ownerGroup`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineNotify {
+    /// Destinations told when the run fails, after the last retry.
+    #[serde(default)]
+    pub on_failure: Vec<String>,
+    /// Destinations told when the run succeeds.
+    #[serde(default)]
+    pub on_success: Vec<String>,
+    /// Destinations told on the first success after a failure.
+    #[serde(default)]
+    pub on_recovered: Vec<String>,
+}
+
+impl PipelineNotify {
+    /// Nothing is listed, so the resource carries no `spec.notify` at all.
+    pub fn is_empty(&self) -> bool {
+        self.on_failure.is_empty() && self.on_success.is_empty() && self.on_recovered.is_empty()
+    }
+
+    /// The operator's shape rules (`crd.rs`, `PipelineSpec::validate`), in its order and its
+    /// sentences: at most five names per list, each 1 to 64 characters without outer
+    /// whitespace, and no name twice in one list.
+    fn check_shape(&self) -> Result<(), String> {
+        for (list, names) in [
+            ("onFailure", &self.on_failure),
+            ("onSuccess", &self.on_success),
+            ("onRecovered", &self.on_recovered),
+        ] {
+            if names.len() > 5 {
+                return Err(format!("notify.{list} names at most 5 destinations"));
+            }
+            let mut seen = BTreeSet::new();
+            for name in names {
+                if name.trim().is_empty() || name.chars().count() > 64 {
+                    return Err(format!(
+                        "notify.{list} holds `{name}`, which is not a destination name (1 to 64 characters)"
+                    ));
+                }
+                if name != name.trim() {
+                    return Err(format!(
+                        "notify.{list} holds `{name}`, which has leading or trailing whitespace"
+                    ));
+                }
+                if !seen.insert(name.as_str()) {
+                    return Err(format!("notify.{list} names `{name}` twice"));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// The advanced options of a schedule (#223), all optional: an omitted field keeps today's
@@ -1736,6 +1819,10 @@ pub struct CreatePipelineRequest {
     /// Which bundle, target and commit this pipeline is deployed from (`stardelt bundle deploy`).
     #[serde(default)]
     pub provenance: Option<Provenance>,
+    /// Who is told when a run ends (`spec.notify`). Omitted writes none; every name must be a
+    /// destination of `ownerGroup`.
+    #[serde(default)]
+    pub notify: Option<PipelineNotify>,
 }
 
 /// `PUT /api/pipelines/{namespace}/{name}`: change the statement, the schedule, the parameters
@@ -1771,6 +1858,11 @@ pub struct UpdatePipelineRequest {
     /// already says untouched; given, it replaces it.
     #[serde(default)]
     pub provenance: Option<Provenance>,
+    /// Who is told when a run ends (`spec.notify`). Omitted keeps the stored `spec.notify`;
+    /// given with all three lists empty, it removes it — a form save must not wipe a
+    /// notification a bundle deployed until the form edits it.
+    #[serde(default)]
+    pub notify: Option<PipelineNotify>,
 }
 
 /// Where a pipeline came from when `stardelt bundle deploy` published it. It names things and
@@ -1906,6 +1998,9 @@ pub struct PipelineDocument {
     pub params: BTreeMap<String, String>,
     /// Retries, the wait, the time limit and the run mode, defaults filled in.
     pub options: PipelineOptionsView,
+    /// Who is told when a run ends; left out when the resource has none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notify: Option<PipelineNotify>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, utoipa::ToSchema)]
@@ -2143,6 +2238,9 @@ pub struct PipelineDetail {
     /// The public Airflow DAG URL, `None` when `NOVA_BASE_DOMAIN` is unset; the route is already visibility-gated, so no second permission check.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub airflow_url: Option<String>,
+    /// Who is told when a run ends; left out when the resource has none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notify: Option<PipelineNotify>,
 }
 
 /// `GET …/runs/{run_id}`: one run and its task instances.
@@ -2912,6 +3010,7 @@ async fn pipeline_detail(
         retries: retries_of(spec),
         options: options_of(spec),
         airflow_url,
+        notify: notify_of(spec),
     })
 }
 
@@ -2961,6 +3060,7 @@ fn spec_response(resource: &Value) -> PipelineSpecResponse {
             schedule,
             params: params_of(spec),
             options: options_of(spec),
+            notify: notify_of(spec),
         },
         resource_version: resource
             .get("metadata")
@@ -3666,6 +3766,7 @@ async fn audit_group(resources: Option<&PipelineResources>, name: &str) -> Strin
 /// Airflow has not seen it yet). Audited whatever happens.
 async fn create_pipeline(
     resources: Option<&PipelineResources>,
+    db: Option<&sqlx::PgPool>,
     notebooks: Option<&NotebookStore>,
     limiter: &CreateLimiter,
     who: &Identity,
@@ -3679,7 +3780,7 @@ async fn create_pipeline(
         body.schedule.as_ref(),
         &body.owner_group,
     );
-    let result = create_pipeline_inner(resources, notebooks, limiter, who, body).await;
+    let result = create_pipeline_inner(resources, db, notebooks, limiter, who, body).await;
     match &result {
         Ok(_) => audit::pipeline_event(
             "create",
@@ -3703,6 +3804,51 @@ async fn create_pipeline(
     result.map_err(|e| e.fail)
 }
 
+/// Every name in `notify` must be a destination of `group` (nova#815 decision 1). The shape is
+/// the operator's (`PipelineNotify::check_shape`), the ownership is the state store's: the
+/// pipeline's `ownerGroup`, never the caller's groups, so an administrator cannot name another
+/// group's destination either.
+async fn check_notify(
+    db: Option<&sqlx::PgPool>,
+    group: &str,
+    notify: Option<&PipelineNotify>,
+) -> Result<(), Fail> {
+    let Some(notify) = notify.filter(|notify| !notify.is_empty()) else {
+        return Ok(());
+    };
+    notify
+        .check_shape()
+        .map_err(|message| Fail::new(StatusCode::BAD_REQUEST, message))?;
+    let Some(db) = db else {
+        return Err(Fail::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the state store is not configured",
+        ));
+    };
+    let lists = [&notify.on_failure, &notify.on_success, &notify.on_recovered];
+    let names: Vec<String> = lists
+        .iter()
+        .flat_map(|names| names.iter().cloned())
+        .collect();
+    let found: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM destination WHERE owner_group = $1 AND name = ANY($2)",
+    )
+    .bind(group)
+    .bind(&names)
+    .fetch_all(db)
+    .await
+    .map_err(|_| Fail::new(StatusCode::BAD_GATEWAY, "the state store did not answer"))?;
+    for name in lists.iter().flat_map(|names| names.iter()) {
+        if !found.contains(name) {
+            return Err(Fail::new(
+                StatusCode::BAD_REQUEST,
+                format!("there is no destination named {name} in {group}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// What a create writes once every rule has passed: the statement or notebook, the schedule, the options.
 struct Planned {
     statement: Statement,
@@ -3714,6 +3860,7 @@ struct Planned {
 /// validate route share them, so "the check passed" and "the write succeeds" cannot drift apart).
 async fn plan_pipeline(
     resources: &PipelineResources,
+    db: Option<&sqlx::PgPool>,
     notebooks_store: Option<&NotebookStore>,
     who: &Identity,
     body: &CreatePipelineRequest,
@@ -3733,6 +3880,11 @@ async fn plan_pipeline(
             ),
         ));
     }
+
+    // 2b. Every notification destination belongs to the pipeline's own group (nova#815).
+    check_notify(db, &body.owner_group, body.notify.as_ref())
+        .await
+        .map_err(|fail| ActionError::refused("notify", fail))?;
 
     // 3. The principal of the group must exist and be ready: the loader refuses otherwise, and
     //    a pipeline the loader refuses would sit in the list as `not-loaded`.
@@ -3958,6 +4110,7 @@ pub(crate) fn deployment_of(resource: &Value) -> Option<DeploymentView> {
 
 async fn create_pipeline_inner(
     resources: Option<&PipelineResources>,
+    db: Option<&sqlx::PgPool>,
     notebooks_store: Option<&NotebookStore>,
     limiter: &CreateLimiter,
     who: &Identity,
@@ -3971,7 +4124,7 @@ async fn create_pipeline_inner(
         statement,
         schedule,
         options,
-    } = plan_pipeline(resources, notebooks_store, who, &body).await?;
+    } = plan_pipeline(resources, db, notebooks_store, who, &body).await?;
 
     // 7. The name is free.
     if resources
@@ -3996,6 +4149,7 @@ async fn create_pipeline_inner(
         &body.params,
         &options,
         &who.display_name,
+        body.notify.as_ref(),
     );
     if let Some(provenance) = &body.provenance {
         stamp_provenance(&mut resource, provenance, &who.display_name);
@@ -4039,12 +4193,13 @@ fn not_ok(message: &str) -> ValidatePipelineResponse {
 /// unreachable cluster or notebook store is still an error, as on create.
 async fn validate_pipeline(
     resources: Option<&PipelineResources>,
+    db: Option<&sqlx::PgPool>,
     notebooks_store: Option<&NotebookStore>,
     who: &Identity,
     body: CreatePipelineRequest,
 ) -> Result<ValidatePipelineResponse, Fail> {
     let resources = resources.ok_or_else(no_cluster)?;
-    let planned = match plan_pipeline(resources, notebooks_store, who, &body).await {
+    let planned = match plan_pipeline(resources, db, notebooks_store, who, &body).await {
         Ok(planned) => planned,
         Err(e) if e.outcome.starts_with("refused:") => return Ok(not_ok(e.fail.message())),
         Err(e) => return Err(e.fail),
@@ -4078,6 +4233,7 @@ async fn validate_pipeline(
                 &planned.options,
                 &body.params,
                 planned.schedule.as_ref(),
+                body.notify.as_ref(),
             );
             if let Some(provenance) = &body.provenance {
                 stamp_provenance(&mut updated, provenance, &who.display_name);
@@ -4150,8 +4306,10 @@ async fn view_after_write(
 /// `PUT /api/pipelines/{namespace}/{name}`: change the statement and the schedule of a statement
 /// pipeline, or the version and parameters of a notebook pipeline, and nothing else. Audited
 /// whatever happens.
+#[allow(clippy::too_many_arguments)]
 async fn update_pipeline(
     resources: Option<&PipelineResources>,
+    db: Option<&sqlx::PgPool>,
     notebooks: Option<&NotebookStore>,
     airflow: Option<&AirflowClient>,
     who: &Identity,
@@ -4167,8 +4325,10 @@ async fn update_pipeline(
         body.schedule.as_ref(),
         &group,
     );
-    let result =
-        update_pipeline_inner(resources, notebooks, airflow, who, namespace, name, body).await;
+    let result = update_pipeline_inner(
+        resources, db, notebooks, airflow, who, namespace, name, body,
+    )
+    .await;
     match &result {
         Ok(_) => audit::pipeline_event(
             "update",
@@ -4192,8 +4352,10 @@ async fn update_pipeline(
     result.map_err(|e| e.fail)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn update_pipeline_inner(
     resources: Option<&PipelineResources>,
+    db: Option<&sqlx::PgPool>,
     notebooks_store: Option<&NotebookStore>,
     airflow: Option<&AirflowClient>,
     who: &Identity,
@@ -4232,6 +4394,11 @@ async fn update_pipeline_inner(
         .filter(|group| !group.is_empty())
         .ok_or_else(|| ActionError::refused("shape", shape_not_editable()))?
         .to_string();
+
+    // Every notification destination belongs to the pipeline's own group, never the caller's.
+    check_notify(db, &group, body.notify.as_ref())
+        .await
+        .map_err(|fail| ActionError::refused("notify", fail))?;
 
     // A body names exactly one of a statement and a notebook (#237); an update never changes
     // what the pipeline runs, only the text or the pinned version.
@@ -4313,6 +4480,7 @@ async fn update_pipeline_inner(
         &options,
         &body.params,
         schedule.as_ref(),
+        body.notify.as_ref(),
     );
     if let Some(provenance) = &body.provenance {
         stamp_provenance(&mut updated, provenance, &who.display_name);
@@ -4961,6 +5129,7 @@ pub(crate) async fn create(
         StatusCode::CREATED,
         create_pipeline(
             resources(signed.state()).as_ref(),
+            signed.state().db.as_ref(),
             signed.state().notebooks.as_ref(),
             &signed.state().pipeline_creates,
             signed.identity(),
@@ -4991,6 +5160,7 @@ pub(crate) async fn validate(
     answer(
         validate_pipeline(
             resources(signed.state()).as_ref(),
+            signed.state().db.as_ref(),
             signed.state().notebooks.as_ref(),
             signed.identity(),
             body,
@@ -5029,6 +5199,7 @@ pub(crate) async fn update(
     answer(
         update_pipeline(
             resources(signed.state()).as_ref(),
+            signed.state().db.as_ref(),
             signed.state().notebooks.as_ref(),
             signed.state().airflow.as_ref(),
             signed.identity(),
@@ -8137,6 +8308,7 @@ mod tests {
         let error = update_pipeline(
             Some(&resources),
             None,
+            None,
             Some(&airflow),
             &viewer,
             &namespace,
@@ -8204,6 +8376,7 @@ mod tests {
                 "update",
                 update_pipeline(
                     Some(&resources),
+                    None,
                     None,
                     Some(&airflow),
                     &outsider,
@@ -9038,6 +9211,7 @@ mod tests {
             params: BTreeMap::new(),
             options: None,
             provenance: None,
+            notify: None,
         }
     }
 
@@ -9050,6 +9224,7 @@ mod tests {
             options: None,
             resource_version: None,
             provenance: None,
+            notify: None,
         }
     }
 
@@ -9074,6 +9249,7 @@ mod tests {
             &BTreeMap::new(),
             &default_options(),
             "sub-ada",
+            None,
         );
         resource["metadata"]["resourceVersion"] = json!("7");
         resource
@@ -9148,6 +9324,7 @@ mod tests {
         let view = create_pipeline(
             Some(&resources),
             None,
+            None,
             &create_limiter(),
             &ada,
             create_body("daily-trips", "analytics", "select 1;"),
@@ -9203,6 +9380,7 @@ mod tests {
         let view = create_pipeline(
             Some(&resources),
             None,
+            None,
             &create_limiter(),
             &who("sub-ada", &["analytics"], false),
             body,
@@ -9228,6 +9406,7 @@ mod tests {
         let error = create_pipeline(
             Some(&resources),
             None,
+            None,
             &create_limiter(),
             &ada,
             create_body("smoke", "finance", "select 1"),
@@ -9245,6 +9424,7 @@ mod tests {
         let root = who("sub-root", &["stardelt-admins"], true);
         let error = create_pipeline(
             Some(&resources),
+            None,
             None,
             &create_limiter(),
             &root,
@@ -9270,6 +9450,7 @@ mod tests {
         let error = create_pipeline(
             Some(&resources),
             None,
+            None,
             &limiter,
             &ada,
             create_body("smoke", "analytics", "select 1"),
@@ -9291,6 +9472,7 @@ mod tests {
         let error = create_pipeline(
             Some(&resources),
             None,
+            None,
             &limiter,
             &ada,
             create_body("smoke", "analytics", "select 1"),
@@ -9311,6 +9493,7 @@ mod tests {
         );
         let error = create_pipeline(
             Some(&resources),
+            None,
             None,
             &limiter,
             &ada,
@@ -9340,6 +9523,7 @@ mod tests {
             let error = create_pipeline(
                 Some(&resources),
                 None,
+                None,
                 &limiter,
                 &ada,
                 create_body(name, "analytics", "select 1"),
@@ -9353,6 +9537,7 @@ mod tests {
         // A blank statement is neither a statement nor a notebook (#237).
         let error = create_pipeline(
             Some(&resources),
+            None,
             None,
             &limiter,
             &ada,
@@ -9371,6 +9556,7 @@ mod tests {
             let error = create_pipeline(
                 Some(&resources),
                 None,
+                None,
                 &limiter,
                 &ada,
                 create_body("smoke", "analytics", &sql),
@@ -9386,7 +9572,7 @@ mod tests {
             cron: "0 3 * * *".into(),
             timezone: "Mars/Olympus".into(),
         });
-        let error = create_pipeline(Some(&resources), None, &limiter, &ada, body)
+        let error = create_pipeline(Some(&resources), None, None, &limiter, &ada, body)
             .await
             .expect_err("not an IANA zone");
         assert_eq!(error.status(), StatusCode::BAD_REQUEST);
@@ -9398,7 +9584,7 @@ mod tests {
                 cron: cron.into(),
                 timezone: "UTC".into(),
             });
-            let error = create_pipeline(Some(&resources), None, &limiter, &ada, body)
+            let error = create_pipeline(Some(&resources), None, None, &limiter, &ada, body)
                 .await
                 .expect_err("invalid cron");
             assert_eq!(error.status(), StatusCode::BAD_REQUEST);
@@ -9412,6 +9598,7 @@ mod tests {
         // One trailing `;` is dropped from the stored statement; the rest is trimmed.
         create_pipeline(
             Some(&resources),
+            None,
             None,
             &limiter,
             &ada,
@@ -9434,6 +9621,7 @@ mod tests {
         create_pipeline(
             Some(&resources),
             None,
+            None,
             &limiter,
             &ada,
             create_body("smoke", "analytics", "select 1"),
@@ -9443,6 +9631,7 @@ mod tests {
 
         let error = create_pipeline(
             Some(&resources),
+            None,
             None,
             &limiter,
             &ada,
@@ -9471,6 +9660,7 @@ mod tests {
             create_pipeline(
                 Some(&resources),
                 None,
+                None,
                 &limiter,
                 &ada,
                 create_body(&format!("daily-{index}"), "analytics", "select 1"),
@@ -9480,6 +9670,7 @@ mod tests {
         }
         let error = create_pipeline(
             Some(&resources),
+            None,
             None,
             &limiter,
             &ada,
@@ -9501,6 +9692,7 @@ mod tests {
         // Another person has their own ten.
         create_pipeline(
             Some(&resources),
+            None,
             None,
             &limiter,
             &who("sub-bob", &["analytics"], false),
@@ -9541,9 +9733,11 @@ mod tests {
             }),
             resource_version: None,
             provenance: None,
+            notify: None,
         };
         let view = update_pipeline(
             Some(&resources),
+            None,
             None,
             None,
             &ada,
@@ -9588,6 +9782,7 @@ mod tests {
             Some(&resources),
             None,
             None,
+            None,
             &ada,
             &namespace,
             "smoke",
@@ -9602,6 +9797,7 @@ mod tests {
                 options: None,
                 resource_version: None,
                 provenance: None,
+                notify: None,
             },
         )
         .await
@@ -9640,6 +9836,7 @@ mod tests {
         for caller in [&ada, &admin()] {
             let error = update_pipeline(
                 Some(&resources),
+                None,
                 None,
                 None,
                 caller,
@@ -9687,6 +9884,7 @@ mod tests {
         for name in ["two-tasks", "other-name"] {
             let error = update_pipeline(
                 Some(&resources),
+                None,
                 None,
                 None,
                 &ada,
@@ -9769,6 +9967,7 @@ mod tests {
             Some(&resources),
             None,
             None,
+            None,
             &ada,
             &namespace,
             "smoke",
@@ -9799,6 +9998,7 @@ mod tests {
             Some(&resources),
             None,
             None,
+            None,
             &ada,
             &namespace,
             "smoke",
@@ -9820,6 +10020,7 @@ mod tests {
         current.sql = "select 10".into();
         let error = update_pipeline(
             Some(&resources),
+            None,
             None,
             None,
             &ada,
@@ -9853,7 +10054,7 @@ mod tests {
 
         let mut body = create_body("daily-trips", "analytics", "select 1");
         body.provenance = Some(provenance("shop-etl", "prod", Some("0123abc-dirty")));
-        let view = create_pipeline(Some(&resources), None, &create_limiter(), &ada, body)
+        let view = create_pipeline(Some(&resources), None, None, &create_limiter(), &ada, body)
             .await
             .expect("created");
         let deployment = view.deployment.expect("the view shows it");
@@ -9885,6 +10086,7 @@ mod tests {
 
         let plain = create_pipeline(
             Some(&resources),
+            None,
             None,
             &create_limiter(),
             &ada,
@@ -9958,6 +10160,7 @@ mod tests {
             let error = create_pipeline(
                 Some(&resources),
                 None,
+                None,
                 &create_limiter(),
                 &ada,
                 body.clone(),
@@ -9966,7 +10169,7 @@ mod tests {
             .expect_err("refused");
             assert_eq!(error.status(), StatusCode::BAD_REQUEST, "{bundle} {target}");
             assert!(error.message().starts_with(sentence), "{}", error.message());
-            let answer = validate_pipeline(Some(&resources), None, &ada, body)
+            let answer = validate_pipeline(Some(&resources), None, None, &ada, body)
                 .await
                 .expect("an answer");
             assert!(!answer.ok);
@@ -10013,7 +10216,7 @@ mod tests {
 
         let mut body = create_body("daily-trips", "analytics", "select 1");
         body.provenance = Some(provenance("shop-etl", "prod", Some("aaaaaaa")));
-        let created = create_pipeline(Some(&resources), None, &create_limiter(), &ada, body)
+        let created = create_pipeline(Some(&resources), None, None, &create_limiter(), &ada, body)
             .await
             .expect("created");
         assert_eq!(
@@ -10025,6 +10228,7 @@ mod tests {
         // The form or the YAML editor: no stamp in the body, so the old stamp and digest stay.
         update_pipeline(
             Some(&resources),
+            None,
             None,
             None,
             &ada,
@@ -10042,6 +10246,7 @@ mod tests {
         deploy.provenance = Some(provenance("shop-etl", "prod", Some("bbbbbbb")));
         update_pipeline(
             Some(&resources),
+            None,
             None,
             None,
             &ada,
@@ -10073,7 +10278,7 @@ mod tests {
             let resources = &resources;
             let ada = &ada;
             async move {
-                validate_pipeline(Some(resources), None, ada, body)
+                validate_pipeline(Some(resources), None, None, ada, body)
                     .await
                     .expect("an answer")
             }
@@ -10083,6 +10288,7 @@ mod tests {
         body.provenance = Some(provenance("shop-etl", "prod", Some("aaaaaaa")));
         create_pipeline(
             Some(&resources),
+            None,
             None,
             &create_limiter(),
             &ada,
@@ -10096,6 +10302,7 @@ mod tests {
         // The form or the YAML editor changes it; the next deploy would overwrite that.
         update_pipeline(
             Some(&resources),
+            None,
             None,
             None,
             &ada,
@@ -10116,6 +10323,7 @@ mod tests {
         create_pipeline(
             Some(&resources),
             None,
+            None,
             &create_limiter(),
             &ada,
             create_body("by-hand", "analytics", "select 1"),
@@ -10130,6 +10338,7 @@ mod tests {
         deploy.provenance = body.provenance.clone();
         update_pipeline(
             Some(&resources),
+            None,
             None,
             None,
             &ada,
@@ -10157,17 +10366,17 @@ mod tests {
         // The check: the same stamp is no change, another commit is, and saying nothing is not.
         let mut body = create_body("daily-trips", "analytics", "select 1");
         body.provenance = Some(provenance("shop-etl", "prod", Some("aaaaaaa")));
-        let same = validate_pipeline(Some(&resources), None, &ada, body.clone())
+        let same = validate_pipeline(Some(&resources), None, None, &ada, body.clone())
             .await
             .expect("an answer");
         assert!(same.changes.is_empty(), "{:?}", same.changes);
         body.provenance = Some(provenance("shop-etl", "prod", Some("bbbbbbb")));
-        let newer = validate_pipeline(Some(&resources), None, &ada, body.clone())
+        let newer = validate_pipeline(Some(&resources), None, None, &ada, body.clone())
             .await
             .expect("an answer");
         assert_eq!(newer.changes, vec!["deployment"]);
         body.provenance = None;
-        let silent = validate_pipeline(Some(&resources), None, &ada, body)
+        let silent = validate_pipeline(Some(&resources), None, None, &ada, body)
             .await
             .expect("an answer");
         assert!(silent.changes.is_empty());
@@ -10175,6 +10384,7 @@ mod tests {
         // The write: no stamp in the body leaves the stored one alone.
         update_pipeline(
             Some(&resources),
+            None,
             None,
             None,
             &ada,
@@ -10196,6 +10406,7 @@ mod tests {
         deploy.provenance = Some(provenance("shop-etl", "dev", None));
         update_pipeline(
             Some(&resources),
+            None,
             None,
             None,
             &ada,
@@ -10231,6 +10442,7 @@ mod tests {
             Some(&resources),
             None,
             None,
+            None,
             &ada,
             &namespace,
             "smoke",
@@ -10249,6 +10461,7 @@ mod tests {
         let resources = memory_with(&[("smoke", nova_pipeline("smoke", "analytics"))], &[]);
         let error = update_pipeline(
             Some(&resources),
+            None,
             None,
             None,
             &ada,
@@ -10476,6 +10689,7 @@ mod tests {
         create_pipeline(
             Some(&resources),
             None,
+            None,
             &limiter,
             &actor,
             create_body("canary", "analytics", CANARY),
@@ -10484,6 +10698,7 @@ mod tests {
         .expect("create");
         update_pipeline(
             Some(&resources),
+            None,
             None,
             None,
             &actor,
@@ -10761,6 +10976,7 @@ mod tests {
         create_pipeline(
             Some(&resources),
             None,
+            None,
             &create_limiter(),
             &who("sub-ada", &["analytics"], false),
             body,
@@ -10801,6 +11017,7 @@ mod tests {
         create_pipeline(
             Some(&resources),
             None,
+            None,
             &create_limiter(),
             &ada,
             create_body("plain", "analytics", "select 1"),
@@ -10829,6 +11046,7 @@ mod tests {
         });
         update_pipeline(
             Some(&resources),
+            None,
             None,
             None,
             &ada,
@@ -10936,7 +11154,7 @@ mod tests {
             let mut body = create_body(&format!("refused-{index}"), "analytics", "select 1");
             body.params = parameters;
             body.options = Some(options);
-            let error = create_pipeline(Some(&resources), None, &limiter, &ada, body)
+            let error = create_pipeline(Some(&resources), None, None, &limiter, &ada, body)
                 .await
                 .expect_err("the option is out of range");
             assert_eq!(error.status(), StatusCode::BAD_REQUEST, "{sentence}");
@@ -10968,7 +11186,7 @@ mod tests {
         ] {
             let mut body = create_body("typo", "analytics", sql);
             body.params = params;
-            let error = create_pipeline(Some(&resources), None, &limiter, &ada, body)
+            let error = create_pipeline(Some(&resources), None, None, &limiter, &ada, body)
                 .await
                 .expect_err("the loader would fail this run");
             assert_eq!(error.status(), StatusCode::BAD_REQUEST, "{sql}");
@@ -10981,7 +11199,7 @@ mod tests {
         let statement = "select '${run.date}', '${run.id}', '${params.day}', '${a-b}'";
         let mut body = create_body("defined", "analytics", statement);
         body.params = params(&[("day", "2026-10-01")]);
-        create_pipeline(Some(&resources), None, &limiter, &ada, body)
+        create_pipeline(Some(&resources), None, None, &limiter, &ada, body)
             .await
             .expect("every placeholder is one the loader fills");
         let stored = stored_pipeline(&resources, "defined")
@@ -11197,6 +11415,7 @@ mod tests {
         let answer = validate_pipeline(
             Some(&resources),
             None,
+            None,
             &ada,
             create_body("daily-trips", "analytics", "select 1"),
         )
@@ -11231,13 +11450,14 @@ mod tests {
             let refusal = create_pipeline(
                 Some(&resources),
                 None,
+                None,
                 &create_limiter(),
                 &ada,
                 body.clone(),
             )
             .await
             .expect_err("create refuses it");
-            let answer = validate_pipeline(Some(&resources), None, &ada, body)
+            let answer = validate_pipeline(Some(&resources), None, None, &ada, body)
                 .await
                 .expect("a refusal is an answer, not an error");
             assert!(!answer.ok);
@@ -11283,6 +11503,7 @@ mod tests {
         let own = validate_pipeline(
             Some(&resources),
             None,
+            None,
             &ada,
             create_body("daily-trips", "analytics", "select 2"),
         )
@@ -11306,6 +11527,7 @@ mod tests {
             let answer = validate_pipeline(
                 Some(&resources),
                 None,
+                None,
                 &ada,
                 create_body(name, group, "select 2"),
             )
@@ -11319,6 +11541,7 @@ mod tests {
         let both = who("sub-bob", &["analytics", "finance"], false);
         let moved = validate_pipeline(
             Some(&resources),
+            None,
             None,
             &both,
             create_body("theirs", "analytics", "select 2"),
@@ -11369,7 +11592,7 @@ mod tests {
             (everything, vec!["statement", "schedule", "options"]),
             (parametrised, vec!["statement", "params"]),
         ] {
-            let answer = validate_pipeline(Some(&resources), None, &ada, body)
+            let answer = validate_pipeline(Some(&resources), None, None, &ada, body)
                 .await
                 .expect("an answer");
             assert!(answer.ok, "{answer:?}");
@@ -11384,6 +11607,7 @@ mod tests {
 
         let new = validate_pipeline(
             Some(&resources),
+            None,
             None,
             &ada,
             create_body("other", "analytics", "select 1"),
@@ -11425,6 +11649,7 @@ mod tests {
                 Some(&resources),
                 None,
                 None,
+                None,
                 &ada,
                 &namespace,
                 name,
@@ -11434,6 +11659,7 @@ mod tests {
             .expect_err("update refuses it");
             let answer = validate_pipeline(
                 Some(&resources),
+                None,
                 None,
                 &ada,
                 create_body(name, "analytics", "select 2"),
@@ -11547,8 +11773,9 @@ mod tests {
                 concurrency: Some(document.options.concurrency.clone()),
             }),
             provenance: None,
+            notify: None,
         };
-        let verdict = validate_pipeline(Some(&resources), None, &ada, body)
+        let verdict = validate_pipeline(Some(&resources), None, None, &ada, body)
             .await
             .expect("an answer");
         assert!(verdict.ok, "{verdict:?}");
@@ -11651,6 +11878,7 @@ mod tests {
                 &Default::default(),
                 &default_options(),
                 "ann",
+                None,
             )
         };
         let resources = vec![
@@ -11732,9 +11960,15 @@ mod tests {
     #[tokio::test]
     async fn validate_without_a_cluster_is_503() {
         let ada = who("sub-ada", &["analytics"], false);
-        let error = validate_pipeline(None, None, &ada, create_body("x", "analytics", "select 1"))
-            .await
-            .expect_err("no cluster, no answer");
+        let error = validate_pipeline(
+            None,
+            None,
+            None,
+            &ada,
+            create_body("x", "analytics", "select 1"),
+        )
+        .await
+        .expect_err("no cluster, no answer");
         assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
@@ -11985,6 +12219,7 @@ mod tests {
             params: BTreeMap::new(),
             options: None,
             provenance: None,
+            notify: None,
         }
     }
 
@@ -12001,6 +12236,7 @@ mod tests {
             options: None,
             resource_version: None,
             provenance: None,
+            notify: None,
         }
     }
 
@@ -12018,6 +12254,7 @@ mod tests {
             &BTreeMap::new(),
             &default_options(),
             "sub-ada",
+            None,
         );
         resource["metadata"]["resourceVersion"] = json!("7");
         resource
@@ -12040,6 +12277,7 @@ mod tests {
 
         let view = create_pipeline(
             Some(&resources),
+            None,
             Some(&store),
             &create_limiter(),
             &ada,
@@ -12113,7 +12351,7 @@ mod tests {
         // Neither: no statement and no notebook.
         let mut body = notebook_body("either", "analytics", "report.ipynb", &version);
         body.notebook = None;
-        let error = create_pipeline(Some(&resources), Some(&store), &limiter, &ada, body)
+        let error = create_pipeline(Some(&resources), None, Some(&store), &limiter, &ada, body)
             .await
             .expect_err("neither");
         assert_eq!(error.status(), StatusCode::BAD_REQUEST);
@@ -12122,7 +12360,7 @@ mod tests {
         // Both: the body would have to choose.
         let mut body = notebook_body("either", "analytics", "report.ipynb", &version);
         body.sql = "select 1".into();
-        let error = create_pipeline(Some(&resources), Some(&store), &limiter, &ada, body)
+        let error = create_pipeline(Some(&resources), None, Some(&store), &limiter, &ada, body)
             .await
             .expect_err("both");
         assert_eq!(error.status(), StatusCode::BAD_REQUEST);
@@ -12143,6 +12381,7 @@ mod tests {
         update.sql = "select 1".into();
         let error = update_pipeline(
             Some(&resources_with_pipeline),
+            None,
             Some(&store),
             None,
             &ada,
@@ -12158,7 +12397,7 @@ mod tests {
         // A blank statement is no statement: the notebook is what runs.
         let mut body = notebook_body("blank-sql", "analytics", "report.ipynb", &version);
         body.sql = "  \n\t ".into();
-        create_pipeline(Some(&resources), Some(&store), &limiter, &ada, body)
+        create_pipeline(Some(&resources), None, Some(&store), &limiter, &ada, body)
             .await
             .expect("a blank statement next to a notebook is not a second one");
         let stored = stored_pipeline(&resources, "blank-sql")
@@ -12179,7 +12418,7 @@ mod tests {
         let printed = format!("{notebook:?}");
         let mut body = notebook_body("smoke", "analytics", "report.ipynb", "v1");
         body.notebook = Some(notebook);
-        let error = create_pipeline(Some(resources), Some(store), limiter, who, body)
+        let error = create_pipeline(Some(resources), None, Some(store), limiter, who, body)
             .await
             .expect_err(&printed);
         assert_eq!(error.status(), StatusCode::BAD_REQUEST, "{expected}");
@@ -12334,7 +12573,7 @@ mod tests {
         // A deleted (or never published) version of a notebook that does exist.
         for pinned in ["v99".to_string(), "v1 ".to_string(), "v".repeat(129)] {
             let body = notebook_body("smoke", "analytics", "report.ipynb", &pinned);
-            let error = create_pipeline(Some(&resources), Some(&store), &limiter, &ada, body)
+            let error = create_pipeline(Some(&resources), None, Some(&store), &limiter, &ada, body)
                 .await
                 .expect_err("no such version");
             assert_eq!(error.status(), StatusCode::BAD_REQUEST, "{pinned:?}");
@@ -12343,7 +12582,7 @@ mod tests {
 
         // A notebook nobody published.
         let body = notebook_body("smoke", "analytics", "missing.ipynb", &version);
-        let error = create_pipeline(Some(&resources), Some(&store), &limiter, &ada, body)
+        let error = create_pipeline(Some(&resources), None, Some(&store), &limiter, &ada, body)
             .await
             .expect_err("no such notebook");
         assert_eq!(error.status(), StatusCode::BAD_REQUEST);
@@ -12362,7 +12601,7 @@ mod tests {
         let ada = who("sub-ada", &["analytics"], false);
         // No `NOVA_S3_*`: Nova cannot prove the version exists, so it schedules nothing.
         let body = notebook_body("smoke", "analytics", "report.ipynb", "v1");
-        let error = create_pipeline(Some(&resources), None, &create_limiter(), &ada, body)
+        let error = create_pipeline(Some(&resources), None, None, &create_limiter(), &ada, body)
             .await
             .expect_err("no store");
         assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -12372,6 +12611,7 @@ mod tests {
         // A statement pipeline needs no store at all: nothing changed for it.
         create_pipeline(
             Some(&resources),
+            None,
             None,
             &create_limiter(),
             &ada,
@@ -12394,6 +12634,7 @@ mod tests {
             let body = notebook_body("their-budget", "finance", "budget.ipynb", &version);
             let error = create_pipeline(
                 Some(&resources),
+                None,
                 Some(&store),
                 &create_limiter(),
                 caller,
@@ -12417,6 +12658,7 @@ mod tests {
         );
         let error = update_pipeline(
             Some(&resources),
+            None,
             Some(&store),
             None,
             &ada,
@@ -12445,6 +12687,7 @@ mod tests {
             BTreeMap::from([("days".to_string(), "1".to_string())]);
         create_pipeline(
             Some(&resources),
+            None,
             Some(&store),
             &create_limiter(),
             &ada,
@@ -12465,6 +12708,7 @@ mod tests {
         });
         let view = update_pipeline(
             Some(&resources),
+            None,
             Some(&store),
             None,
             &ada,
@@ -12500,6 +12744,7 @@ mod tests {
         // `sql` on a notebook pipeline: the schema would have to change, so it is refused.
         let error = update_pipeline(
             Some(&resources),
+            None,
             Some(&store),
             None,
             &ada,
@@ -12524,6 +12769,7 @@ mod tests {
         statement.schedule = None;
         create_pipeline(
             Some(&resources),
+            None,
             Some(&store),
             &create_limiter(),
             &ada,
@@ -12533,6 +12779,7 @@ mod tests {
         .expect("create a statement pipeline");
         let error = update_pipeline(
             Some(&resources),
+            None,
             Some(&store),
             None,
             &ada,
@@ -12641,6 +12888,7 @@ mod tests {
         ]);
         create_pipeline(
             Some(&resources),
+            None,
             Some(&store),
             &create_limiter(),
             &ada,
@@ -12654,6 +12902,7 @@ mod tests {
             BTreeMap::from([("region".to_string(), CANARY.to_string())]);
         update_pipeline(
             Some(&resources),
+            None,
             Some(&store),
             None,
             &ada,
@@ -12753,5 +13002,243 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// `spec.notify` is written under the CRD's keys and read back as the document's shape
+    /// (nova#815 decision 1); a pipeline without one carries no key.
+    #[test]
+    fn pipeline_notify_is_written_and_read_back() {
+        let notify = PipelineNotify {
+            on_failure: vec!["pager".into()],
+            ..PipelineNotify::default()
+        };
+        let resource = pipeline_resource(
+            "daily-trips",
+            "analytics",
+            &Statement::Sql("select 1".into()),
+            None,
+            &BTreeMap::new(),
+            &default_options(),
+            "sub-ada",
+            Some(&notify),
+        );
+        assert_eq!(spec_of(&resource)["notify"]["onFailure"], json!(["pager"]));
+
+        let document = spec_response(&resource).document;
+        assert_eq!(document.notify, Some(notify));
+        let printed = serde_json::to_value(&document).expect("the document serialises");
+        assert_eq!(printed["notify"]["onFailure"], json!(["pager"]));
+
+        let plain = nova_pipeline("no-notify", "analytics");
+        let bare = serde_json::to_value(spec_response(&plain).document).expect("serialises");
+        assert!(
+            bare.get("notify").is_none(),
+            "a pipeline without notify carries no key: {bare}"
+        );
+        assert_eq!(notify_of(spec_of(&plain)), None);
+    }
+
+    /// The operator's sentences, word for word, in its order (`crd.rs`,
+    /// `PipelineSpec::validate`).
+    #[test]
+    fn pipeline_notify_refuses_bad_names() {
+        let six = PipelineNotify {
+            on_success: ["a", "b", "c", "d", "e", "f"].map(str::to_string).to_vec(),
+            ..PipelineNotify::default()
+        };
+        assert_eq!(
+            six.check_shape().expect_err("six names"),
+            "notify.onSuccess names at most 5 destinations"
+        );
+
+        let padded = PipelineNotify {
+            on_failure: vec![" pager".into()],
+            ..PipelineNotify::default()
+        };
+        assert_eq!(
+            padded.check_shape().expect_err("a padded name"),
+            "notify.onFailure holds ` pager`, which has leading or trailing whitespace"
+        );
+
+        let blank = PipelineNotify {
+            on_recovered: vec!["   ".into()],
+            ..PipelineNotify::default()
+        };
+        assert_eq!(
+            blank.check_shape().expect_err("a blank name"),
+            "notify.onRecovered holds `   `, which is not a destination name (1 to 64 characters)"
+        );
+
+        let long = "x".repeat(65);
+        let too_long = PipelineNotify {
+            on_failure: vec![long.clone()],
+            ..PipelineNotify::default()
+        };
+        assert_eq!(
+            too_long.check_shape().expect_err("too long"),
+            format!(
+                "notify.onFailure holds `{long}`, which is not a destination name (1 to 64 characters)"
+            )
+        );
+
+        let twice = PipelineNotify {
+            on_success: vec!["pager".into(), "pager".into()],
+            ..PipelineNotify::default()
+        };
+        assert_eq!(
+            twice.check_shape().expect_err("a duplicate"),
+            "notify.onSuccess names `pager` twice"
+        );
+
+        assert_eq!(PipelineNotify::default().check_shape(), Ok(()));
+    }
+
+    /// `None` leaves the stored notifications alone, an all-empty `Some` removes them, a filled
+    /// `Some` replaces them — a form save must not wipe what a bundle deployed.
+    #[test]
+    fn an_update_without_notify_keeps_it_an_empty_one_removes_it() {
+        let stored = pipeline_resource(
+            "daily-trips",
+            "analytics",
+            &Statement::Sql("select 1".into()),
+            None,
+            &BTreeMap::new(),
+            &default_options(),
+            "sub-ada",
+            Some(&PipelineNotify {
+                on_failure: vec!["pager".into()],
+                ..PipelineNotify::default()
+            }),
+        );
+        let statement = Statement::Sql("select 2".into());
+
+        let kept = updated_resource(
+            &stored,
+            &statement,
+            &default_options(),
+            &BTreeMap::new(),
+            None,
+            None,
+        );
+        assert_eq!(
+            spec_of(&kept)["tasks"][0]["sql"],
+            json!("select 2"),
+            "the update itself is written"
+        );
+        assert_eq!(spec_of(&kept)["notify"]["onFailure"], json!(["pager"]));
+
+        let removed = updated_resource(
+            &stored,
+            &statement,
+            &default_options(),
+            &BTreeMap::new(),
+            None,
+            Some(&PipelineNotify::default()),
+        );
+        assert!(
+            spec_of(&removed).get("notify").is_none(),
+            "an all-empty notify removes the key: {}",
+            spec_of(&removed)
+        );
+
+        let replaced = updated_resource(
+            &stored,
+            &statement,
+            &default_options(),
+            &BTreeMap::new(),
+            None,
+            Some(&PipelineNotify {
+                on_success: vec!["digest".into()],
+                ..PipelineNotify::default()
+            }),
+        );
+        assert_eq!(
+            spec_of(&replaced)["notify"],
+            json!({ "onSuccess": ["digest"], "onFailure": [], "onRecovered": [] })
+        );
+    }
+
+    /// The group check reads the store: a name of another group is a 400 with the sentence, and
+    /// no store at all is a 503.
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn the_notify_check_reads_the_group() {
+        let pool = crate::db::test_support::migrated_pool().await;
+        sqlx::query(
+            "INSERT INTO destination (owner_group, name, kind, config, created_at, updated_at) \
+             VALUES ('A', 'pager', 'email', '{\"recipients\": [\"oncall@example.com\"]}'::jsonb, 0, 0)",
+        )
+        .execute(&pool)
+        .await
+        .expect("the destination is stored");
+        let notify = PipelineNotify {
+            on_failure: vec!["pager".into()],
+            ..PipelineNotify::default()
+        };
+        assert!(
+            check_notify(Some(&pool), "A", Some(&notify)).await.is_ok(),
+            "group A owns pager"
+        );
+        let other = check_notify(Some(&pool), "B", Some(&notify))
+            .await
+            .expect_err("group B does not own pager");
+        assert_eq!(other.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(other.message(), "there is no destination named pager in B");
+        let no_store = check_notify(None, "A", Some(&notify))
+            .await
+            .expect_err("no state store");
+        assert_eq!(no_store.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(no_store.message(), "the state store is not configured");
+    }
+
+    /// The same rule through the two routes: a create is a 400 with the sentence, and the
+    /// validate route answers it as `ok: false`, 200 (nova#815 slice b acceptance).
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn a_foreign_destination_is_refused_by_create_and_validate() {
+        let pool = crate::db::test_support::migrated_pool().await;
+        sqlx::query(
+            "INSERT INTO destination (owner_group, name, kind, config, created_at, updated_at) \
+             VALUES ('finance', 'ledger', 'email', '{\"recipients\": [\"oncall@example.com\"]}'::jsonb, 0, 0)",
+        )
+        .execute(&pool)
+        .await
+        .expect("the destination is stored");
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        let mut body = create_body("daily-trips", "analytics", "select 1");
+        body.notify = Some(PipelineNotify {
+            on_failure: vec!["ledger".into()],
+            ..PipelineNotify::default()
+        });
+
+        let refusal = create_pipeline(
+            Some(&resources),
+            Some(&pool),
+            None,
+            &create_limiter(),
+            &ada,
+            body.clone(),
+        )
+        .await
+        .expect_err("finance's destination is not analytics'");
+        assert_eq!(refusal.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            refusal.message(),
+            "there is no destination named ledger in analytics"
+        );
+
+        let answer = validate_pipeline(Some(&resources), Some(&pool), None, &ada, body)
+            .await
+            .expect("a refusal is an answer, not an error");
+        assert!(!answer.ok);
+        assert_eq!(answer.action, None);
+        assert_eq!(
+            answer.errors,
+            vec![ValidationIssue {
+                message: "there is no destination named ledger in analytics".into()
+            }]
+        );
+        assert!(resources.list().await.unwrap().is_empty());
     }
 }
