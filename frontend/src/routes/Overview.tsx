@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { ApiError, api, errorMessage, type CatalogStat, type QueryLogItem, type RunsListResponse } from '../api'
 import { mergeActivity, type ActivityRow } from '../activity'
-import { dayStarts, queriesPerDay, runsPerDay, type RunBucket } from '../charts'
+import { coveredStart, dayStarts, oldestOf, queriesPerDay, runsPerDay, type RunBucket } from '../charts'
 import { formatBytes, formatCount, formatTime, relativeTime, statusLabel } from '../format'
 import ErrorBox from '../components/ErrorBox'
 import { EmptyState } from '../components/EmptyState'
@@ -34,6 +34,7 @@ function newestUpdate(catalogs: CatalogStat[] | undefined): number | null {
 
 const PULSE_QUERY_PAGE_LIMIT = 200
 const PULSE_QUERY_MAX_PAGES = 20 // 4,000 rows; the API caps a page at 200
+const PULSE_RUNS_LIMIT = 200 // the API's `RUNS_MAX_LIMIT`; at this size the answer may be cut
 async function loadPulseQueries(from: number) {
   const items: QueryLogItem[] = []
   let cursor: string | undefined
@@ -117,7 +118,7 @@ export default function Overview() {
   })
   const pulseRuns = useQuery({
     queryKey: ['runs', 'pulse'],
-    queryFn: () => api.runs({ limit: 200 }),
+    queryFn: () => api.runs({ limit: PULSE_RUNS_LIMIT }),
     refetchInterval: 60_000,
     staleTime: 30_000,
   })
@@ -186,6 +187,15 @@ export default function Overview() {
   const runDays = dayStarts(7, now)
   const queryCounts = queriesPerDay((pulseQueries.data?.items ?? []).map(q => q.createdAt), 14, now)
   const runBuckets = runsPerDay(pulseRuns.data?.runs ?? [], 7, now)
+  // A truncated answer is not a quiet week (#882): start each chart at the oldest day it covers.
+  const queryTruncated = pulseQueries.data?.truncated ?? false
+  const runTruncated = (pulseRuns.data?.runs?.length ?? 0) >= PULSE_RUNS_LIMIT
+  const queryStart = coveredStart(queryDays, oldestOf((pulseQueries.data?.items ?? []).map((q) => q.createdAt)), queryTruncated)
+  const runStart = coveredStart(
+    runDays,
+    oldestOf((pulseRuns.data?.runs ?? []).map((r) => (r.startedAt === null ? null : Date.parse(r.startedAt)))),
+    runTruncated,
+  )
 
   return (
     <div className="space-y-6 max-w-6xl">
@@ -230,10 +240,10 @@ export default function Overview() {
         <PulseCard
           queries={pulseQueries}
           runs={pulseRuns}
-          queryCounts={queryCounts}
-          queryDays={queryDays}
-          runBuckets={runBuckets}
-          runDays={runDays}
+          queryCounts={queryCounts.slice(queryStart)}
+          queryDays={queryDays.slice(queryStart)}
+          runBuckets={runBuckets.slice(runStart)}
+          runDays={runDays.slice(runStart)}
         />
       </section>
 
@@ -391,7 +401,7 @@ function PulseCard({ queries, runs, queryCounts, queryDays, runBuckets, runDays 
         <div className="grid md:grid-cols-2 gap-6 mt-3">
           <div className="min-w-0">
             <div className="flex items-baseline justify-between gap-2">
-              <span className="label">Queries per day</span>
+              <span className="label">Queries per day · just you</span>
               <span className="text-xs text-text-mute">14 days · {formatCount(queryTotal)} queries</span>
             </div>
             {queries.isError ? (
@@ -412,7 +422,7 @@ function PulseCard({ queries, runs, queryCounts, queryDays, runBuckets, runDays 
           </div>
           <div className="min-w-0">
             <div className="flex items-baseline justify-between gap-2">
-              <span className="label">Runs per day</span>
+              <span className="label">Runs per day · your groups</span>
               <span className="text-xs text-text-mute">7 days · {formatCount(runTotal)} runs</span>
             </div>
             {runs.isError ? (
