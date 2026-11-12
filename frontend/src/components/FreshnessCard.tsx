@@ -31,8 +31,10 @@ export default function FreshnessCard() {
   })
   const rows = tables.data?.tables ?? []
   const now = Date.now()
+  // 306 px = the empty state at 1280×720 (#860, measured 2026-11-12); the loading state is
+  // 162 px and must not be shorter, or the cards below move when the answer lands.
   return (
-    <section className="card p-5 min-w-0" aria-labelledby="freshness-title">
+    <section className="card p-5 min-w-0 min-h-[306px]" aria-labelledby="freshness-title">
       <div className="flex items-baseline justify-between gap-2">
         <h2 id="freshness-title" className="text-sm font-semibold">Freshness</h2>
         <span className="text-xs text-text-mute">The five tables you read most · 30 days</span>
