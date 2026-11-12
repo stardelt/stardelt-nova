@@ -356,8 +356,10 @@ function PulseCard({ queries, runs, queryCounts, queryDays, runBuckets, runDays 
   const bothFailed = queries.isError && runs.isError
   // "No rows in the window" is a claim about both answers: nothing while one is still out.
   const empty = queries.data !== undefined && runs.data !== undefined && queryTotal === 0 && runTotal === 0
+  // 326 px = the empty state at 1280×720 (#860, measured 2026-11-12); the loading state
+  // (two 2-row skeletons) is 171 px and must not be shorter, or the cards below move.
   return (
-    <div className="card p-5 md:col-span-2 min-w-0">
+    <div className="card p-5 md:col-span-2 min-w-0 min-h-[326px]">
       <h2 className="text-sm font-semibold">The last two weeks</h2>
       {bothFailed && (
         <div className="mt-3">
@@ -458,7 +460,15 @@ function CatalogsCard({ metrics, error, denied, admin, pending, refreshing, refr
         </div>
       </div>
       {refreshError && <p role="status" className="text-xs text-bad mb-2 break-words">{refreshError}</p>}
-      {!metrics && !error && <SkeletonTable rows={8} />}
+      {!metrics && !error && (
+        <>
+          {/* The table's header line: the loading branch reserves the header too (#860).
+              A plain block, not a `Skeleton`, so the row count stays the eight rows below. */}
+          <div aria-hidden="true" className="mt-1 mb-2 h-3 w-24 rounded-lg bg-bg-soft" />
+          {/* 29 px = the measured `tbody tr` (37 px) minus the 8 px `space-y-2` gap. */}
+          <SkeletonTable rows={8} rowHeight={29} />
+        </>
+      )}
       {denied && (
         <div className="space-y-1">
           <p role="status" className="text-sm break-words">{errorMessage(error)}</p>
