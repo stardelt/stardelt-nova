@@ -1,7 +1,7 @@
 import { useQuery, type UseQueryResult } from '@tanstack/react-query'
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
-import { ApiError, api, errorMessage, type CatalogStat, type QueryLogPage, type RunsListResponse } from '../api'
+import { ApiError, api, errorMessage, type CatalogStat, type QueryLogItem, type RunsListResponse } from '../api'
 import { mergeActivity, type ActivityRow } from '../activity'
 import { dayStarts, queriesPerDay, runsPerDay, type RunBucket } from '../charts'
 import { formatBytes, formatCount, formatTime, relativeTime, statusLabel } from '../format'
@@ -30,6 +30,20 @@ function newestUpdate(catalogs: CatalogStat[] | undefined): number | null {
     if (typeof at === 'number' && (newest === null || at > newest)) newest = at
   }
   return newest
+}
+
+const PULSE_QUERY_PAGE_LIMIT = 200
+const PULSE_QUERY_MAX_PAGES = 20 // 4,000 rows; the API caps a page at 200
+async function loadPulseQueries(from: number) {
+  const items: QueryLogItem[] = []
+  let cursor: string | undefined
+  for (let page = 0; page < PULSE_QUERY_MAX_PAGES; page++) {
+    const answer = await api.queryLog({ scope: 'mine', from, limit: PULSE_QUERY_PAGE_LIMIT, cursor })
+    items.push(...answer.items)
+    if (!answer.nextCursor) return { items, truncated: false }
+    cursor = answer.nextCursor
+  }
+  return { items, truncated: true }
 }
 
 /**
@@ -90,13 +104,14 @@ export default function Overview() {
     enabled: timeline.near,
   })
   const jobs = useQuery({ queryKey: ['jobs'], queryFn: api.jobs, refetchInterval: 10_000, staleTime: 30_000 })
-  // The two small charts (#767): the same list endpoints, one read per chart, capped at 200
-  // rows each. `pulseFrom` is the first midnight of the 14-day chart, so the query log is
-  // asked only for the window the chart draws.
+  // The two small charts (#767): the same list endpoints, one read per chart. The query log
+  // is read page by page over the 14-day window (nova#883): one page of 200 rows drew false
+  // zero days when the window held more. `pulseFrom` is the first midnight of the 14-day
+  // chart, so the query log is asked only for the window the chart draws.
   const pulseFrom = useMemo(() => dayStarts(14, Date.now())[0], [])
   const pulseQueries = useQuery({
     queryKey: ['query-log', 'pulse'],
-    queryFn: () => api.queryLog({ scope: 'mine', from: pulseFrom, limit: 200 }),
+    queryFn: () => loadPulseQueries(pulseFrom),
     refetchInterval: 60_000,
     staleTime: 30_000,
   })
@@ -339,19 +354,19 @@ export default function Overview() {
 
 /**
  * "The last two weeks" (#767): how many queries the person ran per day, and how their runs
- * ended. Two reads of the existing list endpoints, capped at 200 rows each; a full answer
- * says so instead of pretending the window is complete. A failing source hides only its own
- * chart, and a source still loading reserves its height instead of flashing a spinner.
+ * ended. The query log is read page by page over the window, up to 4,000 rows (nova#883); the
+ * runs read is one page of 200. A shortened answer says so instead of pretending the window is
+ * complete. A failing source hides only its own chart, and a source still loading reserves its
+ * height instead of flashing a spinner.
  */
 function PulseCard({ queries, runs, queryCounts, queryDays, runBuckets, runDays }: {
-  queries: UseQueryResult<QueryLogPage>
+  queries: UseQueryResult<{ items: QueryLogItem[]; truncated: boolean }>
   runs: UseQueryResult<RunsListResponse>
   queryCounts: number[]
   queryDays: number[]
   runBuckets: RunBucket[]
   runDays: number[]
 }) {
-  const queryItems = queries.data?.items ?? []
   const runItems = runs.data?.runs ?? []
   const queryTotal = queryCounts.reduce((sum, c) => sum + c, 0)
   const runTotal = runBuckets.reduce((sum, b) => sum + b.ok + b.failed + b.running + b.other, 0)
@@ -390,8 +405,8 @@ function PulseCard({ queries, runs, queryCounts, queryDays, runBuckets, runDays 
             ) : (
               <QuerySparkline counts={queryCounts} days={queryDays} />
             )}
-            {queryItems.length === 200 && (
-              <p className="text-xs text-text-mute mt-1">Showing the latest 200 queries.</p>
+            {queries.data?.truncated && (
+              <p className="text-xs text-text-mute mt-1">Showing the newest 4,000 queries.</p>
             )}
           </div>
           <div className="min-w-0">

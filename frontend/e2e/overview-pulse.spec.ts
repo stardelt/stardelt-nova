@@ -16,13 +16,11 @@ const METRICS = {
   generatedAt: 0,
 }
 
-/** Three queries: one today, one two days ago, one three days ago — inside the 14-day window. */
-const QUERY_ITEMS = [
-  { id: 'q-today', state: 'FINISHED', createdAt: Date.now() - 3_600_000 },
-  { id: 'q-2d', state: 'FINISHED', createdAt: Date.now() - 2 * 86_400_000 },
-  { id: 'q-3d', state: 'FAILED', createdAt: Date.now() - 3 * 86_400_000 },
-].map((q) => ({
-  ...q,
+/** One query row, `ageMs` before now — inside the 14-day window. */
+const queryItem = (id: string, state: string, ageMs: number) => ({
+  id,
+  state,
+  createdAt: Date.now() - ageMs,
   user: 'e2e',
   userName: 'E2E',
   source: 'nova-sql-editor',
@@ -32,7 +30,14 @@ const QUERY_ITEMS = [
   wallMs: 12,
   outputRows: 1,
   errorCode: null,
-}))
+})
+
+/** Three queries: one today, one two days ago, one three days ago — inside the 14-day window. */
+const QUERY_ITEMS = [
+  queryItem('q-today', 'FINISHED', 3_600_000),
+  queryItem('q-2d', 'FINISHED', 2 * 86_400_000),
+  queryItem('q-3d', 'FAILED', 3 * 86_400_000),
+]
 
 const RUN = (id: string, state: string, minutesAgo: number) => ({
   namespace: 'default',
@@ -53,7 +58,14 @@ const RUN = (id: string, state: string, minutesAgo: number) => ({
 /** Two successes and one failure, all started within the last day. */
 const RUNS = { runs: [RUN('r1', 'success', 10), RUN('r2', 'success', 20), RUN('r3', 'failed', 30)], groups: [] }
 
-async function stubApi(page: Page, opts: { queryLogStatus?: number; seen?: { from?: string | null } } = {}) {
+async function stubApi(page: Page, opts: {
+  queryLogStatus?: number
+  seen?: { from?: string | null }
+  /** Answers for the chart's windowed reads, keyed by `cursor` (`''` for the first page). */
+  queryPages?: Record<string, { items: unknown[]; nextCursor: string | null }>
+  /** Every windowed read the chart makes, in order. */
+  calls?: { cursor: string | null }[]
+} = {}) {
   await page.route('**/api/**', (route) => {
     const url = new URL(route.request().url())
     const path = url.pathname
@@ -64,9 +76,14 @@ async function stubApi(page: Page, opts: { queryLogStatus?: number; seen?: { fro
     if (path === '/api/apps') return json(route, [])
     if (path === '/api/settings') return json(route, {})
     if (path === '/api/query-log') {
+      const cursor = url.searchParams.get('cursor')
       // The chart asks for a window; the timeline's read sends no `from`.
-      if (opts.seen && url.searchParams.get('from') !== null) opts.seen.from = url.searchParams.get('from')
+      if (url.searchParams.get('from') !== null) {
+        if (opts.seen) opts.seen.from = url.searchParams.get('from')
+        if (opts.calls) opts.calls.push({ cursor })
+      }
       if (opts.queryLogStatus) return json(route, { error: 'boom' }, opts.queryLogStatus)
+      if (opts.queryPages) return json(route, opts.queryPages[cursor ?? ''] ?? { items: [], nextCursor: null })
       return json(route, { items: QUERY_ITEMS, nextCursor: null })
     }
     if (path === '/api/runs') return json(route, RUNS)
@@ -98,6 +115,47 @@ test('the card draws fourteen query days and seven run days', async ({ page }) =
   const failed = await bars.evaluateAll((nodes) => nodes.map((n) => Number(n.getAttribute('data-failed'))))
   expect(ok.reduce((a, b) => a + b, 0)).toBe(2)
   expect(failed.reduce((a, b) => a + b, 0)).toBe(1)
+})
+
+test('the queries chart reads every page of its window', async ({ page }) => {
+  // Five queries over two pages (nova#883): the chart follows `nextCursor` instead of
+  // drawing the first 200 rows — or, here, the first three — as the whole window.
+  const calls: { cursor: string | null }[] = []
+  await stubApi(page, {
+    calls,
+    queryPages: {
+      '': {
+        items: [
+          queryItem('p-1-today', 'FINISHED', 3_600_000),
+          queryItem('p-1-2d', 'FINISHED', 2 * 86_400_000),
+          queryItem('p-1-3d', 'FAILED', 3 * 86_400_000),
+        ],
+        nextCursor: 'page-2',
+      },
+      'page-2': {
+        items: [
+          queryItem('p-2-4d', 'FINISHED', 4 * 86_400_000),
+          queryItem('p-2-5d', 'FINISHED', 5 * 86_400_000),
+        ],
+        nextCursor: null,
+      },
+    },
+  })
+  await page.goto('/')
+  const card = pulseCard(page)
+  await expect(card).toBeVisible()
+
+  const days = card.locator('svg[data-chart="queries"] [data-day]')
+  await expect(days).toHaveCount(14)
+  await expect
+    .poll(async () => (await days.evaluateAll((nodes) => nodes.map((n) => Number(n.getAttribute('data-count')))))
+      .reduce((a, b) => a + b, 0))
+    .toBe(5)
+
+  await expect.poll(() => calls.length).toBe(2)
+  expect(calls[0].cursor).toBeNull()
+  expect(calls[1].cursor).toBe('page-2')
+  await expect(card.getByText('Showing the latest 200 queries.')).toHaveCount(0)
 })
 
 test('the card never prints NaN or an Invalid Date', async ({ page }) => {

@@ -28,6 +28,9 @@ async function stubApi(page: import('@playwright/test').Page) {
     // List endpoints, not `{}`: the shell and the page read them as arrays.
     if (path === '/api/jobs') return json(route, [])
     if (path === '/api/apps/links') return json(route, [])
+    // The Overview's charts read list pages: an empty page, not `{}` (nova#883).
+    if (path === '/api/query-log') return json(route, { items: [], nextCursor: null })
+    if (path === '/api/runs') return json(route, { runs: [], groups: [] })
     // static-dev is the operator here, so the page also renders the Platform apps card.
     if (path === '/api/apps') return json(route, [])
     return json(route, {})
