@@ -1,5 +1,7 @@
-//! The pipeline failure notice (nova#815 slice c): one message per failed run of a
-//! pipeline, sent by Nova to the destinations its `spec.notify.onFailure` names.
+//! The pipeline notice (nova#815 slices c and c2): one message per ending of a pipeline's
+//! run, sent by Nova to the destinations its `spec.notify` names for that ending —
+//! `onFailure` for a failed run, `onSuccess` for a success, `onRecovered` for the first
+//! success after a failure.
 //!
 //! Design decision 2 of nova#815: Nova sends, from one background collector, so no new
 //! credential is put into task pods. The collector reads the newest run of every pipeline
@@ -8,8 +10,8 @@
 //! At most once per run, three attempts inside the tick, no retry on a later tick.
 //!
 //! A run a person stopped in Nova carries `STOPPED_NOTE` in its Airflow note and is never
-//! announced. `onSuccess` and `onRecovered` are slice c2; the lists are parsed here already
-//! so the message shape does not change when they land.
+//! announced; its claim records `stopped`, so the success after it is a plain success and
+//! not a recovery.
 //!
 //! Without a state store, an engine or a cluster client the collector stays off.
 
@@ -33,18 +35,15 @@ const TICK: Duration = Duration::from_secs(30);
 /// How long Nova waits before the second and the third attempt of one destination.
 const RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(3)];
 
-/// `spec.notify`: the destination names of the pipeline's group, by kind of ending.
-/// `onSuccess` and `onRecovered` are carried already; only `onFailure` is sent (slice c2).
+/// `spec.notify`: the destination names of the pipeline's group, by kind of ending — a
+/// failed run, a success, and the first success after a failure.
 #[derive(Deserialize, Default, Debug)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Notify {
     #[serde(default)]
     pub on_failure: Vec<String>,
-    // Carried so the document keeps its shape; slice c2 sends these.
-    #[allow(dead_code)]
     #[serde(default)]
     pub on_success: Vec<String>,
-    #[allow(dead_code)]
     #[serde(default)]
     pub on_recovered: Vec<String>,
 }
@@ -96,7 +95,10 @@ pub(crate) async fn run_once(state: &AppState) -> Result<usize, String> {
         let notify: Notify =
             serde_json::from_value(spec.get("notify").cloned().unwrap_or_default())
                 .unwrap_or_default();
-        if notify.on_failure.is_empty() {
+        if notify.on_failure.is_empty()
+            && notify.on_success.is_empty()
+            && notify.on_recovered.is_empty()
+        {
             continue;
         }
         let dag_id = dag_id_for(&namespace, name);
@@ -110,21 +112,39 @@ pub(crate) async fn run_once(state: &AppState) -> Result<usize, String> {
         let Some(run) = runs.first() else {
             continue;
         };
-        let Some(body) = notice_for(&notify, &namespace, name, group, run, &base_domain) else {
-            continue;
+        // A run a person stopped is claimed as `stopped` even though it is announced to
+        // nobody: `last_state` stays current, so the success after it is not a recovery.
+        let stopped = run
+            .note
+            .as_deref()
+            .is_some_and(|note| note.starts_with(STOPPED_NOTE));
+        let claimed_state = if stopped {
+            "stopped"
+        } else {
+            run.state.as_deref().unwrap_or("")
         };
-        let run_state = run.state.as_deref().unwrap_or("");
-        match claim(db, &namespace, name, &run.dag_run_id, run_state).await {
-            Ok(true) => {}
+        let claimed = match claim(db, &namespace, name, &run.dag_run_id, claimed_state).await {
+            Ok(Some(claim)) => claim,
             // Already handled (or a crash lost it); either way this run is not sent again.
-            Ok(false) => continue,
+            Ok(None) => continue,
             Err(e) => {
                 tracing::warn!(pipeline = %name, error = %e, "the run could not be claimed");
                 continue;
             }
-        }
+        };
+        let Some(ending) = ending_for(
+            &notify,
+            &namespace,
+            name,
+            group,
+            run,
+            claimed.previous_state.as_deref(),
+            &base_domain,
+        ) else {
+            continue;
+        };
         let mut delivered = false;
-        for destination in &notify.on_failure {
+        for destination in &ending.destinations {
             let found = sqlx::query_as::<_, (i64, String, Value)>(
                 "SELECT id, kind, config FROM destination WHERE owner_group = $1 AND name = $2",
             )
@@ -173,7 +193,7 @@ pub(crate) async fn run_once(state: &AppState) -> Result<usize, String> {
             let mut attempts = 0;
             loop {
                 attempts += 1;
-                let outcome = post_webhook(&state.http, url, &body).await;
+                let outcome = post_webhook(&state.http, url, &ending.body).await;
                 let ok = outcome.status == "delivered";
                 if let Err(e) = record(db, id, &run.dag_run_id, &outcome).await {
                     tracing::warn!(pipeline = %name, error = %e, "the attempt was not recorded");
@@ -200,19 +220,22 @@ pub(crate) async fn run_once(state: &AppState) -> Result<usize, String> {
     Ok(noticed)
 }
 
-/// The webhook body of one failed run, or `None` when this run is not announced: only
-/// `failed` runs are, and never one a person stopped in Nova.
-pub(crate) fn notice_for(
+/// What one run means to the pipeline's destinations: the names to tell and the document to
+/// send. `None` when this run is announced to nobody.
+struct Ending {
+    destinations: Vec<String>,
+    body: Value,
+}
+
+fn ending_for(
     notify: &Notify,
     namespace: &str,
     name: &str,
     group: &str,
     run: &DagRun,
+    previous_state: Option<&str>,
     base_domain: &str,
-) -> Option<Value> {
-    if run.state.as_deref() != Some("failed") {
-        return None;
-    }
+) -> Option<Ending> {
     if run
         .note
         .as_deref()
@@ -220,59 +243,108 @@ pub(crate) fn notice_for(
     {
         return None;
     }
-    // Nothing to send to is nothing to announce (the collector skips these pipelines too).
-    if notify.on_failure.is_empty() {
+    let (state, recovered) = match run.state.as_deref()? {
+        "failed" => ("failed", false),
+        "success" => ("success", previous_state == Some("failed")),
+        _ => return None,
+    };
+    // A recovery tells the people who asked for recoveries and the people who asked for every
+    // success, once each; a plain success tells `onSuccess` only.
+    let destinations = if recovered {
+        unique(&notify.on_recovered, &notify.on_success)
+    } else if state == "failed" {
+        notify.on_failure.clone()
+    } else {
+        notify.on_success.clone()
+    };
+    if destinations.is_empty() {
         return None;
     }
+    let text = match (state, recovered) {
+        ("failed", _) => format!("Pipeline {name} failed: run {}", run.dag_run_id),
+        (_, true) => format!(
+            "Pipeline {name} recovered after a failure: run {}",
+            run.dag_run_id
+        ),
+        _ => format!("Pipeline {name} succeeded: run {}", run.dag_run_id),
+    };
     let mut body = json!({
-        "text": format!("Pipeline {name} failed: run {}", run.dag_run_id),
+        "text": text,
         "kind": "pipeline_run",
         "pipeline": name,
         "namespace": namespace,
         "group": group,
         "runId": run.dag_run_id,
-        "state": "failed",
+        "state": state,
         "trigger": run.run_type.clone().unwrap_or_default(),
         "startedAt": run.start_date,
         "durationSeconds": duration_seconds(run.start_date.as_deref(), run.end_date.as_deref()),
         "apiPath": format!("/api/pipelines/{namespace}/{name}/runs/{}", run.dag_run_id),
     });
+    if recovered {
+        body["recovered"] = Value::Bool(true);
+    }
     if !base_domain.is_empty() {
         body["runUrl"] = Value::String(format!(
             "https://nova.{base_domain}/pipelines/{namespace}/{name}"
         ));
     }
-    Some(body)
+    Some(Ending { destinations, body })
 }
 
-/// Remember which run was announced, before anything is sent: `true` means this is the
-/// first time Nova sees it, `false` means it already handled that run id.
+/// The names of both lists, in order, each once (a name may be in both).
+fn unique(first: &[String], second: &[String]) -> Vec<String> {
+    let mut names: Vec<String> = Vec::with_capacity(first.len() + second.len());
+    for name in first.iter().chain(second.iter()) {
+        if !names.contains(name) {
+            names.push(name.clone());
+        }
+    }
+    names
+}
+
+/// The state the previous run was announced with, or `None` for the first run of a pipeline.
+struct Claim {
+    previous_state: Option<String>,
+}
+
+/// Remember which run was announced, before anything is sent: `Some` means this is the first
+/// time Nova sees it, `None` means it already handled that run id.
+///
+/// `state` is what the next claim compares against: the Airflow state, except that a run a
+/// person stopped is recorded as `stopped`, so the success after it is not called a recovery.
 async fn claim(
     pool: &PgPool,
     namespace: &str,
     pipeline: &str,
     run_id: &str,
     state: &str,
-) -> Result<bool, sqlx::Error> {
-    let claimed = sqlx::query_scalar::<_, String>(
-        "INSERT INTO pipeline_notice (namespace, pipeline, last_run_id, last_state, noticed_at) \
-         VALUES ($1, $2, $3, $4, $5) \
-         ON CONFLICT (namespace, pipeline) DO UPDATE \
-           SET last_run_id = EXCLUDED.last_run_id, \
-               last_state = EXCLUDED.last_state, \
-               noticed_at = EXCLUDED.noticed_at \
-           WHERE pipeline_notice.last_run_id <> EXCLUDED.last_run_id \
-         RETURNING last_run_id",
+) -> Result<Option<Claim>, sqlx::Error> {
+    let row = sqlx::query_as::<_, (Option<String>, i64)>(
+        "WITH before AS ( \
+             SELECT last_state FROM pipeline_notice \
+              WHERE namespace = $1 AND pipeline = $2 \
+         ), upsert AS ( \
+             INSERT INTO pipeline_notice (namespace, pipeline, last_run_id, last_state, noticed_at) \
+             VALUES ($1, $2, $3, $4, $5) \
+             ON CONFLICT (namespace, pipeline) DO UPDATE \
+               SET last_run_id = EXCLUDED.last_run_id, \
+                   last_state = EXCLUDED.last_state, \
+                   noticed_at = EXCLUDED.noticed_at \
+               WHERE pipeline_notice.last_run_id <> EXCLUDED.last_run_id \
+             RETURNING 1 \
+         ) \
+         SELECT (SELECT last_state FROM before), (SELECT count(*) FROM upsert)",
     )
     .bind(namespace)
     .bind(pipeline)
     .bind(run_id)
     .bind(state)
-    // Epoch milliseconds, like the rest of the store (`chrono` has no `clock` here).
     .bind(crate::jobs::now_ms() as i64)
-    .fetch_optional(pool)
+    .fetch_one(pool)
     .await?;
-    Ok(claimed.is_some())
+    let (previous_state, claimed) = row;
+    Ok((claimed > 0).then_some(Claim { previous_state }))
 }
 
 /// One `destination_delivery` row per attempt, tagged with the run it belonged to.
@@ -302,10 +374,11 @@ async fn record(
 mod tests {
     use super::*;
 
-    fn notify(on_failure: &[&str]) -> Notify {
+    fn notify_with(failure: &[&str], success: &[&str], recovered: &[&str]) -> Notify {
         Notify {
-            on_failure: on_failure.iter().map(|s| s.to_string()).collect(),
-            ..Notify::default()
+            on_failure: failure.iter().map(|s| s.to_string()).collect(),
+            on_success: success.iter().map(|s| s.to_string()).collect(),
+            on_recovered: recovered.iter().map(|s| s.to_string()).collect(),
         }
     }
 
@@ -324,37 +397,128 @@ mod tests {
     }
 
     #[test]
-    fn a_stopped_run_is_not_noticed() {
-        let failed = run("failed", None);
+    fn a_stopped_run_is_not_announced() {
         let stopped = run("failed", Some("stopped in Nova by Ada"));
-        let success = run("success", None);
-        let what = notify(&["on-call"]);
+        let what = notify_with(&["on-call"], &["digest"], &["digest"]);
         assert!(
-            notice_for(&what, "stardelt", "daily", "analytics", &stopped, "").is_none(),
+            ending_for(&what, "stardelt", "daily", "analytics", &stopped, None, "").is_none(),
             "a run a person stopped must not be announced"
         );
+    }
+
+    #[test]
+    fn a_failed_run_tells_on_failure() {
+        let failed = run("failed", None);
+        let ending = ending_for(
+            &notify_with(&["on-call"], &[], &[]),
+            "stardelt",
+            "daily",
+            "analytics",
+            &failed,
+            None,
+            "",
+        )
+        .expect("a failed run is announced to its failure list");
+        assert_eq!(ending.destinations, ["on-call"]);
+        assert_eq!(ending.body["state"], "failed");
         assert!(
-            notice_for(&what, "stardelt", "daily", "analytics", &success, "").is_none(),
-            "slice c announces failures only"
+            ending.body.get("recovered").is_none(),
+            "a failure is not a recovery: {}",
+            ending.body
         );
+    }
+
+    #[test]
+    fn a_success_tells_on_success() {
+        let success = run("success", None);
+        let ending = ending_for(
+            &notify_with(&[], &["digest"], &[]),
+            "stardelt",
+            "daily",
+            "analytics",
+            &success,
+            None,
+            "",
+        )
+        .expect("a success is announced to its success list");
+        assert_eq!(ending.destinations, ["digest"]);
+        assert_eq!(ending.body["state"], "success");
         assert!(
-            notice_for(&what, "stardelt", "daily", "analytics", &failed, "").is_some(),
-            "a failed run is announced"
+            ending.body.get("recovered").is_none(),
+            "a first success is not a recovery: {}",
+            ending.body
+        );
+    }
+
+    #[test]
+    fn a_success_after_a_failure_is_recovered_and_tells_both_lists_once() {
+        let success = run("success", None);
+        let ending = ending_for(
+            &notify_with(&[], &["digest"], &["on-call", "digest"]),
+            "stardelt",
+            "daily",
+            "analytics",
+            &success,
+            Some("failed"),
+            "",
+        )
+        .expect("the first success after a failure is announced");
+        assert_eq!(ending.destinations, ["on-call", "digest"]);
+        assert_eq!(ending.body["recovered"], true);
+        assert_eq!(ending.body["state"], "success");
+        let text = ending.body["text"].as_str().expect("a text");
+        assert!(
+            text.starts_with("Pipeline daily recovered after a failure"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn nothing_to_tell_is_no_notice() {
+        let failed = run("failed", None);
+        assert!(
+            ending_for(
+                &notify_with(&[], &[], &[]),
+                "stardelt",
+                "daily",
+                "analytics",
+                &failed,
+                None,
+                ""
+            )
+            .is_none(),
+            "a failure nobody asked about is announced to nobody"
+        );
+        let success = run("success", None);
+        assert!(
+            ending_for(
+                &notify_with(&["on-call"], &[], &[]),
+                "stardelt",
+                "daily",
+                "analytics",
+                &success,
+                Some("failed"),
+                ""
+            )
+            .is_none(),
+            "a recovery nobody asked about is announced to nobody"
         );
     }
 
     #[test]
     fn a_failed_run_is_noticed_once_with_the_facts() {
         let failed = run("failed", None);
-        let body = notice_for(
-            &notify(&["on-call"]),
+        let body = ending_for(
+            &notify_with(&["on-call"], &[], &[]),
             "stardelt",
             "daily",
             "analytics",
             &failed,
+            None,
             "",
         )
-        .expect("a failed run is announced");
+        .expect("a failed run is announced")
+        .body;
         assert_eq!(body["kind"], "pipeline_run");
         assert_eq!(body["pipeline"], "daily");
         assert_eq!(body["runId"], "manual__2026-11-12T03:00:00+00:00");
@@ -372,15 +536,17 @@ mod tests {
             "no base domain, no link: {body}"
         );
 
-        let linked = notice_for(
-            &notify(&["on-call"]),
+        let linked = ending_for(
+            &notify_with(&["on-call"], &[], &[]),
             "stardelt",
             "daily",
             "analytics",
             &failed,
+            None,
             "dev.example.io",
         )
-        .expect("a failed run is announced");
+        .expect("a failed run is announced")
+        .body;
         assert_eq!(
             linked["runUrl"],
             "https://nova.dev.example.io/pipelines/stardelt/daily"
@@ -391,23 +557,29 @@ mod tests {
     #[ignore = "needs NOVA_TEST_DATABASE_URL"]
     async fn a_run_is_claimed_once() {
         let pool = crate::db::test_support::migrated_pool().await;
+        let first = claim(&pool, "stardelt", "daily", "run-1", "failed")
+            .await
+            .expect("claim")
+            .expect("the first sight of a run is claimed");
+        assert_eq!(
+            first.previous_state, None,
+            "the first run of a pipeline has no state before it"
+        );
         assert!(
             claim(&pool, "stardelt", "daily", "run-1", "failed")
                 .await
-                .expect("claim"),
-            "the first sight of a run is claimed"
-        );
-        assert!(
-            !claim(&pool, "stardelt", "daily", "run-1", "failed")
-                .await
-                .expect("claim"),
+                .expect("claim")
+                .is_none(),
             "the same run is not sent twice"
         );
-        assert!(
-            claim(&pool, "stardelt", "daily", "run-2", "failed")
-                .await
-                .expect("claim"),
-            "a new run is claimed"
+        let next = claim(&pool, "stardelt", "daily", "run-2", "success")
+            .await
+            .expect("claim")
+            .expect("a new run is claimed");
+        assert_eq!(
+            next.previous_state.as_deref(),
+            Some("failed"),
+            "the state of the run the previous claim recorded"
         );
     }
 
