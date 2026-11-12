@@ -40,6 +40,8 @@ async function open(page: Page) {
   })
   await page.goto('/')
   const card = page.locator('div.card', { has: page.getByRole('heading', { name: 'Recent activity' }) })
+  // The card is below the fold and reads its two lists only when it comes near (nova#859).
+  await page.getByRole('heading', { name: 'Recent activity' }).scrollIntoViewIfNeeded()
   await expect(card.locator('a[data-at]').first()).toBeVisible()
   return { card, scopes }
 }

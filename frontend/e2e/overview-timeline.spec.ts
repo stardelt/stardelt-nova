@@ -47,7 +47,14 @@ async function open(page: Page) {
   )
   await page.goto('/')
   const card = page.locator('div.card', { has: page.getByRole('heading', { name: 'Recent activity' }) })
+  // The card is below the fold and reads its two lists only when it comes near (nova#859):
+  // bring it into view, as a person would.
+  await page.getByRole('heading', { name: 'Recent activity' }).scrollIntoViewIfNeeded()
   await expect(card.locator('a[data-at]').first()).toBeVisible()
+  // The two reads start together but answer one after the other, so the card can show the
+  // loads alone for a moment: wait for a row of each gated source before a test reads the list.
+  await expect(card.locator('a[href^="/pipelines/"]').first()).toBeVisible()
+  await expect(card.locator('a[href^="/queries?id="]').first()).toBeVisible()
   return card
 }
 

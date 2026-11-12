@@ -1,5 +1,5 @@
 import { useQuery, type UseQueryResult } from '@tanstack/react-query'
-import { useMemo, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { ApiError, api, errorMessage, type CatalogStat, type QueryLogPage, type RunsListResponse } from '../api'
 import { mergeActivity, type ActivityRow } from '../activity'
@@ -32,8 +32,32 @@ function newestUpdate(catalogs: CatalogStat[] | undefined): number | null {
   return newest
 }
 
+/**
+ * True once the element has come within 200 px of the viewport (#510 item 6). The timeline's
+ * two list reads are started only then; `jobs` stays eager because the Activity stat above the
+ * fold counts it.
+ */
+function useNearViewport<T extends Element>() {
+  const ref = useRef<T>(null)
+  const [near, setNear] = useState(false)
+  useEffect(() => {
+    const node = ref.current
+    if (!node || near) return
+    if (typeof IntersectionObserver === 'undefined') { setNear(true); return }
+    const observer = new IntersectionObserver(
+      (entries) => { if (entries.some((e) => e.isIntersecting)) { setNear(true); observer.disconnect() } },
+      { rootMargin: '200px' },
+    )
+    observer.observe(node)
+    return () => observer.disconnect()
+  }, [near])
+  return { ref, near }
+}
+
 export default function Overview() {
-  const me = useQuery({ queryKey: ['me'], queryFn: api.me })
+  // The page's own budget (#510 item 6): an answer younger than 30 s is not read again when
+  // this page is mounted another time. `refetchInterval` still re-reads while it is open.
+  const me = useQuery({ queryKey: ['me'], queryFn: api.me, staleTime: 30_000 })
   // The numbers are read in the background (#263), so the first answer is already there.
   // A catalog that has none yet is `pending`: re-ask every 5 s until it has numbers, and
   // stop after a minute — a scan that never finishes must not turn this page into a poller.
@@ -41,6 +65,7 @@ export default function Overview() {
   const metrics = useQuery({
     queryKey: ['catalog', 'metrics'],
     queryFn: api.catalogMetrics,
+    staleTime: 30_000,
     refetchInterval: (query) => {
       if (!query.state.data?.catalogs.some(catalog => catalog.pending)) {
         pendingSince.current = null
@@ -54,13 +79,17 @@ export default function Overview() {
   // runs of the caller's group-owned pipelines, queries follow the scope chosen here, and
   // loads are always the caller's own. The endpoints keep enforcing their own visibility.
   const [scope, setScope] = useState<'me' | 'groups'>('groups')
-  const runs = useQuery({ queryKey: ['runs'], queryFn: () => api.runs(), refetchInterval: 10_000 })
+  // The Recent activity card sits below the fold, so its two reads wait until it is near.
+  const timeline = useNearViewport<HTMLElement>()
+  const runs = useQuery({ queryKey: ['runs'], queryFn: () => api.runs(), refetchInterval: 10_000, staleTime: 30_000, enabled: timeline.near })
   const queries = useQuery({
     queryKey: ['query-log', 'overview', scope],
     queryFn: () => api.queryLog({ scope: scope === 'me' ? 'mine' : 'team', limit: 20 }),
     refetchInterval: 10_000,
+    staleTime: 30_000,
+    enabled: timeline.near,
   })
-  const jobs = useQuery({ queryKey: ['jobs'], queryFn: api.jobs, refetchInterval: 10_000 })
+  const jobs = useQuery({ queryKey: ['jobs'], queryFn: api.jobs, refetchInterval: 10_000, staleTime: 30_000 })
   // The two small charts (#767): the same list endpoints, one read per chart, capped at 200
   // rows each. `pulseFrom` is the first midnight of the 14-day chart, so the query log is
   // asked only for the window the chart draws.
@@ -69,18 +98,20 @@ export default function Overview() {
     queryKey: ['query-log', 'pulse'],
     queryFn: () => api.queryLog({ scope: 'mine', from: pulseFrom, limit: 200 }),
     refetchInterval: 60_000,
+    staleTime: 30_000,
   })
   const pulseRuns = useQuery({
     queryKey: ['runs', 'pulse'],
     queryFn: () => api.runs({ limit: 200 }),
     refetchInterval: 60_000,
+    staleTime: 30_000,
   })
   // The engine and app cards are operator views: their endpoints answer 403 to everyone else,
   // so they are not fetched at all for a non-admin (an `enabled: false` query stays pending —
   // it must never be rendered as "loading…" or as an error).
   const admin = me.data ? isAdmin(me.data) : false
-  const cluster = useQuery({ queryKey: ['trino', 'cluster'], queryFn: api.trinoCluster, retry: false, enabled: admin })
-  const apps = useQuery({ queryKey: ['apps'], queryFn: api.apps, refetchInterval: 15_000, enabled: admin })
+  const cluster = useQuery({ queryKey: ['trino', 'cluster'], queryFn: api.trinoCluster, retry: false, staleTime: 30_000, enabled: admin })
+  const apps = useQuery({ queryKey: ['apps'], queryFn: api.apps, refetchInterval: 15_000, staleTime: 30_000, enabled: admin })
 
   // An administrator's Refresh starts a round in the background; the numbers follow with
   // the next read, which is why the page asks again five seconds later (a scan takes a
@@ -106,7 +137,7 @@ export default function Overview() {
   // pipeline from Git. It waits for the numbers (a catalog still being counted reads zero) and
   // for the settings answer (no flash for someone who dismissed it), and it goes away as soon
   // as a table exists. An unreadable setting only means the card shows.
-  const settings = useQuery({ queryKey: ['settings'], queryFn: api.settings, retry: false })
+  const settings = useQuery({ queryKey: ['settings'], queryFn: api.settings, retry: false, staleTime: 30_000 })
   const [dismissed, setDismissed] = useState(false)
   const firstRun =
     totals !== undefined && totals.tables === 0 && !pending &&
@@ -204,7 +235,7 @@ export default function Overview() {
         onRefresh={refreshNow}
       />
 
-      <section className="grid lg:grid-cols-3 gap-4">
+      <section ref={timeline.ref} className="grid lg:grid-cols-3 gap-4">
         <div className={`card p-5 ${admin ? 'lg:col-span-2' : 'lg:col-span-3'}`}>
           <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
             <h2 className="text-sm font-semibold">Recent activity</h2>
