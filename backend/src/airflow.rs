@@ -639,11 +639,13 @@ impl AirflowClient {
     }
 
     /// Mark a run failed. This is metadata, not a cancel: work already in flight keeps running
-    /// and can commit its side effects, and the run may end up with an empty log.
+    /// and can commit its side effects, and the run may end up with an empty log. `note` is what
+    /// tells the failure notice this run was stopped by a person (nova#815 slice c).
     pub async fn mark_run_failed(
         &self,
         dag_id: &str,
         run_id: &str,
+        note: &str,
     ) -> Result<DagRun, AirflowError> {
         let url = self.url(&format!(
             "{API}/dags/{}/dagRuns/{}",
@@ -655,7 +657,7 @@ impl AirflowClient {
                 self.http
                     .patch(&url)
                     .bearer_auth(token)
-                    .json(&json!({ "state": "failed" }))
+                    .json(&json!({ "state": "failed", "note": note }))
             })
             .await?;
         Self::parse(body)
@@ -1369,12 +1371,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mark_failed_patches_the_state() {
+    async fn mark_failed_patches_the_state_and_the_note() {
         let (client, _cfg, fake) = fake::start().await;
         let run = client
             .mark_run_failed(
                 "stardelt__spike-j1",
                 "manual__2026-10-20T07:23:50.608876+00:00",
+                "stopped in Nova by Ada",
             )
             .await
             .unwrap();
@@ -1390,7 +1393,10 @@ mod tests {
             line,
             "PATCH /api/v2/dags/stardelt__spike-j1/dagRuns/manual__2026-10-20T07%3A23%3A50.608876%2B00%3A00"
         );
-        assert_eq!(body.as_ref(), Some(&json!({ "state": "failed" })));
+        assert_eq!(
+            body.as_ref(),
+            Some(&json!({ "state": "failed", "note": "stopped in Nova by Ada" }))
+        );
     }
 
     #[tokio::test]

@@ -688,7 +688,7 @@ fn parse_rfc3339(text: &str) -> Option<f64> {
 /// The seconds between two Airflow timestamps, rounded to microseconds; `None` unless both
 /// parse and the end is not before the start. Airflow's ISO strings carry microseconds, and a
 /// float difference would otherwise leak binary noise into the JSON.
-fn duration_seconds(started: Option<&str>, ended: Option<&str>) -> Option<f64> {
+pub(crate) fn duration_seconds(started: Option<&str>, ended: Option<&str>) -> Option<f64> {
     let ended = parse_rfc3339(ended?)?;
     let started = parse_rfc3339(started?)?;
     let duration = ended - started;
@@ -3431,7 +3431,15 @@ async fn stop_run_inner(
         return Err(ActionError::refused("not-active", run_not_active()));
     }
 
-    match airflow.mark_run_failed(&dag_id, &run.dag_run_id).await {
+    let note = format!(
+        "{} by {}",
+        crate::pipeline_notice::STOPPED_NOTE,
+        who.display_name
+    );
+    match airflow
+        .mark_run_failed(&dag_id, &run.dag_run_id, &note)
+        .await
+    {
         Ok(run) => Ok(run_view(&run)),
         Err(AirflowError::NotFound) => Err(ActionError::refused("not-found", no_such_run())),
         Err(e) => Err(ActionError::error(scheduler_fail(e))),
