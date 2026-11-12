@@ -1501,6 +1501,8 @@ export const api = {
     jget<RunResponse>(`/api/pipelines/${seg(ns)}/${seg(name)}/runs/${seg(runId)}`),
   stopPipelineRun: (ns: string, name: string, runId: string) =>
     jpost<RunView>(`/api/pipelines/${seg(ns)}/${seg(name)}/runs/${seg(runId)}/stop`, {}),
+  retryPipelineRun: (ns: string, name: string, runId: string) =>
+    jpost<RunView>(`/api/pipelines/${seg(ns)}/${seg(name)}/runs/${seg(runId)}/retry`, {}),
   pipelineLog:  (ns: string, name: string, runId: string, taskId: string, p: PipelineLogParams = {}) =>
     jget<LogPage>(pipelineLogUrl(ns, name, runId, taskId, p)),
   /** The executed copy of a notebook task's run (#682), outputs and traceback included. */

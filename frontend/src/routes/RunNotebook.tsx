@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { ApiError, api, runNotebookUrl } from '../api'
 import { EmptyState } from '../components/EmptyState'
@@ -19,7 +19,10 @@ import { PipelineStateBadge, formatWhen, runDuration } from './Pipelines'
 export default function RunNotebook() {
   const { namespace = '', name = '', runId = '', taskId = '' } = useParams()
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
   const [rerunning, setRerunning] = useState(false)
+  const [retrying, setRetrying] = useState(false)
+  const [retryError, setRetryError] = useState<unknown>(null)
 
   const notebook = useQuery({
     queryKey: ['run-notebook', namespace, name, runId, taskId],
@@ -53,6 +56,19 @@ export default function RunNotebook() {
       navigate(`/pipelines/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}`)
     } finally {
       setRerunning(false)
+    }
+  }
+
+  async function retryFailed() {
+    setRetrying(true)
+    setRetryError(null)
+    try {
+      await api.retryPipelineRun(namespace, name, runId)
+      await queryClient.invalidateQueries({ queryKey: ['pipeline-run', namespace, name, runId] })
+    } catch (e) {
+      setRetryError(e)
+    } finally {
+      setRetrying(false)
     }
   }
 
@@ -129,6 +145,11 @@ export default function RunNotebook() {
           )}
 
           <div className="flex flex-wrap items-center gap-2">
+            {run.data?.run.state === 'failed' && (
+              <button type="button" className="btn-primary py-1.5" onClick={() => void retryFailed()} disabled={retrying}>
+                Retry failed tasks
+              </button>
+            )}
             <button type="button" className="btn-primary py-1.5" onClick={() => void again()} disabled={rerunning}>
               Run again
             </button>
@@ -140,6 +161,8 @@ export default function RunNotebook() {
               Download
             </a>
           </div>
+
+          {retryError ? <ErrorBox error={retryError} /> : null}
 
           <NotebookFrame title="Executed notebook" html={rendered.html} />
         </>
