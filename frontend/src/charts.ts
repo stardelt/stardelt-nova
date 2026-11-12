@@ -12,6 +12,26 @@ export function dayStart(ms: number): number {
   return d.getTime()
 }
 
+/** The oldest timestamp in a list, or null when nothing has one. */
+export function oldestOf(times: (number | null | undefined)[]): number | null {
+  let oldest: number | null = null
+  for (const at of times) {
+    if (typeof at !== 'number' || !Number.isFinite(at)) continue
+    if (oldest === null || at < oldest) oldest = at
+  }
+  return oldest
+}
+
+/**
+ * Where a chart window starts when the answer may be truncated: the index of the oldest covered
+ * day, so a day the cap cut off is absent instead of drawn as zero. `0` when nothing is truncated.
+ */
+export function coveredStart(days: number[], oldest: number | null, truncated: boolean): number {
+  if (!truncated || oldest === null) return 0
+  const index = days.findIndex((day) => day >= dayStart(oldest))
+  return index < 0 ? days.length : index
+}
+
 /** The midnights of the last `days` local days, oldest first, today's last. */
 export function dayStarts(days: number, now: number): number[] {
   const count = Number.isFinite(days) ? Math.floor(days) : 0

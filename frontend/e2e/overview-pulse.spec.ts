@@ -58,6 +58,16 @@ const RUN = (id: string, state: string, minutesAgo: number) => ({
 /** Two successes and one failure, all started within the last day. */
 const RUNS = { runs: [RUN('r1', 'success', 10), RUN('r2', 'success', 20), RUN('r3', 'failed', 30)], groups: [] }
 
+/** A run row that started at an absolute moment, in the shape the runs list expects. */
+const runAt = (id: string, state: string, at: number) => ({
+  ...RUN(id, state, 0),
+  runId: id,
+  state,
+  logicalDate: new Date(at).toISOString(),
+  startedAt: new Date(at).toISOString(),
+  endedAt: new Date(at + 30_000).toISOString(),
+})
+
 async function stubApi(page: Page, opts: {
   queryLogStatus?: number
   seen?: { from?: string | null }
@@ -67,6 +77,8 @@ async function stubApi(page: Page, opts: {
   queryItems?: unknown[]
   /** Every windowed read the chart makes, in order. */
   calls?: { cursor: string | null }[]
+  /** The answer the runs reads get, when a test needs its own rows. */
+  runsBody?: unknown
 } = {}) {
   await page.route('**/api/**', (route) => {
     const url = new URL(route.request().url())
@@ -88,7 +100,7 @@ async function stubApi(page: Page, opts: {
       if (opts.queryPages) return json(route, opts.queryPages[cursor ?? ''] ?? { items: [], nextCursor: null })
       return json(route, { items: opts.queryItems ?? QUERY_ITEMS, nextCursor: null })
     }
-    if (path === '/api/runs') return json(route, RUNS)
+    if (path === '/api/runs') return json(route, opts.runsBody ?? RUNS)
     return json(route, {})
   })
 }
@@ -158,6 +170,29 @@ test('the queries chart reads every page of its window', async ({ page }) => {
   expect(calls[0].cursor).toBeNull()
   expect(calls[1].cursor).toBe('page-2')
   await expect(card.getByText('Showing the latest 200 queries.')).toHaveCount(0)
+})
+
+test('a truncated runs answer does not draw empty days', async ({ page }) => {
+  // The API caps the runs read at 200 rows, so the answer covers only the newest part of the
+  // window (nova#882): the days the cap cut off are absent, not drawn as zero. The 200 rows sit
+  // at today's midnight and yesterday's 00:30, so the covered span is exactly today and yesterday
+  // whatever hour the test runs at, and both are within the last 48 hours.
+  const midnight = new Date()
+  midnight.setHours(0, 0, 0, 0)
+  const cappedRuns = {
+    runs: Array.from({ length: 200 }, (_, i) =>
+      runAt(`c-${i}`, i % 2 === 0 ? 'success' : 'failed', midnight.getTime() - (i % 2) * 23.5 * 3_600_000)),
+    groups: [],
+  }
+  await stubApi(page, { runsBody: cappedRuns })
+  await page.goto('/')
+  const card = pulseCard(page)
+  await expect(card).toBeVisible()
+
+  // Two days, not seven: the five the cap cut off are not drawn as zero.
+  await expect(card.locator('svg[data-chart="runs"] [data-day]')).toHaveCount(2)
+  await expect(card.getByText('Showing the latest 200 runs.')).toBeVisible()
+  await expect(card.getByText('Runs per day · your groups')).toBeVisible()
 })
 
 test('the card never prints NaN or an Invalid Date', async ({ page }) => {
