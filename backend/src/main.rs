@@ -77,9 +77,11 @@
 //! `400 {"error":"query exceeded the Ns limit and was cancelled"}`.
 //! `NOVA_AIRFLOW_URL`, `NOVA_AIRFLOW_USER` and `NOVA_AIRFLOW_PASSWORD` (all three or
 //! none) switch on the Airflow client (`airflow.rs`) that the pipeline views use.
-//! `NOVA_CATALOG_TOKEN_URL`, `NOVA_CATALOG_CLIENT_ID` and `NOVA_CATALOG_CLIENT_SECRET`
-//! (all three or none) make Nova send its own service token on every Lakekeeper call
-//! (`catalog_token.rs`); unset, the catalog is called without one.
+//! `NOVA_CATALOG_CLIENT_ID` and `NOVA_CATALOG_CLIENT_SECRET` (both or neither) make Nova
+//! send its own service token on every Lakekeeper call (`catalog_token.rs`); the token
+//! endpoint is `NOVA_CATALOG_TOKEN_URL` when it is set, otherwise the sign-in provider's
+//! discovery `token_endpoint`. Unset (or no endpoint advertised), the catalog is called
+//! without one.
 //! `NOVA_S3_URL`, `NOVA_S3_ACCESS_KEY`, `NOVA_S3_SECRET_KEY` and
 //! `NOVA_S3_NOTEBOOK_BUCKET` (all four or none) switch on published notebooks
 //! (`notebooks.rs`); unset, the routes answer 503.
@@ -924,22 +926,13 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    // Nova's own sign-in at the catalog (stardelt-nova#222). All three variables or none;
-    // a partial one refuses to start rather than calling Lakekeeper unauthenticated. The
-    // client secret and every token stay in `Secret` — nothing here logs either.
-    let catalog_token = match catalog_token::CatalogTokenConfig::from_env() {
-        Ok(None) => {
-            info!("NOVA_CATALOG_TOKEN_URL is not set — catalog calls carry no service token");
-            None
-        }
-        Ok(Some(cfg)) => {
-            info!(
-                token_url = %cfg.token_url,
-                client_id = %cfg.client_id,
-                "catalog service token configured"
-            );
-            Some(catalog_token::CatalogToken::new(http.clone(), cfg))
-        }
+    // Nova's own sign-in at the catalog (stardelt-nova#222). Both client variables or
+    // neither; a partial one refuses to start rather than calling Lakekeeper
+    // unauthenticated. The endpoint is resolved below, after the sign-in provider is
+    // known (stardelt-platform#611). The client secret and every token stay in `Secret` —
+    // nothing here logs either.
+    let catalog_env = match catalog_token::CatalogTokenEnv::from_env() {
+        Ok(env) => env,
         Err(e) => anyhow::bail!("refusing to start: catalog token configuration: {e}"),
     };
 
@@ -975,6 +968,73 @@ async fn main() -> anyhow::Result<()> {
             );
             None
         }
+    };
+
+    // Sign-in (stardelt-nova#20). Built before the app state because the catalog's
+    // service-token endpoint comes from the same discovery document (#611). A wrong
+    // issuer refuses to start; an unreachable provider does not.
+    let auth = match auth_mode {
+        auth::AuthMode::Dev => None,
+        auth::AuthMode::Oidc(cfg) => {
+            if !cfg.secure_cookies() {
+                tracing::warn!(public_url = %cfg.public_url, "NOVA_PUBLIC_URL is not https — session cookies are not Secure");
+            }
+            let a = auth::AuthState::new(*cfg, reqwest::Client::builder().build()?);
+            // Check the IdP now so a wrong issuer is a startup error. An unreachable IdP
+            // is not: Nova starts, sign-in fails (closed) and discovery is retried.
+            match a.provider.discovery().await {
+                Ok(d) => info!(issuer = %d.issuer, "oidc discovery ok"),
+                Err(e @ auth::AuthError::Misconfigured(_)) => {
+                    anyhow::bail!("refusing to start: {e}")
+                }
+                Err(e) => {
+                    tracing::warn!(reason = %e, "oidc discovery failed — sign-in unavailable until the identity provider answers")
+                }
+            }
+            Some(a)
+        }
+    };
+
+    // The catalog's token endpoint: `NOVA_CATALOG_TOKEN_URL` when it is set, otherwise the
+    // one the sign-in provider advertises (stardelt-platform#611). The discovery document
+    // is the cached one the block above fetched; nothing is fetched per request. An
+    // unreachable provider is not fatal — the service token stays off and Nova serves,
+    // exactly as when the variables are unset.
+    let need_discovery = catalog_env.as_ref().is_some_and(|env| !env.has_token_url());
+    let discovery_token_url = match auth.as_ref().filter(|_| need_discovery) {
+        Some(a) => match a.provider.discovery().await {
+            Ok(d) => Some(d.token_endpoint.clone()),
+            Err(e) => {
+                tracing::warn!(reason = %e, "token endpoint not discovered — catalog calls carry no service token");
+                None
+            }
+        },
+        None => None,
+    };
+    let catalog_token = match catalog_env {
+        None => {
+            info!(
+                "NOVA_CATALOG_CLIENT_ID/NOVA_CATALOG_CLIENT_SECRET are not set — catalog calls carry no service token"
+            );
+            None
+        }
+        Some(env) => match env.resolve(discovery_token_url) {
+            Ok(Some(cfg)) => {
+                info!(
+                    token_url = %cfg.token_url,
+                    client_id = %cfg.client_id,
+                    "catalog service token configured"
+                );
+                Some(catalog_token::CatalogToken::new(http.clone(), cfg))
+            }
+            Ok(None) => {
+                info!(
+                    "NOVA_CATALOG_CLIENT_ID/NOVA_CATALOG_CLIENT_SECRET are set but the identity provider advertises no token endpoint — catalog calls carry no service token"
+                );
+                None
+            }
+            Err(e) => anyhow::bail!("refusing to start: catalog token configuration: {e}"),
+        },
     };
 
     let state = Arc::new(AppState {
@@ -1036,28 +1096,6 @@ async fn main() -> anyhow::Result<()> {
     // minutes, with Nova's own service token, one round at a time (stardelt-nova#263).
     // Not in demo mode (the seeded tables are the numbers) and not without a catalog.
     catalog_metrics::spawn_refresher(Arc::clone(&state));
-
-    let auth = match auth_mode {
-        auth::AuthMode::Dev => None,
-        auth::AuthMode::Oidc(cfg) => {
-            if !cfg.secure_cookies() {
-                tracing::warn!(public_url = %cfg.public_url, "NOVA_PUBLIC_URL is not https — session cookies are not Secure");
-            }
-            let a = auth::AuthState::new(*cfg, reqwest::Client::builder().build()?);
-            // Check the IdP now so a wrong issuer is a startup error. An unreachable IdP
-            // is not: Nova starts, sign-in fails (closed) and discovery is retried.
-            match a.provider.discovery().await {
-                Ok(d) => info!(issuer = %d.issuer, "oidc discovery ok"),
-                Err(e @ auth::AuthError::Misconfigured(_)) => {
-                    anyhow::bail!("refusing to start: {e}")
-                }
-                Err(e) => {
-                    tracing::warn!(reason = %e, "oidc discovery failed — sign-in unavailable until the identity provider answers")
-                }
-            }
-            Some(a)
-        }
-    };
 
     let static_dir = std::env::var("NOVA_STATIC_DIR").unwrap_or_else(|_| "/app/static".into());
 
