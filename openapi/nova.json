@@ -474,7 +474,7 @@
           "internal"
         ],
         "summary": "`GET /api/apps/links` — the header's app switcher, for every signed-in user.",
-        "description": "The apps the caller may open from the header's app switcher: `id`, `name`, `category` and the address a browser opens (`external_url`). For every signed-in user. No status and no workload data: liveness is operator information (`GET /api/apps`). Left out: Nova itself, apps with no browsable surface, apps whose address cannot be built because no base domain is configured, and the engine's own UI for everybody who is not an administrator. Field names are snake_case.",
+        "description": "The apps the caller may open from the header's app switcher: `id`, `name`, `category` and the address a browser opens (`external_url`). For every signed-in user. No status and no workload data: liveness is operator information (`GET /api/apps`). Left out: Nova itself, apps with no browsable surface, apps whose address cannot be built because no base domain is configured, and the engine's own UI and Airflow for everybody who is not an administrator. Field names are snake_case.",
         "operationId": "apps_links",
         "responses": {
           "200": {

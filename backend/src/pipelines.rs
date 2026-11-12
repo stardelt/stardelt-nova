@@ -3056,7 +3056,9 @@ async fn pipeline_detail(
     // already passed the same visibility rule that `load_visible` applies to an edit.
     view.tasks = task_specs(spec, true);
     let base = std::env::var("NOVA_BASE_DOMAIN").unwrap_or_default();
-    let airflow_url = (!base.is_empty()).then(|| format!("https://airflow.{base}/dags/{dag_id}"));
+    // A non-administrator's Airflow role has no global DAG read, so the DAG page answers 403.
+    let airflow_url =
+        (who.is_admin && !base.is_empty()).then(|| format!("https://airflow.{base}/dags/{dag_id}"));
     Ok(PipelineDetail {
         pipeline: view,
         runs: runs.iter().map(run_view).collect(),
@@ -8199,6 +8201,34 @@ mod tests {
         assert_eq!(
             detail.airflow_url.as_deref(),
             Some("https://airflow.alpha.dev.stardelt.io/dags/stardelt__smoke")
+        );
+        unsafe {
+            std::env::remove_var("NOVA_BASE_DOMAIN");
+        }
+    }
+
+    #[tokio::test]
+    async fn detail_hides_airflow_url_from_non_admins() {
+        let _base_domain = BASE_DOMAIN_LOCK.lock().await;
+        unsafe {
+            std::env::set_var("NOVA_BASE_DOMAIN", "alpha.dev.stardelt.io");
+        }
+        let resources = memory(&[("smoke", resource("smoke", Some("analytics")))]);
+        let (airflow, _fake) = fake_airflow::start().await;
+
+        let detail = pipeline_detail(
+            Some(&resources),
+            Some(&airflow),
+            &who("sub-ada", &["analytics"], false),
+            &crate::cluster::namespace(),
+            "smoke",
+        )
+        .await
+        .expect("the detail is readable");
+
+        assert!(
+            detail.airflow_url.is_none(),
+            "a non-administrator is not sent to a DAG page that answers 403"
         );
         unsafe {
             std::env::remove_var("NOVA_BASE_DOMAIN");
