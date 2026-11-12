@@ -39,9 +39,9 @@ export default function Dashboards() {
     <div className="h-full flex flex-col gap-4">
       <header className="flex items-center justify-between gap-4 flex-wrap">
         <div>
-          <h1 className="text-3xl font-bold tracking-tight">Dashboards</h1>
+          <h1 className="text-2xl font-bold tracking-tight">Dashboards</h1>
           <p className="text-text-dim text-sm mt-1">
-            Apache Superset, embedded.
+            Charts and dashboards on your tables, built in Superset.
             {deployed
               // The embed uses the platform IdP; the superset-admin Secret is the API/administrator
               // account, not a UI login.

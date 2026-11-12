@@ -113,7 +113,7 @@ export default function Lineage() {
       <header>
         <h1 className="text-2xl font-bold tracking-tight">Lineage</h1>
         <p className="text-text-dim text-sm mt-1">
-          Table lineage across the lakehouse, drawn from recorded OpenLineage events.
+          Where a table's data comes from and where it goes, recorded each time a query, notebook or pipeline writes it.
         </p>
       </header>
 
@@ -209,7 +209,7 @@ export default function Lineage() {
         data.nodes.length <= 1 ? (
           <div className="card p-6">
             <p className="text-sm text-text-dim">
-              No lineage captured for this table yet. Runs that report OpenLineage events will appear here.
+              No lineage for this table yet. It appears after the next query, notebook or pipeline that writes or reads it.
             </p>
           </div>
         ) : phone ? (

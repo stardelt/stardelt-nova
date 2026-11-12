@@ -30,7 +30,7 @@ export default function Health() {
       <header className="flex items-end justify-between gap-4 flex-wrap">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Platform health</h1>
-          <p className="text-text-dim text-sm mt-1">Live probes for every service, from the backend.</p>
+          <p className="text-text-dim text-sm mt-1">Whether each service answers right now, as Nova sees it.</p>
         </div>
         <div className="text-sm text-text-dim">
           <span className={up === installed.length && installed.length > 0 ? 'text-success font-semibold' : 'font-semibold'}>{up}</span>

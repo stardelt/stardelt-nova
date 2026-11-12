@@ -29,7 +29,7 @@ export default function Data() {
       <header>
         <h1 className="text-2xl font-bold tracking-tight">Load & transfer</h1>
         <p className="text-text-dim text-sm mt-1">
-          Bring files into Iceberg, or move data between tables. Every operation is recorded as a job.
+          Load files into tables, or move data between tables. Each load and transfer shows up in Activity.
           {me.data?.demo && <span className="text-warn"> Demo mode writes to memory.</span>}
         </p>
       </header>
