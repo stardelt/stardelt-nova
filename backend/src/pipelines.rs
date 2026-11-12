@@ -2367,6 +2367,17 @@ fn is_group_marker(event: &LogEvent) -> bool {
 const MAX_LOG_LINES: usize = 2000;
 /// The most log text (bytes) one answer carries.
 const MAX_LOG_BYTES: usize = 512 * 1024;
+/// The most stack frames one failed task shows below its exception.
+const MAX_ERROR_FRAMES: usize = 20;
+
+/// The last segment of a frame's filename: `/home/airflow/.local/lib/python3.12/site-packages/…`
+/// never reaches the page, `task_runner.py` does.
+fn short_path(filename: &str) -> &str {
+    filename
+        .rsplit('/')
+        .find(|segment| !segment.is_empty())
+        .unwrap_or(filename)
+}
 
 fn log_view(page: LogPage) -> LogView {
     let mut lines = Vec::new();
@@ -2387,6 +2398,39 @@ fn log_view(page: LogPage) -> LogView {
             level: event.level,
             text,
         });
+        // A failed task's reason lives only in `error_detail`; without it the page stops at
+        // "Task failed with exception" and says nothing.
+        for detail in &event.error_detail {
+            let text = format!("{}: {}", detail.exc_type, detail.exc_value);
+            if lines.len() >= MAX_LOG_LINES || bytes + text.len() > MAX_LOG_BYTES {
+                truncated = true;
+                break;
+            }
+            bytes += text.len();
+            lines.push(LogLine {
+                timestamp: None,
+                level: Some("error".to_string()),
+                text,
+            });
+            for frame in detail.frames.iter().take(MAX_ERROR_FRAMES) {
+                let text = format!(
+                    "  {}:{} in {}",
+                    short_path(&frame.filename),
+                    frame.lineno,
+                    frame.name
+                );
+                if lines.len() >= MAX_LOG_LINES || bytes + text.len() > MAX_LOG_BYTES {
+                    truncated = true;
+                    break;
+                }
+                bytes += text.len();
+                lines.push(LogLine {
+                    timestamp: None,
+                    level: None,
+                    text,
+                });
+            }
+        }
     }
     LogView {
         lines,
@@ -5383,7 +5427,7 @@ pub(crate) async fn run(
     operation_id = "pipelines_run_task_logs",
     path = "/api/pipelines/{namespace}/{name}/runs/{run_id}/tasks/{task_id}/logs",
     tag = "public",
-    description = "One page of a task's log: at most 2000 lines and 512 KiB, ANSI escapes removed, the `::group::` source marker dropped (it names internal object-store paths and is never returned). `try` defaults to the task's last attempt; `token` is the `nextToken` of the previous answer. Every read writes one audit line with user, pipeline, run and task — never the content. Answers `Cache-Control: no-store`.",
+    description = "One page of a task's log: at most 2000 lines and 512 KiB, ANSI escapes removed, the `::group::` source marker dropped (it names internal object-store paths and is never returned). A failed task's line is followed by the exception the scheduler recorded (`ExcType: message`) and up to 20 of its stack frames, each with the file's last path segment; they count against the same caps. `try` defaults to the task's last attempt; `token` is the `nextToken` of the previous answer. Every read writes one audit line with user, pipeline, run and task — never the content. Answers `Cache-Control: no-store`.",
     params(
         ("namespace" = String, Path, description = "The Pipeline's namespace (Nova's own)"),
         ("name" = String, Path, description = "Pipeline name"),
@@ -7563,10 +7607,179 @@ mod tests {
         );
     }
 
+    /// One failed event whose exception carries `frames` frames.
+    fn failed_event(frames: usize) -> Value {
+        let frames: Vec<Value> = (0..frames)
+            .map(|index| {
+                json!({
+                    "filename": "/home/airflow/.local/lib/python3.12/site-packages/airflow/task/task_runner.py",
+                    "lineno": 1263 + index,
+                    "name": format!("frame_{index}")
+                })
+            })
+            .collect();
+        json!({
+            "timestamp": "2026-11-11T06:07:40.133090Z",
+            "event": "Task failed with exception",
+            "level": "error",
+            "error_detail": [{
+                "exc_type": "TrinoError",
+                "exc_value": "CATALOG_NOT_FOUND: line 1:1: Catalog 'bronze' not found",
+                "is_cause": false,
+                "frames": frames
+            }]
+        })
+    }
+
+    #[tokio::test]
+    async fn log_error_detail_reaches_the_lines() {
+        let resources = memory(&[("smoke", resource("smoke", Some("analytics")))]);
+        let (airflow, fake) = fake_airflow::start().await;
+        fake.lock().unwrap().log_page = json!({
+            "content": [
+                { "level": "info", "event": "starting" },
+                failed_event(2)
+            ],
+            "continuation_token": null
+        });
+
+        let view = task_logs(
+            Some(&resources),
+            Some(&airflow),
+            &admin(),
+            &crate::cluster::namespace(),
+            "smoke",
+            SMOKE_RUN,
+            "insert",
+            Some(1),
+            None,
+        )
+        .await
+        .expect("the log is readable");
+
+        assert!(!view.truncated);
+        let texts: Vec<&str> = view.lines.iter().map(|line| line.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec![
+                "starting",
+                "Task failed with exception",
+                "TrinoError: CATALOG_NOT_FOUND: line 1:1: Catalog 'bronze' not found",
+                "  task_runner.py:1263 in frame_0",
+                "  task_runner.py:1264 in frame_1",
+            ]
+        );
+        assert_eq!(
+            view.lines[2].level.as_deref(),
+            Some("error"),
+            "the exception is an error level line"
+        );
+        assert_eq!(view.lines[2].timestamp, None, "the detail has no timestamp");
+        assert_eq!(view.lines[3].level, None, "a frame carries no level");
+    }
+
+    #[tokio::test]
+    async fn an_event_without_error_detail_is_unchanged() {
+        let resources = memory(&[("smoke", resource("smoke", Some("analytics")))]);
+        let (airflow, fake) = fake_airflow::start().await;
+        fake.lock().unwrap().log_page = json!({
+            "content": [
+                { "level": "info", "event": "starting" },
+                {
+                    "level": "error",
+                    "event": "Task failed with exception",
+                    "error_detail": []
+                }
+            ],
+            "continuation_token": null
+        });
+
+        let view = task_logs(
+            Some(&resources),
+            Some(&airflow),
+            &admin(),
+            &crate::cluster::namespace(),
+            "smoke",
+            SMOKE_RUN,
+            "insert",
+            Some(1),
+            None,
+        )
+        .await
+        .expect("the log is readable");
+
+        assert_eq!(view.lines.len(), 2, "an empty detail appends nothing");
+        assert_eq!(view.lines[1].text, "Task failed with exception");
+        assert_eq!(view.lines[1].level.as_deref(), Some("error"));
+        assert!(!view.truncated);
+    }
+
+    #[tokio::test]
+    async fn a_long_traceback_is_cut_to_the_frame_cap() {
+        let resources = memory(&[("smoke", resource("smoke", Some("analytics")))]);
+        let (airflow, fake) = fake_airflow::start().await;
+        fake.lock().unwrap().log_page = json!({
+            "content": [failed_event(30)],
+            "continuation_token": null
+        });
+
+        let view = task_logs(
+            Some(&resources),
+            Some(&airflow),
+            &admin(),
+            &crate::cluster::namespace(),
+            "smoke",
+            SMOKE_RUN,
+            "insert",
+            Some(1),
+            None,
+        )
+        .await
+        .expect("the log is readable");
+
+        let frames = view.lines.iter().filter(|line| line.text.starts_with("  "));
+        assert_eq!(frames.count(), MAX_ERROR_FRAMES);
+        assert_eq!(view.lines.len(), 1 + 1 + MAX_ERROR_FRAMES);
+    }
+
+    #[tokio::test]
+    async fn the_error_detail_counts_against_the_line_cap() {
+        let resources = memory(&[("smoke", resource("smoke", Some("analytics")))]);
+        let (airflow, fake) = fake_airflow::start().await;
+        let mut events: Vec<Value> = (0..MAX_LOG_LINES - 5)
+            .map(|index| json!({ "level": "info", "event": format!("line {index}") }))
+            .collect();
+        events.push(failed_event(30));
+        fake.lock().unwrap().log_page = json!({
+            "content": events,
+            "continuation_token": null
+        });
+
+        let view = task_logs(
+            Some(&resources),
+            Some(&airflow),
+            &admin(),
+            &crate::cluster::namespace(),
+            "smoke",
+            SMOKE_RUN,
+            "insert",
+            Some(1),
+            None,
+        )
+        .await
+        .expect("the log is readable");
+
+        assert!(
+            view.lines.len() <= MAX_LOG_LINES,
+            "the page stayed under the line cap: {}",
+            view.lines.len()
+        );
+        assert!(view.truncated, "the detail overflowed the page");
+    }
+
     // -----------------------------------------------------------------------
     // A run id never crosses pipelines
     // -----------------------------------------------------------------------
-
     #[tokio::test]
     async fn a_run_id_of_another_pipeline_does_not_resolve() {
         let resources = memory(&[
