@@ -44,13 +44,13 @@ const NOTEBOOK = {
   cells: [{ cell_type: 'code', source: 'print("hi")\n', outputs: [], execution_count: 1 }],
 }
 
-async function open(page: Page) {
+async function open(page: Page, runState: string = RUN.state) {
   await page.route('**/api/**', (route) => {
     const url = new URL(route.request().url())
     if (url.pathname === '/api/me') return json(route, ME)
     if (url.pathname === '/api/pipelines/stardelt/nightly_upload') return json(route, PIPELINE)
     if (url.pathname === '/api/pipelines/stardelt/nightly_upload/runs/manual__2') {
-      return json(route, { run: RUN, tasks: [] })
+      return json(route, { run: { ...RUN, state: runState }, tasks: [] })
     }
     if (url.pathname === '/api/pipelines/stardelt/nightly_upload/runs/manual__2/tasks/load/notebook') {
       return json(route, NOTEBOOK)
@@ -71,5 +71,25 @@ test.describe('run provenance', () => {
     await expect(provenance).toContainText('as svc-pipeline-finance')
     await page.getByText('Parameters (1)').click()
     await expect(page.getByText('month = 2026-11')).toBeVisible()
+  })
+
+  test('a failed run offers Retry failed tasks (nova#816)', async ({ page }) => {
+    let retried = 0
+    await open(page)
+    // Registered after open(): Playwright runs the most recently registered route first.
+    await page.route('**/api/pipelines/stardelt/nightly_upload/runs/manual__2/retry', (route) => {
+      retried += 1
+      return json(route, RUN)
+    })
+    await page.getByRole('button', { name: 'Retry failed tasks' }).click()
+    await expect.poll(() => retried).toBe(1)
+  })
+
+  test('a successful run offers no Retry failed tasks (nova#816)', async ({ page }) => {
+    await open(page, 'success')
+    // The controls render with the executed notebook: waiting for "Run again" is what makes
+    // the absence below mean something (a bare count of 0 passes before the page has painted).
+    await expect(page.getByRole('button', { name: 'Run again' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Retry failed tasks' })).toHaveCount(0)
   })
 })
