@@ -25,8 +25,9 @@
 //!   enforced at trigger time (Nova checks the latest runs itself), a `logical_date` in the past
 //!   or future produces a run without tasks (Nova always sends now), and stopping a run marks it
 //!   failed — it is not a cancel: in-flight work can finish and commit (see #255).
-//! - **Logs**: the `::group::` marker carries internal object-store paths in `sources`; it is
-//!   dropped, and no field of an answer can hold a `sources` value. Answers are capped at 2000
+//! - **Logs**: the `::group::` source-details block (the marker with `sources`, the internal
+//!   object-store path Airflow writes as the next event, and `::endgroup::`) is dropped, and no
+//!   field of an answer can hold a `sources` value or an internal path. Answers are capped at 2000
 //!   lines and 512 KiB and say `truncated: true` beyond that.
 //! - **Unreachable upstreams are 502, never 500** (rule U12 of `design/ui-conformance.md`):
 //!   without a cluster client or an Airflow client the routes answer 503 and say which one is
@@ -2353,14 +2354,22 @@ fn strip_ansi(text: &str) -> String {
     out
 }
 
-/// The `::group::Log message source details` marker, and anything else that carries
-/// `sources`: those values are internal object-store paths and never leave this module.
-fn is_group_marker(event: &LogEvent) -> bool {
+/// The start of the `::group::Log message source details` block: the marker carries `sources`,
+/// and Airflow then writes the internal path as its own event.
+fn starts_sources_group(event: &LogEvent) -> bool {
     !event.sources.is_empty()
         || event
             .event
             .as_deref()
             .is_some_and(|text| text.trim_start().starts_with("::group::"))
+}
+
+/// The `::endgroup::` that closes the source-details block.
+fn ends_sources_group(event: &LogEvent) -> bool {
+    event
+        .event
+        .as_deref()
+        .is_some_and(|text| text.trim_start().starts_with("::endgroup::"))
 }
 
 /// The most log lines one answer carries.
@@ -2383,8 +2392,22 @@ fn log_view(page: LogPage) -> LogView {
     let mut lines = Vec::new();
     let mut bytes = 0usize;
     let mut truncated = false;
+    // The `::group::` source-details block is three events on live Airflow: the marker (with
+    // `sources`), the internal object-store path as its own event, and `::endgroup::`. All three
+    // are dropped: those paths are internal and never leave this module.
+    let mut in_sources_group = false;
     for event in page.content {
-        if is_group_marker(&event) {
+        if starts_sources_group(&event) {
+            in_sources_group = true;
+            continue;
+        }
+        if in_sources_group {
+            if ends_sources_group(&event) {
+                in_sources_group = false;
+            }
+            continue;
+        }
+        if ends_sources_group(&event) {
             continue;
         }
         let text = strip_ansi(event.event.as_deref().unwrap_or_default());
@@ -5429,7 +5452,7 @@ pub(crate) async fn run(
     operation_id = "pipelines_run_task_logs",
     path = "/api/pipelines/{namespace}/{name}/runs/{run_id}/tasks/{task_id}/logs",
     tag = "public",
-    description = "One page of a task's log: at most 2000 lines and 512 KiB, ANSI escapes removed, the `::group::` source marker dropped (it names internal object-store paths and is never returned). A failed task's line is followed by the exception the scheduler recorded (`ExcType: message`) and up to 20 of its stack frames, each with the file's last path segment; they count against the same caps. `try` defaults to the task's last attempt; `token` is the `nextToken` of the previous answer. Every read writes one audit line with user, pipeline, run and task — never the content. Answers `Cache-Control: no-store`.",
+    description = "One page of a task's log: at most 2000 lines and 512 KiB, ANSI escapes removed, the `::group::` source-details block dropped — its marker, the internal object-store path it wraps and its `::endgroup::` (they are never returned). A failed task's line is followed by the exception the scheduler recorded (`ExcType: message`) and up to 20 of its stack frames, each with the file's last path segment; they count against the same caps. `try` defaults to the task's last attempt; `token` is the `nextToken` of the previous answer. Every read writes one audit line with user, pipeline, run and task — never the content. Answers `Cache-Control: no-store`.",
     params(
         ("namespace" = String, Path, description = "The Pipeline's namespace (Nova's own)"),
         ("name" = String, Path, description = "Pipeline name"),
@@ -5739,6 +5762,9 @@ mod tests {
 
     /// A value that must never appear in a log answer: the marker's `sources` path.
     const SOURCES_CANARY: &str = "s3://backups/airflow-logs/dag_id=stardelt__smoke/run_id=manual__2026-10-20T07:23:50.608876+00:00/task_id=insert/attempt=3.log";
+    /// The path Airflow sends as the group's *body* event on live Airflow 3 (a separate event,
+    /// no `sources`): it must never appear in an answer either.
+    const SOURCES_BODY_CANARY: &str = "s3://backups/airflow-logs/dag_id=stardelt__smoke/run_id=manual__2026-10-20T07:23:50.608876+00:00/task_id=insert/attempt=2.log";
     const SMOKE_RUN: &str = "manual__2026-10-20T07:23:50.608876+00:00";
     const OTHER_RUN: &str = "manual__2026-10-20T09:00:00.000000+00:00";
 
@@ -5876,6 +5902,12 @@ mod tests {
                 {
                     "event": "::group::Log message source details",
                     "sources": [SOURCES_CANARY]
+                },
+                {
+                    "event": SOURCES_BODY_CANARY
+                },
+                {
+                    "event": "::endgroup::"
                 },
                 {
                     "timestamp": "2026-10-20T07:23:51.000000Z",
@@ -7510,6 +7542,11 @@ mod tests {
             !serialized.contains(SOURCES_CANARY),
             "the marker's object-store path must not be in the answer: {serialized}"
         );
+        assert!(
+            !serialized.contains(SOURCES_BODY_CANARY),
+            "the group's body path must not be in the answer: {serialized}"
+        );
+        assert!(!serialized.contains("::endgroup::"));
         assert!(!serialized.contains("s3://"));
         assert!(!serialized.contains("::group::"));
         assert!(!serialized.contains("sources"));
