@@ -482,7 +482,7 @@ async fn proxy_get(s: &AppState, url: String) -> Response {
             tracing::warn!(error = %e, "upstream request failed");
             (
                 StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({"error": "the upstream service is not reachable"})),
+                Json(serde_json::json!({"error": "the query engine is not answering; try again in a minute"})),
             )
                 .into_response()
         }
@@ -1616,7 +1616,7 @@ mod router_tests {
     #[tokio::test]
     async fn saved_queries_answer_503_without_a_state_store() {
         let (app, _dir) = test_app("saved-503");
-        let unavailable = serde_json::json!({"error": "the state store is not configured"});
+        let unavailable = serde_json::json!({"error": "this needs Nova's database, and this installation has none; ask your administrator"});
         let (status, body) = call(&app, "GET", "/api/saved-queries", None).await;
         assert_eq!(
             (status, body),
@@ -1903,7 +1903,7 @@ mod router_tests {
     #[tokio::test]
     async fn settings_answer_503_without_a_state_store() {
         let (app, _dir) = test_app("settings-503");
-        let unavailable = serde_json::json!({"error": "the state store is not configured"});
+        let unavailable = serde_json::json!({"error": "this needs Nova's database, and this installation has none; ask your administrator"});
         for (method, uri, body) in [
             ("GET", "/api/settings", None),
             ("PUT", "/api/settings/theme", Some(r#""dark""#)),

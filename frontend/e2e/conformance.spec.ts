@@ -4215,7 +4215,7 @@ test.describe('preferences', () => {
     is_admin: false, groups: ['analysts'],
   }
   const NO_STORE =
-    'Your preferences are kept in this browser only: this installation has no state store.'
+    'Your preferences are kept in this browser only: this installation has no database for Nova.'
 
   /** A Preferences page with every `/api/**` call stubbed; writes are recorded for the test. */
   async function open(browser: Browser, {
@@ -4241,7 +4241,7 @@ test.describe('preferences', () => {
       if (path === '/api/me') return json(route, ME)
       if (path === '/api/settings') {
         return settingsStatus
-          ? json(route, { error: 'the state store is not configured' }, settingsStatus)
+          ? json(route, { error: "this needs Nova's database, and this installation has none; ask your administrator" }, settingsStatus)
           : json(route, settings)
       }
       if (path.startsWith('/api/settings/')) {

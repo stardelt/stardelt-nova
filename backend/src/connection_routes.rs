@@ -1505,7 +1505,7 @@ pub(crate) async fn break_glass_log(
     let Some(db) = state.db.as_ref() else {
         return Fail::new(
             StatusCode::SERVICE_UNAVAILABLE,
-            "the state store is not configured",
+            "this needs Nova's database, and this installation has none; ask your administrator",
         )
         .into_response();
     };
@@ -1538,7 +1538,11 @@ pub(crate) async fn break_glass_log(
             .into_response(),
         Err(e) => {
             tracing::warn!(error = %e, "could not read the break-glass log");
-            Fail::new(StatusCode::BAD_GATEWAY, "the state store did not answer").into_response()
+            Fail::new(
+                StatusCode::BAD_GATEWAY,
+                "Nova's database is not answering; try again in a minute",
+            )
+            .into_response()
         }
     }
 }
@@ -3344,7 +3348,10 @@ mod tests {
             .await
             .unwrap();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(body["error"], "the state store is not configured");
+        assert_eq!(
+            body["error"],
+            "this needs Nova's database, and this installation has none; ask your administrator"
+        );
     }
 
     #[tokio::test]

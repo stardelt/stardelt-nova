@@ -78,10 +78,10 @@ test("somebody else's saved query is read-only", async ({ page }) => {
 
 test('without a state store the panel shows the API sentence and offers no save', async ({ page }) => {
   await page.route('**/api/saved-queries', (route) =>
-    json(route, { error: 'the state store is not configured' }, 503),
+    json(route, { error: "this needs Nova's database, and this installation has none; ask your administrator" }, 503),
   )
 
   await page.goto('/query')
-  await expect(page.getByText('the state store is not configured')).toBeVisible()
+  await expect(page.getByText("this needs Nova's database, and this installation has none; ask your administrator")).toBeVisible()
   await expect(page.getByRole('button', { name: 'Save query' })).toBeDisabled()
 })

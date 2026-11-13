@@ -7,7 +7,7 @@
 //! that another person's query is there.
 //!
 //! Without a state store (`NOVA_DATABASE_URL` unset) all three routes answer
-//! `503 {"error":"the state store is not configured"}`.
+//! `503 {"error":"this needs Nova's database, and this installation has none; ask your administrator"}`.
 
 use std::sync::Arc;
 
@@ -121,11 +121,11 @@ pub(crate) fn not_found() -> Response {
     error(StatusCode::NOT_FOUND, "not found")
 }
 
-/// The answer while the state store is not configured.
+/// The answer when this installation has no database for Nova.
 pub(crate) fn unavailable() -> Response {
     error(
         StatusCode::SERVICE_UNAVAILABLE,
-        "the state store is not configured",
+        "this needs Nova's database, and this installation has none; ask your administrator",
     )
 }
 
