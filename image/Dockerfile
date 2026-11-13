@@ -17,7 +17,14 @@ COPY backend/Cargo.toml backend/
 RUN mkdir -p backend/src && \
     echo "fn main() {}" > backend/src/main.rs && \
     cargo build --release -p stardelt-nova-backend && \
-    rm -rf backend/src target/release/deps/stardelt_nova_backend* target/release/stardelt-nova-backend
+    # The build state of the placeholder compile must go too: COPY gives the real sources the
+    # checkout mtime, which is older than the placeholder build, so Cargo would call the crate
+    # fresh and stage 3 would copy a 437 KB `fn main() {}` binary (stardelt-nova#909).
+    # cargo 1.100 keeps that state in `target/release/build/<pkg>/<hash>/`; older cargo in
+    # `target/release/.fingerprint/<pkg>-*`. Both are removed so either layout is safe.
+    rm -rf backend/src target/release/deps/stardelt_nova_backend* \
+           target/release/stardelt-nova-backend target/release/.fingerprint/stardelt-nova-backend-* \
+           target/release/build/stardelt-nova-backend
 COPY backend/src backend/src
 # `sqlx::migrate!` embeds backend/migrations/*.sql at compile time: without this line the
 # build fails with "error canonicalizing migration directory".
@@ -39,5 +46,8 @@ EXPOSE 8080
 # are in-memory, so nothing needs to be writable. World-readable bits are
 # enforced here rather than assumed from the build stages' umask.
 RUN chmod 755 /usr/local/bin/nova && chmod -R a=rX /app/static
+# The real backend is ~34 MB; the placeholder is ~437 KB. Fail here rather than ship it.
+RUN test "$(stat -c%s /usr/local/bin/nova)" -gt 1000000 \
+    || { echo "the runtime image holds a $(stat -c%s /usr/local/bin/nova)-byte binary: the placeholder was copied (stardelt-nova#909)" >&2; exit 1; }
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/nova"]
