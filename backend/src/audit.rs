@@ -193,7 +193,7 @@ pub fn pipeline_log_event(
 pub struct PipelineWrite<'a> {
     pub statement_chars: usize,
     pub schedule: Option<&'a str>,
-    /// `sql` or `notebook`: what the pipeline runs.
+    /// `sql`, `notebook` or `tasks`: what the pipeline runs.
     pub kind: &'a str,
     /// The notebook a write pins; `None` for a statement pipeline.
     pub notebook: Option<NotebookTarget<'a>>,

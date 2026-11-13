@@ -959,6 +959,8 @@ enum Statement {
         object_version: String,
         params: String,
     },
+    /// A whole task list, each task checked (`#905`).
+    Tasks(Vec<TaskStatement>),
 }
 
 /// The body's statement with the rules of its kind applied: the SQL ones (statement, template
@@ -1009,6 +1011,256 @@ async fn checked_statement(
             }
         }
         _ => Err(refused("body", ONE_OF_STATEMENT_OR_NOTEBOOK.into())),
+    }
+}
+
+/// One task of a task list (`#905`): its name, what must succeed first, and the statement the
+/// existing per-kind rules accepted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TaskStatement {
+    name: String,
+    depends_on: Vec<String>,
+    statement: Statement,
+}
+
+/// The task a `TaskStatement` carries as the resource stores it.
+fn task_json(task: &TaskStatement) -> Value {
+    let mut value = match &task.statement {
+        Statement::Sql(sql) => json!({ "name": task.name, "kind": "sql", "sql": sql }),
+        Statement::Notebook {
+            name,
+            object_version,
+            params,
+        } => json!({
+            "name": task.name,
+            "kind": "notebook",
+            "config": { "notebook": name, "objectVersion": object_version, "params": params },
+        }),
+        // `checked_statement` never answers a task list.
+        Statement::Tasks(_) => unreachable!("a task carries one statement, not a list"),
+    };
+    if !task.depends_on.is_empty() {
+        value["dependsOn"] = json!(task.depends_on);
+    }
+    value
+}
+
+/// At most this many tasks: the CRD's `spec.tasks` `maxItems` (`PipelineSpec`, measured live).
+const MAX_TASKS: usize = 30;
+/// At most this many dependencies per task: the CRD's `tasks[].dependsOn` `maxItems`.
+const MAX_TASK_DEPENDS_ON: usize = 8;
+const TOO_MANY_TASKS: &str = "at most 30 tasks";
+const NO_TASKS: &str = "give at least one task";
+const TASK_NAME_RULE: &str = "task names are 1 to 63 lower-case letters, digits, dashes and underscores, starting with a \
+     letter or digit";
+const TOO_MANY_TASK_DEPENDS_ON: &str = "a task depends on at most 8 tasks";
+const ONE_OF_STATEMENT_NOTEBOOK_OR_TASKS: &str = "give a statement, a notebook or a task list";
+/// A task list is edited in its file, not in the dialog (`#905` decision 5).
+const SEVERAL_TASKS: &str =
+    "this pipeline has several tasks; change it in its file and deploy again";
+
+/// `^[a-z0-9][a-z0-9_-]{0,62}$`: the lower-case subset of the CRD's task-name pattern.
+fn valid_task_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 63
+        && (bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit())
+        && bytes.iter().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-' || *byte == b'_'
+        })
+}
+
+/// Refuse a task list whose dependencies loop. The operator's `PipelineSpec::validate` runs the
+/// same check (Kahn's algorithm); Nova answers a sentence instead of the API server's 422.
+fn check_task_cycles(tasks: &[TaskStatement]) -> Result<(), String> {
+    fn visit(at: usize, tasks: &[TaskStatement], state: &mut [u8]) -> Result<(), String> {
+        match state[at] {
+            2 => return Ok(()),
+            1 => {
+                return Err(format!(
+                    "task `{}` is part of a dependency cycle",
+                    tasks[at].name
+                ));
+            }
+            _ => {}
+        }
+        state[at] = 1;
+        for dependency in &tasks[at].depends_on {
+            if let Some(next) = tasks.iter().position(|task| &task.name == dependency) {
+                visit(next, tasks, state)?;
+            }
+        }
+        state[at] = 2;
+        Ok(())
+    }
+    // 0 = unvisited, 1 = on the current path, 2 = done. At most 30 tasks, so the recursion depth
+    // is bounded.
+    let mut state = vec![0u8; tasks.len()];
+    for at in 0..tasks.len() {
+        visit(at, tasks, &mut state)?;
+    }
+    Ok(())
+}
+
+/// The `tasks` a body gives, checked: each task's name, its dependencies and exactly one statement
+/// or pinned notebook under the rules of `checked_statement`, then the list's own rules (1 to 30
+/// tasks, unique names, every dependency names a task of the list, no cycle). `Err` is one sentence
+/// that names the task (`#905` decision 2).
+async fn checked_tasks(
+    tasks: &[PipelineTaskRequest],
+    template_params: &BTreeMap<String, String>,
+    notebooks: Option<&NotebookStore>,
+    group: &str,
+) -> Result<Vec<TaskStatement>, ActionError> {
+    let refused = |reason: &'static str, message: String| {
+        ActionError::refused(reason, Fail::new(StatusCode::BAD_REQUEST, message))
+    };
+    if tasks.is_empty() {
+        return Err(refused("tasks", NO_TASKS.into()));
+    }
+    if tasks.len() > MAX_TASKS {
+        return Err(refused("tasks", TOO_MANY_TASKS.into()));
+    }
+    let mut checked: Vec<TaskStatement> = Vec::with_capacity(tasks.len());
+    for task in tasks {
+        if !valid_task_name(&task.name) {
+            return Err(refused(
+                "task-name",
+                format!("task name `{}` is not valid: {TASK_NAME_RULE}", task.name),
+            ));
+        }
+        if checked.iter().any(|done| done.name == task.name) {
+            return Err(refused(
+                "task-name",
+                format!("task name `{}` is used twice", task.name),
+            ));
+        }
+        if task.depends_on.len() > MAX_TASK_DEPENDS_ON {
+            return Err(refused(
+                "task-depends",
+                format!("task `{}`: {TOO_MANY_TASK_DEPENDS_ON}", task.name),
+            ));
+        }
+        if task
+            .depends_on
+            .iter()
+            .any(|dependency| dependency == &task.name)
+        {
+            return Err(refused(
+                "task-depends",
+                format!("task `{}` cannot depend on itself", task.name),
+            ));
+        }
+        // The same rules the single `run` task gets (#821, #237); `checked_run` has already
+        // validated the pipeline-level parameter table, so a refusal here is the task's own.
+        let statement = checked_statement(
+            &task.sql,
+            task.notebook.as_ref(),
+            template_params,
+            notebooks,
+            group,
+        )
+        .await
+        .map_err(|error| error.about_task(&task.name))?;
+        checked.push(TaskStatement {
+            name: task.name.clone(),
+            depends_on: task.depends_on.clone(),
+            statement,
+        });
+    }
+    for task in &checked {
+        for dependency in &task.depends_on {
+            if !checked.iter().any(|other| &other.name == dependency) {
+                return Err(refused(
+                    "task-depends",
+                    format!(
+                        "task `{}` depends on `{dependency}`, which is not a task of this pipeline",
+                        task.name
+                    ),
+                ));
+            }
+        }
+    }
+    check_task_cycles(&checked).map_err(|message| refused("task-cycle", message))?;
+    Ok(checked)
+}
+
+/// What a body asks the pipeline to run: one statement, one pinned notebook, or a task list —
+/// exactly one of the three, each under the rules of its kind (`#905` decision 1).
+async fn checked_run(
+    sql: &str,
+    notebook: Option<&NotebookRequest>,
+    tasks: Option<&[PipelineTaskRequest]>,
+    template_params: &BTreeMap<String, String>,
+    notebooks: Option<&NotebookStore>,
+    group: &str,
+) -> Result<Statement, ActionError> {
+    match (sql.trim().is_empty(), notebook.is_some(), tasks) {
+        // A body without `tasks` behaves exactly as today, sentence included.
+        (_, _, None) => checked_statement(sql, notebook, template_params, notebooks, group).await,
+        (true, false, Some(tasks)) => {
+            // Once for the whole list: the parameters are the pipeline's, shared by every task.
+            validate_params(template_params).map_err(|message| {
+                ActionError::refused("params", Fail::new(StatusCode::BAD_REQUEST, message))
+            })?;
+            checked_tasks(tasks, template_params, notebooks, group)
+                .await
+                .map(Statement::Tasks)
+        }
+        _ => Err(ActionError::refused(
+            "body",
+            Fail::new(StatusCode::BAD_REQUEST, ONE_OF_STATEMENT_NOTEBOOK_OR_TASKS),
+        )),
+    }
+}
+
+/// What a stored pipeline runs, for the rules only an update has (`#905` decision 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StoredShape {
+    /// The form's single `run` task, of this kind (`sql` or `notebook`).
+    Run(&'static str),
+    /// A task list: every task is `sql` or `notebook`, and it is not the single `run` task.
+    Tasks,
+    /// A shape Nova does not write (another kind, or no tasks at all).
+    Other,
+}
+
+/// A task list: `run_task_kind` does not answer, and every task is a kind Nova can write.
+fn is_task_list(resource: &Value) -> bool {
+    if run_task_kind(resource).is_some() {
+        return false;
+    }
+    resource
+        .get("spec")
+        .and_then(|spec| spec.get("tasks"))
+        .and_then(Value::as_array)
+        .is_some_and(|tasks| {
+            !tasks.is_empty()
+                && tasks.iter().all(|task| {
+                    matches!(
+                        task.get("kind").and_then(Value::as_str),
+                        Some("sql" | "notebook")
+                    )
+                })
+        })
+}
+
+fn stored_shape(resource: &Value) -> StoredShape {
+    match run_task_kind(resource) {
+        Some("notebook") => StoredShape::Run("notebook"),
+        Some(_) => StoredShape::Run("sql"),
+        None if is_task_list(resource) => StoredShape::Tasks,
+        None => StoredShape::Other,
+    }
+}
+
+/// The word the form uses for what a pipeline runs, in `changes_of`: the single task's kind, or
+/// `tasks` for a task list (`#905` decision 4).
+fn run_word(resource: &Value) -> &'static str {
+    match run_task_kind(resource) {
+        Some("notebook") => "notebook",
+        Some(_) => "statement",
+        None => "tasks",
     }
 }
 
@@ -1480,22 +1732,23 @@ fn pipeline_resource(
     created_by: &str,
     notify: Option<&PipelineNotify>,
 ) -> Value {
-    let task = match statement {
-        Statement::Sql(sql) => json!({ "name": "run", "kind": "sql", "sql": sql }),
+    let tasks = match statement {
+        Statement::Sql(sql) => json!([{ "name": "run", "kind": "sql", "sql": sql }]),
         Statement::Notebook {
             name,
             object_version,
             params,
-        } => json!({
+        } => json!([{
             "name": "run",
             "kind": "notebook",
             "config": { "notebook": name, "objectVersion": object_version, "params": params },
-        }),
+        }]),
+        Statement::Tasks(tasks) => Value::Array(tasks.iter().map(task_json).collect()),
     };
     let mut spec = json!({
         "ownerGroup": group,
         "runAs": format!("pipeline-{group}"),
-        "tasks": [task],
+        "tasks": tasks,
         "concurrency": options.concurrency,
         "retries": { "attempts": options.retries, "backoff": format!("{}m", options.backoff_minutes) },
         "timeout": format!("{}m", options.timeout_minutes),
@@ -1553,6 +1806,9 @@ fn updated_resource(
                 "params": params,
             });
         }
+        Statement::Tasks(tasks) => {
+            updated["spec"]["tasks"] = Value::Array(tasks.iter().map(task_json).collect());
+        }
     }
     updated["spec"]["concurrency"] = json!(options.concurrency);
     updated["spec"]["retries"] = json!({
@@ -1599,11 +1855,7 @@ fn updated_resource(
 /// commit a deploy stamped differs.
 fn changes_of(before_resource: &Value, after_resource: &Value) -> Vec<String> {
     let (before, after) = (spec_of(before_resource), spec_of(after_resource));
-    let run = if after["tasks"][0]["kind"] == "notebook" {
-        "notebook"
-    } else {
-        "statement"
-    };
+    let run = run_word(after_resource);
     let options = ["concurrency", "retries", "timeout"]
         .iter()
         .any(|key| before.get(key) != after.get(key));
@@ -1797,6 +2049,24 @@ pub struct NotebookRequest {
     pub params: BTreeMap<String, String>,
 }
 
+/// One task of a task-list body (`#905`): the name the engine uses, exactly one of a statement and
+/// a notebook, and the tasks that must succeed first.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineTaskRequest {
+    /// Unique within the pipeline: `[a-z0-9][a-z0-9_-]{0,62}` (the CRD also accepts capitals).
+    pub name: String,
+    /// The statement to run; exactly one of this and `notebook` is given.
+    #[serde(default)]
+    pub sql: String,
+    /// A published notebook version to run instead (#237).
+    #[serde(default)]
+    pub notebook: Option<NotebookRequest>,
+    /// Names of the tasks that must succeed first; at most 8, each a task of this list.
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+}
+
 /// `POST /api/pipelines`: schedule a statement for one of the caller's own groups.
 #[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -1809,6 +2079,10 @@ pub struct CreatePipelineRequest {
     /// A published notebook version to run instead of a statement (#237).
     #[serde(default)]
     pub notebook: Option<NotebookRequest>,
+    /// A whole task list instead of one `run` task (`#905`): 1 to 30 tasks, each a statement or a
+    /// pinned notebook, with dependencies. Exclusive with `sql` and `notebook`.
+    #[serde(default)]
+    pub tasks: Option<Vec<PipelineTaskRequest>>,
     #[serde(default)]
     pub schedule: Option<ScheduleRequest>,
     /// Values for `${params.<name>}` in the statement; at most 16. A notebook's values are in
@@ -1842,6 +2116,10 @@ pub struct UpdatePipelineRequest {
     /// pipeline refuses it.
     #[serde(default)]
     pub notebook: Option<NotebookRequest>,
+    /// A whole task list instead of one `run` task (`#905`): 1 to 30 tasks, each a statement or a
+    /// pinned notebook, with dependencies. Exclusive with `sql` and `notebook`.
+    #[serde(default)]
+    pub tasks: Option<Vec<PipelineTaskRequest>>,
     /// Omitted means no schedule: the pipeline then runs on demand only.
     #[serde(default)]
     pub schedule: Option<ScheduleRequest>,
@@ -3378,6 +3656,17 @@ impl ActionError {
         Self::refused(why, fail)
     }
 
+    /// The same refusal with the task's name in front of the sentence (`#905` decision 2).
+    fn about_task(self, name: &str) -> Self {
+        Self {
+            fail: Fail::new(
+                self.fail.status(),
+                format!("task `{name}`: {}", self.fail.message()),
+            ),
+            outcome: self.outcome,
+        }
+    }
+
     fn error(fail: Fail) -> Self {
         Self {
             fail,
@@ -3783,7 +4072,8 @@ fn audit_name(name: &str) -> String {
 
 /// The facts a create or update records beside the action (#210, #223, #237): the statement's
 /// **length**, the cron text and — for a notebook — the group, the file name and the pinned
-/// version. Never the statement, never a parameter value.
+/// version. Never the statement, never a parameter value. A task list (`#905`) counts the
+/// characters of its `sql` tasks and carries no notebook target: it is not one notebook.
 struct WriteFacts {
     statement_chars: usize,
     cron: Option<String>,
@@ -3795,13 +4085,23 @@ impl WriteFacts {
     fn of(
         sql: &str,
         notebook: Option<&NotebookRequest>,
+        tasks: Option<&[PipelineTaskRequest]>,
         schedule: Option<&ScheduleRequest>,
         group: &str,
     ) -> Self {
         Self {
-            statement_chars: sql.trim().chars().count(),
+            statement_chars: tasks
+                .map(|tasks| {
+                    tasks
+                        .iter()
+                        .map(|task| task.sql.trim().chars().count())
+                        .sum()
+                })
+                .unwrap_or_else(|| sql.trim().chars().count()),
             cron: schedule.map(|schedule| schedule.cron.trim().to_string()),
-            kind: if notebook.is_some() {
+            kind: if tasks.is_some() {
+                "tasks"
+            } else if notebook.is_some() {
                 "notebook"
             } else {
                 "sql"
@@ -3864,6 +4164,7 @@ async fn create_pipeline(
     let facts = WriteFacts::of(
         &body.sql,
         body.notebook.as_ref(),
+        body.tasks.as_deref(),
         body.schedule.as_ref(),
         &body.owner_group,
     );
@@ -3987,12 +4288,13 @@ async fn plan_pipeline(
         ));
     }
 
-    // 4. What it runs: exactly one of a statement and a notebook (#237), with the rules of its
-    //    kind — the statement's parameters and placeholders, or the notebook's name,
-    //    parameters and a pinned version that exists in the group.
-    let statement = checked_statement(
+    // 4. What it runs: exactly one of a statement, a notebook and a task list (#237, #905), with
+    //    the rules of its kind — the statement's parameters and placeholders, or the notebook's
+    //    name, parameters and a pinned version that exists in the group.
+    let statement = checked_run(
         &body.sql,
         body.notebook.as_ref(),
+        body.tasks.as_deref(),
         &body.params,
         notebooks_store,
         &body.owner_group,
@@ -4304,15 +4606,15 @@ async fn validate_pipeline(
             if spec_of(&existing)["ownerGroup"].as_str() != Some(body.owner_group.as_str()) {
                 return Ok(not_ok("the group of an existing pipeline cannot change"));
             }
-            // The rules only an update has: the form edits one `run` task and never turns a
-            // statement into a notebook or back.
-            match (run_task_kind(&existing), &planned.statement) {
-                (None, _) => return Ok(not_ok(shape_not_editable().message())),
-                (Some("notebook"), Statement::Sql(_)) => return Ok(not_ok(NOTEBOOK_PIPELINE)),
-                (Some("sql"), Statement::Notebook { .. }) => {
-                    return Ok(not_ok(STATEMENT_PIPELINE));
-                }
-                _ => {}
+            // What an update has, for three shapes (#905 decision 3).
+            match (stored_shape(&existing), &planned.statement) {
+                (StoredShape::Other, _) => return Ok(not_ok(shape_not_editable().message())),
+                (StoredShape::Tasks, Statement::Tasks(_)) => {}
+                (StoredShape::Tasks, _) => return Ok(not_ok(SEVERAL_TASKS)),
+                (StoredShape::Run("notebook"), Statement::Notebook { .. }) => {}
+                (StoredShape::Run("notebook"), _) => return Ok(not_ok(NOTEBOOK_PIPELINE)),
+                (StoredShape::Run(_), Statement::Sql(_)) => {}
+                (StoredShape::Run(_), _) => return Ok(not_ok(STATEMENT_PIPELINE)),
             }
             let mut updated = updated_resource(
                 &existing,
@@ -4409,6 +4711,7 @@ async fn update_pipeline(
     let facts = WriteFacts::of(
         &body.sql,
         body.notebook.as_ref(),
+        body.tasks.as_deref(),
         body.schedule.as_ref(),
         &group,
     );
@@ -4487,42 +4790,45 @@ async fn update_pipeline_inner(
         .await
         .map_err(|fail| ActionError::refused("notify", fail))?;
 
-    // A body names exactly one of a statement and a notebook (#237); an update never changes
-    // what the pipeline runs, only the text or the pinned version.
-    let requested_kind = match (body.sql.trim().is_empty(), body.notebook.is_some()) {
-        (false, false) => "sql",
-        (true, true) => "notebook",
-        _ => {
-            return Err(ActionError::refused(
-                "body",
-                Fail::new(StatusCode::BAD_REQUEST, ONE_OF_STATEMENT_OR_NOTEBOOK),
-            ));
-        }
-    };
-    match (run_task_kind(&resource), requested_kind) {
-        (Some("notebook"), "sql") => {
-            return Err(ActionError::refused(
-                "kind",
-                Fail::new(StatusCode::BAD_REQUEST, NOTEBOOK_PIPELINE),
-            ));
-        }
-        (Some("sql"), "notebook") => {
-            return Err(ActionError::refused(
-                "kind",
-                Fail::new(StatusCode::BAD_REQUEST, STATEMENT_PIPELINE),
-            ));
-        }
-        _ => {}
-    }
-
-    let statement = checked_statement(
+    // A body names exactly one of a statement, a notebook and a task list (#237, #905), and an
+    // update never changes the shape the pipeline has: a task list stays a task list and a `run`
+    // pipeline stays one.
+    let requested = checked_run(
         &body.sql,
         body.notebook.as_ref(),
+        body.tasks.as_deref(),
         &body.params,
         notebooks_store,
         &group,
     )
     .await?;
+    match (stored_shape(&resource), &requested) {
+        // Not Nova's shape at all; the form never edits it.
+        (StoredShape::Other, _) => {
+            return Err(ActionError::refused("shape", shape_not_editable()));
+        }
+        (StoredShape::Tasks, Statement::Tasks(_)) => {}
+        (StoredShape::Tasks, _) => {
+            return Err(ActionError::refused(
+                "shape",
+                Fail::new(StatusCode::CONFLICT, SEVERAL_TASKS),
+            ));
+        }
+        (StoredShape::Run("notebook"), Statement::Notebook { .. }) => {}
+        (StoredShape::Run("notebook"), _) => {
+            return Err(ActionError::refused(
+                "kind",
+                Fail::new(StatusCode::BAD_REQUEST, NOTEBOOK_PIPELINE),
+            ));
+        }
+        (StoredShape::Run(_), Statement::Sql(_)) => {}
+        (StoredShape::Run(_), _) => {
+            return Err(ActionError::refused(
+                "kind",
+                Fail::new(StatusCode::BAD_REQUEST, STATEMENT_PIPELINE),
+            ));
+        }
+    }
 
     let options = body
         .options
@@ -4556,14 +4862,9 @@ async fn update_pipeline_inner(
         ));
     }
 
-    // The form edits exactly one `run` task, of the kind it already has.
-    if run_task_kind(&resource).is_none() {
-        return Err(ActionError::refused("shape", shape_not_editable()));
-    }
-
     let mut updated = updated_resource(
         &resource,
-        &statement,
+        &requested,
         &options,
         &body.params,
         schedule.as_ref(),
@@ -5195,7 +5496,7 @@ pub(crate) async fn preview(
     operation_id = "pipelines_create",
     path = "/api/pipelines",
     tag = "public",
-    description = "Schedule a statement or a published notebook: create a `Pipeline` for one of the caller's owner groups (`runAs: pipeline-<group>`), validated so the loader accepts it. A body gives exactly one of a non-empty `sql` and a `notebook` (`{ name, objectVersion, params }`, #237) — both or neither is 400 `give a statement or a notebook`. Refusals, in this order: a name outside 1 to 40 lower-case letters, digits and dashes starting with a letter 400; a group the caller is not a member of 403 (`you are not a member of the group <g>` — administrators included); a group without a ready `ServicePrincipal` 409 with the `principals` route's message; an empty, over-20,000-character or NUL-carrying statement 400; a parameter name, a parameter count or value, or a `${…}` placeholder the loader cannot fill 400; a notebook name outside `^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}\\.ipynb$` 400, more than 32 notebook parameters, a value over 256 characters or NUL, or a `params` JSON text over 4096 characters 400, and a version that is not in the store 400 `that notebook version does not exist in group <g>` (503 when `NOVA_S3_*` is unset, 502 when S3 does not answer); a retry, wait, time-limit or run-mode option out of range 400; a cron that is not five in-range fields or fires more often than every five minutes 400; an unknown IANA timezone 400; a name that already exists 409; more than ten creations per user per hour 429. `options` and `params` are optional: an omitted option keeps its default (1 retry after 5 minutes, a 120-minute time limit, `Forbid`); `params` are the statement's `${params.<name>}` values, a notebook's values are in `notebook.params`. Airflow is not needed: the resource is the source of truth, and the answer is the new pipeline with `loaded: false`, `state: \"loading\"`. The audit line carries the statement's length, the cron and, for a notebook, the group, the file name and the pinned version — never the statement and never a parameter value. Answers `Cache-Control: no-store`.",
+    description = "Schedule a statement or a published notebook: create a `Pipeline` for one of the caller's owner groups (`runAs: pipeline-<group>`), validated so the loader accepts it. A body gives exactly one of a non-empty `sql` and a `notebook` (`{ name, objectVersion, params }`, #237) — both or neither is 400 `give a statement or a notebook`. A body may instead give `tasks` (`[{ name, sql | notebook, dependsOn }]`, 1 to 30 tasks, each with exactly one of the two, at most 8 dependencies): `tasks` together with `sql` or `notebook` is 400 `give a statement, a notebook or a task list`; a task name outside `^[a-z0-9][a-z0-9_-]{0,62}$`, a name used twice, more than 30 tasks, a dependency on itself or on a task of another pipeline, and a cycle are 400 with a sentence that names the task. Refusals, in this order: a name outside 1 to 40 lower-case letters, digits and dashes starting with a letter 400; a group the caller is not a member of 403 (`you are not a member of the group <g>` — administrators included); a group without a ready `ServicePrincipal` 409 with the `principals` route's message; an empty, over-20,000-character or NUL-carrying statement 400; a parameter name, a parameter count or value, or a `${…}` placeholder the loader cannot fill 400; a notebook name outside `^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}\\.ipynb$` 400, more than 32 notebook parameters, a value over 256 characters or NUL, or a `params` JSON text over 4096 characters 400, and a version that is not in the store 400 `that notebook version does not exist in group <g>` (503 when `NOVA_S3_*` is unset, 502 when S3 does not answer); a retry, wait, time-limit or run-mode option out of range 400; a cron that is not five in-range fields or fires more often than every five minutes 400; an unknown IANA timezone 400; a name that already exists 409; more than ten creations per user per hour 429. `options` and `params` are optional: an omitted option keeps its default (1 retry after 5 minutes, a 120-minute time limit, `Forbid`); `params` are the statement's `${params.<name>}` values, a notebook's values are in `notebook.params`. Airflow is not needed: the resource is the source of truth, and the answer is the new pipeline with `loaded: false`, `state: \"loading\"`. The audit line carries the statement's length, the cron and, for a notebook, the group, the file name and the pinned version — never the statement and never a parameter value. Answers `Cache-Control: no-store`.",
     request_body = CreatePipelineRequest,
     responses(
         (status = 201, description = "The resource as written", body = PipelineView),
@@ -5231,7 +5532,7 @@ pub(crate) async fn create(
     operation_id = "pipelines_validate",
     path = "/api/pipelines/validate",
     tag = "public",
-    description = "Check a pipeline document without writing it: the body is the body of `pipelines_create` (the document `stardelt apply` reads). It runs every rule a create runs (the name, the caller's own group, the group's ready principal, exactly one of a statement and a notebook with the rules of its kind, the options, the schedule) and then looks at the name: free means `create`; a pipeline Nova wrote that the caller may act on, in the same group, means `update`; a pipeline written outside Nova, someone else's, or in another group is a problem. A rule that refuses is an answer, `ok: false` with one sentence in `errors`, status 200; nothing is written and no creation slot is taken. An accepted document with a schedule lists its next five fire times. A cluster or notebook store that does not answer is 502 or 503 as on create. Answers `Cache-Control: no-store`.",
+    description = "Check a pipeline document without writing it: the body is the body of `pipelines_create` (the document `stardelt apply` reads). It runs every rule a create runs (the name, the caller's own group, the group's ready principal, exactly one of a statement and a notebook with the rules of its kind, the options, the schedule) and then looks at the name: free means `create`; a pipeline Nova wrote that the caller may act on, in the same group, means `update`; a pipeline written outside Nova, someone else's, or in another group is a problem. A body may instead give `tasks` (`[{ name, sql | notebook, dependsOn }]`, 1 to 30 tasks, each with exactly one of the two, at most 8 dependencies): `tasks` together with `sql` or `notebook` is 400 `give a statement, a notebook or a task list`; a task name outside `^[a-z0-9][a-z0-9_-]{0,62}$`, a name used twice, more than 30 tasks, a dependency on itself or on a task of another pipeline, and a cycle are 400 with a sentence that names the task. A rule that refuses is an answer, `ok: false` with one sentence in `errors`, status 200; nothing is written and no creation slot is taken. An accepted document with a schedule lists its next five fire times. A cluster or notebook store that does not answer is 502 or 503 as on create. Answers `Cache-Control: no-store`.",
     request_body = CreatePipelineRequest,
     responses(
         (status = 200, description = "The verdict: accepted (with the action) or the reason it is not", body = ValidatePipelineResponse),
@@ -5261,7 +5562,7 @@ pub(crate) async fn validate(
     operation_id = "pipelines_update",
     path = "/api/pipelines/{namespace}/{name}",
     tag = "public",
-    description = "Change a pipeline Nova created (`app.kubernetes.io/managed-by: stardelt-nova`) and nothing else. A statement pipeline's body carries `sql`; a notebook pipeline's carries `notebook` (`{ name, objectVersion, params }`), and an update never changes which of the two it is: `sql` on a notebook pipeline is 400 `this pipeline runs a notebook`, a notebook on a statement pipeline 400 `this pipeline runs a statement`, and both or neither 400 `give a statement or a notebook`. The body describes the whole editable state: an omitted `schedule` removes it, an omitted `params` removes the table, an omitted option keeps its default, and a notebook body's file name, version and parameters replace the task's `config`. Refusals: a pipeline the caller cannot see 404, and one it can see but may not change — a viewer (`spec.viewers`) — 403 `only the owner group may change this pipeline`; a pipeline Nova did not write, or one whose task shape is not exactly one `run` task of kind `sql` or `notebook` 409; the statement, a parameter, a placeholder, a notebook name, a parameter value or count, or a version that is not in the store (503 without `NOVA_S3_*`, 502 when S3 does not answer), an option, the cron or the timezone as on create 400; the group's principal no longer ready 409 with the `principals` route's message; a concurrent change to the resource 409 `the pipeline changed while you edited it: reload`. A body may carry `resourceVersion` (the one `pipelines_spec` answered): when it is not the stored one, the answer is that same 409 and nothing is written; omitted, the update behaves as before. The audit line carries the statement's length, the cron and, for a notebook, the group, the file name and the pinned version — never the statement and never a parameter value. Answers `Cache-Control: no-store`.",
+    description = "Change a pipeline Nova created (`app.kubernetes.io/managed-by: stardelt-nova`) and nothing else. A statement pipeline's body carries `sql`; a notebook pipeline's carries `notebook` (`{ name, objectVersion, params }`), and an update never changes which of the two it is: `sql` on a notebook pipeline is 400 `this pipeline runs a notebook`, a notebook on a statement pipeline 400 `this pipeline runs a statement`, and both or neither 400 `give a statement or a notebook`. A task-list pipeline's body carries `tasks` and replaces the whole list; any other body on a task list is 409 `this pipeline has several tasks; change it in its file and deploy again`, and `tasks` on a statement or notebook pipeline is 400 `this pipeline runs a statement` / `this pipeline runs a notebook`. The body describes the whole editable state: an omitted `schedule` removes it, an omitted `params` removes the table, an omitted option keeps its default, and a notebook body's file name, version and parameters replace the task's `config`. Refusals: a pipeline the caller cannot see 404, and one it can see but may not change — a viewer (`spec.viewers`) — 403 `only the owner group may change this pipeline`; a pipeline Nova did not write, or one whose task shape is not exactly one `run` task of kind `sql` or `notebook` 409; the statement, a parameter, a placeholder, a notebook name, a parameter value or count, or a version that is not in the store (503 without `NOVA_S3_*`, 502 when S3 does not answer), an option, the cron or the timezone as on create 400; the group's principal no longer ready 409 with the `principals` route's message; a concurrent change to the resource 409 `the pipeline changed while you edited it: reload`. A body may carry `resourceVersion` (the one `pipelines_spec` answered): when it is not the stored one, the answer is that same 409 and nothing is written; omitted, the update behaves as before. The audit line carries the statement's length, the cron and, for a notebook, the group, the file name and the pinned version — never the statement and never a parameter value. Answers `Cache-Control: no-store`.",
     params(
         ("namespace" = String, Path, description = "The Pipeline's namespace (Nova's own)"),
         ("name" = String, Path, description = "Pipeline name"),
@@ -9516,6 +9817,7 @@ mod tests {
             owner_group: group.into(),
             sql: sql.into(),
             notebook: None,
+            tasks: None,
             schedule: Some(ScheduleRequest {
                 cron: "0 3 * * *".into(),
                 timezone: "Europe/Berlin".into(),
@@ -9531,12 +9833,23 @@ mod tests {
         UpdatePipelineRequest {
             sql: sql.into(),
             notebook: None,
+            tasks: None,
             schedule: None,
             params: BTreeMap::new(),
             options: None,
             resource_version: None,
             provenance: None,
             notify: None,
+        }
+    }
+
+    /// A task-list entry for the tests (`task` is taken by the Airflow run double above).
+    fn pipeline_task(name: &str, sql: &str, depends_on: &[&str]) -> PipelineTaskRequest {
+        PipelineTaskRequest {
+            name: name.into(),
+            sql: sql.into(),
+            notebook: None,
+            depends_on: depends_on.iter().map(|name| (*name).to_string()).collect(),
         }
     }
 
@@ -10033,6 +10346,7 @@ mod tests {
         let update = UpdatePipelineRequest {
             sql: "select 2;".into(),
             notebook: None,
+            tasks: None,
             schedule: None,
             params: BTreeMap::from([
                 ("days".to_string(), "7".to_string()),
@@ -10101,6 +10415,7 @@ mod tests {
             UpdatePipelineRequest {
                 sql: "select 3".into(),
                 notebook: None,
+                tasks: None,
                 schedule: Some(ScheduleRequest {
                     cron: "30 6 * * mon-fri".into(),
                     timezone: "UTC".into(),
@@ -10183,8 +10498,16 @@ mod tests {
         other_name["spec"]["tasks"] = json!([
             { "name": "load", "kind": "sql", "sql": "select 1" }
         ]);
+        let mut python_task = nova_pipeline("python-task", "analytics");
+        python_task["spec"]["tasks"] = json!([
+            { "name": "load", "kind": "python" }
+        ]);
         let resources = memory_with(
-            &[("two-tasks", two_tasks), ("other-name", other_name)],
+            &[
+                ("two-tasks", two_tasks),
+                ("other-name", other_name),
+                ("python-task", python_task),
+            ],
             &[(
                 "pipeline-analytics",
                 service_principal("pipeline-analytics", "analytics", Some(true)),
@@ -10193,7 +10516,16 @@ mod tests {
         let ada = who("sub-ada", &["analytics"], false);
         let namespace = crate::cluster::namespace();
 
-        for name in ["two-tasks", "other-name"] {
+        // A task list is a shape Nova writes, but a single-statement body cannot edit it; a
+        // shape Nova does not write keeps the form's refusal.
+        for (name, expected) in [
+            ("two-tasks", SEVERAL_TASKS),
+            ("other-name", SEVERAL_TASKS),
+            (
+                "python-task",
+                "this pipeline has a shape the form cannot edit",
+            ),
+        ] {
             let error = update_pipeline(
                 Some(&resources),
                 None,
@@ -10207,11 +10539,7 @@ mod tests {
             .await
             .expect_err("the form cannot edit this shape");
             assert_eq!(error.status(), StatusCode::CONFLICT, "{name}");
-            assert_eq!(
-                error.message(),
-                "this pipeline has a shape the form cannot edit",
-                "{name}"
-            );
+            assert_eq!(error.message(), expected, "{name}");
         }
         assert_eq!(
             stored_pipeline(&resources, "two-tasks").await.unwrap()["spec"]["tasks"]
@@ -10221,6 +10549,272 @@ mod tests {
             2,
             "a refused update changes nothing"
         );
+    }
+
+    #[tokio::test]
+    async fn create_with_tasks_writes_the_whole_list() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        let mut body = create_body("shop-silver", "analytics", "");
+        body.tasks = Some(vec![
+            pipeline_task(
+                "load",
+                "insert into silver.orders select * from bronze.orders",
+                &[],
+            ),
+            pipeline_task("check", "select count(*) from silver.orders", &["load"]),
+        ]);
+        create_pipeline(Some(&resources), None, None, &create_limiter(), &ada, body)
+            .await
+            .expect("a task list");
+        let stored = stored_pipeline(&resources, "shop-silver")
+            .await
+            .expect("written");
+        assert_eq!(
+            stored["spec"]["tasks"],
+            json!([
+                { "name": "load", "kind": "sql",
+                  "sql": "insert into silver.orders select * from bronze.orders" },
+                { "name": "check", "kind": "sql",
+                  "sql": "select count(*) from silver.orders", "dependsOn": ["load"] }
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn create_with_tasks_accepts_a_notebook_task() {
+        let resources = analytics_ready();
+        let s3 = FakeS3::start().await;
+        let version = s3.put_raw("analytics/report.ipynb", b"{\"nbformat\":4}", "ada");
+        let store = notebook_store(&s3.base);
+        let ada = who("sub-ada", &["analytics"], false);
+        let mut body = create_body("nightly-report", "analytics", "");
+        body.tasks = Some(vec![
+            pipeline_task("load", "insert into gold.report select 1", &[]),
+            PipelineTaskRequest {
+                name: "report".into(),
+                sql: String::new(),
+                notebook: Some(NotebookRequest {
+                    name: "report.ipynb".into(),
+                    object_version: version.clone(),
+                    params: BTreeMap::new(),
+                }),
+                depends_on: vec!["load".into()],
+            },
+        ]);
+        create_pipeline(
+            Some(&resources),
+            None,
+            Some(&store),
+            &create_limiter(),
+            &ada,
+            body,
+        )
+        .await
+        .expect("a mixed list");
+        let stored = stored_pipeline(&resources, "nightly-report")
+            .await
+            .expect("written");
+        assert_eq!(
+            stored["spec"]["tasks"][1],
+            json!({
+                "name": "report",
+                "kind": "notebook",
+                "dependsOn": ["load"],
+                "config": { "notebook": "report.ipynb", "objectVersion": version, "params": "{}" }
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn task_list_refusals_name_the_task() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        let refused = |body: CreatePipelineRequest| {
+            let resources = &resources;
+            let ada = &ada;
+            async move {
+                create_pipeline(Some(resources), None, None, &create_limiter(), ada, body)
+                    .await
+                    .expect_err("refused")
+                    .message()
+                    .to_string()
+            }
+        };
+        let mut cases: Vec<(CreatePipelineRequest, String)> = Vec::new();
+
+        let mut both = create_body("both", "analytics", "select 1");
+        both.tasks = Some(vec![pipeline_task("load", "select 1", &[])]);
+        cases.push((both, ONE_OF_STATEMENT_NOTEBOOK_OR_TASKS.into()));
+
+        let mut empty = create_body("empty", "analytics", "");
+        empty.tasks = Some(Vec::new());
+        cases.push((empty, NO_TASKS.into()));
+
+        let mut many = create_body("many", "analytics", "");
+        many.tasks = Some(
+            (0..31)
+                .map(|at| pipeline_task(&format!("t{at}"), "select 1", &[]))
+                .collect(),
+        );
+        cases.push((many, TOO_MANY_TASKS.into()));
+
+        let mut capital = create_body("capital", "analytics", "");
+        capital.tasks = Some(vec![pipeline_task("Load", "select 1", &[])]);
+        cases.push((
+            capital,
+            format!("task name `Load` is not valid: {TASK_NAME_RULE}"),
+        ));
+
+        let mut twice = create_body("twice", "analytics", "");
+        twice.tasks = Some(vec![
+            pipeline_task("load", "select 1", &[]),
+            pipeline_task("load", "select 2", &[]),
+        ]);
+        cases.push((twice, "task name `load` is used twice".into()));
+
+        let mut itself = create_body("itself", "analytics", "");
+        itself.tasks = Some(vec![pipeline_task("load", "select 1", &["load"])]);
+        cases.push((itself, "task `load` cannot depend on itself".into()));
+
+        let mut unknown = create_body("unknown", "analytics", "");
+        unknown.tasks = Some(vec![pipeline_task("load", "select 1", &["nope"])]);
+        cases.push((
+            unknown,
+            "task `load` depends on `nope`, which is not a task of this pipeline".into(),
+        ));
+
+        let mut cycle = create_body("cycle", "analytics", "");
+        cycle.tasks = Some(vec![
+            pipeline_task("a", "select 1", &["b"]),
+            pipeline_task("b", "select 2", &["a"]),
+        ]);
+        assert_eq!(
+            refused(cycle).await,
+            "task `a` is part of a dependency cycle"
+        );
+
+        let mut wide = create_body("wide", "analytics", "");
+        wide.tasks = Some(vec![pipeline_task(
+            "load",
+            "select 1",
+            &["a", "b", "c", "d", "e", "f", "g", "h", "i"],
+        )]);
+        assert_eq!(
+            refused(wide).await,
+            format!("task `load`: {TOO_MANY_TASK_DEPENDS_ON}")
+        );
+
+        for (body, expected) in cases {
+            assert_eq!(refused(body).await, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn update_replaces_the_whole_task_list() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        let namespace = crate::cluster::namespace();
+        let mut body = create_body("shop-silver", "analytics", "");
+        body.tasks = Some(vec![pipeline_task("load", "select 1", &[])]);
+        create_pipeline(Some(&resources), None, None, &create_limiter(), &ada, body)
+            .await
+            .expect("created");
+
+        let mut update = update_body("");
+        update.tasks = Some(vec![
+            pipeline_task("load", "select 2", &[]),
+            pipeline_task("check", "select 3", &["load"]),
+        ]);
+        update_pipeline(
+            Some(&resources),
+            None,
+            None,
+            None,
+            &ada,
+            &namespace,
+            "shop-silver",
+            update,
+        )
+        .await
+        .expect("updated");
+        let stored = stored_pipeline(&resources, "shop-silver")
+            .await
+            .expect("stored");
+        assert_eq!(stored["spec"]["tasks"].as_array().unwrap().len(), 2);
+        assert_eq!(stored["spec"]["tasks"][0]["sql"], "select 2");
+
+        // A single-statement body on a task list is the sentence decision 5 fixes.
+        let refused = update_pipeline(
+            Some(&resources),
+            None,
+            None,
+            None,
+            &ada,
+            &namespace,
+            "shop-silver",
+            update_body("select 9"),
+        )
+        .await
+        .expect_err("a task list is not a statement pipeline");
+        assert_eq!(refused.status(), StatusCode::CONFLICT);
+        assert_eq!(refused.message(), SEVERAL_TASKS);
+
+        // And a task list never becomes a statement pipeline, nor the other way round.
+        let mut statement = nova_pipeline("smoke", "analytics");
+        statement["metadata"]["resourceVersion"] = json!("7");
+        let resources = memory_with(
+            &[("smoke", statement)],
+            &[(
+                "pipeline-analytics",
+                service_principal("pipeline-analytics", "analytics", Some(true)),
+            )],
+        );
+        let mut tasks_body = update_body("");
+        tasks_body.tasks = Some(vec![pipeline_task("load", "select 1", &[])]);
+        let refused = update_pipeline(
+            Some(&resources),
+            None,
+            None,
+            None,
+            &ada,
+            &namespace,
+            "smoke",
+            tasks_body,
+        )
+        .await
+        .expect_err("a statement pipeline is not a task list");
+        assert_eq!(refused.message(), STATEMENT_PIPELINE);
+    }
+
+    #[tokio::test]
+    async fn validate_lists_tasks_when_the_list_changed() {
+        let resources = analytics_ready();
+        let ada = who("sub-ada", &["analytics"], false);
+        let mut body = create_body("shop-silver", "analytics", "");
+        body.tasks = Some(vec![pipeline_task("load", "select 1", &[])]);
+        create_pipeline(
+            Some(&resources),
+            None,
+            None,
+            &create_limiter(),
+            &ada,
+            body.clone(),
+        )
+        .await
+        .expect("created");
+
+        let same = validate_pipeline(Some(&resources), None, None, &ada, body.clone())
+            .await
+            .expect("an answer");
+        assert_eq!(same.action.as_deref(), Some("update"));
+        assert!(same.changes.is_empty(), "{:?}", same.changes);
+
+        body.tasks = Some(vec![pipeline_task("load", "select 2", &[])]);
+        let drifted = validate_pipeline(Some(&resources), None, None, &ada, body)
+            .await
+            .expect("an answer");
+        assert_eq!(drifted.changes, vec!["tasks".to_string()]);
     }
 
     #[tokio::test]
@@ -12076,6 +12670,7 @@ mod tests {
             owner_group: document.owner_group.clone().unwrap(),
             sql: document.sql.clone().unwrap(),
             notebook: None,
+            tasks: None,
             schedule: document.schedule.clone(),
             params: document.params.clone(),
             options: Some(PipelineOptions {
@@ -12524,6 +13119,7 @@ mod tests {
                 object_version: version.into(),
                 params: BTreeMap::new(),
             }),
+            tasks: None,
             schedule: Some(ScheduleRequest {
                 cron: "0 3 * * *".into(),
                 timezone: "Europe/Berlin".into(),
@@ -12543,6 +13139,7 @@ mod tests {
                 object_version: version.into(),
                 params: BTreeMap::new(),
             }),
+            tasks: None,
             schedule: None,
             params: BTreeMap::new(),
             options: None,

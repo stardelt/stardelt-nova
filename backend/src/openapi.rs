@@ -217,6 +217,7 @@ pub struct ErrorResponse {
         crate::pipelines::DeploymentView,
         crate::pipelines::PipelineDocument,
         crate::pipelines::NotebookRequest,
+        crate::pipelines::PipelineTaskRequest,
         crate::pipelines::PrincipalsResponse,
         crate::pipelines::PrincipalView,
         crate::pipelines::ServicePrincipalView,
