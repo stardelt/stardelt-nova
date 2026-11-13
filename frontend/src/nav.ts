@@ -45,8 +45,7 @@ export const NAV_GROUPS: NavGroup[] = [
     admin: true,
     items: [
       { to: '/admin/catalogs', label: 'Catalogs', icon: 'database' },
-      { to: '/apps', label: 'Apps', icon: 'grid' },
-      { to: '/health', label: 'Health', icon: 'pulse' },
+      { to: '/platform', label: 'Platform', icon: 'grid' },
       { to: '/settings', label: 'Platform settings', icon: 'sliders' },
       // What `stardelt bundle deploy` published, by bundle and stage: an administrator's
       // overview, not the list of a data engineer (stardelt-nova#516, nova#618).

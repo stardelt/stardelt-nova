@@ -34,7 +34,7 @@ export default function AppDetail() {
     const unknown = detail.error instanceof ApiError && detail.error.status === 404
     return (
       <div className="max-w-6xl space-y-4">
-        <Link to="/apps" className="text-sm text-text-dim hover:text-text inline-flex items-center gap-1">
+        <Link to="/platform" className="text-sm text-text-dim hover:text-text inline-flex items-center gap-1">
           ← All apps
         </Link>
         <div className="card p-6">
@@ -43,7 +43,7 @@ export default function AppDetail() {
               <div className="font-semibold">Unknown app “{id}”.</div>
               <p className="text-text-dim text-sm mt-1">
                 Nova only knows the services it can wire into the platform. The list is on the{' '}
-                <Link to="/apps" className="text-accent hover:underline">apps page</Link>.
+                <Link to="/platform" className="text-accent hover:underline">Platform page</Link>.
               </p>
             </>
           ) : (
@@ -73,7 +73,7 @@ export default function AppDetail() {
 
   return (
     <div className="max-w-6xl space-y-6">
-      <Link to="/apps" className="text-sm text-text-dim hover:text-text inline-flex items-center gap-1">
+      <Link to="/platform" className="text-sm text-text-dim hover:text-text inline-flex items-center gap-1">
         ← All apps
       </Link>
 

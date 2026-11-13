@@ -6,7 +6,7 @@ import { formatTime, relativeTime, setTimeDisplay, sqlTableRef } from '../src/fo
 // Rules U1–U13 are written down in stardelt-internal/design/ui-conformance.md.
 
 const ROUTES = ['/', '/catalog', '/query', '/data', '/connections', '/jobs', '/pipelines', '/runs', '/deployments', '/queries',
-  '/apps', '/admin/catalogs', '/compute', '/lineage', '/dashboards', '/notebooks', '/health', '/settings', '/preferences', '/profile',
+  '/platform', '/admin/catalogs', '/compute', '/lineage', '/dashboards', '/notebooks', '/settings', '/preferences', '/profile',
   '/no-such-page']
 const VARIANTS = [
   { name: 'desktop-dark', viewport: { width: 1280, height: 800 }, theme: 'dark', keyboard: true },
@@ -191,10 +191,24 @@ test.describe('roles', () => {
     expect(hits.filter((h) => /^\/api\/(workloads|trino\/cluster)/.test(h) || (h.startsWith('/api/apps') && h !== '/api/apps/links'))).toEqual([])
     const text = await page.evaluate(() => document.body.innerText)
     expect(text).not.toMatch(/not installed/i)
-    for (const route of ['/apps', '/health', '/settings']) {
+    for (const route of ['/platform', '/settings']) {
       await page.goto(route)
       await expect(page.getByText(/for platform administrators/i)).toBeVisible()
     }
+  })
+
+  test('the old addresses open /platform: /apps and /health both redirect there', async ({ browser }) => {
+    const page = await (await browser.newContext({ viewport: { width: 1280, height: 800 } })).newPage()
+    await page.route('**/api/**', (r) => {
+      const path = new URL(r.request().url()).pathname
+      if (path === '/api/me') return json(r, { user: 'bob', auth_mode: 'oidc', demo: false, warehouse: 'warehouse', is_admin: true, groups: ['admins'] })
+      return json(r, [])
+    })
+    for (const old of ['/apps', '/health']) {
+      await page.goto(old)
+      await expect(page, old).toHaveURL(/\/platform$/)
+    }
+    await page.context().close()
   })
 
   test('Deployments sits under Admin: an admin finds it there, and the Build group reads in task order', async ({ browser }) => {
@@ -365,8 +379,7 @@ test.describe('errors', () => {
       '/catalog': '/api/catalog/catalogs',
       '/jobs': '/api/jobs',
       '/queries': '/api/query-log',
-      '/health': '/api/apps',
-      '/apps': '/api/apps',
+      '/platform': '/api/apps',
     }
     for (const route of Object.keys(failing)) {
       const page = await (await browser.newContext({ viewport: { width: 1280, height: 800 } })).newPage()
