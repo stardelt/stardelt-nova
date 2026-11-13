@@ -18,14 +18,9 @@ export default function Platform() {
   // outage (#70). Its row stays in the list below, labelled "not installed".
   const installed = list.filter(a => a.status !== 'not-installed')
   const up = installed.filter(a => a.status === 'up').length
-  // Services are grouped by category, as the cards were on the old Apps page: the
-  // engine, the catalog, the scheduler read as the parts of one platform.
-  const groups = new Map<string, PlatformApp[]>()
-  for (const app of list) {
-    const bucket = groups.get(app.category) ?? []
-    bucket.push(app)
-    groups.set(app.category, bucket)
-  }
+  // One grid, problems first: an administrator opens this page to see what is broken.
+  const rank: Record<PlatformApp['status'], number> = { unreachable: 0, unknown: 1, up: 2, 'not-installed': 3 }
+  const sorted = [...list].sort((a, b) => rank[a.status] - rank[b.status] || a.name.localeCompare(b.name))
   // The snapshot, not a bare array: `rows` may be the last known state rather than the
   // current one, which is exactly what the notice below is for.
   const snapshot = workloads.data
@@ -58,15 +53,8 @@ export default function Platform() {
         <div className="label mb-2">Services</div>
         {apps.isLoading && <div className="text-text-mute text-sm">loading…</div>}
         {apps.isError && !apps.data && <ErrorBox error={apps.error} onRetry={() => apps.refetch()} />}
-        <div className="space-y-4">
-          {[...groups.entries()].map(([category, cards]) => (
-            <section key={category}>
-              <div className="label mb-2">{category}</div>
-              <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                {cards.map(app => <AppCard key={app.id} app={app} />)}
-              </div>
-            </section>
-          ))}
+        <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          {sorted.map(app => <AppCard key={app.id} app={app} />)}
         </div>
       </section>
 
@@ -133,6 +121,7 @@ function Stat({ label, value, hint, ok }: { label: string; value: string; hint: 
 
 function AppCard({ app }: { app: PlatformApp }) {
   const up = app.status === 'up'
+  const failing = app.status === 'unreachable' || app.status === 'unknown'
   const externalUrl = isBrowsable(app) ? safeHttpUrl(app.external_url) : undefined
   return (
     <div className="card p-5 flex flex-col gap-3 hover:border-accent/40 transition">
@@ -141,6 +130,7 @@ function AppCard({ app }: { app: PlatformApp }) {
           <Icon name="grid" className="w-4 h-4" />
         </div>
         <div className="min-w-0 flex-1">
+          <div className="text-[11px] uppercase tracking-wider text-text-mute">{app.category}</div>
           <Link to={`/apps/${app.id}`} className="font-semibold truncate block hover:text-accent transition">
             {app.name}
           </Link>
@@ -161,9 +151,9 @@ function AppCard({ app }: { app: PlatformApp }) {
       <div className="flex items-center gap-2 mt-auto">
         <span className={[
           'badge',
-          up ? 'border-success/40 bg-success/10 text-success' : 'border-border bg-bg-soft text-text-mute',
+          up ? 'border-success/40 bg-success/10 text-success' : failing ? 'border-warn/40 bg-warn/10 text-warn' : 'border-border bg-bg-soft text-text-mute',
         ].join(' ')}>
-          <span className={['w-1.5 h-1.5 rounded-full', up ? 'bg-success' : 'bg-text-mute'].join(' ')} />
+          <span className={['w-1.5 h-1.5 rounded-full', up ? 'bg-success' : failing ? 'bg-warn' : 'bg-text-mute'].join(' ')} />
           {statusLabel(app.status)}
         </span>
         <Link to={`/apps/${app.id}`} className="btn-ghost ml-auto py-1.5 px-3 text-xs">
