@@ -1,11 +1,12 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { api, errorMessage } from '../api'
+import { api, errorMessage, type PlatformApp } from '../api'
 import { ClusterNotice } from '../components/ClusterNotice'
 import ErrorBox from '../components/ErrorBox'
-import { isBrowsable, safeHttpUrl, shortImage } from '../format'
+import { Icon } from '../components/Icon'
+import { isBrowsable, safeHttpUrl, shortImage, statusLabel } from '../format'
 
-export default function Health() {
+export default function Platform() {
   const apps = useQuery({ queryKey: ['apps'], queryFn: api.apps, refetchInterval: 10_000 })
   const cluster = useQuery({ queryKey: ['trino', 'cluster'], queryFn: api.trinoCluster, retry: false, refetchInterval: 15_000 })
   const workloads = useQuery({ queryKey: ['workloads'], queryFn: api.workloads, refetchInterval: 15_000 })
@@ -17,6 +18,14 @@ export default function Health() {
   // outage (#70). Its row stays in the list below, labelled "not installed".
   const installed = list.filter(a => a.status !== 'not-installed')
   const up = installed.filter(a => a.status === 'up').length
+  // Services are grouped by category, as the cards were on the old Apps page: the
+  // engine, the catalog, the scheduler read as the parts of one platform.
+  const groups = new Map<string, PlatformApp[]>()
+  for (const app of list) {
+    const bucket = groups.get(app.category) ?? []
+    bucket.push(app)
+    groups.set(app.category, bucket)
+  }
   // The snapshot, not a bare array: `rows` may be the last known state rather than the
   // current one, which is exactly what the notice below is for.
   const snapshot = workloads.data
@@ -29,8 +38,8 @@ export default function Health() {
     <div className="max-w-6xl space-y-6">
       <header className="flex items-end justify-between gap-4 flex-wrap">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">Platform health</h1>
-          <p className="text-text-dim text-sm mt-1">Whether each service answers right now, as Nova sees it.</p>
+          <h1 className="text-2xl font-bold tracking-tight">Platform</h1>
+          <p className="text-text-dim text-sm mt-1">Every service, its workloads and the query engine, as Nova sees them now.</p>
         </div>
         <div className="text-sm text-text-dim">
           <span className={up === installed.length && installed.length > 0 ? 'text-success font-semibold' : 'font-semibold'}>{up}</span>
@@ -47,21 +56,16 @@ export default function Health() {
 
       <section>
         <div className="label mb-2">Services</div>
-        <div className="card divide-y divide-border/70">
-          {apps.isLoading && <div className="p-5 text-text-mute text-sm">loading…</div>}
-          {apps.isError && !apps.data && <div className="p-5"><ErrorBox error={apps.error} onRetry={() => apps.refetch()} /></div>}
-          {list.map(a => (
-            <div key={a.id} className="flex items-center gap-3 px-5 py-3">
-              <span className={['w-2 h-2 rounded-full', a.status === 'up' ? 'bg-success' : 'bg-text-mute'].join(' ')} />
-              <Link to={`/apps/${a.id}`} className="font-medium hover:text-accent transition">{a.name}</Link>
-              <span className="text-xs text-text-mute hidden sm:inline">{a.description}</span>
-              <span className="ml-auto text-xs text-text-dim">{a.status === 'not-installed' ? 'not installed' : a.status}</span>
-              {isBrowsable(a) && safeHttpUrl(a.external_url)
-                ? <a href={safeHttpUrl(a.external_url)} target="_blank" rel="noreferrer" className="btn-ghost py-1 px-2.5 text-xs">
-                    Open service ↗
-                  </a>
-                : <span className="w-[68px]" />}
-            </div>
+        {apps.isLoading && <div className="text-text-mute text-sm">loading…</div>}
+        {apps.isError && !apps.data && <ErrorBox error={apps.error} onRetry={() => apps.refetch()} />}
+        <div className="space-y-4">
+          {[...groups.entries()].map(([category, cards]) => (
+            <section key={category}>
+              <div className="label mb-2">{category}</div>
+              <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                {cards.map(app => <AppCard key={app.id} app={app} />)}
+              </div>
+            </section>
           ))}
         </div>
       </section>
@@ -107,8 +111,7 @@ export default function Health() {
 
       <section className="card p-5">
         <div className="flex items-center justify-between mb-3">
-          <h2 className="text-sm font-semibold">Trino cluster</h2>
-          <Link to="/apps" className="text-xs text-text-dim hover:text-text">All apps →</Link>
+          <h2 className="text-sm font-semibold">Query engine</h2>
         </div>
         <pre className="text-xs font-mono text-text-dim overflow-auto max-h-64">
 {JSON.stringify(cluster.data ?? { error: cluster.error ? errorMessage(cluster.error) : 'loading' }, null, 2)}
@@ -124,6 +127,70 @@ function Stat({ label, value, hint, ok }: { label: string; value: string; hint: 
       <div className="text-[11px] uppercase tracking-widest text-text-mute">{label}</div>
       <div className={`text-2xl font-semibold mt-2 ${ok ? 'text-success' : ''}`}>{value}</div>
       <div className="text-xs text-text-mute mt-0.5">{hint}</div>
+    </div>
+  )
+}
+
+function AppCard({ app }: { app: PlatformApp }) {
+  const up = app.status === 'up'
+  const externalUrl = isBrowsable(app) ? safeHttpUrl(app.external_url) : undefined
+  return (
+    <div className="card p-5 flex flex-col gap-3 hover:border-accent/40 transition">
+      <div className="flex items-start gap-3">
+        <div className="w-9 h-9 rounded-[10px] bg-accent/15 border border-accent/25 grid place-items-center text-accent shrink-0">
+          <Icon name="grid" className="w-4 h-4" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <Link to={`/apps/${app.id}`} className="font-semibold truncate block hover:text-accent transition">
+            {app.name}
+          </Link>
+          <div className="text-xs text-text-dim leading-snug">{app.description}</div>
+        </div>
+      </div>
+
+      {app.images.length > 0 && (
+        <div className="space-y-1">
+          {app.images.map(image => (
+            <div key={image} className="text-[11px] font-mono text-text-mute truncate" title={image}>
+              {shortImage(image)}
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="flex items-center gap-2 mt-auto">
+        <span className={[
+          'badge',
+          up ? 'border-success/40 bg-success/10 text-success' : 'border-border bg-bg-soft text-text-mute',
+        ].join(' ')}>
+          <span className={['w-1.5 h-1.5 rounded-full', up ? 'bg-success' : 'bg-text-mute'].join(' ')} />
+          {statusLabel(app.status)}
+        </span>
+        <Link to={`/apps/${app.id}`} className="btn-ghost ml-auto py-1.5 px-3 text-xs">
+          App details <Icon name="arrow" className="w-3.5 h-3.5" />
+        </Link>
+        {/* Only link what is actually serving. The ingress exists for every app with a
+            UI in the playground, so an uninstalled Superset answers with an ingress 503
+            — offering that link is how a user ends up staring at one — and an app with
+            no UI at all (Lakekeeper) has no ingress, hence no link. See issue #70 for
+            the not-installed-vs-unreachable wording, #69 for `browsable`. */}
+        {externalUrl && up && (
+          <a
+            href={externalUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="btn-ghost py-1.5 px-3 text-xs"
+            title={`Open ${externalUrl}`}
+          >
+            Open app ↗
+          </a>
+        )}
+        {externalUrl && !up && (
+          <span className="py-1.5 px-3 text-xs text-text-mute" title={`${externalUrl} is not answering yet`}>
+            no link
+          </span>
+        )}
+      </div>
     </div>
   )
 }

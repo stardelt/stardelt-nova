@@ -332,7 +332,7 @@ export default function Overview() {
         <div className="card p-5">
           <div className="flex items-center justify-between mb-3">
             <h2 className="text-sm font-semibold">Platform apps</h2>
-            <Link to="/apps" className="text-xs text-text-dim hover:text-text">All apps →</Link>
+            <Link to="/platform" className="text-xs text-text-dim hover:text-text">All apps →</Link>
           </div>
           <div className="space-y-2 text-sm">
             {apps.isLoading && <div className="text-text-mute text-sm">loading…</div>}
@@ -355,7 +355,7 @@ export default function Overview() {
         <Action to="/catalog" icon="database" title="Browse the catalog" body="Explore schemas, tables and column types." />
         <Action to="/data" icon="upload" title="Load & transfer" body="Ingest CSV or JSON, or copy a table." />
         {admin && (
-          <Action to="/apps" icon="grid" title="Platform apps" body="Every service, live status and deep links." />
+          <Action to="/platform" icon="grid" title="Platform" body="Every service, live status and deep links." />
         )}
       </section>
     </div>

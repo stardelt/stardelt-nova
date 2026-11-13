@@ -96,3 +96,10 @@ that needs two installs.
 condition forced on for the shot (in `dev` mode `/api/me` answers `shared_account: false`,
 so it does not render otherwise). At 390 px it wraps to four lines above the catalog and
 covers no control.
+
+`platform-*.png` — the Platform page (stardelt-nova#865), which replaces the old Apps and
+Health pages, at 1440×1100 and 390×900, dark, from the built UI with stubbed `/api/me`
+(administrator), `/api/apps`, `/api/apps/links`, `/api/workloads`, `/api/trino/cluster`
+and `/api/catalog/warehouse`. It shows the grouped service cards, the Admin group with
+**Platform** once, and the four tiles at the top; the extra height at 1440 px keeps the
+whole Admin group in the image.

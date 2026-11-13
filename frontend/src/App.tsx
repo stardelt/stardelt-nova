@@ -1,4 +1,4 @@
-import { Route, Routes } from 'react-router-dom'
+import { Navigate, Route, Routes } from 'react-router-dom'
 import RequireAdmin from './components/RequireAdmin'
 import Shell from './components/Shell'
 import Overview from './routes/Overview'
@@ -16,11 +16,10 @@ import Streams from './routes/Streams'
 import Compute from './routes/Compute'
 import Deployments from './routes/Deployments'
 import QueryLog from './routes/QueryLog'
-import Apps from './routes/Apps'
 import AppDetail from './routes/AppDetail'
 import AdminCatalogs from './routes/AdminCatalogs'
 import Lineage from './routes/Lineage'
-import Health from './routes/Health'
+import Platform from './routes/Platform'
 import Dashboards from './routes/Dashboards'
 import Notebooks from './routes/Notebooks'
 import NotebookDetail from './routes/NotebookDetail'
@@ -48,14 +47,15 @@ export default function App() {
         <Route path="/compute" element={<Compute />} />
         <Route path="/deployments" element={<Deployments />} />
         <Route path="/queries"    element={<QueryLog   />} />
-        <Route path="/apps"       element={<RequireAdmin><Apps      /></RequireAdmin>} />
+        <Route path="/apps"       element={<Navigate to="/platform" replace />} />
         <Route path="/apps/:id"   element={<RequireAdmin><AppDetail /></RequireAdmin>} />
+        <Route path="/platform"   element={<RequireAdmin><Platform  /></RequireAdmin>} />
         <Route path="/admin/catalogs" element={<RequireAdmin><AdminCatalogs /></RequireAdmin>} />
         <Route path="/lineage"    element={<Lineage    />} />
         <Route path="/dashboards" element={<Dashboards />} />
         <Route path="/notebooks"  element={<Notebooks  />} />
         <Route path="/notebooks/:group/:name" element={<NotebookDetail />} />
-        <Route path="/health"     element={<RequireAdmin><Health    /></RequireAdmin>} />
+        <Route path="/health"     element={<Navigate to="/platform" replace />} />
         <Route path="/settings"   element={<RequireAdmin><Settings  /></RequireAdmin>} />
         <Route path="/preferences" element={<Preferences />} />
         <Route path="/profile"   element={<Profile />} />

@@ -24,13 +24,12 @@ const titles: Record<string, string> = {
   '/pipelines': 'Pipelines',
   '/runs': 'Runs',
   '/deployments': 'Deployments',
-  '/apps': 'Platform apps',
   '/admin/catalogs': 'Catalogs',
   '/lineage': 'Lineage',
   '/streams': 'Streams',
   '/dashboards': 'Dashboards',
   '/notebooks': 'Notebooks',
-  '/health': 'Health',
+  '/platform': 'Platform',
   '/settings': 'Platform settings',
   '/preferences': 'Preferences',
   '/profile': 'Profile',
@@ -66,7 +65,7 @@ function navClass({ isActive }: { isActive: boolean }) {
 
 
 /**
- * The header's app switcher. `/apps` is an operator page (workloads, images), so a
+ * The header's app switcher. `/platform` is an operator page (workloads, images), so a
  * data engineer has no other way to reach Superset, Airflow or JupyterHub without
  * knowing the hostname. The list is status-free on purpose: liveness is operator
  * information, and this control is for everyone.
