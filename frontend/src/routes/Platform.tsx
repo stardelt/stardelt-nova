@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { api, errorMessage, type PlatformApp } from '../api'
+import { api, type PlatformApp } from '../api'
 import { ClusterNotice } from '../components/ClusterNotice'
 import ErrorBox from '../components/ErrorBox'
 import { Icon } from '../components/Icon'
@@ -74,10 +74,15 @@ export default function Platform() {
                 <span className="truncate text-[11px] font-mono text-text-dim" title={w.image}>
                   {shortImage(w.image)}
                 </span>
-                <span className={[
-                  'ml-auto shrink-0 text-xs',
-                  w.desired > 0 && w.ready === w.desired ? 'text-success' : 'text-text-mute',
-                ].join(' ')}>
+                <span
+                  className={[
+                    'ml-auto shrink-0 text-xs',
+                    w.desired > 0 && w.ready === w.desired ? 'text-success'
+                      : w.desired > 0 ? 'text-warn font-semibold'
+                      : 'text-text-mute',
+                  ].join(' ')}
+                  title={w.desired === 0 ? 'scaled to zero' : undefined}
+                >
                   {w.ready}/{w.desired}
                 </span>
               </div>
@@ -101,9 +106,23 @@ export default function Platform() {
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-sm font-semibold">Query engine</h2>
         </div>
-        <pre className="text-xs font-mono text-text-dim overflow-auto max-h-64">
-{JSON.stringify(cluster.data ?? { error: cluster.error ? errorMessage(cluster.error) : 'loading' }, null, 2)}
-        </pre>
+        {cluster.isError && !cluster.data
+          ? <ErrorBox error={cluster.error} onRetry={() => cluster.refetch()} />
+          : (
+            <dl className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
+              {[
+                ['Environment', typeof info?.environment === 'string' ? info.environment : '—'],
+                ['Uptime', typeof info?.uptime === 'string' ? info.uptime : '—'],
+                ['Role', info?.coordinator === true ? 'coordinator' : info ? 'worker' : '—'],
+                ['Starting', info?.starting === true ? 'yes' : info ? 'no' : '—'],
+              ].map(([k, v]) => (
+                <div key={k}>
+                  <dt className="text-[11px] uppercase tracking-wider text-text-mute">{k}</dt>
+                  <dd className="font-medium mt-0.5">{v}</dd>
+                </div>
+              ))}
+            </dl>
+          )}
       </section>
     </div>
   )
