@@ -20,9 +20,9 @@
 //!   to refresh there);
 //! - protects every `/api/*` route except `/api/health` and `/api/auth/*`.
 //!
-//! **Single replica.** Sessions and in-flight logins live in this process' memory: a
-//! restart signs everyone out, and two replicas would not share sessions. Run one Nova
-//! replica in `oidc` mode (or pin sessions) until a shared store lands.
+//! **Single replica.** Sessions survive a restart when the state store is on
+//! (`NOVA_DATABASE_URL`); a scratch that has no token left is refreshed on its first
+//! request. More than one replica still needs slice d.
 //!
 //! Tokens never appear in a URL, a log line or an error message; `Secret` redacts its
 //! `Debug` output and no token-holding type derives `Debug`.
@@ -51,6 +51,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 use url::Url;
+
+use crate::{seal, session_store};
 
 pub const SESSION_COOKIE: &str = "nova_session";
 pub const LOGIN_COOKIE: &str = "nova_login";
@@ -387,7 +389,7 @@ impl IntoResponse for AuthError {
 // ---------------------------------------------------------------------------
 
 /// Who the caller is, as the IdP says. `sub` is the only field to persist.
-#[derive(Clone, Debug, Serialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Identity {
     pub sub: String,
     /// `preferred_username` → `email` → `upn` → `name` → `sub`.
@@ -910,6 +912,57 @@ impl Credentials {
     }
 }
 
+/// A session's credentials as they live in the state store: sealed, never plain text.
+/// No `Debug` on purpose — it holds the tokens.
+#[derive(Serialize, Deserialize)]
+struct StoredCredentials {
+    identity: Identity,
+    access_token: String,
+    id_token: Option<String>,
+    refresh_token: Option<String>,
+    /// When `access_token` stops being accepted, in Unix seconds.
+    access_expires_unix: u64,
+    /// The lifetime the IdP reported, in seconds — it sizes the refresh window after a load.
+    lifetime_secs: u64,
+}
+
+impl StoredCredentials {
+    fn from_credentials(c: &Credentials) -> Self {
+        let remaining = c
+            .expires_at
+            .saturating_duration_since(Instant::now())
+            .as_secs();
+        Self {
+            identity: c.identity.clone(),
+            access_token: c.tokens.access_token.expose().to_string(),
+            id_token: c.tokens.id_token.as_ref().map(|s| s.expose().to_string()),
+            refresh_token: c
+                .tokens
+                .refresh_token
+                .as_ref()
+                .map(|s| s.expose().to_string()),
+            access_expires_unix: unix_now() + remaining,
+            lifetime_secs: c.lifetime.as_secs(),
+        }
+    }
+
+    /// An access token that ended while Nova was down comes back with zero remaining, so
+    /// the first request after the restart refreshes it (`needs_refresh`).
+    fn into_credentials(self) -> Credentials {
+        let remaining = self.access_expires_unix.saturating_sub(unix_now());
+        Credentials {
+            identity: self.identity,
+            tokens: TokenSet {
+                access_token: Secret::new(self.access_token),
+                id_token: self.id_token.map(Secret::new),
+                refresh_token: self.refresh_token.map(Secret::new),
+            },
+            expires_at: Instant::now() + Duration::from_secs(remaining),
+            lifetime: Duration::from_secs(self.lifetime_secs),
+        }
+    }
+}
+
 struct Session {
     /// Absolute session deadline (`SESSION_TTL`). A refresh never moves it — the point
     /// of refreshing is that one sign-in outlives many access tokens, not that it lives
@@ -952,6 +1005,30 @@ impl SessionStore {
             }),
         );
         Ok(id)
+    }
+
+    /// Put a session loaded from the state store under the id its cookie carries: no new
+    /// id and no new deadline (both are the stored session's).
+    fn insert_loaded(
+        &self,
+        id: String,
+        expires: Instant,
+        expires_unix: u64,
+        credentials: Credentials,
+    ) -> Option<Arc<Session>> {
+        let mut m = self.inner.lock().ok()?;
+        let now = Instant::now();
+        m.retain(|_, s| s.expires > now);
+        if m.len() >= MAX_SESSIONS {
+            return None;
+        }
+        let session = Arc::new(Session {
+            expires,
+            expires_unix,
+            credentials: tokio::sync::Mutex::new(credentials),
+        });
+        m.insert(id, session.clone());
+        Some(session)
     }
 
     /// The live session for this cookie, if any. Expired sessions are dropped here
@@ -1116,10 +1193,14 @@ pub struct AuthState {
     sessions: SessionStore,
     pending: PendingStore,
     key: Key,
+    /// The state store (`NOVA_DATABASE_URL`); `None` keeps sessions in memory only.
+    db: Option<sqlx::PgPool>,
+    /// Seals a session's tokens before they reach the state store.
+    sealer: seal::Sealer,
 }
 
 impl AuthState {
-    pub fn new(config: OidcConfig, http: reqwest::Client) -> Arc<Self> {
+    pub fn new(config: OidcConfig, http: reqwest::Client, db: Option<sqlx::PgPool>) -> Arc<Self> {
         let provider = Arc::new(Provider::new(http, config.issuer.clone()));
         let bearer = Arc::new(OidcBearer {
             provider: provider.clone(),
@@ -1127,16 +1208,18 @@ impl AuthState {
             client_id: config.client_id.clone(),
             claims: config.claims.clone(),
         });
-        Self::with_validator(config, provider, bearer)
+        Self::with_validator(config, provider, bearer, db)
     }
 
     pub fn with_validator(
         config: OidcConfig,
         provider: Arc<Provider>,
         bearer: Arc<dyn BearerValidator>,
+        db: Option<sqlx::PgPool>,
     ) -> Arc<Self> {
         // `from_lookup` guarantees >= 32 bytes, which `derive_from` requires.
         let key = Key::derive_from(config.session_secret.expose().as_bytes());
+        let sealer = seal::Sealer::from_secret(config.session_secret.expose().as_bytes());
         Arc::new(Self {
             config,
             provider,
@@ -1144,7 +1227,33 @@ impl AuthState {
             sessions: SessionStore::default(),
             pending: PendingStore::default(),
             key,
+            db,
+            sealer,
         })
+    }
+
+    /// Seal a session's credentials for the row its id hashes to.
+    fn seal_credentials(&self, session_id: &str, creds: &Credentials) -> Option<Vec<u8>> {
+        let plain = serde_json::to_vec(&StoredCredentials::from_credentials(creds)).ok()?;
+        self.sealer
+            .seal(&plain, session_store::id_hash(session_id).as_bytes())
+            .ok()
+    }
+
+    /// Write a session through to the state store: best effort, never a reason to fail a
+    /// sign-in or a request (the in-memory session works without the store).
+    async fn persist_session(&self, session_id: &str, creds: &Credentials, expires_unix: u64) {
+        let Some(sealed) = self.seal_credentials(session_id, creds) else {
+            return;
+        };
+        session_store::save(
+            self.db.as_ref(),
+            &session_store::id_hash(session_id),
+            &sealed,
+            expires_unix as i64,
+            unix_now() as i64,
+        )
+        .await;
     }
 
     fn jar(&self, headers: &HeaderMap) -> SignedCookieJar {
@@ -1232,7 +1341,14 @@ impl AuthState {
         &self,
         id: &str,
     ) -> Result<(Identity, Option<Secret>, Option<u64>), AuthError> {
-        let session = self.sessions.find(id).ok_or(AuthError::Unauthenticated)?;
+        let session = match self.sessions.find(id) {
+            Some(session) => session,
+            // A restart emptied the map; the state store may still have the session.
+            None => self
+                .load_session(id)
+                .await
+                .ok_or(AuthError::Unauthenticated)?,
+        };
         // The absolute deadline is fixed at sign-in; a refresh never moves it.
         let ends_at = Some(session.expires_unix);
         let mut creds = session.credentials.lock().await;
@@ -1244,6 +1360,7 @@ impl AuthState {
                 // of a loop of 500s.
                 drop(creds);
                 self.sessions.remove(id);
+                session_store::delete(self.db.as_ref(), &session_store::id_hash(id)).await;
                 info!(reason = %reason, "session refresh failed — signing the session out");
                 return Err(AuthError::Unauthenticated);
             }
@@ -1252,12 +1369,41 @@ impl AuthState {
                 admin = creds.identity.is_admin,
                 "refreshed the session's access token"
             );
+            // The refresh rotated the tokens; the row must carry the new ones or a
+            // restart would replay the spent refresh token.
+            let expires_unix = session.expires_unix;
+            self.persist_session(id, &creds, expires_unix).await;
         }
         Ok((
             creds.identity.clone(),
             Some(creds.tokens.access_token.clone()),
             ends_at,
         ))
+    }
+
+    /// The session behind `id` from the state store when it is not in memory: the restart
+    /// case. A value that does not open (another secret, or a new layout) is deleted and the
+    /// request signs in again, exactly as when the cookie key changes.
+    async fn load_session(&self, id: &str) -> Option<Arc<Session>> {
+        let hash = session_store::id_hash(id);
+        let now = unix_now() as i64;
+        let stored = session_store::load(self.db.as_ref(), &hash, now).await?;
+        let parsed = self
+            .sealer
+            .open(&stored.sealed, hash.as_bytes())
+            .ok()
+            .and_then(|plain| serde_json::from_slice::<StoredCredentials>(&plain).ok());
+        let Some(creds) = parsed else {
+            session_store::delete(self.db.as_ref(), &hash).await;
+            return None;
+        };
+        let remaining = (stored.expires_at - now).max(0) as u64;
+        self.sessions.insert_loaded(
+            id.to_string(),
+            Instant::now() + Duration::from_secs(remaining),
+            stored.expires_at as u64,
+            creds.into_credentials(),
+        )
     }
 
     /// Exchange the session's refresh token at the IdP and replace its identity and
@@ -1661,6 +1807,14 @@ async fn callback(
         Ok(s) => s,
         Err(e) => return no_store(e),
     };
+    // Persist the new session so a rollout keeps this browser signed in. The row's
+    // deadline is the session's own absolute deadline, never the token's.
+    session_store::purge_expired(auth.db.as_ref(), unix_now() as i64).await;
+    if let Some(session) = auth.sessions.find(&sid) {
+        let expires_unix = session.expires_unix;
+        let creds = session.credentials.lock().await;
+        auth.persist_session(&sid, &creds, expires_unix).await;
+    }
     let jar = jar
         .remove(AuthState::removal(LOGIN_COOKIE, LOGIN_COOKIE_PATH))
         .add(auth.cookie(SESSION_COOKIE, sid, "/"));
@@ -1677,14 +1831,18 @@ async fn logout(State(auth): State<Arc<AuthState>>, headers: HeaderMap) -> Respo
         return (StatusCode::FORBIDDEN, "cross-origin logout refused").into_response();
     }
     let jar = auth.jar(&headers);
-    let signed_out = jar.get(SESSION_COOKIE).and_then(|sid| {
+    let sid = jar.get(SESSION_COOKIE).map(|c| c.value().to_string());
+    let signed_out = sid.as_deref().and_then(|id| {
         let identity = auth
             .sessions
-            .find(sid.value())
+            .find(id)
             .and_then(|sess| sess.credentials.try_lock().ok().map(|c| c.identity.clone()));
-        auth.sessions.remove(sid.value());
+        auth.sessions.remove(id);
         identity
     });
+    if let Some(id) = sid.as_deref() {
+        session_store::delete(auth.db.as_ref(), &session_store::id_hash(id)).await;
+    }
     if let Some(id) = signed_out {
         tracing::info!(
             target: "audit",
@@ -2521,12 +2679,16 @@ mod tests {
     }
 
     /// Auth state as `main` builds it in `oidc` mode, pointed at the fake provider.
-    fn auth_for_idp(idp: &FakeIdp) -> Arc<AuthState> {
+    fn auth_for_idp_with_pool(idp: &FakeIdp, db: Option<sqlx::PgPool>) -> Arc<AuthState> {
         let Ok(AuthMode::Oidc(mut cfg)) = AuthMode::from_lookup(env(FULL)) else {
             panic!()
         };
         cfg.issuer = idp.base.clone();
-        AuthState::new(*cfg, reqwest::Client::new())
+        AuthState::new(*cfg, reqwest::Client::new(), db)
+    }
+
+    fn auth_for_idp(idp: &FakeIdp) -> Arc<AuthState> {
+        auth_for_idp_with_pool(idp, None)
     }
 
     /// The bug this fixes: the stored access token runs out mid-session; the next request
@@ -2839,7 +3001,7 @@ mod tests {
             panic!()
         };
         let provider = Arc::new(Provider::new(reqwest::Client::new(), cfg.issuer.clone()));
-        AuthState::with_validator(*cfg, provider, Arc::new(MockValidator))
+        AuthState::with_validator(*cfg, provider, Arc::new(MockValidator), None)
     }
 
     fn session_for(auth: &AuthState, sub: &str) -> String {
@@ -3066,7 +3228,7 @@ mod tests {
         };
         cfg.claims = claims;
         let provider = Arc::new(Provider::new(reqwest::Client::new(), cfg.issuer.clone()));
-        AuthState::with_validator(*cfg, provider, Arc::new(MockValidator))
+        AuthState::with_validator(*cfg, provider, Arc::new(MockValidator), None)
     }
 
     /// The JSON body of a 200 from `/api/me`.
@@ -3260,7 +3422,7 @@ mod tests {
             panic!()
         };
         cfg.issuer = "http://127.0.0.1:9/realms/none".into();
-        let auth = AuthState::new(*cfg, reqwest::Client::new());
+        let auth = AuthState::new(*cfg, reqwest::Client::new(), None);
         let app = app(auth);
         assert_eq!(
             call(&app, "/api/auth/login", &[]).await.0,
@@ -3339,7 +3501,7 @@ mod tests {
             panic!()
         };
         cfg.issuer = base.clone();
-        let auth = AuthState::new(*cfg, reqwest::Client::new());
+        let auth = AuthState::new(*cfg, reqwest::Client::new(), None);
         let app = app(auth);
 
         // 1. login → 303 to the IdP with PKCE + state + nonce, and a login cookie.
@@ -3508,7 +3670,7 @@ mod tests {
             panic!()
         };
         cfg.issuer = base.clone();
-        let auth = AuthState::new(*cfg, reqwest::Client::new());
+        let auth = AuthState::new(*cfg, reqwest::Client::new(), None);
         let app = app(auth);
 
         let resp = app
@@ -3525,5 +3687,96 @@ mod tests {
         let q: HashMap<String, String> = loc.query_pairs().into_owned().collect();
         assert!(!q.contains_key("login_hint"), "{q:?}");
         assert!(!loc.as_str().contains("a%20b"), "{}", loc.as_str());
+    }
+
+    // --- sessions in the state store (#103 slice c) ---------------------------
+
+    /// A session's credentials survive the row's round trip, and a token that ended while
+    /// Nova was down comes back needing a refresh rather than being replayed.
+    #[test]
+    fn stored_credentials_round_trip_and_an_ended_token_needs_a_refresh() {
+        let identity =
+            identity_from_claims(&json!({ "sub": "s" }), &ClaimConfig::default()).unwrap();
+        let mut creds = Credentials::new(
+            identity.clone(),
+            TokenSet {
+                access_token: Secret::new("a"),
+                id_token: Some(Secret::new("i")),
+                refresh_token: Some(Secret::new("r")),
+            },
+            Duration::from_secs(300),
+        );
+        // The token ended while the process was down.
+        creds.expires_at = Instant::now();
+        let plain = serde_json::to_vec(&StoredCredentials::from_credentials(&creds)).unwrap();
+        let back: StoredCredentials = serde_json::from_slice(&plain).unwrap();
+        let back = back.into_credentials();
+        assert_eq!(back.identity, identity);
+        assert_eq!(back.tokens.access_token.expose(), "a");
+        assert!(back.needs_refresh());
+        assert_eq!(back.lifetime, Duration::from_secs(300));
+    }
+
+    /// The restart case: the map is empty, the row is not. The next request with the same
+    /// cookie loads the session back under its own id and deadline.
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn a_session_survives_a_restart_when_the_state_store_is_on() {
+        let pool = crate::db::test_support::migrated_pool().await;
+        let idp = FakeIdp::start().await;
+        let auth = auth_for_idp_with_pool(&idp, Some(pool.clone()));
+        let sid = session_with(
+            &auth,
+            json!({ "sub": "kc-42" }),
+            "a",
+            Some("r1"),
+            Duration::from_secs(300),
+        );
+        let (expires_unix, identity) = {
+            let session = auth.sessions.find(&sid).unwrap();
+            let creds = session.credentials.lock().await;
+            auth.persist_session(&sid, &creds, session.expires_unix)
+                .await;
+            (session.expires_unix, creds.identity.clone())
+        };
+
+        // The second process: same config and secret, an empty map.
+        let second = auth_for_idp_with_pool(&idp, Some(pool.clone()));
+        assert!(
+            second.sessions.find(&sid).is_none(),
+            "the restart emptied the map"
+        );
+        let (loaded, token, ends_at) = second.session_credentials(&sid).await.unwrap();
+        assert_eq!(loaded, identity);
+        assert_eq!(token.unwrap().expose(), "a");
+        assert_eq!(ends_at, Some(expires_unix));
+        // The load put it back in the map, so the next request does not read the store.
+        assert!(second.sessions.find(&sid).is_some());
+    }
+
+    /// A row this Nova cannot open (another secret, another layout) is deleted and the
+    /// request signs in again — never served, never retried on every request.
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn a_session_sealed_with_another_secret_is_deleted_and_signs_out() {
+        let pool = crate::db::test_support::migrated_pool().await;
+        let idp = FakeIdp::start().await;
+        let auth = auth_for_idp_with_pool(&idp, Some(pool.clone()));
+        let sid = "a-session-id-from-another-nova";
+        let hash = session_store::id_hash(sid);
+        let sealed = seal::Sealer::from_secret(b"a different secret of 32 bytes ok")
+            .seal(b"{}", hash.as_bytes())
+            .unwrap();
+        let now = unix_now() as i64;
+        session_store::save(Some(&pool), &hash, &sealed, now + 3600, now).await;
+
+        let err = auth.session_credentials(sid).await.unwrap_err();
+        assert!(matches!(err, AuthError::Unauthenticated), "{err}");
+        assert!(
+            session_store::load(Some(&pool), &hash, unix_now() as i64)
+                .await
+                .is_none(),
+            "the row must be deleted"
+        );
     }
 }

@@ -131,12 +131,8 @@ mod query_log_collector;
 mod query_log_event;
 mod query_log_store;
 mod saved_queries;
-// Wired into the session store by stardelt-nova#103 slice c.
-#[allow(dead_code)]
 mod seal;
 mod secret_store;
-// Wired into the session store by stardelt-nova#103 slice c.
-#[allow(dead_code)]
 mod session_store;
 mod shared_accounts;
 mod stages;
@@ -987,7 +983,7 @@ async fn main() -> anyhow::Result<()> {
             if !cfg.secure_cookies() {
                 tracing::warn!(public_url = %cfg.public_url, "NOVA_PUBLIC_URL is not https — session cookies are not Secure");
             }
-            let a = auth::AuthState::new(*cfg, reqwest::Client::builder().build()?);
+            let a = auth::AuthState::new(*cfg, reqwest::Client::builder().build()?, db.clone());
             // Check the IdP now so a wrong issuer is a startup error. An unreachable IdP
             // is not: Nova starts, sign-in fails (closed) and discovery is retried.
             match a.provider.discovery().await {
