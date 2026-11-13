@@ -108,7 +108,7 @@ async fn get_json(state: &AppState, path: &str) -> Result<Value, Response> {
     let unreachable = || {
         sentence(
             StatusCode::BAD_GATEWAY,
-            "the upstream service is not reachable",
+            "the catalog is not answering; try again in a minute",
         )
     };
     let response = request.send().await.map_err(|e| {
@@ -207,7 +207,7 @@ pub async fn search(
     if filtering && s.db.is_none() {
         return sentence(
             StatusCode::SERVICE_UNAVAILABLE,
-            "the state store is disabled; tag, owner and domain filters need it",
+            "filtering by tag, owner or domain needs Nova's database, and this installation has none",
         );
     }
 
@@ -535,7 +535,7 @@ mod tests {
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(
             body["error"],
-            "the state store is disabled; tag, owner and domain filters need it"
+            "filtering by tag, owner or domain needs Nova's database, and this installation has none"
         );
         assert!(
             fake.asked.lock().unwrap().is_empty(),

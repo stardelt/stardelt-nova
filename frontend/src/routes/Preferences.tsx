@@ -12,7 +12,7 @@ import { THEMES, applyTheme, useTheme, type Theme } from '../theme'
  */
 
 const NO_STORE =
-  'Your preferences are kept in this browser only: this installation has no state store.'
+  'Your preferences are kept in this browser only: this installation has no database for Nova.'
 
 /**
  * The state store's key shape is `[a-z0-9][a-z0-9._-]{0,63}` (ticket #124), so the
@@ -81,8 +81,8 @@ export default function Preferences() {
       <header>
         <h1 className="text-2xl font-bold tracking-tight">Preferences</h1>
         <p className="text-text-dim text-sm mt-1">
-          What you can change for yourself. They follow you to other browsers when Nova has a state
-          store.
+          What you can change for yourself. They follow you to other browsers when Nova has its
+          database.
         </p>
       </header>
 

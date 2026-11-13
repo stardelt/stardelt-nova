@@ -638,7 +638,12 @@ pub async fn graph(
 
     let pool = match &state.db {
         Some(p) => p,
-        None => return error_response(StatusCode::SERVICE_UNAVAILABLE, "state store unavailable"),
+        None => {
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Nova's database is not answering; try again in a minute",
+            );
+        }
     };
 
     let rows: Vec<(String, String, String, String, String, String, String)> =
@@ -780,7 +785,12 @@ pub async fn read_tables(
 
     let pool = match &state.db {
         Some(p) => p,
-        None => return error_response(StatusCode::SERVICE_UNAVAILABLE, "state store unavailable"),
+        None => {
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Nova's database is not answering; try again in a minute",
+            );
+        }
     };
 
     let rows: Vec<(String, String, i64, String)> = sqlx::query_as(TOP_READS_SQL)
@@ -1139,7 +1149,12 @@ pub async fn columns(
 
     let pool = match &state.db {
         Some(p) => p,
-        None => return error_response(StatusCode::SERVICE_UNAVAILABLE, "state store unavailable"),
+        None => {
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Nova's database is not answering; try again in a minute",
+            );
+        }
     };
 
     let rows: Vec<(serde_json::Value, String)> = sqlx::query_as(COLUMNS_SQL)
@@ -1223,7 +1238,12 @@ pub async fn run_detail(
 
     let pool = match &state.db {
         Some(p) => p,
-        None => return error_response(StatusCode::SERVICE_UNAVAILABLE, "state store unavailable"),
+        None => {
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Nova's database is not answering; try again in a minute",
+            );
+        }
     };
 
     let events: Vec<(String, String, String, String, serde_json::Value)> = sqlx::query_as(

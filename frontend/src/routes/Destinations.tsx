@@ -6,7 +6,7 @@ import { Icon } from '../components/Icon'
 
 const EMAIL_NOTE = 'Email needs the platform’s SMTP relay; it is not configured yet.'
 const NO_GROUP = 'You are not in a group, so you cannot add a destination.'
-const DEMO_NOTE = 'The demo has no state store, so notification destinations are not available.'
+const DEMO_NOTE = 'The demo has no database for Nova, so notification destinations are not available.'
 
 /** The address a person reads: the webhook URL, or the recipients joined. */
 const address = (row: Destination) =>

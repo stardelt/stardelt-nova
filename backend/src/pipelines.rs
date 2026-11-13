@@ -4210,7 +4210,7 @@ async fn check_notify(
     let Some(db) = db else {
         return Err(Fail::new(
             StatusCode::SERVICE_UNAVAILABLE,
-            "the state store is not configured",
+            "this needs Nova's database, and this installation has none; ask your administrator",
         ));
     };
     let lists = [&notify.on_failure, &notify.on_success, &notify.on_recovered];
@@ -4225,7 +4225,12 @@ async fn check_notify(
     .bind(&names)
     .fetch_all(db)
     .await
-    .map_err(|_| Fail::new(StatusCode::BAD_GATEWAY, "the state store did not answer"))?;
+    .map_err(|_| {
+        Fail::new(
+            StatusCode::BAD_GATEWAY,
+            "Nova's database is not answering; try again in a minute",
+        )
+    })?;
     for name in lists.iter().flat_map(|names| names.iter()) {
         if !found.contains(name) {
             return Err(Fail::new(
@@ -14097,7 +14102,10 @@ mod tests {
             .await
             .expect_err("no state store");
         assert_eq!(no_store.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(no_store.message(), "the state store is not configured");
+        assert_eq!(
+            no_store.message(),
+            "this needs Nova's database, and this installation has none; ask your administrator"
+        );
     }
 
     /// The same rule through the two routes: a create is a 400 with the sentence, and the

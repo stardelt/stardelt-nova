@@ -485,7 +485,7 @@ async fn proxy(state: &AppState, path: String) -> Response {
             warn!("lakekeeper proxy error: {e}");
             (
                 StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({"error": "the upstream service is not reachable"})),
+                Json(serde_json::json!({"error": "the catalog is not answering; try again in a minute"})),
             )
                 .into_response()
         }
