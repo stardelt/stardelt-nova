@@ -3311,6 +3311,7 @@ mod tests {
             config,
             Arc::new(Provider::new(reqwest::Client::new(), ISSUER.into())),
             Arc::new(validator),
+            None,
         );
         let context = crate::auth::AuthContext {
             auth,
