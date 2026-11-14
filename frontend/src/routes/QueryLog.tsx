@@ -497,6 +497,28 @@ function operatorCpuMs(op: QueryProfileOperator): number {
   return parseEngineDuration(op.addInputCpu) + parseEngineDuration(op.finishCpu) + parseEngineDuration(op.getOutputCpu)
 }
 
+/** Plain words for the engine's operator types (the raw type stays in the title). */
+const OPERATOR_WORDS: Record<string, string> = {
+  TableScanOperator: 'Read', ScanFilterAndProjectOperator: 'Read and filter',
+  FilterAndProjectOperator: 'Filter and compute columns',
+  LookupJoinOperator: 'Join', HashBuilderOperator: 'Join: build the lookup side',
+  HashAggregationOperator: 'Aggregate', AggregationOperator: 'Aggregate',
+  ExchangeOperator: 'Move data between workers', LocalExchangeSinkOperator: 'Move data between workers',
+  LocalExchangeSourceOperator: 'Move data between workers', PartitionedOutputOperator: 'Move data between workers',
+  TaskOutputOperator: 'Send results', DynamicFilterSourceOperator: 'Dynamic filter',
+  OrderByOperator: 'Sort', TopNOperator: 'Top N', LimitOperator: 'Limit',
+  TableWriterOperator: 'Write', WindowOperator: 'Window function',
+}
+function operatorWords(op: QueryProfileOperator, inputs: { catalogName?: string; schema?: string; table?: string }[]): string {
+  const words = OPERATOR_WORDS[op.operatorType] ?? op.operatorType.replace(/Operator$/, '')
+  const named = inputs.filter(i => i.table)
+  if ((op.operatorType === 'TableScanOperator' || op.operatorType === 'ScanFilterAndProjectOperator') && named.length === 1) {
+    const t = named[0]
+    return `${words} ${[t.catalogName, t.schema, t.table].filter(Boolean).join('.')}`
+  }
+  return words
+}
+
 /** Where a finished query spent its time: the top operators by CPU and the engine's plan. */
 function Profile({ id }: { id: string }) {
   const p = useQuery({ queryKey: ['query-log', 'profile', id], queryFn: () => api.queryLogProfile(id) })
@@ -526,16 +548,27 @@ function Profile({ id }: { id: string }) {
   }
 
   const plan = p.data.plan ?? ''
+  // A count answered from Iceberg metadata reads 0 bytes with a non-zero row count. The
+  // list is optional in the answer (a stub, or an older backend), so default it rather
+  // than crash the page on `.length`.
+  const inputs = p.data.inputs ?? []
+  const metadataOnly =
+    inputs.length > 0 &&
+    inputs.every(i => (i.physicalInputBytes ?? 0) === 0) &&
+    inputs.some(i => (i.physicalInputRows ?? 0) > 0)
   return (
     <Group title="Profile" summary="where the time went">
       <div className="col-span-2 md:col-span-3">
+        {metadataOnly && (
+          <p className="text-sm text-text-dim mb-2">Answered from table metadata: no data files were read.</p>
+        )}
         {rows.length === 0 ? (
           <div className="text-text-mute">The engine sent no operator statistics for this query.</div>
         ) : (
           <ol className="space-y-1">
             {rows.map(({ op, cpu, share }) => (
               <li key={`${op.stageId}-${op.pipelineId}-${op.planNodeId}`} className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
-                <span className="font-mono text-xs">{op.operatorType}</span>
+                <span className="font-medium" title={op.operatorType}>{operatorWords(op, inputs)}</span>
                 <span>{formatDurationMs(cpu)} ({Math.round(share * 100)} %)</span>
                 <span className="text-text-dim">
                   {formatCount(op.inputPositions)} → {formatCount(op.outputPositions)} rows
@@ -546,6 +579,9 @@ function Profile({ id }: { id: string }) {
                 {op.spilledDataSize && op.spilledDataSize !== '0B' && (
                   <span className="text-text-mute">spilled · {op.spilledDataSize}</span>
                 )}
+                <div className="basis-full h-1.5 rounded-full bg-bg-soft max-w-md">
+                  <div className="h-1.5 rounded-full bg-accent/70" style={{ width: `${Math.max(2, Math.round(share * 100))}%` }} />
+                </div>
               </li>
             ))}
           </ol>
