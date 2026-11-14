@@ -11,6 +11,9 @@ use crate::query_log_collector::Accepted;
 /// How long rows are kept when `NOVA_QUERY_LOG_RETENTION_DAYS` is not set.
 pub const DEFAULT_RETENTION_DAYS: i64 = 90;
 
+/// How long profiles are kept when `NOVA_QUERY_PROFILE_RETENTION_DAYS` is not set.
+pub const DEFAULT_PROFILE_RETENTION_DAYS: i64 = 14;
+
 /// How often old rows are removed.
 const PURGE_EVERY: Duration = Duration::from_secs(3600);
 
@@ -91,18 +94,62 @@ pub async fn purge(pool: &PgPool, days: i64) -> sqlx::Result<u64> {
     Ok(result.rows_affected())
 }
 
+/// Keep one query's profile; a second event for the same query replaces it.
+pub async fn upsert_profile(
+    pool: &PgPool,
+    query_id: &str,
+    profile: &serde_json::Value,
+) -> sqlx::Result<()> {
+    let bytes = serde_json::to_vec(profile).map(|b| b.len()).unwrap_or(0) as i32;
+    sqlx::query(
+        "INSERT INTO query_profile (query_id, profile, bytes) VALUES ($1, $2, $3) \
+         ON CONFLICT (query_id) DO UPDATE SET profile = EXCLUDED.profile, \
+            bytes = EXCLUDED.bytes, created_at = now()",
+    )
+    .bind(query_id)
+    .bind(profile)
+    .bind(bytes)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Delete profiles created more than `days` days ago; returns how many.
+pub async fn purge_profiles(pool: &PgPool, days: i64) -> sqlx::Result<u64> {
+    let result = sqlx::query(
+        "DELETE FROM query_profile WHERE created_at < now() - make_interval(days => $1::int)",
+    )
+    .bind(days as i32)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 /// Retention from the environment: unset or unparsable gives the default, `0` switches the
 /// purge off (`None`), anything else is the number of days.
 pub fn retention_days_from(get: impl Fn(&str) -> Option<String>) -> Option<i64> {
-    match get("NOVA_QUERY_LOG_RETENTION_DAYS").map(|v| v.trim().to_string()) {
-        None => Some(DEFAULT_RETENTION_DAYS),
-        Some(v) if v.is_empty() => Some(DEFAULT_RETENTION_DAYS),
+    days_from(get, "NOVA_QUERY_LOG_RETENTION_DAYS", DEFAULT_RETENTION_DAYS)
+}
+
+/// The same rule for `NOVA_QUERY_PROFILE_RETENTION_DAYS`.
+pub fn profile_retention_days_from(get: impl Fn(&str) -> Option<String>) -> Option<i64> {
+    days_from(
+        get,
+        "NOVA_QUERY_PROFILE_RETENTION_DAYS",
+        DEFAULT_PROFILE_RETENTION_DAYS,
+    )
+}
+
+fn days_from(get: impl Fn(&str) -> Option<String>, name: &str, default: i64) -> Option<i64> {
+    match get(name).map(|v| v.trim().to_string()) {
+        None => Some(default),
+        Some(v) if v.is_empty() => Some(default),
         Some(v) => match v.parse::<i64>() {
             Ok(0) => None,
             Ok(days) if days > 0 => Some(days),
             _ => {
-                warn!(value = %v, "NOVA_QUERY_LOG_RETENTION_DAYS is not a positive number; using the default");
-                Some(DEFAULT_RETENTION_DAYS)
+                warn!(value = %v, "the {name} value is not a positive number; using the default");
+                Some(default)
             }
         },
     }
@@ -110,18 +157,31 @@ pub fn retention_days_from(get: impl Fn(&str) -> Option<String>) -> Option<i64> 
 
 /// Remove old rows once an hour for as long as Nova runs.
 pub fn spawn_retention(pool: PgPool) {
-    let Some(days) = retention_days_from(|name| std::env::var(name).ok()) else {
-        info!("query-log retention is off (NOVA_QUERY_LOG_RETENTION_DAYS=0)");
+    let log_days = retention_days_from(|name| std::env::var(name).ok());
+    let profile_days = profile_retention_days_from(|name| std::env::var(name).ok());
+    if log_days.is_none() && profile_days.is_none() {
+        info!(
+            "query-log retention is off (NOVA_QUERY_LOG_RETENTION_DAYS=0 and NOVA_QUERY_PROFILE_RETENTION_DAYS=0)"
+        );
         return;
-    };
+    }
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(PURGE_EVERY);
         loop {
             tick.tick().await;
-            match purge(&pool, days).await {
-                Ok(0) => {}
-                Ok(n) => info!(rows = n, days, "removed old query-log rows"),
-                Err(e) => warn!(error = %e, "query-log purge failed"),
+            if let Some(days) = log_days {
+                match purge(&pool, days).await {
+                    Ok(0) => {}
+                    Ok(n) => info!(rows = n, days, "removed old query-log rows"),
+                    Err(e) => warn!(error = %e, "query-log purge failed"),
+                }
+            }
+            if let Some(days) = profile_days {
+                match purge_profiles(&pool, days).await {
+                    Ok(0) => {}
+                    Ok(n) => info!(rows = n, days, "removed old query profiles"),
+                    Err(e) => warn!(error = %e, "query-profile purge failed"),
+                }
             }
         }
     });
@@ -140,6 +200,7 @@ mod tests {
         Accepted {
             record: parse(body.as_bytes()).expect("a fixture"),
             warehouse: warehouse.into(),
+            profile: None,
         }
     }
 
@@ -162,6 +223,73 @@ mod tests {
         assert_eq!(retention_days_from(env(Some("0"))), None);
         assert_eq!(retention_days_from(env(Some("-5"))), Some(90));
         assert_eq!(retention_days_from(env(Some("many"))), Some(90));
+    }
+
+    #[test]
+    fn profile_retention_defaults_to_fourteen_days_and_zero_switches_it_off() {
+        let env = |value: Option<&'static str>| move |_: &str| value.map(String::from);
+        assert_eq!(profile_retention_days_from(env(None)), Some(14));
+        assert_eq!(profile_retention_days_from(env(Some(""))), Some(14));
+        assert_eq!(profile_retention_days_from(env(Some("7"))), Some(7));
+        assert_eq!(profile_retention_days_from(env(Some("0"))), None);
+        assert_eq!(profile_retention_days_from(env(Some("-5"))), Some(14));
+        assert_eq!(profile_retention_days_from(env(Some("many"))), Some(14));
+    }
+
+    fn profile_fixture() -> serde_json::Value {
+        crate::query_log_event::parse_profile(
+            include_str!("testdata/query_log/completed_profile.json").as_bytes(),
+        )
+        .expect("a profile")
+    }
+
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn a_profile_is_stored_once_and_purged_after_its_retention() {
+        let pool = migrated_pool().await;
+        upsert(&pool, &accepted(SELECT, "default")).await.unwrap();
+        let id = "20261019_113323_00000_tnvu4";
+        let profile = profile_fixture();
+        upsert_profile(&pool, id, &profile).await.unwrap();
+        upsert_profile(&pool, id, &profile).await.unwrap();
+        let (stored, bytes): (serde_json::Value, i32) =
+            sqlx::query_as("SELECT profile, bytes FROM query_profile WHERE query_id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored, profile);
+        assert_eq!(bytes as usize, serde_json::to_vec(&profile).unwrap().len());
+        let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM query_profile")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 1);
+        assert_eq!(purge_profiles(&pool, 0).await.unwrap(), 1);
+        let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM query_profile")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn deleting_a_query_removes_its_profile() {
+        let pool = migrated_pool().await;
+        upsert(&pool, &accepted(SELECT, "default")).await.unwrap();
+        let id = "20261019_113323_00000_tnvu4";
+        upsert_profile(&pool, id, &profile_fixture()).await.unwrap();
+        sqlx::query("DELETE FROM query_log WHERE query_id = $1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM query_profile")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 0);
     }
 
     #[tokio::test]

@@ -126,6 +126,7 @@ pub struct ErrorResponse {
         crate::destinations::test,
         crate::query_log_api::list,
         crate::query_log_api::detail,
+        crate::query_log_api::profile,
         crate::lineage_api::graph,
         crate::lineage_api::columns,
         crate::lineage_api::run_detail,

@@ -6314,6 +6314,59 @@
         }
       }
     },
+    "/api/query-log/{id}/profile": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`GET /api/query-log/{id}/profile` — where one finished query spent its time: the engine's\nplan and the per-operator statistics it reported.",
+        "description": "The plan and per-operator statistics of one finished query. The same rule as the detail: somebody else's query answers 404, exactly like a missing one, and an administrator who opens another person's profile is audited. A query without a stored profile answers 404 with a sentence (still running, older than the profile retention, or the engine sent none). With NOVA_QUERY_LOG_REDACT_LITERALS=1 somebody else's plan shows '?' in place of every string literal.",
+        "operationId": "query_log_profile",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The engine's query id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The stored profile: plan, operators, spill and split counts, inputs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such query, it is not the caller's to see, or it has no profile",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The state store is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/runs": {
       "get": {
         "tags": [
