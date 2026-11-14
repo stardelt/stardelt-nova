@@ -7,7 +7,6 @@ import Query from './routes/Query'
 import Data from './routes/Data'
 import Connections from './routes/Connections'
 import Destinations from './routes/Destinations'
-import Jobs from './routes/Jobs'
 import Pipelines from './routes/Pipelines'
 import Runs from './routes/Runs'
 import PipelineDetail from './routes/PipelineDetail'
@@ -38,7 +37,7 @@ export default function App() {
         <Route path="/data"       element={<Data       />} />
         <Route path="/connections" element={<Connections />} />
         <Route path="/destinations" element={<Destinations />} />
-        <Route path="/jobs"       element={<Jobs       />} />
+        <Route path="/jobs"       element={<Navigate to="/queries" replace />} />
         <Route path="/pipelines"  element={<Pipelines  />} />
         <Route path="/pipelines/:namespace/:name" element={<PipelineDetail />} />
         <Route path="/pipelines/:namespace/:name/runs/:runId/notebook/:taskId" element={<RunNotebook />} />

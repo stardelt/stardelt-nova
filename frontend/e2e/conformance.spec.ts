@@ -5,7 +5,7 @@ import { formatTime, relativeTime, setTimeDisplay, sqlTableRef } from '../src/fo
 
 // Rules U1–U13 are written down in stardelt-internal/design/ui-conformance.md.
 
-const ROUTES = ['/', '/catalog', '/query', '/data', '/connections', '/jobs', '/pipelines', '/runs', '/deployments', '/queries',
+const ROUTES = ['/', '/catalog', '/query', '/data', '/connections', '/pipelines', '/runs', '/deployments', '/queries',
   '/platform', '/admin/catalogs', '/compute', '/lineage', '/dashboards', '/notebooks', '/settings', '/preferences', '/profile',
   '/no-such-page']
 const VARIANTS = [
@@ -224,7 +224,7 @@ test.describe('roles', () => {
     // Build: the order a data engineer works in, and no Deployments in it any more (#618).
     // Destinations sits next to Connections, where a group's addresses are named (#789).
     expect(await group('Build').getByRole('link').allTextContents()).toEqual(
-      ['Notebooks', 'Pipelines', 'Runs', 'Streams', 'Compute', 'Connections', 'Destinations', 'Load & transfer', 'Activity'])
+      ['Notebooks', 'Pipelines', 'Runs', 'Streams', 'Compute', 'Connections', 'Destinations', 'Load & transfer'])
     await expect(group('Admin').getByRole('link', { name: 'Deployments' })).toBeVisible()
     await page.context().close()
   })
@@ -296,7 +296,7 @@ test.describe('hostile data', () => {
       if (path === '/api/jobs') return json(r, [{ id: '1', kind: 'query', title: evil, status: 'failed', started_at: now, detail: evil, rows: 1, user: evil }])
       return json(r, [])
     })
-    for (const route of ['/', '/catalog', '/queries', '/jobs']) {
+    for (const route of ['/', '/catalog', '/queries']) {
       await page.goto(route)
       await page.waitForTimeout(1500)
       const s = await page.evaluate(() => ({
@@ -377,7 +377,6 @@ test.describe('errors', () => {
     // The first Retry on each page belongs to this endpoint, in the order the page renders them.
     const failing: Record<string, string> = {
       '/catalog': '/api/catalog/catalogs',
-      '/jobs': '/api/jobs',
       '/queries': '/api/query-log',
       '/platform': '/api/apps',
     }
@@ -5931,7 +5930,7 @@ test.describe('person menu', () => {
 test.describe('activity', () => {
   // stardelt-nova#352: "Jobs" sounded like the scheduled work of Pipelines. The page lists every
   // query, load and transfer, so it is called Activity; the address stays, old links keep working.
-  test('the page that listed jobs is called Activity, at the same address', async ({ browser }) => {
+  test('the Activity page is gone: /jobs opens the Query log', async ({ browser }) => {
     const context = await browser.newContext({ viewport: { width: 1280, height: 800 } })
     const page = await context.newPage()
     await page.route('**/api/**', (route) => {
@@ -5946,11 +5945,9 @@ test.describe('activity', () => {
     })
 
     await page.goto('/jobs')
-    await expect(page.getByRole('heading', { name: 'Activity', exact: true })).toBeVisible()
-    await expect(page.getByText('No activity yet')).toBeVisible()
-    await expect(page).toHaveTitle('Activity · stardelt Nova')
+    await expect(page).toHaveURL(/\/queries$/)
     const nav = await page.evaluate(() => [...document.querySelectorAll('nav a')].map((a) => a.textContent?.trim()))
-    expect(nav).toContain('Activity')
+    expect(nav).not.toContain('Activity')
     expect(nav).not.toContain('Jobs')
 
     await page.goto('/')
