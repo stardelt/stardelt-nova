@@ -25,6 +25,7 @@ use utoipa::ToSchema;
 use crate::AppState;
 use crate::auth::Principal;
 use crate::people;
+use crate::query_hints;
 use crate::query_log::{RowOwner, Scope, Viewer, in_scope, redact_literals, visible};
 use crate::saved_queries::{error, not_found, store_failed, unavailable};
 
@@ -457,6 +458,14 @@ pub async fn list(
     .into_response()
 }
 
+/// The profile row's own fields the hints need: who ran it and how long it waited.
+#[derive(FromRow)]
+struct ProfileRow {
+    principal: String,
+    queued_ms: Option<i64>,
+    execution_ms: Option<i64>,
+}
+
 #[derive(FromRow, Debug)]
 struct DetailRow {
     query_id: String,
@@ -676,7 +685,7 @@ pub async fn detail(
     operation_id = "query_log_profile",
     path = "/api/query-log/{id}/profile",
     tag = "public",
-    description = "The plan and per-operator statistics of one finished query. The same rule as the detail: somebody else's query answers 404, exactly like a missing one, and an administrator who opens another person's profile is audited. A query without a stored profile answers 404 with a sentence (still running, older than the profile retention, or the engine sent none). With NOVA_QUERY_LOG_REDACT_LITERALS=1 somebody else's plan shows '?' in place of every string literal.",
+    description = "The plan and per-operator statistics of one finished query. The same rule as the detail: somebody else's query answers 404, exactly like a missing one, and an administrator who opens another person's profile is audited. A query without a stored profile answers 404 with a sentence (still running, older than the profile retention, or the engine sent none). With NOVA_QUERY_LOG_REDACT_LITERALS=1 somebody else's plan shows '?' in place of every string literal. The answer also carries \"hints\", an array of deterministic suggestions computed from the profile and the query's timing, each with its evidence and a documentation link; an empty array means no rule found evidence.",
     params(("id" = String, Path, description = "The engine's query id")),
     responses(
         (status = 200, description = "The stored profile: plan, operators, spill and split counts, inputs", body = Object),
@@ -693,18 +702,20 @@ pub async fn profile(
         return unavailable();
     };
     let who = Caller::of(caller.as_ref().map(|c| &c.0), &s.dev_user);
-    let principal: Option<String> =
-        match sqlx::query_scalar("SELECT principal FROM query_log WHERE query_id = $1")
-            .bind(&id)
-            .fetch_optional(pool)
-            .await
-        {
-            Ok(row) => row,
-            Err(e) => return store_failed(e),
-        };
-    let Some(principal) = principal else {
+    let row: Option<ProfileRow> = match sqlx::query_as(
+        "SELECT principal, queued_ms, execution_ms FROM query_log WHERE query_id = $1",
+    )
+    .bind(&id)
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(row) => row,
+        Err(e) => return store_failed(e),
+    };
+    let Some(row) = row else {
         return not_found();
     };
+    let principal = row.principal;
     let owners = principal_owners(&s).await;
     let owner = RowOwner {
         principal: &principal,
@@ -746,6 +757,9 @@ pub async fn profile(
             profile["plan"] = serde_json::Value::String(plan);
         }
     }
+    // Hints are computed, never stored: the rules improve without a backfill.
+    let hints = query_hints::hints(&profile, row.queued_ms, row.execution_ms);
+    profile["hints"] = serde_json::to_value(hints).expect("hints serialize");
     (
         [(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))],
         Json(profile),
