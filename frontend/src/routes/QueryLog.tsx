@@ -608,7 +608,8 @@ function Profile({ id }: { id: string }) {
         )}
         {(() => {
           const history = h.data
-          if (!history || history.runs.length < 2) return null
+          // A stub or a backend that answers `{}` has no runs; that is "nothing to show", not an error.
+          if (!history || !history.runs || history.runs.length < 2) return null
           const mine = history.runs.find((run) => run.id === id)?.wallMs ?? null
           const median = history.medianWallMs
           const slower = history.slower && median && mine ? ` · this run took ${(mine / median).toFixed(1)}× the median` : ''
