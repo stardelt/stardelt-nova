@@ -87,6 +87,30 @@ const PROFILE = {
   completedSplits: 4,
   inputs: [],
   truncated: false,
+  hints: [],
+}
+
+const PROFILE_WITH_HINTS = {
+  ...PROFILE,
+  spilledBytes: 536870912,
+  hints: [
+    {
+      code: 'spill',
+      title: 'The query ran out of memory and spilled to disk — give it a larger warehouse, or read less data before the join',
+      evidence: '536,870,912 bytes spilled',
+      docsUrl: 'https://stardelt.io/docs/guides/query-log/#spill',
+    },
+  ],
+}
+
+const HISTORY = {
+  runs: [
+    { id: 'q1', state: 'FINISHED', endedAt: NOW, wallMs: 2000, executionMs: 1990, inputBytes: 1024, inputRows: 10 },
+    { id: 'q0', state: 'FINISHED', endedAt: NOW - 86_400_000, wallMs: 600, executionMs: 590, inputBytes: 900, inputRows: 9 },
+    { id: 'q-1', state: 'FINISHED', endedAt: NOW - 172_800_000, wallMs: 400, executionMs: 390, inputBytes: 800, inputRows: 8 },
+  ],
+  medianWallMs: 600,
+  slower: true,
 }
 
 /** `missingProfile` answers the profile route the way the backend answers a query without one. */
@@ -109,6 +133,8 @@ async function stub(page: import('@playwright/test').Page, missingProfile = fals
       }
       return json(r, profile)
     }
+    // The history answers for every case, including a query without a profile.
+    if (path === '/api/query-log/q1/history') return json(r, HISTORY)
     return json(r, {})
   })
 }
@@ -197,6 +223,26 @@ test('the real engine event reads in plain words', async ({ page }) => {
   await expect(group.getByText('Read and filter', { exact: true })).toBeVisible()
   // Every one of the five rows has a share bar.
   await expect(group.locator('li > div.basis-full')).toHaveCount(5)
+})
+
+test('the hints name what to change, with the number behind them', async ({ page }) => {
+  await stub(page, false, PROFILE_WITH_HINTS)
+  await page.goto('/queries')
+  await openProfile(page)
+  const group = profileGroup(page)
+  await expect(group.getByText('536,870,912 bytes spilled')).toBeVisible()
+  const link = group.getByRole('link', { name: 'What to change' })
+  await expect(link).toHaveAttribute('href', 'https://stardelt.io/docs/guides/query-log/#spill')
+})
+
+test('a slower run says how much slower than the median', async ({ page }) => {
+  await stub(page)
+  await page.goto('/queries')
+  await openProfile(page)
+  const group = profileGroup(page)
+  await expect(group.getByText('Same statement, the last 3 runs')).toBeVisible()
+  await expect(group.getByText('median 600 ms', { exact: false })).toBeVisible()
+  await expect(group.getByText('3.3× the median', { exact: false })).toBeVisible()
 })
 
 test('an answer from table metadata says so', async ({ page }) => {

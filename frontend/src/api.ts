@@ -1278,7 +1278,32 @@ export type QueryProfile = {
   }[]
   /** True when the operator list was too large to keep (the plan may still be present). */
   truncated: boolean
+  /** Deterministic hints (optional: a stub or an older backend may omit them). */
+  hints?: QueryHint[]
 }
+
+/** One deterministic hint from `GET /api/query-log/{id}/profile` (stardelt-nova#788 S3a). */
+export type QueryHint = {
+  code: string
+  title: string
+  evidence: string
+  /** A section of the query log guide, e.g. https://stardelt.io/docs/guides/query-log/#spill */
+  docsUrl: string
+}
+
+/** One earlier run of the same statement (stardelt-nova#788 S4). */
+export type QueryHistoryRun = {
+  id: string
+  state: string
+  endedAt: number | null
+  wallMs: number | null
+  executionMs: number | null
+  inputBytes: number | null
+  inputRows: number | null
+}
+
+/** `GET /api/query-log/{id}/history` */
+export type QueryHistory = { runs: QueryHistoryRun[]; medianWallMs: number | null; slower: boolean }
 
 export type QueryLogParams = {
   scope: 'mine' | 'team' | 'all'
@@ -1487,6 +1512,7 @@ export const api = {
   queryLog:     (p: QueryLogParams)           => jget<QueryLogPage>(queryLogUrl(p)),
   queryLogDetail: (id: string)                => jget<QueryLogDetail>(`/api/query-log/${seg(id)}`),
   queryLogProfile: (id: string)               => jget<QueryProfile>(`/api/query-log/${seg(id)}/profile`),
+  queryLogHistory: (id: string)               => jget<QueryHistory>(`/api/query-log/${seg(id)}/history`),
   pipelines:    ()                            => jget<{ pipelines: PipelineView[] }>('/api/pipelines'),
   streams:       ()                            => jget<{ streams: StreamView[] }>('/api/streams'),
   /** Stop or resume one stream; answers the updated view (`spec.stopped`, D42). */
