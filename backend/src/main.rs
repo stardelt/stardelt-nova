@@ -716,6 +716,7 @@ fn api_router() -> Router<Arc<AppState>> {
         // The query log: the caller's own queries, everybody's for administrators (state store).
         .route("/query-log", get(query_log_api::list))
         .route("/query-log/{id}", get(query_log_api::detail))
+        .route("/query-log/{id}/profile", get(query_log_api::profile))
         // Lineage graph (D40): the edges the OpenLineage consumer wrote, scoped to what the
         // caller may see. Restored after #482's merge dropped the routes (nova#483).
         .route("/lineage", get(lineage_api::graph))
@@ -2115,6 +2116,7 @@ mod router_tests {
                 &query_log_collector::Accepted {
                     record,
                     warehouse: warehouse.into(),
+                    profile: None,
                 },
             )
             .await
@@ -2246,6 +2248,57 @@ mod router_tests {
         assert!(body["error"].as_str().unwrap().contains("limit"));
     }
 
+    /// A profile follows the rule of the detail it belongs to: the owner sees it, another
+    /// person gets the same 404, and an administrator sees it. A query without a profile
+    /// answers 404 with its own sentence.
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn the_query_profile_follows_the_visibility_of_the_detail() {
+        let pool = db::test_support::migrated_pool().await;
+        let [select, ctas, _] = seed_query_log(&pool).await;
+        let profile = query_log_event::parse_profile(
+            include_str!("testdata/query_log/completed_profile.json").as_bytes(),
+        )
+        .expect("a profile");
+        query_log_store::upsert_profile(&pool, &select, &profile)
+            .await
+            .expect("store a profile");
+        let dir = StaticDir::new("query-log");
+        let alice = log_app(pool.clone(), Some(signed_in("alice")), &dir);
+        let bob = log_app(pool.clone(), Some(signed_in("bob")), &dir);
+        let admin = log_app(pool.clone(), Some(signed_in_admin("root")), &dir);
+
+        let path = format!("/api/query-log/{select}/profile");
+        let (status, body) = call(&alice, "GET", &path, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["operators"].as_array().expect("operators").len(), 17);
+        assert!(body["plan"].as_str().expect("a plan").len() > 1_000);
+
+        let (status, body) = call(&bob, "GET", &path, None).await;
+        assert_eq!(
+            (status, body),
+            (
+                StatusCode::NOT_FOUND,
+                serde_json::json!({"error": "not found"})
+            )
+        );
+        assert_eq!(call(&admin, "GET", &path, None).await.0, StatusCode::OK);
+
+        // The ctas query never got a profile: 404 with a sentence, not "not found".
+        let (status, body) = call(
+            &alice,
+            "GET",
+            &format!("/api/query-log/{ctas}/profile"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(
+            body["error"].as_str().unwrap().contains("no profile"),
+            "{body}"
+        );
+    }
+
     /// A fixture stored with an arbitrary engine user: the shape once authz 8/8 runs every
     /// query as the person's `sub`.
     async fn seed_query_log_as(pool: &sqlx::PgPool, principal: &str, fixture: &str) -> String {
@@ -2257,6 +2310,7 @@ mod router_tests {
             &query_log_collector::Accepted {
                 record,
                 warehouse: "default".into(),
+                profile: None,
             },
         )
         .await

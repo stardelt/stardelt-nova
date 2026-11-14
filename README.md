@@ -39,6 +39,7 @@ Browser
          ├─ DELETE /api/settings/:key  remove one
          ├─ GET  /api/query-log        the caller's queries (admins: everyone's), keyset-paged, one query per row
          ├─ GET  /api/query-log/:id    one query's detail: timing, tables read, error code
+         ├─ GET  /api/query-log/:id/profile  one finished query's plan and per-operator statistics
          ├─ GET  /api/apps             installed apps: live status + images
          ├─ GET  /api/apps/:id         one app: workloads, facts, links, embed check
          ├─ GET  /api/workloads        workloads in Nova's namespace + read state (ok/stale/unreachable)
@@ -480,6 +481,7 @@ The backend is configured entirely through environment variables:
 | `NOVA_QUERY_TIMEOUT_SECS` | `300` | How long `POST /api/query` waits for Trino before cancelling the query server-side and answering `400 {"error":"query exceeded the Ns limit and was cancelled"}`. A client disconnect cancels the Trino query too. Results larger than 50,000 rows are cut to exactly that many and answered with `"truncated": true` |
 | `NOVA_DATABASE_URL` | — (empty) | PostgreSQL URL of the state store (`postgres://user:password@host:5432/nova`). Unset = disabled: Nova behaves as before and `/api/health` answers `{"status":"ok","db":"disabled"}`. Set = connect and apply the migrations at start-up, or refuse to start; the platform fills it from the `nova-pg-app` Secret. After start-up an unreachable database only turns `db` into `down` (the probe still answers 200) |
 | `NOVA_QUERY_LOG_RETENTION_DAYS` | `90` | How long query-log rows are kept; the backend purges hourly. `0` disables the purge; an unparsable value warns and uses the default |
+| `NOVA_QUERY_PROFILE_RETENTION_DAYS` | `14` | How long a finished query's profile (plan, per-operator statistics) is kept, independent of the log row; purged hourly, and a deleted log row takes its profile with it. `0` disables the purge; an unparsable value warns and uses the default |
 | `NOVA_SHARED_ACCOUNTS` | — (empty) | Sign-in names whose account many people use — the public demo — comma-separated. `/api/me` answers `shared_account: true` for them (never in `dev` mode), so the UI shows the public-demo banner. Every night at 03:00 UTC Nova deletes their saved queries (with the shares), personal settings and query-log rows in one transaction; the log carries the row count, never a name. Unset or empty = no account is shared and nothing is reset |
 | `NOVA_LINEAGE_RETENTION_DAYS` | `90` | How long lineage events are kept; the backend purges hourly. `0` disables the purge; an unparsable value warns and uses the default |
 | `NOVA_LINEAGE_EDGE_RETENTION_DAYS` | `365` | How long lineage edges are kept; the backend purges hourly. `0` disables the purge; an unparsable value warns and uses the default |

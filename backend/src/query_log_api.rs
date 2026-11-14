@@ -13,7 +13,7 @@ use std::sync::Arc;
 use axum::{
     Extension, Json,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -667,6 +667,90 @@ pub async fn detail(
         error,
     })
     .into_response()
+}
+
+/// `GET /api/query-log/{id}/profile` — where one finished query spent its time: the engine's
+/// plan and the per-operator statistics it reported.
+#[utoipa::path(
+    get,
+    operation_id = "query_log_profile",
+    path = "/api/query-log/{id}/profile",
+    tag = "public",
+    description = "The plan and per-operator statistics of one finished query. The same rule as the detail: somebody else's query answers 404, exactly like a missing one, and an administrator who opens another person's profile is audited. A query without a stored profile answers 404 with a sentence (still running, older than the profile retention, or the engine sent none). With NOVA_QUERY_LOG_REDACT_LITERALS=1 somebody else's plan shows '?' in place of every string literal.",
+    params(("id" = String, Path, description = "The engine's query id")),
+    responses(
+        (status = 200, description = "The stored profile: plan, operators, spill and split counts, inputs", body = Object),
+        (status = 404, description = "No such query, it is not the caller's to see, or it has no profile", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub async fn profile(
+    State(s): State<Arc<AppState>>,
+    caller: Option<Extension<Principal>>,
+    Path(id): Path<String>,
+) -> Response {
+    let Some(pool) = s.db.as_ref() else {
+        return unavailable();
+    };
+    let who = Caller::of(caller.as_ref().map(|c| &c.0), &s.dev_user);
+    let principal: Option<String> =
+        match sqlx::query_scalar("SELECT principal FROM query_log WHERE query_id = $1")
+            .bind(&id)
+            .fetch_optional(pool)
+            .await
+        {
+            Ok(row) => row,
+            Err(e) => return store_failed(e),
+        };
+    let Some(principal) = principal else {
+        return not_found();
+    };
+    let owners = principal_owners(&s).await;
+    let owner = RowOwner {
+        principal: &principal,
+        owner_group: owners.get(&principal).map(String::as_str),
+    };
+    if !visible(&owner, &who.viewer()) {
+        return not_found();
+    }
+    if principal != who.username && principal != who.sub {
+        // An administrator opening somebody else's profile leaves a trace.
+        tracing::info!(
+            target: "audit",
+            actor = %who.username,
+            sub = %who.sub,
+            action = "query_log.read_other_profile",
+            query_id = %id,
+            owner = %principal,
+            "administrator opened another user's query profile"
+        );
+    }
+    let stored: Option<serde_json::Value> =
+        match sqlx::query_scalar("SELECT profile FROM query_profile WHERE query_id = $1")
+            .bind(&id)
+            .fetch_optional(pool)
+            .await
+        {
+            Ok(row) => row,
+            Err(e) => return store_failed(e),
+        };
+    let Some(mut profile) = stored else {
+        return error(
+            StatusCode::NOT_FOUND,
+            "no profile for this query (it is still running, older than the profile retention, or the engine sent none)",
+        );
+    };
+    if s.redact_query_log_literals && !is_own_row(&principal, &who) {
+        let redacted = profile["plan"].as_str().map(redact_literals);
+        if let Some(plan) = redacted {
+            profile["plan"] = serde_json::Value::String(plan);
+        }
+    }
+    (
+        [(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))],
+        Json(profile),
+    )
+        .into_response()
 }
 
 #[cfg(test)]

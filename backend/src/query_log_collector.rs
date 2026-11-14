@@ -38,6 +38,9 @@ pub const LINEAGE_QUEUE_LEN: usize = 10_000;
 pub struct Accepted {
     pub record: QueryLogRecord,
     pub warehouse: String,
+    /// The useful part of a finished event ([`query_log_event::parse_profile`]); `None`
+    /// for a created event.
+    pub profile: Option<serde_json::Value>,
 }
 
 #[derive(Clone)]
@@ -214,13 +217,18 @@ async fn ingest(State(c): State<Arc<Collector>>, headers: HeaderMap, body: Bytes
         Ok(record) => record,
         Err(e) => return error(StatusCode::BAD_REQUEST, e.to_string()),
     };
+    let profile = query_log_event::parse_profile(&body);
     let raw = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
     if let Some(event) = lineage_from_query(&record, raw)
         && c.lineage_tx.try_send(event).is_err()
     {
         tracing::warn!("lineage queue is full; dropped one derived event");
     }
-    match c.tx.try_send(Accepted { record, warehouse }) {
+    match c.tx.try_send(Accepted {
+        record,
+        warehouse,
+        profile,
+    }) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(_) => error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -318,10 +326,24 @@ pub async fn start(db: Option<sqlx::PgPool>) -> anyhow::Result<()> {
                 warehouse = %a.warehouse,
                 "query event"
             );
-            if let Some(pool) = &db_clone
-                && let Err(e) = crate::query_log_store::upsert(pool, &a).await
-            {
-                warn!(error = %e, query_id = %a.record.query_id, "could not store a query-log row");
+            if let Some(pool) = &db_clone {
+                match crate::query_log_store::upsert(pool, &a).await {
+                    Ok(()) => {
+                        if let Some(profile) = &a.profile
+                            && let Err(e) = crate::query_log_store::upsert_profile(
+                                pool,
+                                &a.record.query_id,
+                                profile,
+                            )
+                            .await
+                        {
+                            warn!(error = %e, query_id = %a.record.query_id, "could not store a query profile");
+                        }
+                    }
+                    Err(e) => {
+                        warn!(error = %e, query_id = %a.record.query_id, "could not store a query-log row");
+                    }
+                }
             }
         }
     });

@@ -15,6 +15,9 @@ use sha2::{Digest, Sha256};
 /// Longest SQL text kept in a record, in bytes (cut on a character boundary).
 pub const MAX_SQL_BYTES: usize = 100_000;
 
+/// Longest query profile kept, in bytes (stardelt-nova#788 S1).
+pub const MAX_PROFILE_BYTES: usize = 512 * 1024;
+
 /// Where a query is in its life, as the query log shows it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueryState {
@@ -402,6 +405,86 @@ pub fn parse(body: &[u8]) -> Result<QueryLogRecord, ParseError> {
     })
 }
 
+/// One entry of `statistics.operatorSummaries`: the engine sends each as a JSON string.
+fn operator_entry(entry: &serde_json::Value) -> Option<serde_json::Value> {
+    match entry {
+        serde_json::Value::String(text) => serde_json::from_str(text).ok(),
+        serde_json::Value::Object(_) => Some(entry.clone()),
+        _ => None,
+    }
+}
+
+/// One `ioMetadata.inputs[]` entry: the fields the profile keeps, copied as they are.
+fn input_entry(table: &serde_json::Value) -> serde_json::Value {
+    let field = |name: &str| table.get(name).cloned().unwrap_or(serde_json::Value::Null);
+    serde_json::json!({
+        "catalogName": field("catalogName"),
+        "schema": field("schema"),
+        "table": field("table"),
+        "physicalInputBytes": field("physicalInputBytes"),
+        "physicalInputRows": field("physicalInputRows"),
+        "connectorMetrics": field("connectorMetrics"),
+    })
+}
+
+/// An integer statistic, `0` when it is absent.
+fn count(statistics: &serde_json::Map<String, serde_json::Value>, name: &str) -> i64 {
+    statistics.get(name).and_then(|v| v.as_i64()).unwrap_or(0)
+}
+
+/// The useful part of a finished query's event (stardelt-nova#788 S1): the plan, the
+/// per-operator statistics, spill and split counts, and the connector metrics of every
+/// table the query read.
+///
+/// `None` when the body is not JSON or carries no `statistics` object (a *created* event).
+/// `metadata.payload` and `metadata.jsonPlan` are never copied: the payload repeats the
+/// stage and task detail and is most of the event. A profile over [`MAX_PROFILE_BYTES`]
+/// first loses its operators, then gets a plan cut to [`MAX_PROFILE_BYTES`] / 2 bytes.
+pub fn parse_profile(body: &[u8]) -> Option<serde_json::Value> {
+    let event: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let statistics = event.get("statistics")?.as_object()?;
+    let plan = match event["metadata"].get("plan") {
+        Some(serde_json::Value::String(text)) => serde_json::Value::String(text.clone()),
+        _ => serde_json::Value::Null,
+    };
+    let operators: Vec<serde_json::Value> = statistics
+        .get("operatorSummaries")
+        .and_then(|v| v.as_array())
+        .map(|entries| entries.iter().filter_map(operator_entry).collect())
+        .unwrap_or_default();
+    let inputs: Vec<serde_json::Value> = event["ioMetadata"]["inputs"]
+        .as_array()
+        .map(|tables| tables.iter().map(input_entry).collect())
+        .unwrap_or_default();
+    let mut profile = serde_json::json!({
+        "plan": plan,
+        "operators": operators,
+        "spilledBytes": count(statistics, "spilledBytes"),
+        "completedSplits": count(statistics, "completedSplits"),
+        "inputs": inputs,
+        "truncated": false,
+    });
+    if profile_bytes(&profile) > MAX_PROFILE_BYTES {
+        profile["operators"] = serde_json::Value::Array(Vec::new());
+        profile["truncated"] = serde_json::Value::Bool(true);
+        if profile_bytes(&profile) > MAX_PROFILE_BYTES {
+            let shorter = profile["plan"]
+                .as_str()
+                .map(|text| cut(text, MAX_PROFILE_BYTES / 2));
+            if let Some(text) = shorter {
+                profile["plan"] = serde_json::Value::String(text);
+            }
+        }
+    }
+    Some(profile)
+}
+
+fn profile_bytes(profile: &serde_json::Value) -> usize {
+    serde_json::to_vec(profile)
+        .map(|b| b.len())
+        .unwrap_or(usize::MAX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -412,6 +495,7 @@ mod tests {
     const CANCELED: &str = include_str!("testdata/query_log/completed_canceled.json");
     const CTAS: &str = include_str!("testdata/query_log/completed_ctas.json");
     const CATALOG: &str = include_str!("testdata/query_log/completed_catalog.json");
+    const PROFILE: &str = include_str!("testdata/query_log/completed_profile.json");
 
     #[test]
     fn a_created_event_is_a_queued_row_without_numbers() {
@@ -490,6 +574,57 @@ mod tests {
         );
         assert_eq!(r.sql_hash, hex_sha256(&long));
         assert_eq!(r.sql_hash.len(), 64);
+    }
+
+    #[test]
+    fn a_completed_event_yields_a_profile_with_its_operators_and_plan() {
+        let p = parse_profile(PROFILE.as_bytes()).expect("a completed event");
+        let operators = p["operators"].as_array().expect("operators");
+        assert_eq!(operators.len(), 17);
+        for operator in operators {
+            assert!(
+                operator.is_object() && operator["operatorType"].is_string(),
+                "{operator}"
+            );
+        }
+        assert!(p["plan"].as_str().expect("a plan").len() > 1_000);
+        assert_eq!(p["truncated"], false);
+        assert!(!p.to_string().contains("payload"), "the payload is copied");
+        assert!(
+            !p.to_string().contains("jsonPlan"),
+            "the json plan is copied"
+        );
+        assert_eq!(p["completedSplits"], 22);
+        assert_eq!(p["inputs"].as_array().expect("inputs").len(), 2);
+        assert_eq!(p["inputs"][0]["catalogName"], "iceberg");
+        assert_eq!(p["inputs"][1]["table"], "customer");
+    }
+
+    #[test]
+    fn a_created_event_has_no_profile() {
+        assert!(parse_profile(CREATED.as_bytes()).is_none());
+        assert!(parse_profile(b"not json").is_none());
+        assert!(parse_profile(br#"{"metadata":{"queryId":"q"}}"#).is_none());
+    }
+
+    #[test]
+    fn an_oversized_profile_loses_its_operators_then_gets_a_shorter_plan() {
+        let huge = serde_json::json!({
+            "metadata": { "plan": "é".repeat(MAX_PROFILE_BYTES) },
+            "statistics": {
+                "operatorSummaries": (0..200)
+                    .map(|_| serde_json::json!({"operatorType": "Filter", "info": "x".repeat(4_000)}))
+                    .collect::<Vec<_>>()
+            },
+            "ioMetadata": { "inputs": [] }
+        })
+        .to_string();
+        let p = parse_profile(huge.as_bytes()).expect("a completed event");
+        assert_eq!(p["truncated"], true);
+        assert!(p["operators"].as_array().expect("operators").is_empty());
+        let plan = p["plan"].as_str().expect("a plan");
+        assert!(plan.len() <= MAX_PROFILE_BYTES / 2);
+        assert!(plan.chars().all(|c| c == 'é'), "the cut is on a character");
     }
 
     #[test]
