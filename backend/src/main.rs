@@ -718,6 +718,7 @@ fn api_router() -> Router<Arc<AppState>> {
         .route("/query-log", get(query_log_api::list))
         .route("/query-log/{id}", get(query_log_api::detail))
         .route("/query-log/{id}/profile", get(query_log_api::profile))
+        .route("/query-log/{id}/history", get(query_log_api::history))
         // Lineage graph (D40): the edges the OpenLineage consumer wrote, scoped to what the
         // caller may see. Restored after #482's merge dropped the routes (nova#483).
         .route("/lineage", get(lineage_api::graph))
@@ -2302,6 +2303,59 @@ mod router_tests {
             body["error"].as_str().unwrap().contains("no profile"),
             "{body}"
         );
+    }
+
+    /// The history of a statement lists its earlier runs newest first, with the median wall time
+    /// and whether this run is more than twice it. The same visibility rule as the detail, and a
+    /// statement run once has nothing to compare.
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn the_history_lists_the_runs_of_the_same_statement() {
+        let pool = db::test_support::migrated_pool().await;
+        let [select, ctas, _] = seed_query_log(&pool).await;
+        // Two earlier runs of the same statement: same principal, same sql_hash from the seeded row.
+        for (id, wall, execution) in [
+            ("history-2", 900_i64, 800_i64),
+            ("history-3", 1000_i64, 900_i64),
+        ] {
+            sqlx::query(
+                "INSERT INTO query_log (query_id, state, principal, sql_text, sql_hash, created_at, ended_at, wall_ms, execution_ms, input_bytes, input_rows) \
+                 SELECT $1, 'FINISHED', principal, sql_text, sql_hash, created_at - interval '1 hour', ended_at - interval '1 hour', $2, $3, 1000, 10 \
+                 FROM query_log WHERE query_id = $4",
+            )
+            .bind(id).bind(wall).bind(execution).bind(&select)
+            .execute(&pool).await.expect("an earlier run");
+        }
+        let dir = StaticDir::new("query-log");
+        let alice = log_app(pool.clone(), Some(signed_in("alice")), &dir);
+        let bob = log_app(pool.clone(), Some(signed_in("bob")), &dir);
+
+        let path = format!("/api/query-log/{select}/history");
+        let (status, body) = call(&alice, "GET", &path, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["runs"].as_array().expect("runs").len(), 3);
+        assert_eq!(body["runs"][0]["id"], select.as_str()); // the seeded row is the newest
+        assert_eq!(body["medianWallMs"], 1000); // 2324, 1000, 900
+        assert_eq!(body["slower"], true); // 2324 > 2 × 1000
+        assert_eq!(body["runs"][1]["wallMs"], 1000);
+
+        // Somebody else's history is a 404, exactly like a missing query.
+        assert_eq!(
+            call(&bob, "GET", &path, None).await.0,
+            StatusCode::NOT_FOUND
+        );
+
+        // A statement run once has one run and no comparison.
+        let (status, body) = call(
+            &alice,
+            "GET",
+            &format!("/api/query-log/{ctas}/history"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["runs"].as_array().expect("runs").len(), 1);
+        assert_eq!(body["slower"], false);
     }
 
     /// A fixture stored with an arbitrary engine user: the shape once authz 8/8 runs every

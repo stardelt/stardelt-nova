@@ -6314,6 +6314,59 @@
         }
       }
     },
+    "/api/query-log/{id}/history": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "summary": "`GET /api/query-log/{id}/history` — the last runs of the same statement, and whether this\none is slower than their median.",
+        "description": "The last 20 runs of the same statement by the same principal: each one's state, end time, wall and execution time, bytes and rows read, newest first. The same visibility rule as the detail: somebody else's query answers 404, exactly like a missing one, and an administrator who opens another person's history is audited. medianWallMs is the median of the returned runs' wall times; slower is true when this run's wall time is more than twice that median and at least three runs were compared. Answers Cache-Control: no-store.",
+        "operationId": "query_log_history",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The engine's query id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The runs of the same statement, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueryHistory"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such query, or it is not the caller's to see",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The state store is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/query-log/{id}/profile": {
       "get": {
         "tags": [
@@ -9672,6 +9725,58 @@
           }
         }
       },
+      "HistoryRun": {
+        "type": "object",
+        "description": "One earlier run of the same statement (nova#788 S4).",
+        "required": [
+          "id",
+          "state"
+        ],
+        "properties": {
+          "endedAt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Finished at, epoch milliseconds; null while the engine never reported an end."
+          },
+          "executionMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "id": {
+            "type": "string"
+          },
+          "inputBytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "inputRows": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "state": {
+            "type": "string"
+          },
+          "wallMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          }
+        }
+      },
       "Job": {
         "type": "object",
         "required": [
@@ -11494,6 +11599,34 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "QueryHistory": {
+        "type": "object",
+        "description": "The runs of the same statement that the caller can see, newest first.",
+        "required": [
+          "runs",
+          "slower"
+        ],
+        "properties": {
+          "medianWallMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Median wall time of `runs` in milliseconds; null when no run has a timing."
+          },
+          "runs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HistoryRun"
+            }
+          },
+          "slower": {
+            "type": "boolean",
+            "description": "True when this query's wall time is more than twice the median and at least three runs were compared."
           }
         }
       },
