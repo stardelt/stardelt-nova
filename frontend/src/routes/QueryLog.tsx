@@ -522,6 +522,8 @@ function operatorWords(op: QueryProfileOperator, inputs: { catalogName?: string;
 /** Where a finished query spent its time: the top operators by CPU and the engine's plan. */
 function Profile({ id }: { id: string }) {
   const p = useQuery({ queryKey: ['query-log', 'profile', id], queryFn: () => api.queryLogProfile(id) })
+  // The same statement's recent runs. A 404 (an old query, someone else's) just hides the block.
+  const h = useQuery({ queryKey: ['query-log', 'history', id], queryFn: () => api.queryLogHistory(id), retry: false })
   const rows = useMemo(() => {
     const ops = p.data?.operators ?? []
     const total = ops.reduce((sum, op) => sum + operatorCpuMs(op), 0)
@@ -559,6 +561,19 @@ function Profile({ id }: { id: string }) {
   return (
     <Group title="Profile" summary="where the time went">
       <div className="col-span-2 md:col-span-3">
+        {(p.data.hints ?? []).length > 0 && (
+          <ul className="mb-2 space-y-1">
+            {(p.data.hints ?? []).map((hint) => (
+              <li key={hint.code} className="text-sm">
+                <span className="font-medium">{hint.title}</span>{' '}
+                <span className="text-text-dim">({hint.evidence})</span>{' '}
+                <a href={hint.docsUrl} target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">
+                  What to change
+                </a>
+              </li>
+            ))}
+          </ul>
+        )}
         {metadataOnly && (
           <p className="text-sm text-text-dim mb-2">Answered from table metadata: no data files were read.</p>
         )}
@@ -591,6 +606,30 @@ function Profile({ id }: { id: string }) {
             The engine sent more operators than fit; the list above is from the part that was kept.
           </p>
         )}
+        {(() => {
+          const history = h.data
+          if (!history || history.runs.length < 2) return null
+          const mine = history.runs.find((run) => run.id === id)?.wallMs ?? null
+          const median = history.medianWallMs
+          const slower = history.slower && median && mine ? ` · this run took ${(mine / median).toFixed(1)}× the median` : ''
+          return (
+            <div className="mt-2">
+              <p className="text-sm">
+                Same statement, the last {history.runs.length} runs
+                {median != null && <> · median {formatDurationMs(median)}</>}
+                {slower}
+              </p>
+              <ul className="text-text-dim text-xs">
+                {history.runs.map((run) => (
+                  <li key={run.id}>
+                    {run.endedAt != null ? relativeTime(run.endedAt) : 'no end time'} · {run.state.toLowerCase()} ·{' '}
+                    {formatDurationMs(run.wallMs)} · {formatBytes(run.inputBytes)} read
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )
+        })()}
         {plan.trim() !== '' && (
           <details className="mt-2">
             <summary className="cursor-pointer text-sm">Plan</summary>
