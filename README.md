@@ -492,6 +492,8 @@ The backend is configured entirely through environment variables:
 | `NOVA_DEV_USER` | `stardelt-dev` | Static user identity returned by `/api/me` (dev mode only) |
 | `NOVA_PEER_STAGES` | — (empty) | Other stages this Nova may compare its deployed pipelines with, as `name=url` pairs, e.g. `prod=https://nova.prod.example`. Only configured names are accepted, so a browser can never point Nova at an arbitrary address. `GET /api/stages/compare?peer=<name>` calls the peer's `GET /api/pipelines` with the **caller's own token**, so the peer answers with that person's rights; a refused token is `status: "unauthorized"`, no answer within 5 s `status: "unreachable"`. Nova never deploys to a peer and stores no secret for one. `/api/me` lists the names (`peers`) |
 | `NOVA_AUTH_MODE` | `dev` | `dev` (no login) or `oidc` — see [Sign-in](#sign-in-oidc) |
+| `NOVA_MCP_ENABLED` | off | Serve the hosted MCP endpoint at `/mcp` (JSON-RPC: `initialize`, `tools/list`, `tools/call`) and its `/.well-known/oauth-protected-resource[/mcp]` metadata. Off, every MCP route answers `404` JSON, never the SPA. Needs `NOVA_AUTH_MODE=oidc`: there is no anonymous mode, and the endpoint refuses to start otherwise. Four read-only tools reuse the catalog handlers as the caller: `platform_status`, `catalog_list`, `catalog_describe`, `catalog_search`. Every call writes one line on the `audit` target |
+| `NOVA_MCP_AUDIENCE` | — (required with `NOVA_MCP_ENABLED`) | The resource identifier the sign-in provider mints access tokens for, e.g. `https://nova.<domain>/mcp`. A token minted for the browser audience is refused, and the session cookie is never accepted on `/mcp` |
 | `RUST_LOG` | `info` | Tracing filter for the backend (`debug`, `info`, `warn`, …) |
 
 ---

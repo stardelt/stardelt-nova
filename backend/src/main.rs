@@ -67,6 +67,11 @@
 //!   GET  /api/notebooks/{group}/{name}/parameters — one version's parameters (Schedule, #237)
 //!   GET  /api/notebooks/{group}/{name}/content  — one version's stored bytes (preview, #684)
 //!
+//! Outside `/api` (the hosted MCP endpoint, `mcp.rs`, `NOVA_MCP_ENABLED`):
+//!   GET  /.well-known/oauth-protected-resource      — the MCP resource metadata (RFC 9728)
+//!   GET  /.well-known/oauth-protected-resource/mcp  — the same, for the `/mcp` path
+//!   POST /mcp                                       — JSON-RPC: initialize, tools/list, tools/call
+//!
 //! `NOVA_DEMO=1` serves an in-memory lakehouse so the UI runs with no cluster.
 //! `NOVA_AUTH_MODE=oidc` puts every `/api/*` route except `/api/health` and
 //! `/api/auth/*` behind OIDC sign-in (see `auth.rs`); `dev` (default) has no login.
@@ -114,6 +119,7 @@ mod jobs;
 mod lineage_api;
 mod lineage_event;
 mod lineage_store;
+mod mcp;
 mod metrics;
 mod migrations;
 mod notebooks;
@@ -223,6 +229,12 @@ pub struct AppState {
     /// Show the statement of somebody else's query with its string literals replaced by `'?'`
     /// (`NOVA_QUERY_LOG_REDACT_LITERALS=1`). Off by default; the owner always sees their own text.
     pub redact_query_log_literals: bool,
+    /// The hosted MCP endpoint (`mcp.rs`, stardelt-nova#112). `None` unless
+    /// `NOVA_MCP_ENABLED` is on: every MCP route then answers 404, never the SPA.
+    pub mcp: Option<mcp::McpConfig>,
+    /// The sign-in state (`auth.rs`), for the MCP endpoint's own bearer check. `None` in
+    /// `dev` mode; MCP refuses to start without it (see `mcp::McpConfig::from_env`).
+    pub auth: Option<Arc<auth::AuthState>>,
     pub jobs: Mutex<Vec<jobs::Job>>,
     pub demo_state: RwLock<demo::DemoState>,
     /// Cluster client for the read-only workload view. `None` in demo mode, or when
@@ -533,6 +545,9 @@ async fn security_headers(req: axum::extract::Request, next: axum::middleware::N
 /// instead of at the ingress.
 fn app(state: Arc<AppState>, api: Router<Arc<AppState>>, static_dir: &str) -> Router {
     Router::new()
+        // The MCP endpoint is outside `/api` (`mcp.rs`), merged before the fallback so
+        // the SPA never answers `/mcp`: with the switch off, every MCP route is its 404.
+        .merge(mcp::router())
         // The fallback sits on the nested router; see `api_not_found`.
         .nest("/api", api.fallback(api_not_found))
         .fallback_service(
@@ -1002,6 +1017,14 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // The hosted MCP endpoint (stardelt-nova#112): off unless `NOVA_MCP_ENABLED` is on,
+    // and never without sign-in — the endpoint has no anonymous mode.
+    let mcp = mcp::McpConfig::from_env(auth.is_some())
+        .map_err(|e| anyhow::anyhow!("refusing to start: MCP configuration: {e}"))?;
+    if let Some(cfg) = &mcp {
+        info!(audience = %cfg.audience, "MCP endpoint enabled at /mcp");
+    }
+
     // The catalog's token endpoint: `NOVA_CATALOG_TOKEN_URL` when it is set, otherwise the
     // one the sign-in provider advertises (stardelt-platform#611). The discovery document
     // is the cached one the block above fetched; nothing is fetched per request. An
@@ -1079,6 +1102,8 @@ async fn main() -> anyhow::Result<()> {
         shared_accounts: shared_accounts::from_env(),
         forward_identity: env_flag("NOVA_FORWARD_IDENTITY"),
         redact_query_log_literals: env_flag("NOVA_QUERY_LOG_REDACT_LITERALS"),
+        mcp,
+        auth: auth.clone(),
         jobs: Mutex::new(Vec::new()),
         demo_state: RwLock::new(demo_state),
         kube,
@@ -1350,6 +1375,8 @@ mod router_tests {
             demo: demo_mode,
             forward_identity: false,
             redact_query_log_literals: false,
+            mcp: None,
+            auth: None,
             jobs: Mutex::new(Vec::new()),
             demo_state: RwLock::new(demo::DemoState::default()),
             kube,
@@ -1405,10 +1432,10 @@ mod router_tests {
 
     /// A static directory holding only `index.html`, so the SPA fallback behaves the way
     /// the image's `/app/static` does. Removed when the test ends.
-    struct StaticDir(std::path::PathBuf);
+    pub(crate) struct StaticDir(std::path::PathBuf);
 
     impl StaticDir {
-        fn new(tag: &str) -> Self {
+        pub(crate) fn new(tag: &str) -> Self {
             let dir = std::env::temp_dir().join(format!("nova-test-{tag}-{}", std::process::id()));
             std::fs::create_dir_all(&dir).expect("temp static dir");
             std::fs::write(dir.join("index.html"), "<!doctype html><title>nova</title>")
@@ -1416,7 +1443,7 @@ mod router_tests {
             Self(dir)
         }
 
-        fn path(&self) -> &str {
+        pub(crate) fn path(&self) -> &str {
             self.0.to_str().expect("utf-8 temp path")
         }
     }
