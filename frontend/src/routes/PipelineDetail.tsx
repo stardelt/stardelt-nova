@@ -7,7 +7,7 @@ import { EmptyState } from '../components/EmptyState'
 import ScheduleDialog, { DeletePipelineDialog } from '../components/ScheduleDialog'
 import DefinitionEditor from '../components/DefinitionEditor'
 import StopRunDialog from '../components/StopRunDialog'
-import { shortRevision, shortVersion } from '../format'
+import { formatBytes, formatDurationMs, relativeTime, shortRevision, shortVersion } from '../format'
 import { toYaml } from '../yaml'
 import {
   NOT_LOADED_NOTE,
@@ -556,6 +556,11 @@ function RunTasks({
       return state === 'queued' || state === 'running' ? 5_000 : false
     },
   })
+  const queries = useQuery({
+    queryKey: ['pipeline-run-queries', namespace, name, runId],
+    queryFn: () => api.pipelineRunQueries(namespace, name, runId),
+    refetchInterval: tasks.data?.run.state === 'running' || tasks.data?.run.state === 'queued' ? 5_000 : false,
+  })
 
   if (tasks.isLoading) return <p className="text-sm text-text-mute">Loading tasks…</p>
   if (tasks.isError || !tasks.data) {
@@ -626,6 +631,43 @@ function RunTasks({
               })}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {queries.data && queries.data.queries.length > 0 && (
+        <div className="space-y-2">
+          <h3 className="text-sm font-semibold">Statements this run sent, slowest first</h3>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <caption className="sr-only">The run's queries, slowest first.</caption>
+              <thead>
+                <tr>
+                  <th scope="col" className="th px-3 py-2">Task</th>
+                  <th scope="col" className="th px-3 py-2">State</th>
+                  <th scope="col" className="th px-3 py-2">Started</th>
+                  <th scope="col" className="th px-3 py-2">Wall</th>
+                  <th scope="col" className="th px-3 py-2">Read</th>
+                  <th scope="col" className="th px-3 py-2">Statement</th>
+                </tr>
+              </thead>
+              <tbody>
+                {queries.data.queries.map((q) => (
+                  <tr key={q.id} className="border-t border-border/70">
+                    <td className="td px-3"><span className="font-mono text-xs">{q.taskId ?? '—'}</span></td>
+                    <td className="td px-3"><RunStateBadge state={q.state} /></td>
+                    <td className="td px-3 text-text-dim text-xs whitespace-nowrap">
+                      {q.startedAt != null ? relativeTime(q.startedAt) : '—'}
+                    </td>
+                    <td className="td px-3 text-text-dim text-xs whitespace-nowrap">{formatDurationMs(q.wallMs)}</td>
+                    <td className="td px-3 text-text-dim text-xs whitespace-nowrap">{formatBytes(q.inputBytes)}</td>
+                    <td className="td px-3">
+                      <span className="font-mono text-xs line-clamp-2 break-all" title={q.sql}>{q.sql}</span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
 

@@ -1848,6 +1848,8 @@ test.describe('pipelines', () => {
       const path = url.pathname
       const method = request.method()
       if (path === '/api/me' && method === 'GET') return json(route, me)
+      // A run's statements (#788 S5): an empty list; no test here stubs them.
+      if (path.endsWith('/queries') && method === 'GET') return json(route, { queries: [] })
       if (read?.(route, path, method, url)) return
       if (path === '/api/pipelines' && method === 'GET') return json(route, { pipelines: rows })
       if (method !== 'GET' && write?.(route, path, method)) return

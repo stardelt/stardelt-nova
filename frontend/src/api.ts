@@ -994,6 +994,19 @@ export type TaskView = {
 /** `GET …/runs/{runId}`: one run and its task instances. */
 export type RunResponse = { run: RunView; tasks: TaskView[] }
 
+/** One statement a run's task sent to the engine (stardelt-nova#788 S5). */
+export type RunQueryView = {
+  id: string
+  state: string
+  taskId: string | null
+  startedAt: number | null
+  wallMs: number | null
+  executionMs: number | null
+  inputBytes: number | null
+  inputRows: number | null
+  sql: string
+}
+
 /** One output of an executed code cell, as nbformat 4 stores it (#683). */
 export type NotebookOutput = {
   output_type: string
@@ -1581,6 +1594,8 @@ export const api = {
   resumePipeline: (ns: string, name: string)  => jpost<PipelineView>(`/api/pipelines/${seg(ns)}/${seg(name)}/resume`, {}),
   pipelineRun:  (ns: string, name: string, runId: string) =>
     jget<RunResponse>(`/api/pipelines/${seg(ns)}/${seg(name)}/runs/${seg(runId)}`),
+  pipelineRunQueries: (namespace: string, name: string, runId: string) =>
+    jget<{ queries: RunQueryView[] }>(`/api/pipelines/${seg(namespace)}/${seg(name)}/runs/${seg(runId)}/queries`),
   stopPipelineRun: (ns: string, name: string, runId: string) =>
     jpost<RunView>(`/api/pipelines/${seg(ns)}/${seg(name)}/runs/${seg(runId)}/stop`, {}),
   retryPipelineRun: (ns: string, name: string, runId: string) =>

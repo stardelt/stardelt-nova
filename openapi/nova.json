@@ -5543,6 +5543,86 @@
         }
       }
     },
+    "/api/pipelines/{namespace}/{name}/runs/{run_id}/queries": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "description": "The statements one run sent to the query engine, slowest first, read from the `pipeline=` and `run=` client tags the pipeline loader writes. Access is the pipeline's (`load_visible`), not the query log's owner rule: these statements ran as the pipeline's service principal, so the query-log scope would hide them from the person who can see the run. Each answers taskId, startedAt, wallMs, executionMs, inputBytes, inputRows and the statement; with NOVA_QUERY_LOG_REDACT_LITERALS=1 every statement shows '?' in place of its string literals. Answers `Cache-Control: no-store`.",
+        "operationId": "pipelines_run_queries",
+        "parameters": [
+          {
+            "name": "namespace",
+            "in": "path",
+            "description": "The Pipeline's namespace (Nova's own)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Pipeline name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "run_id",
+            "in": "path",
+            "description": "Airflow's run id, for example `scheduled__2026-11-14T03:00:00+00:00`",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The run's statements, slowest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunQueriesResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No token to sign in with",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such pipeline for this caller",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No cluster connection, or the state store is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/pipelines/{namespace}/{name}/runs/{run_id}/retry": {
       "post": {
         "tags": [
@@ -12072,6 +12152,86 @@
               "type": "string",
               "writeOnly": true
             }
+          }
+        }
+      },
+      "RunQueriesResponse": {
+        "type": "object",
+        "description": "`GET …/runs/{run_id}/queries` — the run's statements, slowest first.",
+        "required": [
+          "queries"
+        ],
+        "properties": {
+          "queries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RunQueryView"
+            }
+          }
+        }
+      },
+      "RunQueryView": {
+        "type": "object",
+        "description": "One statement a run's task sent to the engine (nova#788 S5).",
+        "required": [
+          "id",
+          "state",
+          "sql"
+        ],
+        "properties": {
+          "executionMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "id": {
+            "type": "string",
+            "description": "The engine's query id."
+          },
+          "inputBytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "inputRows": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "sql": {
+            "type": "string",
+            "description": "The statement; string literals are replaced by `?` under NOVA_QUERY_LOG_REDACT_LITERALS=1."
+          },
+          "startedAt": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Started at, epoch milliseconds."
+          },
+          "state": {
+            "type": "string"
+          },
+          "taskId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The task id from the `task=` client tag, when the loader sent one."
+          },
+          "wallMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
           }
         }
       },

@@ -2531,6 +2531,32 @@ pub struct RunResponse {
     pub tasks: Vec<TaskView>,
 }
 
+/// One statement a run's task sent to the engine (nova#788 S5).
+#[derive(Debug, Clone, PartialEq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RunQueryView {
+    /// The engine's query id.
+    pub id: String,
+    pub state: String,
+    /// The task id from the `task=` client tag, when the loader sent one.
+    pub task_id: Option<String>,
+    /// Started at, epoch milliseconds.
+    pub started_at: Option<i64>,
+    pub wall_ms: Option<i64>,
+    pub execution_ms: Option<i64>,
+    pub input_bytes: Option<i64>,
+    pub input_rows: Option<i64>,
+    /// The statement; string literals are replaced by `?` under NOVA_QUERY_LOG_REDACT_LITERALS=1.
+    pub sql: String,
+}
+
+/// `GET …/runs/{run_id}/queries` — the run's statements, slowest first.
+#[derive(Debug, Clone, PartialEq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RunQueriesResponse {
+    pub queries: Vec<RunQueryView>,
+}
+
 fn run_view(run: &DagRun) -> RunView {
     RunView {
         run_id: run.dag_run_id.clone(),
@@ -3471,6 +3497,106 @@ async fn run_detail(
         run: run_view(run),
         tasks: tasks.iter().map(task_view).collect(),
     })
+}
+
+/// One row of the run-queries read, in the query's column order. A named alias because the
+/// tuple is too wide for `clippy::type_complexity`.
+type RunQueryRow = (
+    String,
+    String,
+    Vec<String>,
+    String,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+);
+
+/// The statements of one run, selected by the tags the pipeline loader sends
+/// (`stardelt-demos` `dags/stardelt_pipelines/trino.py`): the pipeline tag must match too,
+/// because Airflow's scheduled run ids are the same for every pipeline.
+async fn run_queries_for(
+    pool: &sqlx::PgPool,
+    namespace: &str,
+    name: &str,
+    run_id: &str,
+    redact: bool,
+) -> Result<Vec<RunQueryView>, sqlx::Error> {
+    let pipeline = format!("pipeline={namespace}/{name}");
+    let run = format!("run={run_id}");
+    let rows: Vec<RunQueryRow> = sqlx::query_as(
+        "SELECT query_id, state, client_tags, sql_text, \
+            (extract(epoch FROM started_at) * 1000)::bigint AS started_ms, \
+            wall_ms, execution_ms, input_bytes, input_rows \
+         FROM query_log \
+         WHERE client_tags @> ARRAY[$1, $2]::text[] AND state <> 'QUEUED' \
+         ORDER BY COALESCE(wall_ms, 0) DESC, started_at DESC NULLS LAST \
+         LIMIT 200",
+    )
+    .bind(&pipeline)
+    .bind(&run)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(id, state, tags, sql, started_at, wall_ms, execution_ms, input_bytes, input_rows)| {
+                RunQueryView {
+                    id,
+                    state,
+                    task_id: tags
+                        .iter()
+                        .find_map(|tag| tag.strip_prefix("task=").map(str::to_string)),
+                    started_at,
+                    wall_ms,
+                    execution_ms,
+                    input_bytes,
+                    input_rows,
+                    sql: if redact {
+                        crate::query_log::redact_literals(&sql)
+                    } else {
+                        sql
+                    },
+                }
+            },
+        )
+        .collect())
+}
+
+/// `GET …/runs/{run_id}/queries`: the run's statements, slowest first. Access is the
+/// pipeline's (`load_visible`), not the query log's owner rule: these statements ran as the
+/// pipeline's service principal.
+async fn run_queries_answer(
+    signed: SignedIn,
+    namespace: String,
+    name: String,
+    run_id: String,
+) -> Result<RunQueriesResponse, Fail> {
+    let resources = resources(signed.state()).ok_or_else(no_cluster)?;
+    load_visible(&resources, signed.identity(), &namespace, &name).await?;
+    let Some(pool) = signed.state().db.as_ref() else {
+        return Err(Fail::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the state store is not configured",
+        ));
+    };
+    let queries = run_queries_for(
+        pool,
+        &namespace,
+        &name,
+        &run_id,
+        signed.state().redact_query_log_literals,
+    )
+    .await
+    .map_err(|e| {
+        tracing::warn!(error = %e, "run queries read failed");
+        Fail::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the query log is not readable",
+        )
+    })?;
+    Ok(RunQueriesResponse { queries })
 }
 
 /// `GET …/tasks/{task_id}/logs`: one page of a task's log. `try` defaults to the task's last
@@ -5153,6 +5279,10 @@ pub(crate) fn router() -> Router<Arc<AppState>> {
         .route("/pipelines/{namespace}/{name}/resume", post(resume))
         .route("/pipelines/{namespace}/{name}/runs/{run_id}", get(run))
         .route(
+            "/pipelines/{namespace}/{name}/runs/{run_id}/queries",
+            get(run_queries),
+        )
+        .route(
             "/pipelines/{namespace}/{name}/runs/{run_id}/stop",
             post(stop),
         )
@@ -5751,6 +5881,31 @@ pub(crate) async fn run(
         )
         .await,
     )
+}
+
+#[utoipa::path(
+    get,
+    operation_id = "pipelines_run_queries",
+    path = "/api/pipelines/{namespace}/{name}/runs/{run_id}/queries",
+    tag = "public",
+    description = "The statements one run sent to the query engine, slowest first, read from the `pipeline=` and `run=` client tags the pipeline loader writes. Access is the pipeline's (`load_visible`), not the query log's owner rule: these statements ran as the pipeline's service principal, so the query-log scope would hide them from the person who can see the run. Each answers taskId, startedAt, wallMs, executionMs, inputBytes, inputRows and the statement; with NOVA_QUERY_LOG_REDACT_LITERALS=1 every statement shows '?' in place of its string literals. Answers `Cache-Control: no-store`.",
+    params(
+        ("namespace" = String, Path, description = "The Pipeline's namespace (Nova's own)"),
+        ("name" = String, Path, description = "Pipeline name"),
+        ("run_id" = String, Path, description = "Airflow's run id, for example `scheduled__2026-11-14T03:00:00+00:00`"),
+    ),
+    responses(
+        (status = 200, description = "The run's statements, slowest first", body = RunQueriesResponse),
+        (status = 401, description = "No token to sign in with", body = crate::openapi::ErrorResponse),
+        (status = 404, description = "No such pipeline for this caller", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "No cluster connection, or the state store is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub(crate) async fn run_queries(
+    signed: SignedIn,
+    Path((namespace, name, run_id)): Path<(String, String, String)>,
+) -> Response {
+    answer(run_queries_answer(signed, namespace, name, run_id).await)
 }
 
 #[utoipa::path(
@@ -7075,6 +7230,48 @@ mod tests {
         assert!(
             fake.lock().unwrap().calls.is_empty(),
             "neither route asks Airflow about a hidden pipeline"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_queries_of_a_hidden_pipeline_is_404_before_the_state_store_is_read() {
+        // The state has no database: a route that read the store before the visibility check
+        // would answer 503 "the state store is not configured", not 404.
+        let kube = fake_kube::start(vec![resource("hidden", Some("finance"))]).await;
+        let (store, _store_fake) = crate::secret_store::fake::start().await;
+        let (airflow, airflow_fake) = fake_airflow::start().await;
+        let namespace = crate::cluster::namespace();
+        let app = router()
+            .with_state(test_state(Some(kube), airflow, store))
+            .layer(Extension(principal(who("sub-ada", &["analytics"], false))));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/pipelines/{namespace}/hidden/runs/scheduled__2026-11-14T03:00:00+00:00/queries"
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["error"], "no such pipeline");
+        assert!(
+            airflow_fake.lock().unwrap().calls.is_empty(),
+            "a hidden pipeline never reaches Airflow"
         );
     }
 
@@ -14157,5 +14354,73 @@ mod tests {
             }]
         );
         assert!(resources.list().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore = "needs NOVA_TEST_DATABASE_URL"]
+    async fn the_run_queries_read_the_tags_the_loader_sends() {
+        let pool = crate::db::test_support::migrated_pool().await;
+        // Two statements of the run, one statement of the same run id in another pipeline,
+        // and one statement of another run of this pipeline: only the first two may answer.
+        let seed = [
+            (
+                "rq-1",
+                "{stardelt-pipeline,pipeline=stardelt/mobility-medallion,task=gold_kpis,run=scheduled__2026-11-14T03:00:00+00:00}",
+                "select 'a' from t",
+                6000_i64,
+            ),
+            (
+                "rq-2",
+                "{stardelt-pipeline,pipeline=stardelt/mobility-medallion,task=quality_gate,run=scheduled__2026-11-14T03:00:00+00:00}",
+                "select 'b' from t",
+                700_i64,
+            ),
+            (
+                "rq-3",
+                "{stardelt-pipeline,pipeline=stardelt/other,task=gold_kpis,run=scheduled__2026-11-14T03:00:00+00:00}",
+                "select 'c' from t",
+                9999_i64,
+            ),
+            (
+                "rq-4",
+                "{stardelt-pipeline,pipeline=stardelt/mobility-medallion,task=gold_kpis,run=scheduled__2026-11-13T03:00:00+00:00}",
+                "select 'd' from t",
+                9999_i64,
+            ),
+        ];
+        for (id, tags, sql, wall) in seed {
+            sqlx::query(
+                "INSERT INTO query_log (query_id, state, principal, client_tags, sql_text, sql_hash, created_at, started_at, wall_ms) \
+                 VALUES ($1, 'FINISHED', 'svc-pipeline', $2::text[], $3, $4, now(), now(), $5)",
+            )
+            .bind(id).bind(tags).bind(sql).bind(format!("h-{id}")).bind(wall)
+            .execute(&pool).await.unwrap();
+        }
+        let queries = run_queries_for(
+            &pool,
+            "stardelt",
+            "mobility-medallion",
+            "scheduled__2026-11-14T03:00:00+00:00",
+            false,
+        )
+        .await
+        .unwrap();
+        let ids: Vec<&str> = queries.iter().map(|q| q.id.as_str()).collect();
+        assert_eq!(ids, ["rq-1", "rq-2"]); // slowest first; other pipeline and other run excluded
+        assert_eq!(queries[0].task_id.as_deref(), Some("gold_kpis"));
+        let redacted = run_queries_for(
+            &pool,
+            "stardelt",
+            "mobility-medallion",
+            "scheduled__2026-11-14T03:00:00+00:00",
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(
+            !redacted[0].sql.contains("'a'"),
+            "the literal is redacted: {}",
+            redacted[0].sql
+        );
     }
 }
