@@ -522,6 +522,49 @@ pub struct QueryFailure {
     message: Option<String>,
 }
 
+/// One earlier run of the same statement (nova#788 S4).
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryRun {
+    pub id: String,
+    pub state: String,
+    /// Finished at, epoch milliseconds; null while the engine never reported an end.
+    pub ended_at: Option<i64>,
+    pub wall_ms: Option<i64>,
+    pub execution_ms: Option<i64>,
+    pub input_bytes: Option<i64>,
+    pub input_rows: Option<i64>,
+}
+
+/// The runs of the same statement that the caller can see, newest first.
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct QueryHistory {
+    pub runs: Vec<HistoryRun>,
+    /// Median wall time of `runs` in milliseconds; null when no run has a timing.
+    pub median_wall_ms: Option<i64>,
+    /// True when this query's wall time is more than twice the median and at least three runs were compared.
+    pub slower: bool,
+}
+
+/// The median of the runs' wall times (integer milliseconds) and whether `current` is more
+/// than twice it. Fewer than three timed runs is never "slower": there is nothing to compare.
+pub fn history_summary(values: &[Option<i64>], current: Option<i64>) -> (Option<i64>, bool) {
+    let mut timed: Vec<i64> = values.iter().filter_map(|v| *v).collect();
+    if timed.is_empty() {
+        return (None, false);
+    }
+    timed.sort_unstable();
+    let n = timed.len();
+    let median = if n % 2 == 1 {
+        timed[n / 2]
+    } else {
+        (timed[n / 2 - 1] + timed[n / 2]) / 2
+    };
+    let slower = n >= 3 && median > 0 && matches!(current, Some(c) if c > 2 * median);
+    (Some(median), slower)
+}
+
 /// Everything stored about one query: the whole statement, timing, data volumes, tables.
 #[derive(Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -753,6 +796,124 @@ pub async fn profile(
         .into_response()
 }
 
+/// The visibility key of a history: whose statement it is, and which statement.
+#[derive(FromRow)]
+struct HistoryBase {
+    principal: String,
+    sql_hash: String,
+}
+
+/// One stored run of the statement.
+#[derive(FromRow)]
+struct HistoryRow {
+    query_id: String,
+    state: String,
+    ended_ms: Option<i64>,
+    wall_ms: Option<i64>,
+    execution_ms: Option<i64>,
+    input_bytes: Option<i64>,
+    input_rows: Option<i64>,
+}
+
+/// `GET /api/query-log/{id}/history` — the last runs of the same statement, and whether this
+/// one is slower than their median.
+#[utoipa::path(
+    get,
+    operation_id = "query_log_history",
+    path = "/api/query-log/{id}/history",
+    tag = "public",
+    description = "The last 20 runs of the same statement by the same principal: each one's state, end time, wall and execution time, bytes and rows read, newest first. The same visibility rule as the detail: somebody else's query answers 404, exactly like a missing one, and an administrator who opens another person's history is audited. medianWallMs is the median of the returned runs' wall times; slower is true when this run's wall time is more than twice that median and at least three runs were compared. Answers Cache-Control: no-store.",
+    params(("id" = String, Path, description = "The engine's query id")),
+    responses(
+        (status = 200, description = "The runs of the same statement, newest first", body = QueryHistory),
+        (status = 404, description = "No such query, or it is not the caller's to see", body = crate::openapi::ErrorResponse),
+        (status = 503, description = "The state store is not configured", body = crate::openapi::ErrorResponse),
+    )
+)]
+pub async fn history(
+    State(s): State<Arc<AppState>>,
+    caller: Option<Extension<Principal>>,
+    Path(id): Path<String>,
+) -> Response {
+    let Some(pool) = s.db.as_ref() else {
+        return unavailable();
+    };
+    let who = Caller::of(caller.as_ref().map(|c| &c.0), &s.dev_user);
+    let base: Option<HistoryBase> =
+        match sqlx::query_as("SELECT principal, sql_hash FROM query_log WHERE query_id = $1")
+            .bind(&id)
+            .fetch_optional(pool)
+            .await
+        {
+            Ok(row) => row,
+            Err(e) => return store_failed(e),
+        };
+    let Some(base) = base else {
+        return not_found();
+    };
+    let owners = principal_owners(&s).await;
+    let owner = RowOwner {
+        principal: &base.principal,
+        owner_group: owners.get(&base.principal).map(String::as_str),
+    };
+    if !visible(&owner, &who.viewer()) {
+        return not_found();
+    }
+    if base.principal != who.username && base.principal != who.sub {
+        // An administrator opening somebody else's history leaves a trace.
+        tracing::info!(
+            target: "audit",
+            actor = %who.username,
+            sub = %who.sub,
+            action = "query_log.read_other_history",
+            query_id = %id,
+            owner = %base.principal,
+            "administrator opened another user's query history"
+        );
+    }
+    let rows: Vec<HistoryRow> = match sqlx::query_as(
+        "SELECT l.query_id, l.state, \
+            (extract(epoch FROM l.ended_at) * 1000)::bigint AS ended_ms, \
+            l.wall_ms, l.execution_ms, l.input_bytes, l.input_rows \
+         FROM query_log l \
+         WHERE l.principal = $1 AND l.sql_hash = $2 AND l.state <> 'QUEUED' \
+         ORDER BY l.ended_at DESC NULLS LAST, l.query_id DESC \
+         LIMIT 20",
+    )
+    .bind(&base.principal)
+    .bind(&base.sql_hash)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => return store_failed(e),
+    };
+    let runs: Vec<HistoryRun> = rows
+        .into_iter()
+        .map(|r| HistoryRun {
+            id: r.query_id,
+            state: r.state,
+            ended_at: r.ended_ms,
+            wall_ms: r.wall_ms,
+            execution_ms: r.execution_ms,
+            input_bytes: r.input_bytes,
+            input_rows: r.input_rows,
+        })
+        .collect();
+    let current = runs.iter().find(|r| r.id == id).and_then(|r| r.wall_ms);
+    let values: Vec<Option<i64>> = runs.iter().map(|r| r.wall_ms).collect();
+    let (median_wall_ms, slower) = history_summary(&values, current);
+    (
+        [(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))],
+        Json(QueryHistory {
+            runs,
+            median_wall_ms,
+            slower,
+        }),
+    )
+        .into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -840,6 +1001,23 @@ mod tests {
         })
         .unwrap();
         assert_eq!(page, serde_json::json!({ "items": [], "nextCursor": null }));
+    }
+
+    #[test]
+    fn history_summary_is_the_median_and_the_doubling_flag() {
+        assert_eq!(
+            history_summary(&[Some(900), Some(1000), Some(2324)], Some(2324)),
+            (Some(1000), true)
+        );
+        assert_eq!(
+            history_summary(&[Some(900), Some(1000)], Some(900)),
+            (Some(950), false)
+        );
+        assert_eq!(
+            history_summary(&[Some(1000), Some(1000), None], Some(1999)),
+            (Some(1000), false)
+        );
+        assert_eq!(history_summary(&[], None), (None, false));
     }
 
     #[test]
