@@ -197,6 +197,27 @@ test('the plan is there, as the engine indents it', async ({ page }) => {
   await expect(page.getByText('└─ TableScan', { exact: false })).toBeVisible()
 })
 
+test('the share bars take a line of their own, at the row start', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await stub(page)
+  await page.goto('/queries')
+
+  await openProfile(page)
+  // One track per operator row: `.basis-full` wraps it, the inner div is the 448 px track.
+  const tracks = page.locator('#ql-q1 .basis-full > div')
+  await expect(tracks).toHaveCount(2)
+  const row = await page.locator('#ql-q1 ol > li').first().boundingBox()
+  const first = await tracks.nth(0).boundingBox()
+  const second = await tracks.nth(1).boundingBox()
+  expect(row).not.toBeNull()
+  expect(first).not.toBeNull()
+  expect(second).not.toBeNull()
+  // Both tracks start where the row's text starts — not after it — and both are max-w-md (448 px).
+  expect(first!.x).toBeCloseTo(row!.x, 0)
+  expect(second!.x).toBeCloseTo(row!.x, 0)
+  expect(first!.width).toBeCloseTo(448, 0)
+})
+
 test('a query without a profile says so calmly', async ({ page }) => {
   await stub(page, true)
   await page.goto('/queries')
