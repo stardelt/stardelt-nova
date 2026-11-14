@@ -125,6 +125,7 @@ mod pipelines;
 #[allow(dead_code)]
 mod query_log;
 // Maps the engine's event payloads to log records; wired up by the collector ticket.
+mod query_hints;
 mod query_log_api;
 mod query_log_collector;
 #[allow(dead_code)]
@@ -2273,6 +2274,10 @@ mod router_tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["operators"].as_array().expect("operators").len(), 17);
         assert!(body["plan"].as_str().expect("a plan").len() > 1_000);
+        assert!(
+            body["hints"].as_array().expect("hints").is_empty(),
+            "{body}"
+        );
 
         let (status, body) = call(&bob, "GET", &path, None).await;
         assert_eq!(

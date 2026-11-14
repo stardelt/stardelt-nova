@@ -6320,7 +6320,7 @@
           "public"
         ],
         "summary": "`GET /api/query-log/{id}/profile` — where one finished query spent its time: the engine's\nplan and the per-operator statistics it reported.",
-        "description": "The plan and per-operator statistics of one finished query. The same rule as the detail: somebody else's query answers 404, exactly like a missing one, and an administrator who opens another person's profile is audited. A query without a stored profile answers 404 with a sentence (still running, older than the profile retention, or the engine sent none). With NOVA_QUERY_LOG_REDACT_LITERALS=1 somebody else's plan shows '?' in place of every string literal.",
+        "description": "The plan and per-operator statistics of one finished query. The same rule as the detail: somebody else's query answers 404, exactly like a missing one, and an administrator who opens another person's profile is audited. A query without a stored profile answers 404 with a sentence (still running, older than the profile retention, or the engine sent none). With NOVA_QUERY_LOG_REDACT_LITERALS=1 somebody else's plan shows '?' in place of every string literal. The answer also carries \"hints\", an array of deterministic suggestions computed from the profile and the query's timing, each with its evidence and a documentation link; an empty array means no rule found evidence.",
         "operationId": "query_log_profile",
         "parameters": [
           {
