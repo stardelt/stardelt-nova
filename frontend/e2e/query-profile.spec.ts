@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { test, expect, type Route } from '@playwright/test'
 
 // The Profile group of an expanded query-log row (stardelt-nova#788 S2): the operators that
@@ -89,7 +90,7 @@ const PROFILE = {
 }
 
 /** `missingProfile` answers the profile route the way the backend answers a query without one. */
-async function stub(page: import('@playwright/test').Page, missingProfile = false) {
+async function stub(page: import('@playwright/test').Page, missingProfile = false, profile: unknown = PROFILE) {
   await page.route('**/api/**', async (r) => {
     const path = new URL(r.request().url()).pathname
 
@@ -106,10 +107,37 @@ async function stub(page: import('@playwright/test').Page, missingProfile = fals
           404,
         )
       }
-      return json(r, PROFILE)
+      return json(r, profile)
     }
     return json(r, {})
   })
+}
+
+/** The Profile group of the expanded row. */
+const profileGroup = (page: import('@playwright/test').Page) =>
+  page.locator('#ql-q1 details').filter({ has: page.locator('summary', { hasText: 'Profile' }) })
+
+/** The real Trino 480 completed event the S0 spike captured (#922). */
+const REAL_EVENT = JSON.parse(
+  readFileSync(new URL('../../backend/src/testdata/query_log/completed_profile.json', import.meta.url), 'utf8'),
+)
+
+/** What the backend keeps of that event at `/api/query-log/{id}/profile`. */
+const realProfile = {
+  plan: REAL_EVENT.metadata.plan ?? null,
+  operators: (REAL_EVENT.statistics.operatorSummaries as unknown[]).map((o) =>
+    typeof o === 'string' ? JSON.parse(o) : o,
+  ),
+  spilledBytes: 0,
+  completedSplits: REAL_EVENT.statistics.completedSplits,
+  inputs: ((REAL_EVENT.ioMetadata?.inputs ?? []) as Record<string, unknown>[]).map((i) => ({
+    catalogName: i.catalogName,
+    schema: i.schema,
+    table: i.table,
+    physicalInputBytes: i.physicalInputBytes,
+    physicalInputRows: i.physicalInputRows,
+  })),
+  truncated: false,
 }
 
 /** Expand the one row, then open the Profile group. */
@@ -123,8 +151,12 @@ test('the profile names the operators and their share', async ({ page }) => {
   await page.goto('/queries')
 
   await openProfile(page)
-  await expect(page.getByText('TableScanOperator')).toBeVisible()
-  await expect(page.getByText('AggregationOperator')).toBeVisible()
+  // Plain words, the engine's own type in the tooltip.
+  const group = profileGroup(page)
+  await expect(group.getByText('Read', { exact: true })).toBeVisible()
+  await expect(group.getByText('Aggregate', { exact: true })).toBeVisible()
+  await expect(group.getByTitle('TableScanOperator')).toBeVisible()
+  await expect(group.getByTitle('AggregationOperator')).toBeVisible()
   // Two operators, 1.00s of CPU each: half the time went into each.
   await expect(page.getByText('50 %').first()).toBeVisible()
 })
@@ -151,4 +183,29 @@ test('a query without a profile says so calmly', async ({ page }) => {
     ),
   ).toBeVisible()
   await expect(panel.locator('.text-bad')).toHaveCount(0)
+})
+
+test('the real engine event reads in plain words', async ({ page }) => {
+  await stub(page, false, realProfile)
+  await page.goto('/queries')
+
+  await openProfile(page)
+  const group = profileGroup(page)
+  // Eleven engine types, every one of them in words: no class name reaches the screen.
+  await expect(group.getByText(/Operator\b/)).toHaveCount(0)
+  await expect(group.getByText('Join', { exact: true })).toBeVisible()
+  await expect(group.getByText('Read and filter', { exact: true })).toBeVisible()
+  // Every one of the five rows has a share bar.
+  await expect(group.locator('li > div.basis-full')).toHaveCount(5)
+})
+
+test('an answer from table metadata says so', async ({ page }) => {
+  await stub(page, false, {
+    ...PROFILE,
+    inputs: [{ catalogName: 'iceberg', schema: 's0', table: 'orders', physicalInputBytes: 0, physicalInputRows: 300343 }],
+  })
+  await page.goto('/queries')
+
+  await openProfile(page)
+  await expect(page.getByText('Answered from table metadata')).toBeVisible()
 })

@@ -97,6 +97,9 @@ condition forced on for the shot (in `dev` mode `/api/me` answers `shared_accoun
 so it does not render otherwise). At 390 px it wraps to four lines above the catalog and
 covers no control.
 
+`query-profile-*.png` — the Profile group of a query (stardelt-nova#788), from the real Trino 480
+event of the S0 spike (`completed_profile.json`): plain-word operators with share bars and the plan.
+
 `platform-*.png` — the Platform page (stardelt-nova#865), which replaces the old Apps and
 Health pages, at 1440×1180 and 390×900, dark, from the built UI with stubbed `/api/me`
 (administrator), `/api/apps`, `/api/apps/links`, `/api/workloads`, `/api/trino/cluster`,
