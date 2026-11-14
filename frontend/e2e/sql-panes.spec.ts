@@ -70,11 +70,15 @@ test('the Tables pane inserts a table name at the cursor, and the catalog still 
 
   const editor = page.getByLabel('SQL query')
   await editor.fill('SELECT * FROM ')
+  // The fill must reach React state: a lost input event shows here, not at the final assertion (#934).
+  await expect(editor).toHaveValue('SELECT * FROM ')
   await editor.click()
   // The caret is right after the space the person typed.
   await page.keyboard.press('End')
 
   await tree.getByRole('button', { name: 'nyc_taxi' }).click()
+  // Opening a schema must not drop what the person typed (#934).
+  await expect(editor).toHaveValue('SELECT * FROM ')
   await tree.getByRole('button', { name: 'trips', exact: true }).click()
   await expect(editor).toBeFocused()
   await expect(editor).toHaveValue('SELECT * FROM warehouse.nyc_taxi.trips')
