@@ -818,6 +818,14 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 pub trait BearerValidator: Send + Sync {
     fn validate<'a>(&'a self, token: &'a str) -> BoxFuture<'a, Result<Identity, AuthError>>;
+    /// Validate against an audience list other than the browser's (the MCP resource).
+    fn validate_for<'a>(
+        &'a self,
+        token: &'a str,
+        _audiences: &'a [String],
+    ) -> BoxFuture<'a, Result<Identity, AuthError>> {
+        self.validate(token)
+    }
 }
 
 struct OidcBearer {
@@ -833,6 +841,20 @@ impl BearerValidator for OidcBearer {
             let claims = self
                 .provider
                 .verify(token, &self.audiences, &self.client_id)
+                .await?;
+            identity_from_claims(&claims, &self.claims)
+        })
+    }
+
+    fn validate_for<'a>(
+        &'a self,
+        token: &'a str,
+        audiences: &'a [String],
+    ) -> BoxFuture<'a, Result<Identity, AuthError>> {
+        Box::pin(async move {
+            let claims = self
+                .provider
+                .verify(token, audiences, &self.client_id)
                 .await?;
             identity_from_claims(&claims, &self.claims)
         })
@@ -1315,6 +1337,32 @@ impl AuthState {
             },
             facts,
         ))
+    }
+
+    /// The MCP endpoint's bearer check: `Authorization: Bearer` only (never the session
+    /// cookie), validated against `audiences` instead of the browser's.
+    pub async fn authenticate_bearer_for(
+        &self,
+        headers: &HeaderMap,
+        audiences: &[String],
+    ) -> Result<Principal, AuthError> {
+        let value = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .ok_or(AuthError::Unauthenticated)?;
+        let Some((scheme, token)) = value.split_once(' ') else {
+            return Err(AuthError::Unauthenticated);
+        };
+        if !scheme.eq_ignore_ascii_case("bearer") || token.trim().is_empty() {
+            return Err(AuthError::Unauthenticated);
+        }
+        let token = token.trim();
+        let identity = self.bearer.validate_for(token, audiences).await?;
+        Ok(Principal {
+            identity,
+            via: "bearer",
+            access_token: Some(Secret(token.to_string())),
+        })
     }
 
     /// What `/api/me` reports beyond the identity: the administrator decision and, for a
@@ -2994,6 +3042,21 @@ mod tests {
                 }
             })
         }
+
+        /// The MCP resource's own audience: a token is good only for `stardelt-mcp`.
+        fn validate_for<'a>(
+            &'a self,
+            token: &'a str,
+            audiences: &'a [String],
+        ) -> BoxFuture<'a, Result<Identity, AuthError>> {
+            Box::pin(async move {
+                if token == "good" && audiences.len() == 1 && audiences[0] == "stardelt-mcp" {
+                    identity_from_claims(&json!({ "sub": "mcp-user" }), &ClaimConfig::default())
+                } else {
+                    Err(AuthError::InvalidToken("wrong audience"))
+                }
+            })
+        }
     }
 
     fn test_auth() -> Arc<AuthState> {
@@ -3002,6 +3065,36 @@ mod tests {
         };
         let provider = Arc::new(Provider::new(reqwest::Client::new(), cfg.issuer.clone()));
         AuthState::with_validator(*cfg, provider, Arc::new(MockValidator), None)
+    }
+
+    /// The MCP endpoint's bearer check: the header only, and only for its own audience.
+    #[tokio::test]
+    async fn mcp_bearer_rejects_another_audience() {
+        let auth = test_auth();
+        let mcp = ["stardelt-mcp".to_string()];
+
+        // No `Authorization` header: unauthenticated, never a fallback to the cookie.
+        let no_token = HeaderMap::new();
+        assert!(matches!(
+            auth.authenticate_bearer_for(&no_token, &mcp).await,
+            Err(AuthError::Unauthenticated)
+        ));
+
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, "Bearer good".parse().unwrap());
+        let principal = auth
+            .authenticate_bearer_for(&headers, &mcp)
+            .await
+            .expect("a token for the MCP audience");
+        assert_eq!(principal.identity.sub, "mcp-user");
+        assert_eq!(principal.via, "bearer");
+
+        // The browser audience is not the MCP audience.
+        let nova = ["nova".to_string()];
+        assert!(matches!(
+            auth.authenticate_bearer_for(&headers, &nova).await,
+            Err(AuthError::InvalidToken(_))
+        ));
     }
 
     fn session_for(auth: &AuthState, sub: &str) -> String {

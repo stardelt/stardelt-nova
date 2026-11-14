@@ -2587,6 +2587,8 @@ mod tests {
             demo: false,
             forward_identity: false,
             redact_query_log_literals: false,
+            mcp: None,
+            auth: None,
             jobs: Mutex::new(Vec::new()),
             demo_state: std::sync::RwLock::new(crate::demo::DemoState::default()),
             kube: None,
