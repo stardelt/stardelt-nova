@@ -97,6 +97,27 @@ export default function Lineage() {
     setParams(next)
   }
 
+  // No table picked: open on the table the caller reads most, preferring one that something writes.
+  const readTables = useQuery({
+    queryKey: ['read-tables'],
+    queryFn: () => api.readTables(),
+    enabled: !hasSelection,
+    staleTime: 60_000,
+    retry: false,
+  })
+  useEffect(() => {
+    if (hasSelection) return
+    const candidates = (readTables.data?.tables ?? []).filter((t) => t.namespace.includes('.'))
+    const first = candidates.find((t) => t.lastWrite) ?? candidates[0]
+    if (!first) return
+    const dot = first.namespace.indexOf('.')
+    const next = new URLSearchParams(params)
+    next.set('catalog', first.namespace.slice(0, dot))
+    next.set('schema', first.namespace.slice(dot + 1))
+    next.set('table', first.name)
+    setParams(next, { replace: true })
+  }, [hasSelection, readTables.data, params, setParams])
+
   const graph: LineageGraphView = data ?? {
     nodes: [],
     edges: [],

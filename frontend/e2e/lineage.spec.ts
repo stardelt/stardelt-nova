@@ -38,13 +38,19 @@ const graph = () => ({
 const me = { user: 'alice', auth_mode: 'oidc', demo: false, warehouse: 'warehouse', is_admin: true, groups: ['admins'] }
 
 /** Every request of the page: `/api/lineage` answers the fixture, everything else is empty. */
-async function stub(page: import('@playwright/test').Page, lineage: unknown = graph(), runs: unknown = []) {
+async function stub(
+  page: import('@playwright/test').Page,
+  lineage: unknown = graph(),
+  runs: unknown = [],
+  readTables: unknown = { tables: [] },
+) {
   await page.route('**/api/**', (r) => {
     const path = new URL(r.request().url()).pathname
     if (path === '/api/me') return json(r, me)
     if (path === '/api/catalogs') return json(r, [])
     if (path === '/api/lineage') return json(r, lineage)
     if (path === '/api/runs') return json(r, runs)
+    if (path === '/api/lineage/read-tables') return json(r, readTables)
     return json(r, [])
   })
 }
@@ -52,13 +58,39 @@ async function stub(page: import('@playwright/test').Page, lineage: unknown = gr
 test('no selection asks for a table', async ({ page }) => {
   const lineageRequests: string[] = []
   page.on('request', (r) => {
-    if (r.url().includes('/api/lineage')) lineageRequests.push(r.url())
+    if (new URL(r.url()).pathname === '/api/lineage') lineageRequests.push(r.url())
   })
   await stub(page)
   await page.goto('/lineage')
   await expect(page.getByText('Pick a table to see what it is made from')).toBeVisible()
   await page.waitForTimeout(300)
   expect(lineageRequests).toEqual([])
+})
+
+test('no selection opens on the table read most', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.emulateMedia({ colorScheme: 'dark' })
+  await page.addInitScript(() => {
+    try {
+      localStorage.setItem('stardelt-nova:theme', 'dark')
+    } catch {
+      /* ignore */
+    }
+  })
+  await stub(page, graph(), [], {
+    tables: [
+      // No catalog part: never picked.
+      { namespace: 'demo', name: 'nodot', queries: 9, lastRead: LAST },
+      // Read more often, but nothing writes it; the one below wins.
+      { namespace: 'lakehouse.staging', name: 'unwritten', queries: 8, lastRead: LAST },
+      { namespace: 'lakehouse.staging', name: 'trips_clean', queries: 5, lastRead: LAST, lastWrite: LAST },
+    ],
+  })
+  await page.goto('/lineage')
+  await expect(page).toHaveURL(/catalog=lakehouse&schema=staging&table=trips_clean/)
+  await expect(page.getByText('Pick a table to see what it is made from')).toHaveCount(0)
+  await expect(page.locator('main').getByRole('button', { name: /trips_clean/ })).toBeVisible()
+  await page.screenshot({ path: '../docs/screenshots/941/lineage-opens-on-read-table-1440-dark.png' })
 })
 
 test('the graph puts sources left and consumers right, and labels only on hover', async ({ page }) => {
