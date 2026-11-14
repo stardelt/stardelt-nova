@@ -594,8 +594,10 @@ function Profile({ id }: { id: string }) {
                 {op.spilledDataSize && op.spilledDataSize !== '0B' && (
                   <span className="text-text-mute">spilled · {op.spilledDataSize}</span>
                 )}
-                <div className="basis-full h-1.5 rounded-full bg-bg-soft max-w-md">
-                  <div className="h-1.5 rounded-full bg-accent/70" style={{ width: `${Math.max(2, Math.round(share * 100))}%` }} />
+                <div className="basis-full">
+                  <div className="h-1.5 rounded-full bg-bg-soft max-w-md">
+                    <div className="h-1.5 rounded-full bg-accent/70" style={{ width: `${Math.max(2, Math.round(share * 100))}%` }} />
+                  </div>
                 </div>
               </li>
             ))}
