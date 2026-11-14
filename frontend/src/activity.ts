@@ -106,7 +106,7 @@ export function mergeActivity(
         job.rows != null ? rowsLabel(job.rows) : null,
       ]),
       at: job.started_at,
-      href: '/jobs',
+      href: '/data',
     })
   }
 

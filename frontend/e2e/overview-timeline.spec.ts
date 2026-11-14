@@ -74,8 +74,9 @@ test.describe('overview timeline', () => {
     )
     expect(hrefs.length).toBeGreaterThan(0)
     for (const href of hrefs) {
-      // The three deep links the card offers: a run's pipeline, a query's detail, the job list.
-      const known = href.startsWith('/pipelines/') || href.startsWith('/queries?id=') || href === '/jobs'
+      // The three deep links the card offers: a run's pipeline, a query's detail, the page that
+      // started a load (Load & transfer; the Activity page is gone, stardelt-nova#948).
+      const known = href.startsWith('/pipelines/') || href.startsWith('/queries?id=') || href === '/data'
       expect(known, href).toBe(true)
     }
     // A pipeline run and a query, side by side: the jobs-only card is gone (#761).

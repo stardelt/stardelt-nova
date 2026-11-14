@@ -29,7 +29,8 @@ export default function Data() {
       <header>
         <h1 className="text-2xl font-bold tracking-tight">Load & transfer</h1>
         <p className="text-text-dim text-sm mt-1">
-          Load files into tables, or move data between tables. Each load and transfer shows up in Activity.
+          Load files into tables, or move data between tables. Each load and transfer appears
+          under Recent activity on the Overview.
           {me.data?.demo && <span className="text-warn"> Demo mode writes to memory.</span>}
         </p>
       </header>
@@ -190,7 +191,6 @@ function LoadForm() {
               >
                 Open in catalog →
               </Link>
-              <Link to="/jobs" className="hover:text-text">View job →</Link>
             </div>
           </div>
         )}
@@ -202,7 +202,7 @@ function LoadForm() {
           <li>The file is parsed and column types are inferred.</li>
           <li>A table is created (or replaced) in the selected schema; the schema is created if it does not exist.</li>
           <li>Rows are written through the engine into Iceberg.</li>
-          <li>The load appears under Activity with a row count.</li>
+          <li>The load appears under Recent activity on the Overview, with a row count.</li>
         </ol>
         <div className="mt-4 pt-4 border-t border-border text-xs text-text-mute">
           CSV and JSON arrays of objects are supported. The whole file is sent in one request, so
@@ -304,7 +304,12 @@ function TransferForm() {
             <div className="font-medium text-ok">
               Transferred {rowsLabel(result.rows)} → {(result.target_catalog ? result.target_catalog + '.' : result.source_catalog ? result.source_catalog + '.' : '') + result.target}
             </div>
-            <Link to="/jobs" className="text-text-dim mt-1 inline-block hover:text-text">View job →</Link>
+            <Link
+              to={`/catalog?ns=${encodeURIComponent(result.target.split('.')[0])}&tbl=${encodeURIComponent(result.target.split('.').slice(1).join('.'))}${(result.target_catalog ?? result.source_catalog) ? `&catalog=${encodeURIComponent((result.target_catalog ?? result.source_catalog) as string)}` : ''}`}
+              className="text-text-dim mt-1 inline-block hover:text-text"
+            >
+              Open in catalog →
+            </Link>
           </div>
         )}
       </div>
