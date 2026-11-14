@@ -1246,6 +1246,40 @@ export type QueryLogDetail = {
   error: { code: string; message: string | null } | null
 }
 
+/** One operator of the engine's `statistics.operatorSummaries` (stardelt-nova#788 S1/S2). */
+export type QueryProfileOperator = {
+  operatorType: string
+  planNodeId: string
+  stageId: number
+  pipelineId: number
+  inputPositions: number
+  outputPositions: number
+  /** Engine-formatted durations ("3.74s", "12.59ms", "0.00ns"); parse with parseEngineDuration. */
+  addInputCpu: string
+  finishCpu: string
+  getOutputCpu: string
+  /** Engine-formatted sizes ("656B"); shown verbatim. Absent on some operators. */
+  peakTotalMemoryReservation?: string
+  spilledDataSize?: string
+}
+
+/** `GET /api/query-log/{id}/profile` (the stored profile of a finished query). */
+export type QueryProfile = {
+  plan: string | null
+  operators: QueryProfileOperator[]
+  spilledBytes: number
+  completedSplits: number
+  inputs: {
+    catalogName?: string
+    schema?: string
+    table?: string
+    physicalInputBytes?: number
+    physicalInputRows?: number
+  }[]
+  /** True when the operator list was too large to keep (the plan may still be present). */
+  truncated: boolean
+}
+
 export type QueryLogParams = {
   scope: 'mine' | 'team' | 'all'
   state?: string
@@ -1452,6 +1486,7 @@ export const api = {
   jobs:         ()                            => jget<Job[]>('/api/jobs'),
   queryLog:     (p: QueryLogParams)           => jget<QueryLogPage>(queryLogUrl(p)),
   queryLogDetail: (id: string)                => jget<QueryLogDetail>(`/api/query-log/${seg(id)}`),
+  queryLogProfile: (id: string)               => jget<QueryProfile>(`/api/query-log/${seg(id)}/profile`),
   pipelines:    ()                            => jget<{ pipelines: PipelineView[] }>('/api/pipelines'),
   streams:       ()                            => jget<{ streams: StreamView[] }>('/api/streams'),
   /** Stop or resume one stream; answers the updated view (`spec.stopped`, D42). */

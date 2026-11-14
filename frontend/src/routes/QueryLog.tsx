@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { Link, useSearchParams } from 'react-router-dom'
-import { api, errorMessage, type QueryLogItem } from '../api'
+import { api, errorMessage, type QueryLogItem, type QueryProfileOperator } from '../api'
 import { EmptyState } from '../components/EmptyState'
 import { formatBytes, formatCount, formatDurationMs, formatTime, relativeTime, rowsLabel, sourceLabel } from '../format'
 import { isAdmin } from '../roles'
@@ -454,6 +454,7 @@ function Details({ id }: { id: string }) {
         <Metric label="Total (wall clock)" value={formatDurationMs(q.timing.wallMs)} />
         <Metric label="CPU time" value={formatDurationMs(q.timing.cpuMs)} />
       </Group>
+      <Profile id={q.id} />
       <Group title="Data" summary={q.data.outputRows != null ? rowsLabel(q.data.outputRows) : undefined}>
         <Metric label="Rows read" value={num(q.data.inputRows)} />
         <Metric label="Bytes read" value={formatBytes(q.data.inputBytes)} />
@@ -470,6 +471,98 @@ function Details({ id }: { id: string }) {
         <TableList label="Written" tables={q.tablesWritten} />
       </Group>
     </div>
+  )
+}
+
+/** "3.74s" -> 3740; "12.59ms" -> 12.59; "0.00ns" -> 0. Unit set the engine prints: ns/µs/us/ms/s/m/h. */
+function parseEngineDuration(text: string | undefined | null): number {
+  if (!text) return 0
+  const m = /^([0-9.]+)\s*(ns|µs|us|ms|s|m|h)$/.exec(text.trim())
+  if (!m) return 0
+  const v = Number(m[1])
+  if (!Number.isFinite(v)) return 0
+  switch (m[2]) {
+    case 'ns': return v / 1e6
+    case 'µs':
+    case 'us': return v / 1e3
+    case 'ms': return v
+    case 's': return v * 1e3
+    case 'm': return v * 6e4
+    default: return v * 36e5
+  }
+}
+
+/** The CPU one operator spent: input + finish + output, in milliseconds. */
+function operatorCpuMs(op: QueryProfileOperator): number {
+  return parseEngineDuration(op.addInputCpu) + parseEngineDuration(op.finishCpu) + parseEngineDuration(op.getOutputCpu)
+}
+
+/** Where a finished query spent its time: the top operators by CPU and the engine's plan. */
+function Profile({ id }: { id: string }) {
+  const p = useQuery({ queryKey: ['query-log', 'profile', id], queryFn: () => api.queryLogProfile(id) })
+  const rows = useMemo(() => {
+    const ops = p.data?.operators ?? []
+    const total = ops.reduce((sum, op) => sum + operatorCpuMs(op), 0)
+    return [...ops]
+      .sort((a, b) => operatorCpuMs(b) - operatorCpuMs(a))
+      .slice(0, 5)
+      .map((op) => ({ op, cpu: operatorCpuMs(op), share: total > 0 ? operatorCpuMs(op) / total : 0 }))
+  }, [p.data])
+
+  if (p.isLoading) {
+    return (
+      <Group title="Profile" summary="where the time went">
+        <div className="col-span-2 md:col-span-3 text-text-mute">loading the profile…</div>
+      </Group>
+    )
+  }
+  // A missing profile is normal (a running query, an old one, an engine that sent none).
+  if (p.isError || !p.data) {
+    return (
+      <Group title="Profile" summary="where the time went">
+        <div className="col-span-2 md:col-span-3 text-text-mute">{errorMessage(p.error)}</div>
+      </Group>
+    )
+  }
+
+  const plan = p.data.plan ?? ''
+  return (
+    <Group title="Profile" summary="where the time went">
+      <div className="col-span-2 md:col-span-3">
+        {rows.length === 0 ? (
+          <div className="text-text-mute">The engine sent no operator statistics for this query.</div>
+        ) : (
+          <ol className="space-y-1">
+            {rows.map(({ op, cpu, share }) => (
+              <li key={`${op.stageId}-${op.pipelineId}-${op.planNodeId}`} className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
+                <span className="font-mono text-xs">{op.operatorType}</span>
+                <span>{formatDurationMs(cpu)} ({Math.round(share * 100)} %)</span>
+                <span className="text-text-dim">
+                  {formatCount(op.inputPositions)} → {formatCount(op.outputPositions)} rows
+                </span>
+                {op.peakTotalMemoryReservation && (
+                  <span className="text-text-mute">peak {op.peakTotalMemoryReservation}</span>
+                )}
+                {op.spilledDataSize && op.spilledDataSize !== '0B' && (
+                  <span className="text-text-mute">spilled · {op.spilledDataSize}</span>
+                )}
+              </li>
+            ))}
+          </ol>
+        )}
+        {p.data.truncated && (
+          <p className="mt-2 text-text-mute text-xs">
+            The engine sent more operators than fit; the list above is from the part that was kept.
+          </p>
+        )}
+        {plan.trim() !== '' && (
+          <details className="mt-2">
+            <summary className="cursor-pointer text-sm">Plan</summary>
+            <pre className="font-mono text-[11px] whitespace-pre overflow-auto max-h-96 rounded-[10px] border border-border bg-bg-soft/60 p-3">{plan}</pre>
+          </details>
+        )}
+      </div>
+    </Group>
   )
 }
 
