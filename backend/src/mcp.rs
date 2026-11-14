@@ -16,6 +16,9 @@
 //! - **Read tools only.** Each tool calls the catalog handler the `/api/catalog/*` route
 //!   calls, with the caller's own principal; no tool writes. Every call writes one line on
 //!   the `audit` target before it answers.
+//! - **Guarded SQL.** `sql_read` and `sql_explain` run ONE read-only statement as the caller,
+//!   with the row cap and timeout below; `query_log_list` reads the caller's own history. The
+//!   classifier is a first filter, never the security boundary.
 //! - **No new dependency.** Three JSON-RPC methods and `serde_json` are enough; a JSON-RPC
 //!   or MCP crate would need a licence check first.
 
@@ -43,11 +46,16 @@ const PROTOCOL_VERSION: &str = "2025-06-18";
 /// `structuredContent` and says so (a whole catalog does not fit in a model's context).
 const MAX_TOOL_TEXT_CHARS: usize = 20_000;
 
-/// The MCP resource's configuration (`NOVA_MCP_ENABLED`, `NOVA_MCP_AUDIENCE`).
+/// The MCP resource's configuration (`NOVA_MCP_ENABLED`, `NOVA_MCP_AUDIENCE`,
+/// `NOVA_MCP_MAX_ROWS`, `NOVA_MCP_QUERY_TIMEOUT_SECS`).
 #[derive(Clone, Debug)]
 pub struct McpConfig {
     /// The resource identifier the IdP mints access tokens for: `https://<nova host>/mcp`.
     pub audience: String,
+    /// Rows one `sql_read` call may return (`NOVA_MCP_MAX_ROWS`, default 200, clamped 1..=1000).
+    pub max_rows: usize,
+    /// Cut-off for one `sql_read`/`sql_explain` call (`NOVA_MCP_QUERY_TIMEOUT_SECS`, default 60, clamped 1..=300).
+    pub query_timeout: std::time::Duration,
 }
 
 impl McpConfig {
@@ -83,7 +91,20 @@ impl McpConfig {
                     .into(),
             );
         }
-        Ok(Some(Self { audience }))
+        let max_rows = get("NOVA_MCP_MAX_ROWS")
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .map(|n| n.clamp(1, 1000))
+            .unwrap_or(200);
+        let query_timeout_secs = get("NOVA_MCP_QUERY_TIMEOUT_SECS")
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|n| *n > 0)
+            .map(|n| n.min(300))
+            .unwrap_or(60);
+        Ok(Some(Self {
+            audience,
+            max_rows,
+            query_timeout: std::time::Duration::from_secs(query_timeout_secs),
+        }))
     }
 }
 
@@ -222,12 +243,12 @@ async fn handle(State(state): State<Arc<AppState>>, headers: HeaderMap, body: By
         // A notification: nothing to answer, and no id to answer it with.
         "notifications/initialized" => StatusCode::ACCEPTED.into_response(),
         "tools/list" => rpc_result(id, json!({ "tools": tools() })),
-        "tools/call" => call_tool(&state, &principal, id, &request).await,
+        "tools/call" => call_tool(&state, &cfg, &principal, id, &request).await,
         _ => rpc_error(id, -32601, "method not found"),
     }
 }
 
-/// The four read-only tools, in a fixed order so a client's menu does not move.
+/// The seven read-only tools, in a fixed order so a client's menu does not move.
 fn tools() -> Value {
     json!([
         {
@@ -278,12 +299,52 @@ fn tools() -> Value {
             },
             "annotations": { "readOnlyHint": true },
         },
+        {
+            "name": "sql_read",
+            "description": "Run ONE read-only SQL statement (SELECT, WITH, VALUES, SHOW, DESCRIBE, TABLE, EXPLAIN) as the signed-in person. At most 200 rows by default (the platform sets the cap, 1 000 at most); a statement that runs longer than 60 seconds is cancelled. Writes, a second statement and EXPLAIN ANALYZE are refused. Aggregate or add a LIMIT instead of reading everything.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "sql": { "type": "string" },
+                    "maxRows": { "type": "integer", "minimum": 1, "maximum": 1000 },
+                },
+                "required": ["sql"],
+                "additionalProperties": false,
+            },
+            "annotations": { "readOnlyHint": true },
+        },
+        {
+            "name": "sql_explain",
+            "description": "Show the query plan of ONE read-only SQL statement without running it (EXPLAIN, never EXPLAIN ANALYZE).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "sql": { "type": "string" },
+                },
+                "required": ["sql"],
+                "additionalProperties": false,
+            },
+            "annotations": { "readOnlyHint": true },
+        },
+        {
+            "name": "query_log_list",
+            "description": "The signed-in person's own recent queries: state, duration, statement preview.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
+                },
+                "additionalProperties": false,
+            },
+            "annotations": { "readOnlyHint": true },
+        },
     ])
 }
 
 /// `tools/call`: run one read tool as the caller and answer in MCP's shape.
 async fn call_tool(
     state: &Arc<AppState>,
+    cfg: &McpConfig,
     principal: &Principal,
     id: Option<Value>,
     request: &Value,
@@ -342,6 +403,48 @@ async fn call_tool(
             .await;
             body_of(response).await
         }
+        "sql_read" | "sql_explain" => {
+            let explain = name == "sql_explain";
+            let sql = arguments
+                .get("sql")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let statement = match classify(sql, explain) {
+                Ok(statement) => statement,
+                Err(message) => {
+                    return tool_result(id, StatusCode::BAD_REQUEST, json!({ "error": message }));
+                }
+            };
+            let asked = arguments
+                .get("maxRows")
+                .and_then(Value::as_u64)
+                .map(|n| n as usize);
+            let limit = asked.unwrap_or(cfg.max_rows).clamp(1, cfg.max_rows);
+            match run_statement(state, cfg, principal, &statement, limit).await {
+                Ok(result) => (
+                    StatusCode::OK,
+                    serde_json::to_value(result).unwrap_or(Value::Null),
+                ),
+                Err(e) => (crate::trino::error_status(&e), json!({ "error": e })),
+            }
+        }
+        "query_log_list" => {
+            let limit = arguments
+                .get("limit")
+                .and_then(Value::as_u64)
+                .unwrap_or(20)
+                .clamp(1, 100);
+            let mut query = std::collections::HashMap::new();
+            query.insert("scope".to_string(), "mine".to_string());
+            query.insert("limit".to_string(), limit.to_string());
+            let response = crate::query_log_api::list(
+                State(state.clone()),
+                Some(Extension(principal.clone())),
+                axum::extract::Query(query),
+            )
+            .await;
+            body_of(response).await
+        }
         other => return rpc_error(id, -32602, &format!("unknown tool: {other}")),
     };
 
@@ -358,6 +461,133 @@ async fn call_tool(
     );
 
     tool_result(id, status, body)
+}
+
+/// `sql_read`/`sql_explain`: one statement, as the caller, with the row cap and the timeout.
+async fn run_statement(
+    state: &Arc<AppState>,
+    cfg: &McpConfig,
+    principal: &Principal,
+    statement: &str,
+    max_rows: usize,
+) -> Result<crate::trino::QueryResult, String> {
+    let run = crate::trino::execute_from(
+        state,
+        statement.to_string(),
+        Some(principal),
+        "stardelt-mcp",
+    );
+    match tokio::time::timeout(cfg.query_timeout, run).await {
+        Err(_) => Err(format!(
+            "the statement did not finish in {} seconds and was cancelled; aggregate or add a LIMIT",
+            cfg.query_timeout.as_secs()
+        )),
+        Ok(Err(e)) => Err(e),
+        Ok(Ok(mut result)) => {
+            if result.rows.len() > max_rows {
+                result.rows.truncate(max_rows);
+                result.row_count = result.rows.len();
+                result.truncated = true;
+            }
+            Ok(result)
+        }
+    }
+}
+
+/// The words a guarded statement may start with, plus `explain`.
+const READ_KEYWORDS: [&str; 6] = ["select", "with", "values", "show", "describe", "table"];
+
+/// `sql` without comments (quoted text kept), and whether a second statement follows the first.
+fn strip_comments(sql: &str) -> (String, bool) {
+    let chars: Vec<char> = sql.chars().collect();
+    let mut out: Vec<char> = Vec::new();
+    let mut semicolons: Vec<usize> = Vec::new();
+    let mut quote: Option<char> = None;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if let Some(q) = quote {
+            out.push(c);
+            if c == q {
+                quote = None;
+            }
+            i += 1;
+        } else if c == '\'' || c == '"' {
+            quote = Some(c);
+            out.push(c);
+            i += 1;
+        } else if c == '-' && chars.get(i + 1) == Some(&'-') {
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
+            }
+        } else if c == '/' && chars.get(i + 1) == Some(&'*') {
+            let mut end = i + 2;
+            while end + 1 < chars.len() && !(chars[end] == '*' && chars[end + 1] == '/') {
+                end += 1;
+            }
+            i = if end + 1 < chars.len() {
+                end + 2
+            } else {
+                chars.len()
+            };
+            out.push(' ');
+        } else {
+            if c == ';' {
+                semicolons.push(out.len());
+            }
+            out.push(c);
+            i += 1;
+        }
+    }
+    let text: String = out.into_iter().collect();
+    let another = semicolons.iter().any(|at| {
+        !text
+            .chars()
+            .skip(at + 1)
+            .collect::<String>()
+            .trim_matches([' ', '\t', '\r', '\n', ';'])
+            .is_empty()
+    });
+    (text, another)
+}
+
+/// The statement to send, or the sentence that says why it is refused. Ported from the local
+/// server's `guarded_sql.classify`, so both see the same statements and the same sentences.
+fn classify(sql: &str, explain: bool) -> Result<String, String> {
+    if sql.trim().is_empty() {
+        return Err("the statement is empty".into());
+    }
+    let (text, another) = strip_comments(sql);
+    if another {
+        return Err("exactly one statement is allowed".into());
+    }
+    let statement = text.trim().trim_end_matches(';').trim().to_string();
+    let words: Vec<String> = statement
+        .split_whitespace()
+        .map(|word| word.to_lowercase())
+        .collect();
+    let Some(first_word) = words.first() else {
+        return Err("the statement is empty".into());
+    };
+    let first = first_word.trim_start_matches('(');
+    if first == "explain" {
+        // EXPLAIN plans without running; EXPLAIN ANALYZE runs the statement and is refused.
+        if words.get(1).is_some_and(|next| next == "analyze") {
+            return Err("EXPLAIN ANALYZE runs the statement and is refused; use EXPLAIN".into());
+        }
+        return Ok(statement);
+    }
+    if !READ_KEYWORDS.contains(&first) {
+        return Err(format!(
+            "only reading statements run here (SELECT, WITH, VALUES, SHOW, DESCRIBE, TABLE), not {}",
+            first.to_uppercase()
+        ));
+    }
+    Ok(if explain {
+        format!("EXPLAIN {statement}")
+    } else {
+        statement
+    })
 }
 
 /// `platform_status` needs no handler: the state the process was built with.
@@ -522,6 +752,8 @@ mod tests {
             s.auth = Some(stub_auth());
             s.mcp = Some(McpConfig {
                 audience: "stardelt-mcp".into(),
+                max_rows: 200,
+                query_timeout: std::time::Duration::from_secs(60),
             });
         }
         let dir = crate::router_tests::StaticDir::new(tag);
@@ -692,7 +924,10 @@ mod tests {
                 "platform_status",
                 "catalog_list",
                 "catalog_describe",
-                "catalog_search"
+                "catalog_search",
+                "sql_read",
+                "sql_explain",
+                "query_log_list"
             ]
         );
 
@@ -711,6 +946,106 @@ mod tests {
         let status: Value = serde_json::from_str(text).expect("the tool text is JSON");
         assert_eq!(status["status"], "ok");
         assert_eq!(status["db"], "disabled");
+    }
+
+    /// One `tools/call`'s `result`, as MCP answers it.
+    async fn call(app: Router, name: &str, arguments: Value) -> Value {
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "tools/call",
+            "params": { "name": name, "arguments": arguments },
+        });
+        let response = send(app, authorized(post(&body.to_string()))).await;
+        let body = json_body(response).await;
+        body["result"].clone()
+    }
+
+    fn text_of(result: &Value) -> &str {
+        result["content"][0]["text"].as_str().expect("the text")
+    }
+
+    #[test]
+    fn classify_accepts_a_commented_select() {
+        assert_eq!(classify("/* c */ select 1", false), Ok("select 1".into()));
+        assert_eq!(
+            classify("WITH x AS (SELECT 1) SELECT * FROM x", false),
+            Ok("WITH x AS (SELECT 1) SELECT * FROM x".into())
+        );
+        assert_eq!(classify("select 1", true), Ok("EXPLAIN select 1".into()));
+        assert_eq!(
+            classify("-- nothing", false),
+            Err("the statement is empty".into())
+        );
+    }
+
+    #[test]
+    fn classify_refuses_a_write() {
+        let message = classify("DROP TABLE t", false).expect_err("a write is refused");
+        assert!(
+            message.contains("only reading statements run here"),
+            "{message}"
+        );
+        assert!(message.contains("DROP"), "{message}");
+    }
+
+    #[test]
+    fn classify_refuses_two_statements() {
+        assert_eq!(
+            classify("SELECT 1; SELECT 2", false),
+            Err("exactly one statement is allowed".into())
+        );
+    }
+
+    #[test]
+    fn classify_refuses_explain_analyze() {
+        let message = classify("EXPLAIN ANALYZE SELECT 1", false).expect_err("refused");
+        assert!(message.contains("EXPLAIN ANALYZE"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn sql_read_refuses_a_write_before_the_engine() {
+        let (app, _dir) = test_app("mcp-sql-write", true);
+        let result = call(app, "sql_read", json!({ "sql": "DROP TABLE t" })).await;
+        assert_eq!(result["isError"], true, "{result}");
+        assert!(
+            text_of(&result).contains("only reading statements run here"),
+            "{result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sql_read_refuses_explain_analyze() {
+        let (app, _dir) = test_app("mcp-sql-analyze", true);
+        let result = call(
+            app,
+            "sql_read",
+            json!({ "sql": "EXPLAIN ANALYZE SELECT 1" }),
+        )
+        .await;
+        assert_eq!(result["isError"], true, "{result}");
+        assert!(text_of(&result).contains("EXPLAIN ANALYZE"), "{result}");
+    }
+
+    #[tokio::test]
+    async fn sql_read_reaches_the_engine() {
+        // `test_state()` points Trino at `http://127.0.0.1:1`: an answer here proves the
+        // statement passed the classifier and was sent to the engine.
+        let (app, _dir) = test_app("mcp-sql-engine", true);
+        let result = call(app, "sql_read", json!({ "sql": "SELECT 1" })).await;
+        assert_eq!(result["isError"], true, "{result}");
+        assert_eq!(text_of(&result), "the query engine is not reachable");
+    }
+
+    #[tokio::test]
+    async fn query_log_list_without_a_state_store() {
+        let (app, _dir) = test_app("mcp-query-log", true);
+        let result = call(app, "query_log_list", json!({})).await;
+        assert_eq!(result["isError"], true, "{result}");
+        assert!(
+            text_of(&result).contains("this needs Nova's database"),
+            "{result}"
+        );
     }
 
     #[tokio::test]
@@ -765,5 +1100,39 @@ mod tests {
         .expect("a configuration")
         .expect("enabled");
         assert_eq!(cfg.audience, "https://nova.example.com/mcp");
+        // The defaults, when neither limit variable is set.
+        assert_eq!(cfg.max_rows, 200);
+        assert_eq!(cfg.query_timeout, std::time::Duration::from_secs(60));
+
+        // Explicit values are read, and clamped to 1..=1000 rows and 1..=300 seconds.
+        let cfg = McpConfig::from_lookup(
+            |k| match k {
+                "NOVA_MCP_ENABLED" => Some("true".to_string()),
+                "NOVA_MCP_AUDIENCE" => Some("https://nova.example.com/mcp".to_string()),
+                "NOVA_MCP_MAX_ROWS" => Some("5000".to_string()),
+                "NOVA_MCP_QUERY_TIMEOUT_SECS" => Some("90".to_string()),
+                _ => None,
+            },
+            true,
+        )
+        .expect("a configuration")
+        .expect("enabled");
+        assert_eq!(cfg.max_rows, 1000);
+        assert_eq!(cfg.query_timeout, std::time::Duration::from_secs(90));
+
+        let cfg = McpConfig::from_lookup(
+            |k| match k {
+                "NOVA_MCP_ENABLED" => Some("true".to_string()),
+                "NOVA_MCP_AUDIENCE" => Some("https://nova.example.com/mcp".to_string()),
+                "NOVA_MCP_MAX_ROWS" => Some("0".to_string()),
+                "NOVA_MCP_QUERY_TIMEOUT_SECS" => Some("0".to_string()),
+                _ => None,
+            },
+            true,
+        )
+        .expect("a configuration")
+        .expect("enabled");
+        assert_eq!(cfg.max_rows, 1);
+        assert_eq!(cfg.query_timeout, std::time::Duration::from_secs(60));
     }
 }
