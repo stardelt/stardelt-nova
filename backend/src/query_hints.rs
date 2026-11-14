@@ -5,14 +5,12 @@
 //! never need a backfill and they never parse the plan text. An empty vector is the normal
 //! answer — no evidence, no hint.
 //!
-//! Two rules of the design's hint table are deliberately absent:
+//! One rule of the design's hint table is deliberately absent:
 //!
 //! - *No pruning* needs the table's total size, and the profile keeps per-**catalog** totals
 //!   only (`CatalogStats`); its `inputs[].catalogName` is the connector's name (`iceberg`),
-//!   not a warehouse.
-//! - *Skew* needs per-task rows, and `query_log_event::parse_profile` drops
-//!   `statistics.taskStatistics` on purpose — it is most of the event. Keeping it is a new
-//!   storage decision, not a read-time rule.
+//!   not a warehouse. The skew rule reads the per-stage CPU spread `parse_profile` keeps in
+//!   `stageStats`.
 
 use serde::Serialize;
 
@@ -36,6 +34,8 @@ pub const SMALL_FILE_MIN_SPLITS: i64 = 100;
 pub const SMALL_FILE_BYTES: i64 = 8 * 1024 * 1024;
 /// A queue shorter than this is normal scheduling, not congestion.
 pub const QUEUE_MIN_MS: i64 = 1000;
+/// A stage whose slowest task took more than this multiple of its median is skewed.
+pub const SKEW_MULTIPLE: i64 = 5;
 
 /// `1_234_567` → `"1,234,567"`; `0` → `"0"`; a negative keeps its sign.
 pub fn commas(n: i64) -> String {
@@ -143,6 +143,34 @@ pub fn hints(
         _ => {}
     }
 
+    // 5. skew — one task of a stage did most of the work.
+    let worst = profile["stageStats"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|stage| {
+            let tasks = stage["tasks"].as_i64().unwrap_or(0);
+            let p50 = stage["cpuP50Ms"].as_i64().unwrap_or(0);
+            let max = stage["cpuMaxMs"].as_i64().unwrap_or(0);
+            (tasks >= 2 && p50 > 0 && max > SKEW_MULTIPLE * p50).then_some((stage, p50, max))
+        })
+        .max_by_key(|(_, p50, max)| max * 1_000 / p50);
+    if let Some((stage, p50, max)) = worst {
+        out.push(Hint {
+            code: "skew",
+            title: "One key holds most of the rows — salt the key or repartition before the join"
+                .to_string(),
+            evidence: format!(
+                "stage {}: the slowest task took {} ms of CPU, the median {} ms ({}×)",
+                stage["stageId"].as_i64().unwrap_or(0),
+                commas(max),
+                commas(p50),
+                max / p50
+            ),
+            docs_url: format!("{HINT_BASE}#skew"),
+        });
+    }
+
     out
 }
 
@@ -233,5 +261,34 @@ mod tests {
         // Below the floor, or the queue is not the longer half: no hint.
         assert_eq!(hints(&plain_profile(), Some(900), Some(100)), Vec::new());
         assert_eq!(hints(&plain_profile(), Some(600), Some(600)), Vec::new());
+    }
+
+    #[test]
+    fn a_skewed_stage_is_named_with_both_times() {
+        let p = serde_json::json!({"operators":[],"spilledBytes":0,"completedSplits":1,"inputs":[],"stageStats":[{"stageId":3,"tasks":8,"cpuP50Ms":600,"cpuMaxMs":9000}]});
+        assert_eq!(
+            hints(&p, None, None),
+            vec![Hint {
+                code: "skew",
+                title:
+                    "One key holds most of the rows — salt the key or repartition before the join"
+                        .to_string(),
+                evidence: "stage 3: the slowest task took 9,000 ms of CPU, the median 600 ms (15×)"
+                    .to_string(),
+                docs_url: format!("{HINT_BASE}#skew"),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_stage_with_one_task_is_not_skewed() {
+        let p = serde_json::json!({"operators":[],"spilledBytes":0,"completedSplits":1,"inputs":[],"stageStats":[{"stageId":3,"tasks":1,"cpuP50Ms":7,"cpuMaxMs":700}]});
+        assert_eq!(hints(&p, None, None), Vec::new());
+    }
+
+    #[test]
+    fn exactly_five_times_is_not_skewed() {
+        let p = serde_json::json!({"operators":[],"spilledBytes":0,"completedSplits":1,"inputs":[],"stageStats":[{"stageId":3,"tasks":4,"cpuP50Ms":100,"cpuMaxMs":500}]});
+        assert_eq!(hints(&p, None, None), Vec::new());
     }
 }

@@ -432,6 +432,32 @@ fn count(statistics: &serde_json::Map<String, serde_json::Value>, name: &str) ->
     statistics.get(name).and_then(|v| v.as_i64()).unwrap_or(0)
 }
 
+/// The most stages the per-stage summary keeps.
+const MAX_STAGES: usize = 40;
+
+/// The per-stage CPU spread the skew hint reads (nova#788): four integers per stage, never the
+/// whole `taskStatistics` array, which is most of the event.
+fn stage_stats(statistics: &serde_json::Map<String, serde_json::Value>) -> Vec<serde_json::Value> {
+    statistics
+        .get("taskStatistics")
+        .and_then(|v| v.as_array())
+        .map(|stages| {
+            stages
+                .iter()
+                .take(MAX_STAGES)
+                .map(|stage| {
+                    serde_json::json!({
+                        "stageId": stage["stageId"].as_i64().unwrap_or(0),
+                        "tasks": stage["tasks"].as_i64().unwrap_or(0),
+                        "cpuP50Ms": stage["cpuTimeDistribution"]["p50"].as_i64().unwrap_or(0),
+                        "cpuMaxMs": stage["cpuTimeDistribution"]["max"].as_i64().unwrap_or(0),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The useful part of a finished query's event (stardelt-nova#788 S1): the plan, the
 /// per-operator statistics, spill and split counts, and the connector metrics of every
 /// table the query read.
@@ -462,6 +488,7 @@ pub fn parse_profile(body: &[u8]) -> Option<serde_json::Value> {
         "spilledBytes": count(statistics, "spilledBytes"),
         "completedSplits": count(statistics, "completedSplits"),
         "inputs": inputs,
+        "stageStats": stage_stats(statistics),
         "truncated": false,
     });
     if profile_bytes(&profile) > MAX_PROFILE_BYTES {
@@ -598,6 +625,16 @@ mod tests {
         assert_eq!(p["inputs"].as_array().expect("inputs").len(), 2);
         assert_eq!(p["inputs"][0]["catalogName"], "iceberg");
         assert_eq!(p["inputs"][1]["table"], "customer");
+        let stages = p["stageStats"].as_array().expect("stageStats");
+        assert_eq!(stages.len(), 3);
+        assert_eq!(stages[0]["stageId"], 0);
+        assert_eq!(stages[0]["tasks"], 1);
+        assert_eq!(stages[0]["cpuP50Ms"], 7);
+        assert_eq!(stages[0]["cpuMaxMs"], 7);
+        assert!(
+            !p.to_string().contains("cpuTimeDistribution"),
+            "the raw distribution is not copied"
+        );
     }
 
     #[test]
